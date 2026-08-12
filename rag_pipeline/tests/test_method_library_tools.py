@@ -423,23 +423,23 @@ def test_the_prototype_payload_validates_end_to_end():
 
 # ------------------------------------------------------------------ the fifth filter
 
-def test_the_code_peer_can_reach_the_method_library():
-    """The fifth gate, and the one that matters most.
+def test_both_code_running_peers_can_reach_the_method_library():
+    """Both peers that can RUN code must be able to FIND a method.
 
-    default_code_fn hardcodes its own KB allowlist — it does NOT follow the request's
-    enabled_search_methods — and it listed only agent_kb_search/get_kb_block. So the peer that
-    WRITES AND RUNS the code, in whose sandbox the library is mounted, could not see it. Told
-    by its own prompt to call kb_method_search and not having it, the model guessed the
-    package from the host directory name: `from method_library import ...` ->
-    ModuleNotFoundError. The package is `iguide_methods`.
+    default_code_fn built its KB toolset from a hardcoded allowlist that listed only
+    agent_kb_search/get_kb_block, so the peer whose sandbox mounts the library could not see
+    it; told by its own prompt to call kb_method_search and not having it, the model guessed
+    `from method_library import ...` and got ModuleNotFoundError. default_analyze_fn holds
+    execute_code too and had the same gap.
     """
     import inspect
 
     from agent_runtime.supervisor import graph
 
-    src = inspect.getsource(graph.default_code_fn)
-    assert "kb_method_search" in src
-    assert "get_method_contract" in src
+    for fn in (graph.default_code_fn, graph.default_analyze_fn):
+        src = inspect.getsource(fn)
+        assert "_CODE_PEER_KB_TOOLS" in src, f"{fn.__name__} cannot reach the method library"
+    assert {"kb_method_search", "get_method_contract"} <= graph._CODE_PEER_KB_TOOLS
 
 
 def test_execute_code_tells_the_model_the_package_name():

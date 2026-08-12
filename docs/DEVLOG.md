@@ -1350,3 +1350,25 @@ directory by default and a test that wants one opts in.
 
 **Next** the invariant gate (M6) — with 203 units that a peer will actually import and run, a
 wrong CRS is now a wrong *number*, not a hypothetical.
+
+## 2026-08-12 · M4.4 · The analyze peer, same gap one peer over
+**Change** `_CODE_PEER_KB_TOOLS` hoisted to module scope and given to `default_analyze_fn` as
+  well as `default_code_fn`.
+
+**Why** the audit flagged it and it is the M2.7 defect repeated: the analyze peer also holds
+`execute_code`, so it could **run** analysis code while being unable to discover that the
+platform already has a callable method for the step it was about to re-implement. Hoisting the
+set means the next peer that gains `execute_code` inherits the right answer instead of
+re-deriving it.
+
+**Measured** end-to-end re-verification against the **203-unit** library (12× the one the
+earlier runs used): the same prototype question returns
+`load_chicago_crime_data` and `plot_choropleth_map` with pinned import lines and correct
+requirements, and **both import cleanly** from the library on disk. Note the element package is
+now `ke_cca9b545_ai_agent_for_chicago_crime_analysis` — the real element title — because the
+corpus builder passes platform metadata rather than a filename stem.
+Suite **799 passed**, same 3 pre-existing failures.
+
+**Still open from the audit** (confirmed, not yet fixed): agent skills are enabled by default
+but no SKILL.md bundle is copied into the agent image, so `list_available_skills` is always
+empty in a deployed container; and the analyze/code peer split itself, which M5 retires.

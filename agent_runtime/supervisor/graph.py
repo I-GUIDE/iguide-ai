@@ -1168,6 +1168,15 @@ def _wants_external_data(query: str) -> bool:
     return bool(_EXTERNAL_DATA_RE.search(query or ""))
 
 
+# KB tools given to the peers that WRITE AND RUN code. Hoisted to module scope because both
+# the code peer and the analyze peer need the same set, and the analyze peer also holds
+# `execute_code` — a peer that can run analysis but cannot discover an existing callable method
+# will re-implement it. Deliberately independent of the request's enabled_search_methods: this
+# is a capability of those peers, not a per-request search preference.
+_CODE_PEER_KB_TOOLS = {"agent_kb_search", "get_kb_block",
+                       "kb_method_search", "get_method_contract"}
+
+
 def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
     """Library methods rendered as evidence documents.
 
@@ -1735,6 +1744,17 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         thread_id = state.get("thread_id")
         request_tool, requests = _make_request_tool()
         tools = list(make_langchain_qgis_tools(session_id=child_thread_id(thread_id, "analysis_qgis")))
+        # Same KB set the code peer gets. This peer also holds `execute_code`, so without these
+        # it can RUN analysis code while being unable to discover that the platform already has
+        # a callable method for the step it is about to re-implement — the exact gap fixed for
+        # the code peer in M2.7, one peer over.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+            tools.extend(t for t in make_langchain_granular_tools(
+                enabled_search_methods=sorted(_CODE_PEER_KB_TOOLS))
+                if getattr(t, "name", "") in _CODE_PEER_KB_TOOLS)
+        except Exception:
+            pass
         if include_mcp_tools:
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
@@ -1846,8 +1866,6 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # kb_method_search, did not have it, and guessed the package name from the directory
         # instead — `from method_library import ...`, which fails. The package is
         # `iguide_methods`.
-        _CODE_PEER_KB_TOOLS = {"agent_kb_search", "get_kb_block",
-                               "kb_method_search", "get_method_contract"}
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
             tools.extend(t for t in make_langchain_granular_tools(
