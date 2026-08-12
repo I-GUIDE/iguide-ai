@@ -282,3 +282,76 @@ def test_private_methods_are_not_offered_at_all():
     src = "class C:\n    def _hidden(self):\n        return 1\n"
     verdicts, _scope, _s = analyze_module(src)
     assert "C._hidden" not in verdicts
+
+
+# --------------------------------------------------------------- def-time evaluation
+
+def _executes(src, qualname):
+    """A slice is only correct if it EXECUTES; static checks passed on all of these."""
+    from extractors.analysis import build_unit_slice
+    verdicts, scope, _ = analyze_module(src)
+    sliced = build_unit_slice(src, qualname, scope=scope, verdicts=verdicts)
+    ns = {}
+    exec(compile(sliced, "<slice>", "exec"), ns)
+    return ns
+
+
+def test_a_parameter_default_naming_a_constant_is_carried_into_the_slice():
+    """`def evaluate(..., feats=FEATS)` -> NameError: FEATS. Defaults are evaluated at DEF
+    TIME in the enclosing scope, so they are a requirement like an annotation."""
+    src = "FEATS = ['a', 'b']\n\ndef evaluate(data, feats=FEATS):\n    return len(feats)\n"
+    verdicts, _s, _ = analyze_module(src)
+    assert verdicts["evaluate"].is_callable
+    assert "FEATS" in verdicts["evaluate"].requires_consts
+    assert "evaluate" in _executes(src, "evaluate")
+
+
+def test_a_parameter_default_naming_a_runtime_value_blocks_the_unit():
+    """The dangerous case, and a FALSE CALLABLE before this fix: `X_train` comes from
+    executing something, so the unit was never independently callable."""
+    src = ("import pandas as pd\n"
+           "X_train = pd.read_csv('train.csv')\n\n"
+           "def plot_predictions(train_data=X_train):\n    return train_data\n")
+    verdicts, _s, _ = analyze_module(src)
+    assert not verdicts["plot_predictions"].is_callable
+    assert "X_train" in verdicts["plot_predictions"].global_reads
+
+
+def test_a_keyword_only_default_counts_too():
+    src = "LIMIT = 10\n\ndef f(x, *, cap=LIMIT):\n    return min(x, cap)\n"
+    verdicts, _s, _ = analyze_module(src)
+    assert "LIMIT" in verdicts["f"].requires_consts
+
+
+def test_a_class_base_is_carried_into_the_slice():
+    """`class AgentState(TypedDict)` -> NameError: TypedDict at import."""
+    src = ("from typing import TypedDict\n\n"
+           "class AgentState(TypedDict):\n    n: int\n\n"
+           "def make_workflow():\n    return AgentState\n")
+    assert "make_workflow" in _executes(src, "make_workflow")
+
+
+def test_a_class_body_annotation_is_carried_into_the_slice():
+    """The class SCOPE holds these names, and the class table is not in the function map —
+    looking it up there silently found nothing and the slice raised NameError: operator."""
+    src = ("import operator\nfrom typing import Annotated, TypedDict\n\n"
+           "class AgentState(TypedDict):\n    messages: Annotated[list, operator.add]\n\n"
+           "def make_workflow():\n    return AgentState\n")
+    assert "make_workflow" in _executes(src, "make_workflow")
+
+
+def test_a_class_reading_a_runtime_global_blocks_its_dependents():
+    src = ("import pandas as pd\n"
+           "CFG = pd.read_csv('c.csv')\n\n"
+           "class Model:\n    cfg = CFG\n\n"
+           "def build():\n    return Model\n")
+    verdicts, _s, _ = analyze_module(src)
+    assert not verdicts["build"].is_callable
+
+
+def test_classes_are_not_counted_as_units():
+    """They are sliceable dependencies, not callable units; counting them would inflate
+    'N of M callable'."""
+    src = "from typing import TypedDict\n\nclass S(TypedDict):\n    n: int\n\ndef f():\n    return S\n"
+    _v, _s, summary = analyze_module(src)
+    assert summary["total"] == 1 and summary["callable"] == 1

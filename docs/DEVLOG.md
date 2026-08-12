@@ -1301,3 +1301,52 @@ remaining six confirmed findings (legacy `analysis_task` stripping every retriev
 analyze peer's toolset, skills with no SKILL.md in the image) are queued, not yet done.
 
 **Next** corpus-scale ingest on the 174 fetchable notebooks, then the invariant gate.
+
+## 2026-08-12 · M3.1 · Corpus scale: 16 units → 203, and three false-callables it exposed
+**Change** `scripts/build_method_library.py` (resumable, bucketed failure accounting) driving
+  the real path platform API → `sources.py` → extractor → analyzer → library. Plus
+  `annotation_names()` extended to **parameter defaults and class bases**, module-level classes
+  given closure entries, and `rag_pipeline/tests/conftest.py` isolating the library.
+
+**Measured** the whole notebook corpus, end to end:
+
+| | before (14 cached notebooks) | after |
+|---|---|---|
+| elements attempted | 14 | **180** |
+| sources fetched | 14 (local copies) | **174 (96.7%)**, 6 × HTTP 404 |
+| units analyzed | 41 | **349** |
+| callable | 16 | **203** |
+| needs_globals / needs_instance | 1 / 24 | 96 / 50 |
+| library modules | 16 | **203** |
+| registry entries | 29 | **388** |
+| elements with ≥1 callable unit | — | 60 / 174 (**34.5%**) |
+
+Import verification over all 203 advertised import lines: **187 import on a bare host (92.1%)**,
+16 fail only on a declared third-party package the sandbox installs, **0 undeclared
+dependencies, 0 slice defects**. Suite **799 passed**, same 3 pre-existing failures.
+
+The 34.5% element coverage is **below the plan's ≥40%** target and I am not going to claim
+otherwise. The blocker histogram says why: 96 units are `needs_globals` — notebook functions
+that read a frame loaded in an earlier cell. That is a supply property of the corpus, not an
+analyzer weakness, and lifting it needs cell-state promotion, which is real design work.
+
+**Surprised by** what corpus scale caught that 14 notebooks could not. Three units imported
+cleanly in every static check and then died with `NameError`, all in one blind spot: names
+evaluated at **def time in the enclosing scope**. I had handled annotations in M2.2 and stopped
+there, but the same rule covers three more positions:
+
+* `def evaluate(..., feats=FEATS)` — a default naming a module constant, simply not carried.
+* `def plot_predictions(train_data=X_train, ...)` — a default naming a **runtime** binding.
+  This was a **false callable**: the unit was never independently callable and the analyzer
+  said it was. Counting defaults turns it into a blocker and it is now correctly refused.
+* `class AgentState(TypedDict): messages: Annotated[list, operator.add]` — the base *and* the
+  body annotation. The class-scope lookup used the function-table map, which recurses THROUGH
+  class tables without including them, so it silently found nothing.
+
+Also a reproducibility hazard worth naming: two long-passing tests began failing the moment
+the corpus library existed on disk, because the sweep unions it and nothing isolated it. Same
+code, same commit, different machine state. `conftest.py` now points the library at an empty
+directory by default and a test that wants one opts in.
+
+**Next** the invariant gate (M6) — with 203 units that a peer will actually import and run, a
+wrong CRS is now a wrong *number*, not a hypothetical.

@@ -220,18 +220,24 @@ def test_the_tools_survive_the_policy_filter(intent):
     assert {"kb_method_search", "get_method_contract"} <= kept
 
 
-def test_analysis_intent_drops_them_and_that_is_the_documented_behavior():
-    """``analysis_task`` selects ANALYSIS_TOOL_NAMES only — no retrieval component tool
-    survives it, ``agent_kb_search`` included. Pinned so that if M5 folds the analyze peer
-    into code, this expectation is revisited deliberately rather than discovered in a run."""
+def test_analysis_intent_keeps_retrieval_tools():
+    """This test previously PINNED the opposite behaviour, with a note to revisit it
+    deliberately rather than discover it in a run. The reachability audit revisited it.
+
+    ``analysis_task`` selected ANALYSIS_TOOL_NAMES alone — 5 crime-MCP + 5 QGIS tools — and on
+    the legacy path that intent is applied to the SearchAgent itself, so an analysis question
+    built the evidence-gathering agent with ZERO retrieval tools and was answered ungrounded.
+    The empty-selection fallback never fired because file/skill/quality tools had already been
+    appended, so the stripping was silent.
+    """
     from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
     from agent_runtime.tool_policy import select_allowed_tools
 
     names = [getattr(t, "name", "") for t in make_langchain_granular_tools()]
     kept = set(select_allowed_tools("analysis_task", names))
-    assert "kb_method_search" not in kept
-    assert "agent_kb_search" not in kept
-
+    assert "keyword_search" in kept, "an analysis agent cannot ground itself"
+    assert "agent_kb_search" in kept
+    assert {"kb_method_search", "get_method_contract"} <= kept
 
 def test_the_tool_returns_json_the_model_can_parse(monkeypatch, registry):
     monkeypatch.setattr(ml, "load_registry", lambda: registry)

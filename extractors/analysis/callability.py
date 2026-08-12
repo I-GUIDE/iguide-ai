@@ -143,17 +143,29 @@ def _globals_of(table: symtable.SymbolTable) -> Tuple[set, set]:
 
 
 def annotation_names(node: ast.AST) -> List[str]:
-    """Root names referenced in a unit's ANNOTATIONS and DECORATORS.
+    """Root names a unit needs at DEF TIME: annotations, decorators, parameter defaults and
+    class bases.
 
-    symtable does not report these as globals of the function scope, and it is right not to:
-    annotations and decorators are evaluated in the *enclosing* scope when the ``def``
-    executes. But a slice carries them, so they must still be satisfied or the slice raises at
-    IMPORT time rather than at call time.
+    symtable does not report any of these as globals of the function scope, and it is right
+    not to — they are all evaluated in the *enclosing* scope when the ``def`` or ``class``
+    statement executes, not when the function is called. But a slice carries them, so they
+    must still be satisfied or the slice raises at IMPORT time rather than at call time.
 
-    Measured: ``def filter_dataframe_by_value(df: pd.DataFrame, ...) -> pd.DataFrame`` uses
-    ``pd`` nowhere in its body. The analyzer correctly found no global read, the unit was
-    marked callable, and the emitted slice died with ``NameError: name 'pd' is not defined``
-    the moment it was imported. Caught only by importing the slice for real.
+    Each position was added after a real slice failed on it, at corpus scale:
+
+      annotations   ``def filter_dataframe_by_value(df: pd.DataFrame) -> pd.DataFrame`` uses
+                    ``pd`` nowhere in its body -> ``NameError: name 'pd' is not defined``.
+      defaults      ``def evaluate(..., feats=FEATS)`` -> ``NameError: FEATS``. The module
+                    constant simply was not carried into the slice.
+      defaults      ``def plot_predictions(train_data=X_train, ...)`` -> ``NameError: X_train``.
+                    This one is worse than a missing const: ``X_train`` is a RUNTIME binding,
+                    so the unit was never independently callable and the analyzer said it was.
+                    Counting defaults turns it into a blocker and the unit is correctly refused.
+      class bases   ``class AgentState(TypedDict)`` -> ``NameError: TypedDict``. A base class is
+                    evaluated when the class body executes.
+
+    Stringized annotations are deliberately excluded: ``'gpd.GeoDataFrame'`` is never evaluated
+    at def time and so cannot fail an import.
     """
     targets: List[ast.AST] = []
     args = getattr(node, "args", None)
@@ -165,9 +177,18 @@ def annotation_names(node: ast.AST) -> List[str]:
         for extra in (getattr(args, "vararg", None), getattr(args, "kwarg", None)):
             if extra is not None and extra.annotation is not None:
                 targets.append(extra.annotation)
+        # Default expressions run at def time in the enclosing scope, so a default naming a
+        # module-level value is a real requirement — and one naming a RUNTIME value is a real
+        # blocker. kw_defaults holds None for keyword-only params that have no default.
+        targets.extend(d for d in (getattr(args, "defaults", []) or []) if d is not None)
+        targets.extend(d for d in (getattr(args, "kw_defaults", []) or []) if d is not None)
     if getattr(node, "returns", None) is not None:
         targets.append(node.returns)          # type: ignore[attr-defined]
     targets.extend(getattr(node, "decorator_list", []) or [])
+    # ClassDef: bases and metaclass keywords are evaluated when the class statement runs.
+    targets.extend(getattr(node, "bases", []) or [])
+    targets.extend(kw.value for kw in (getattr(node, "keywords", []) or [])
+                   if getattr(kw, "value", None) is not None)
 
     names: List[str] = []
     for t in targets:
@@ -212,6 +233,7 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
 
     scope = module_scope(tree, source)
     by_name = {t.get_name(): t for t in _function_tables(table)}
+    _class_tables = {c.get_name(): c for c in table.get_children() if c.get_type() == "class"}
     unit_nodes = dict(iter_units(tree))
 
     verdicts: Dict[str, Callability] = {}
@@ -268,17 +290,56 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
                         f"instance, so it is not importable as a standalone function")
         verdicts[qualname] = c
 
+    # Module-level CLASSES are not units — `iter_units` never yields them and the promotion
+    # loop skips any name it does not yield — but they ARE sliceable dependencies, and the
+    # closure walk dead-ends on a name with no entry. Without this, slicing `make_workflow`
+    # (which calls a helper returning `AgentState`) emitted `class AgentState(TypedDict)` and
+    # not the `TypedDict` import, so the slice raised NameError at import.
+    class_names: List[str] = []
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.ClassDef) or stmt.name in verdicts:
+            continue
+        class_names.append(stmt.name)
+        c = Callability(verdict=CALLABLE)
+        reads = set(annotation_names(stmt))
+        # NOT by_name: that is built from _function_tables, which recurses THROUGH class
+        # tables to reach their methods without ever including the class scope itself. The
+        # class block is where a body annotation lives, and symtable does report its names as
+        # globals — `class AgentState(TypedDict): messages: Annotated[list, operator.add]`
+        # yields globals {Annotated, list, operator}. Looking the class up in the function map
+        # silently found nothing, and the slice raised `NameError: operator` on import.
+        table = _class_tables.get(stmt.name)
+        if table is not None:
+            r, _w = _globals_of(table)
+            reads |= r
+        for name in sorted(reads):
+            if name in scope.imports:
+                c.requires_imports.append(name)
+            elif name in scope.defs:
+                c.requires_units.append(name)
+            elif name in scope.consts:
+                c.requires_consts.append(name)
+            elif name in scope.runtime:
+                c.global_reads.append(name)
+                c.verdict = NEEDS_GLOBALS
+                c.reason = f"class body reads module-level runtime value {name!r}"
+            elif name not in unit_nodes:
+                c.free_names.append(name)
+        verdicts[stmt.name] = c
+
     _demote_transitively(verdicts)
 
-    total = len(verdicts)
-    ok = sum(1 for v in verdicts.values() if v.verdict == CALLABLE)
+    # Classes are dependencies, not units: counting them would inflate "N of M callable".
+    unit_verdicts = {n: v for n, v in verdicts.items() if n not in set(class_names)}
+    total = len(unit_verdicts)
+    ok = sum(1 for v in unit_verdicts.values() if v.verdict == CALLABLE)
     summary = {
         "total": total,
         "callable": ok,
-        "needs_globals": sorted(n for n, v in verdicts.items() if v.verdict == NEEDS_GLOBALS),
-        "needs_instance": sorted(n for n, v in verdicts.items() if v.verdict == NEEDS_INSTANCE),
-        "unparseable": sorted(n for n, v in verdicts.items() if v.verdict == UNPARSEABLE),
-        "blocked_by": _blocked_by_histogram(verdicts),
+        "needs_globals": sorted(n for n, v in unit_verdicts.items() if v.verdict == NEEDS_GLOBALS),
+        "needs_instance": sorted(n for n, v in unit_verdicts.items() if v.verdict == NEEDS_INSTANCE),
+        "unparseable": sorted(n for n, v in unit_verdicts.items() if v.verdict == UNPARSEABLE),
+        "blocked_by": _blocked_by_histogram(unit_verdicts),
         "module_side_effect_lines": scope.side_effect_lines,
     }
     return verdicts, scope, summary
