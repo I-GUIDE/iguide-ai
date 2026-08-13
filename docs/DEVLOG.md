@@ -1750,3 +1750,59 @@ branch is unpushed so a rewrite is cheap and safe, but rewriting history is not 
 unasked; `git filter-branch -f --index-filter 'git rm -r --cached --ignore-unmatch
 .corpus_cache' 6f6d030^..HEAD` is the fix when wanted. The working tree and all future commits
 are already clean (untracked + gitignored in the M7.1 commit).
+
+## 2026-08-13 · M6.3 / M7.6 · The contract is enforced, and classes are units
+**Change** `contract_invariants()` turns inferred parameter expectations into enforceable
+  `InvariantSpec`s (wired into both extractors); `sandbox_verify` gains `check_contract_arg` and
+  a **prologue** that wraps imported units so invariants are checked against the actual argument
+  at call time; `analyze_module` promotes safely-constructible classes. 33 new tests.
+
+**Why (contracts)** `UnitContract` has always carried `crs_expectation`, and
+`infer_units_and_crs` has always set `"projected"` on a GeoDataFrame parameter whose body
+performs a metric operation — 20 corpus params carry it. None of it ever became an
+`InvariantSpec`, and nothing at run time read it. Measured before this: **0 invariants in the
+whole 203-unit registry.** "Contract-bearing structure" meant "structure the model is told
+about".
+
+**Why call time, not after.** An epilogue inspecting the namespace cannot know which frame was
+passed as which parameter. `compute_accessibility(demand, supply)` needs *demand* projected; a
+post-hoc scan sees two GeoDataFrames and has to guess. Wrapping the call removes the guess — and
+the prologue must run BEFORE the user's code, or their `from iguide_methods… import symbol`
+captures the original and the contract goes unchecked while appearing enforced.
+
+**Measured** in a real container, importing a corpus unit that declares `gdf` must be projected:
+
+| run | exit | verdict | finding |
+|---|---|---|---|
+| passes a 4326 frame | **0** | **fail** | `calculate_buffers declares gdf must be in a PROJECTED CRS — its body performs a metric operation` |
+| passes a UTM frame | 0 | pass | — |
+
+| | before | after |
+|---|---|---|
+| invariants in the registry | **0** | **66** (56 `reject_all_nan`, 10 `projected_crs`) |
+| units carrying one | 0 | 39 |
+| callable units | 203 | **229** |
+| elements with ≥1 callable unit | 60/174 (34.5%) | **65/174 (37.4%)** |
+| import lines with real defects | 0 | **0** (209 import bare, 20 need declared deps) |
+
+Suite **998 passed**, same 3 pre-existing failures.
+
+**Why classes.** 50 units were `needs_instance` methods whose class was never promoted — no
+route to any of them. A class is a legitimate unit of reuse *when constructing it is safe*: an
+`__init__` that calls `open`/`read_file`/`requests.get`, or reads a runtime global, is the
+object-shaped version of the hidden-global problem and importing its slice into a network-less
+sandbox fails. Those get `needs_instance` and stay indexed-only; the rest are promoted, +26
+units.
+
+**Surprised by** how the class change had to be restructured twice. My first version kept a
+separate `promotable_classes` list while `iter_units` still didn't yield classes — so the
+extractors, which iterate verdicts and skip anything `iter_units` omits, would have analysed
+every class and then silently dropped it. The fix was to make `iter_units` yield classes as
+*candidates* and let the verdict decide, exactly as it does for functions. Then the second
+version had classes reaching the function loop and dead-ending on `by_name` (function tables
+only), coming back `unparseable`. One loop handling both kinds was the answer; two loops with a
+side list was the bug in two different costumes.
+
+**Still the user's call, not mine:** whether the agent may serve private content (43 of 799
+elements), whether the method library should be exposed as an API, and multi-worker serving.
+Those are product and access-control decisions, not implementation.

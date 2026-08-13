@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 from typing import Any, List, Optional
 
-from ..contracts import ParamSpec
+from ..contracts import InvariantSpec, ParamSpec
 
 # A (Geo)DataFrame parameter is the hook the invariant gate hangs on: CRS and unit checks
 # only apply to frames. Matched by NAME so stringized PEP-563 annotations work, the same
@@ -162,4 +162,35 @@ def contract_params(node: ast.AST, docstring: str = "") -> List[ParamSpec]:
     return params
 
 
-__all__ = ["signature_of", "params_of", "infer_types", "infer_units_and_crs", "contract_params"]
+def contract_invariants(params: List[ParamSpec], node: ast.AST) -> List[InvariantSpec]:
+    """Turn inferred parameter expectations into ENFORCEABLE invariants.
+
+    The missing link. ``infer_units_and_crs`` has always set ``crs_expectation="projected"`` on
+    a GeoDataFrame parameter whose body performs a metric operation — 20 params across the
+    corpus carry it — and nothing ever converted that into an ``InvariantSpec``. Measured
+    before this: **zero** invariants in the whole 203-unit registry. The expectation was
+    displayed to the model in ``get_method_contract`` and enforced nowhere, so "contract-bearing
+    structure" meant "structure the model is told about".
+
+    Each invariant names the PARAMETER it constrains, which is what lets the runtime wrapper
+    check the actual argument rather than guessing which frame in the namespace was meant.
+    """
+    out: List[InvariantSpec] = []
+    for p in params:
+        if p.crs_expectation == "projected":
+            out.append(InvariantSpec(check="projected_crs", target=p.name,
+                                     args={"unit": p.declared_unit or "metres"},
+                                     evidence=p.evidence))
+        elif p.crs_expectation and p.crs_expectation.lower().startswith("epsg:"):
+            out.append(InvariantSpec(check="crs_equals", target=p.name,
+                                     args={"crs": p.crs_expectation}, evidence=p.evidence))
+        if p.inferred_type in {"geodataframe", "dataframe"}:
+            # A frame argument that is entirely null is a failed upstream join; checking it at
+            # the CALL means the caller learns which step broke, not just that the end was NaN.
+            out.append(InvariantSpec(check="reject_all_nan", target=p.name,
+                                     evidence=f"parameter inferred as {p.inferred_type}"))
+    return out
+
+
+__all__ = ["signature_of", "params_of", "infer_types", "infer_units_and_crs",
+           "contract_params", "contract_invariants"]

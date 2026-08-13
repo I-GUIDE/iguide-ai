@@ -24,6 +24,7 @@ its own text for injection.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 from typing import Any, Dict, List, Optional
@@ -242,6 +243,132 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
     return findings
 
 
+
+# --------------------------------------------------------------------------- #
+# Contract enforcement. The extracted unit says what it needs; this checks it.
+# --------------------------------------------------------------------------- #
+
+CONTRACTS_GLOBAL = "IGUIDE_CONTRACTS"
+VIOLATIONS_GLOBAL = "_IGUIDE_CONTRACT_VIOLATIONS"
+
+
+def check_contract_arg(unit: str, invariant: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]:
+    """Check ONE declared invariant against ONE actual argument, or None if satisfied.
+
+    Enforced at CALL time, by wrapping the imported unit, for a reason that is not incidental:
+    an epilogue inspecting the namespace afterwards cannot know which frame was passed as which
+    parameter. ``compute_accessibility(demand, supply)`` needs *demand* projected; a
+    post-hoc scan sees two GeoDataFrames and has to guess. Wrapping the call removes the guess.
+    """
+    check = str(invariant.get("check") or "")
+    target = str(invariant.get("target") or "?")
+    where = f"{unit}({target})"
+
+    if check == "projected_crs":
+        crs = _crs_of(value)
+        if crs is None:
+            if not _looks_like_frame(value):
+                return None                     # not a frame; the contract does not apply
+            return _finding(check, UNKNOWN, where,
+                            f"{unit} declares {target} must be in a projected CRS "
+                            f"(results in {invariant.get('args', {}).get('unit', 'metres')}), "
+                            f"but the frame passed has no CRS set")
+        projected = _is_projected(crs)
+        if projected is False:
+            return _finding(check, FAIL, where,
+                            f"{unit} declares {target} must be in a PROJECTED CRS — its body "
+                            f"performs a metric operation — but {crs!s} is geographic, so the "
+                            f"result is in degrees. Reproject before calling.", crs=str(crs))
+        if projected is None:
+            return _finding(check, UNKNOWN, where,
+                            f"could not determine whether {crs!s} is projected", crs=str(crs))
+        return None
+
+    if check == "crs_equals":
+        want = str((invariant.get("args") or {}).get("crs") or "")
+        crs = _crs_of(value)
+        if crs is None or not want:
+            return None
+        if str(crs).strip().lower() != want.strip().lower():
+            return _finding(check, FAIL, where,
+                            f"{unit} declares {target} must be {want}, got {crs!s}",
+                            crs=str(crs), expected=want)
+        return None
+
+    if check == "reject_all_nan":
+        if not _looks_like_frame(value):
+            return None
+        finding = check_not_all_nan(where, value)
+        # Only a real failure is interesting here: "this frame is fine" is noise on every call.
+        return finding if finding.get("status") == FAIL else None
+
+    return None
+
+
+def install_contract_guards(namespace: Dict[str, Any], contracts: Dict[str, Any]) -> int:
+    """Wrap library units named in *contracts* so their declared invariants are checked.
+
+    Runs BEFORE the user's code, patching the module attribute — so the user's
+    ``from iguide_methods.X.v_sha import symbol`` picks up the wrapped version. Violations are
+    collected rather than raised: a contract breach means the NUMBER is wrong, and failing the
+    run would destroy the evidence and the partial output the user might still want.
+
+    Returns the number of units wrapped. Never raises: an unwrappable unit is simply unguarded,
+    which is the pre-existing behaviour, and losing the guard must not lose the run.
+    """
+    import functools
+    import importlib
+
+    violations: List[Dict[str, Any]] = namespace.setdefault(VIOLATIONS_GLOBAL, [])
+    wrapped = 0
+    for unit_name, spec in (contracts or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        module_path = str(spec.get("module") or "")
+        symbol = str(spec.get("symbol") or unit_name.split(".")[-1])
+        invariants = [i for i in (spec.get("invariants") or []) if isinstance(i, dict)]
+        if not (module_path and symbol and invariants):
+            continue
+        try:
+            module = importlib.import_module(module_path)
+            original = getattr(module, symbol)
+        except Exception:
+            continue
+        if getattr(original, "_iguide_guarded", False):
+            continue
+
+        def make_guard(fn, unit, invs):
+            @functools.wraps(fn)
+            def guarded(*args, **kwargs):
+                try:
+                    import inspect
+                    bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+                    supplied = dict(bound.arguments)
+                except Exception:
+                    supplied = {}
+                for inv in invs:
+                    target = str(inv.get("target") or "")
+                    if target not in supplied:
+                        continue
+                    try:
+                        found = check_contract_arg(unit, inv, supplied[target])
+                    except Exception:
+                        found = None
+                    if found is not None:
+                        violations.append(found)
+                return fn(*args, **kwargs)
+
+            guarded._iguide_guarded = True
+            return guarded
+
+        try:
+            setattr(module, symbol, make_guard(original, unit_name, invariants))
+            wrapped += 1
+        except Exception:
+            continue
+    return wrapped
+
+
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
@@ -295,6 +422,14 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
     """Inspect every frame-like binding in *namespace* and return a findings report."""
     findings: List[Dict[str, Any]] = []
     inspected: List[str] = []
+
+    # Contract violations recorded by the call-time guards go FIRST: they name the specific
+    # unit and parameter that was misused, which is far more actionable than a frame-level
+    # finding about a variable whose role the reader has to infer.
+    for violation in (namespace.get(VIOLATIONS_GLOBAL) or []):
+        if isinstance(violation, dict):
+            findings.append(violation)
+
     for name, obj in list(namespace.items()):
         if name.startswith("_") or len(inspected) >= max_frames:
             continue
@@ -405,6 +540,54 @@ except Exception:
 '''
 
 
+
+_PROLOGUE = '''
+# --- I-GUIDE contract guards (appended automatically; does not change your results) ---
+{contracts_literal}
+
+
+def _iguide_install_contract_guards():
+{body}
+    try:
+        install_contract_guards(globals(), {contracts_global})
+    except Exception:
+        pass
+
+
+try:
+    _iguide_install_contract_guards()
+except Exception:
+    pass
+
+'''
+
+
+def prologue_source(contracts: Optional[Dict[str, Any]] = None) -> str:
+    """Code to run BEFORE the user's, wrapping library units with their declared invariants.
+
+    Returns "" when there is nothing to guard, so a run that imports no library unit pays
+    nothing. The contracts are injected as a literal rather than read from the mounted
+    registry: the mount is optional and the sandbox has no network, and a guard that silently
+    does not install is worse than no guard at all — it would read as "the contract passed".
+    """
+    import json as _json
+
+    if not contracts:
+        return ""
+    parts: List[str] = []
+    for obj in (_finding, _crs_of, _is_projected, check_not_all_nan, check_contract_arg,
+                _looks_like_frame, install_contract_guards):
+        src = inspect.getsource(obj)
+        parts.append("\n".join("    " + line if line.strip() else line
+                               for line in src.splitlines()))
+    body = ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
+            f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
+            "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
+    literal = f"{CONTRACTS_GLOBAL} = " + _json.dumps(contracts, default=str)
+    return _PROLOGUE.format(contracts_literal=literal, body=body,
+                            contracts_global=CONTRACTS_GLOBAL)
+
+
 def epilogue_source() -> str:
     """Self-contained checker source to append to sandboxed code.
 
@@ -417,13 +600,14 @@ def epilogue_source() -> str:
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, check_projected_crs, check_not_all_nan,
                 check_join_cardinality, check_finite, check_declared_units, capture_environment,
-                _looks_like_frame, _has_geometry, run_checks):
+                check_contract_arg, _looks_like_frame, _has_geometry, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))
     body = ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
             f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
             f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
+            f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
             "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
     return _EPILOGUE.format(body=body, filename=CHECKS_FILENAME,
                             env_filename=ENVIRONMENT_FILENAME,
@@ -431,6 +615,8 @@ def epilogue_source() -> str:
 
 
 __all__ = ["run_checks", "write_checks", "epilogue_source", "capture_environment",
+           "prologue_source", "install_contract_guards", "check_contract_arg",
+           "CONTRACTS_GLOBAL", "VIOLATIONS_GLOBAL",
            "CHECKS_FILENAME", "ENVIRONMENT_FILENAME", "DECLARED_FILENAME",
            "PASS", "FAIL", "UNKNOWN", "DECLARED_OUTPUTS", "check_projected_crs",
            "check_not_all_nan", "check_join_cardinality", "check_finite",

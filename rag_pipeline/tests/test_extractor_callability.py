@@ -244,9 +244,12 @@ def test_a_public_method_is_not_callable_on_its_own():
     v = verdicts["Downloader.build_url"]
     assert v.verdict == NEEDS_INSTANCE
     assert not v.is_callable
-    assert "instance" in v.reason
-    assert summary["callable"] == 0
+    assert "class" in v.reason, "the reason should point at the class as the way in"
     assert "Downloader.build_url" in summary["needs_instance"]
+    # The CLASS is promotable here (its __init__ only assigns), so the method is reachable
+    # through it. That is the point of promoting classes: refusing them left 50 corpus units
+    # with no route at all.
+    assert verdicts["Downloader"].is_callable
 
 
 def test_a_module_level_function_is_unaffected_by_a_sibling_class():
@@ -261,7 +264,8 @@ def test_a_module_level_function_is_unaffected_by_a_sibling_class():
     verdicts, _scope, summary = analyze_module(src)
     assert verdicts["free"].is_callable
     assert not verdicts["C.m"].is_callable
-    assert summary["callable"] == 1
+    # `free` and `C` are both callable units; `C.m` is reached through `C`.
+    assert summary["callable"] == 2
 
 
 def test_a_staticmethod_is_still_reported_as_needing_an_instance():
@@ -349,9 +353,42 @@ def test_a_class_reading_a_runtime_global_blocks_its_dependents():
     assert not verdicts["build"].is_callable
 
 
-def test_classes_are_not_counted_as_units():
-    """They are sliceable dependencies, not callable units; counting them would inflate
-    'N of M callable'."""
+def test_a_safely_constructible_class_is_a_unit():
+    """This test previously asserted the opposite — that classes are dependencies only. The
+    design changed on measurement: 50 corpus units were `needs_instance` methods whose class
+    was never promoted, so there was no route to any of them. A class whose construction is
+    safe is a legitimate unit of reuse."""
     src = "from typing import TypedDict\n\nclass S(TypedDict):\n    n: int\n\ndef f():\n    return S\n"
-    _v, _s, summary = analyze_module(src)
-    assert summary["total"] == 1 and summary["callable"] == 1
+    v, _s, summary = analyze_module(src)
+    assert summary["total"] == 2 and summary["callable"] == 2
+    assert v["S"].is_callable
+
+
+def test_a_class_whose_construction_does_io_is_refused():
+    """The object-shaped hidden global: importing the slice into a sandbox with no network
+    fails, so `callable` would be a false promise."""
+    src = ("class Loader:\n"
+           "    def __init__(self, path):\n"
+           "        self.data = open(path).read()\n"
+           "    def get(self):\n        return self.data\n")
+    from extractors.contracts import NEEDS_INSTANCE
+
+    v, _s, _summary = analyze_module(src)
+    assert v["Loader"].verdict == NEEDS_INSTANCE
+    assert "I/O" in v["Loader"].reason
+
+
+def test_a_class_whose_init_reads_a_runtime_global_is_blocked():
+    src = ("import pandas as pd\n"
+           "CFG = pd.read_csv('c.csv')\n\n"
+           "class M:\n"
+           "    def __init__(self):\n        self.cfg = CFG\n"
+           "    def go(self):\n        return 1\n")
+    v, _s, _summary = analyze_module(src)
+    assert v["M"].verdict == "needs_globals"
+
+
+def test_a_promoted_class_slice_executes():
+    src = "class Calc:\n    def __init__(self, k=2):\n        self.k = k\n    def scale(self, x):\n        return x * self.k\n"
+    ns = _executes(src, "Calc")
+    assert "Calc" in ns and ns["Calc"](3).scale(2) == 6

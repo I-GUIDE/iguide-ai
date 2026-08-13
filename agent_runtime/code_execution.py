@@ -350,6 +350,39 @@ class ExecResult:
         }
 
 
+def contracts_for_code(code: str) -> Dict[str, Any]:
+    """Declared invariants for every library unit this code imports.
+
+    Resolved AGENT-side from the registry, then injected into the run as a literal. The sandbox
+    has no network and the library mount is optional, so a guard that tried to read the registry
+    itself could silently fail to install — and a guard that does not install reads exactly like
+    a contract that passed.
+    """
+    try:
+        from agent_runtime.artifacts import library_units_used
+        from agent_runtime.method_library import load_registry
+    except Exception:
+        return {}
+    used = library_units_used(code or "")
+    if not used:
+        return {}
+    registry = load_registry()
+    if not registry:
+        return {}
+    out: Dict[str, Any] = {}
+    for ref in used:
+        module, symbol = ref.get("module"), ref.get("symbol")
+        if not (module and symbol):
+            continue
+        entry = next((v for v in registry.values()
+                      if isinstance(v, dict) and v.get("module") == module
+                      and v.get("library_symbol") == symbol), None)
+        invariants = [i for i in ((entry or {}).get("invariants") or []) if isinstance(i, dict)]
+        if invariants:
+            out[f"{symbol}"] = {"module": module, "symbol": symbol, "invariants": invariants}
+    return out
+
+
 def _read_checks(work: Path) -> Dict[str, Any]:
     """Load the invariant gate's report, if it wrote one.
 
@@ -590,8 +623,13 @@ class CodeExecutor:
             # echoed back to the model stays exactly what the model wrote.
             script = (code or "")
             if invariant_gate_enabled():
-                from agent_runtime.sandbox_verify import epilogue_source
-                script = script + epilogue_source()
+                from agent_runtime.sandbox_verify import epilogue_source, prologue_source
+
+                # PROLOGUE first: it patches the library module, so the user's
+                # `from iguide_methods.X.v_sha import symbol` binds the guarded version. Any
+                # other order and the import would capture the original and the contract would
+                # go unchecked while appearing to be enforced.
+                script = prologue_source(contracts_for_code(code or "")) + script + epilogue_source()
             (work / "script.py").write_text(script, encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors = _stage_inputs(work, input_files)

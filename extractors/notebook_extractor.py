@@ -309,7 +309,8 @@ class NotebookExtractor:
         the slice builder exists to exclude.
         """
         from .analysis import analyze_module, build_unit_slice, iter_units, slice_sha
-        from .analysis.signatures import contract_params, signature_of
+        from .analysis.signatures import (contract_invariants, contract_params,
+                                  signature_of)
         from .pkgmap import requirements_from_source
         from .contracts import ANALYZER_VERSION, CALLABLE, UnitContract
         from .doc_ids import method_unit_doc_id
@@ -335,6 +336,7 @@ class NotebookExtractor:
             if node is None:
                 continue
             doc = ast.get_docstring(node) or ""
+            _params = contract_params(node, doc)
             slice_src = build_unit_slice(module_source, qualname, scope=scope,
                                          verdicts=verdicts,
                                          provenance={"element_id": ctx.anchor(),
@@ -347,7 +349,10 @@ class NotebookExtractor:
                 qualified_name=qualname,
                 unit_kind="method" if "." in qualname else "function",
                 signature=signature_of(node),
-                params=contract_params(node, doc),
+                params=_params,
+                # Enforceable form of what the params declare. Without this the expectation was
+                # shown to the model and checked by nothing.
+                invariants=[dataclasses.asdict(i) for i in contract_invariants(_params, node)],
                 returns=(ast.unparse(node.returns) if getattr(node, "returns", None) else ""),
                 docstring=doc,
                 doc_summary=(doc.strip().splitlines() or [""])[0][:200],

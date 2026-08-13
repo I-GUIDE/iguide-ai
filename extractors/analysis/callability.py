@@ -204,12 +204,19 @@ def annotation_names(node: ast.AST) -> List[str]:
 
 
 def iter_units(tree: ast.Module) -> List[Tuple[str, ast.AST]]:
-    """(qualified_name, node) for every top-level function and public method."""
+    """(qualified_name, node) for every top-level function, public method, AND class.
+
+    Classes are CANDIDATES here; the verdict decides whether one is promotable. Keeping the
+    decision in the verdict rather than in a separate list is what makes the extractors work
+    unchanged — they already iterate verdicts and skip whatever `iter_units` does not yield, so
+    a class held back in a side list would have been analysed and then silently dropped.
+    """
     units: List[Tuple[str, ast.AST]] = []
     for stmt in tree.body:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             units.append((stmt.name, stmt))
         elif isinstance(stmt, ast.ClassDef):
+            units.append((stmt.name, stmt))
             for sub in stmt.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) \
                         and not sub.name.startswith("_"):
@@ -237,22 +244,32 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
     unit_nodes = dict(iter_units(tree))
 
     verdicts: Dict[str, Callability] = {}
-    for qualname in unit_nodes:
+    for qualname, node in unit_nodes.items():
         simple = qualname.split(".")[-1]
-        ftable = by_name.get(simple)
+        is_class = isinstance(node, ast.ClassDef)
+        # One loop for both kinds. The class scope is NOT in `by_name`: that map comes from
+        # _function_tables, which recurses THROUGH class tables to reach their methods without
+        # ever including the class block itself — and the class block is where a body
+        # annotation lives. `class AgentState(TypedDict): messages: Annotated[list,
+        # operator.add]` reports globals {Annotated, list, operator}; looking it up in the
+        # function map silently found nothing and the slice raised `NameError: operator`.
+        ftable = _class_tables.get(simple) if is_class else by_name.get(simple)
         c = Callability(verdict=CALLABLE)
         if ftable is None:
-            # A unit with no symtable entry cannot be reasoned about; do not claim it callable.
+            # Cannot be reasoned about, so do not claim it callable.
             c.verdict = UNPARSEABLE
-            c.reason = "no symbol table for this function"
+            c.reason = f"no symbol table for this {'class' if is_class else 'function'}"
             verdicts[qualname] = c
             continue
         reads, writes = _globals_of(ftable)
-        # Annotations and decorators are evaluated at def time in the enclosing scope, so a
-        # slice must satisfy them too even though symtable does not count them as globals.
-        reads |= set(annotation_names(unit_nodes[qualname]))
+        # Annotations, decorators, parameter defaults and class bases are all evaluated at DEF
+        # TIME in the enclosing scope, so a slice must satisfy them even though symtable does
+        # not count them as globals of the body.
+        reads |= set(annotation_names(node))
         c.global_writes = sorted(writes)
         for name in sorted(reads):
+            if name == qualname or name == simple:
+                continue                      # a class body referring to itself
             if name in scope.imports:
                 c.requires_imports.append(name)
             elif name in scope.defs:
@@ -265,6 +282,7 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
                 c.requires_units.append(name)
             else:
                 c.free_names.append(name)
+
         if c.global_reads:
             c.verdict = NEEDS_GLOBALS
             first = c.global_reads[0]
@@ -273,64 +291,31 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
         elif c.free_names:
             c.verdict = NEEDS_GLOBALS
             c.reason = f"unbound name(s): {', '.join(c.free_names)}"
+        elif is_class:
+            # A class is a legitimate unit of reuse — refusing all of them cost 50 units on the
+            # corpus — but only when CONSTRUCTING it is safe. If `__init__` opens a file or hits
+            # the network, the class is the object-shaped version of the hidden-global problem
+            # and importing its slice into a sandbox with no network fails.
+            if not _construction_is_safe(node, scope, by_name):
+                c.verdict = NEEDS_INSTANCE
+                c.reason = (f"constructing {simple!r} performs I/O or reads a runtime value, so "
+                            f"it cannot be instantiated in an isolated sandbox")
         elif "." in qualname:
-            # A bound method. It reads no globals — `self` is a PARAMETER — so every check
-            # above passes and it was being verdicted `callable`. Measured on the 14-notebook
-            # corpus that was 24 of 40 units, and it is a false-callable in the strict sense:
-            # the emitted slice defines the CLASS, so `from <module> import build_api_url`
+            # A bound method reads no globals — `self` is a PARAMETER — so every check above
+            # passes and these were verdicted `callable`: 24 of 40 units on the first corpus.
+            # The emitted slice defines the CLASS, so `from <module> import build_api_url`
             # raises ImportError, and one such re-export poisoned its element's __init__ and
-            # took every sibling unit down with it (26 of 40 import lines failed).
-            #
-            # Calling one really does require constructing the class, whose __init__ may open
-            # files or hit the network, so this is not merely a naming problem to paper over.
-            # Still emitted for discovery — the method body is useful evidence — but never
-            # shipped as importable code.
+            # took every sibling unit down with it. Reach a method through its class instead.
             c.verdict = NEEDS_INSTANCE
-            c.reason = (f"bound method of {qualname.split('.')[0]!r}; calling it requires an "
-                        f"instance, so it is not importable as a standalone function")
+            c.reason = (f"bound method of {qualname.split('.')[0]!r}; call it via its class, "
+                        f"which is promoted separately when construction is safe")
         verdicts[qualname] = c
-
-    # Module-level CLASSES are not units — `iter_units` never yields them and the promotion
-    # loop skips any name it does not yield — but they ARE sliceable dependencies, and the
-    # closure walk dead-ends on a name with no entry. Without this, slicing `make_workflow`
-    # (which calls a helper returning `AgentState`) emitted `class AgentState(TypedDict)` and
-    # not the `TypedDict` import, so the slice raised NameError at import.
-    class_names: List[str] = []
-    for stmt in tree.body:
-        if not isinstance(stmt, ast.ClassDef) or stmt.name in verdicts:
-            continue
-        class_names.append(stmt.name)
-        c = Callability(verdict=CALLABLE)
-        reads = set(annotation_names(stmt))
-        # NOT by_name: that is built from _function_tables, which recurses THROUGH class
-        # tables to reach their methods without ever including the class scope itself. The
-        # class block is where a body annotation lives, and symtable does report its names as
-        # globals — `class AgentState(TypedDict): messages: Annotated[list, operator.add]`
-        # yields globals {Annotated, list, operator}. Looking the class up in the function map
-        # silently found nothing, and the slice raised `NameError: operator` on import.
-        table = _class_tables.get(stmt.name)
-        if table is not None:
-            r, _w = _globals_of(table)
-            reads |= r
-        for name in sorted(reads):
-            if name in scope.imports:
-                c.requires_imports.append(name)
-            elif name in scope.defs:
-                c.requires_units.append(name)
-            elif name in scope.consts:
-                c.requires_consts.append(name)
-            elif name in scope.runtime:
-                c.global_reads.append(name)
-                c.verdict = NEEDS_GLOBALS
-                c.reason = f"class body reads module-level runtime value {name!r}"
-            elif name not in unit_nodes:
-                c.free_names.append(name)
-        verdicts[stmt.name] = c
 
     _demote_transitively(verdicts)
 
-    # Classes are dependencies, not units: counting them would inflate "N of M callable".
-    unit_verdicts = {n: v for n, v in verdicts.items() if n not in set(class_names)}
+    # Classes ARE units now (a safely-constructible class is a legitimate unit of reuse), so
+    # they count. Refusing all of them cost 50 units on the corpus.
+    unit_verdicts = dict(verdicts)
     total = len(unit_verdicts)
     ok = sum(1 for v in unit_verdicts.values() if v.verdict == CALLABLE)
     summary = {
@@ -343,6 +328,41 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
         "module_side_effect_lines": scope.side_effect_lines,
     }
     return verdicts, scope, summary
+
+
+_IO_CALLS = ("open", "read_file", "read_csv", "read_parquet", "read_excel", "get", "post",
+             "request", "urlopen", "connect", "download", "load", "Session", "system", "run")
+
+
+def _construction_is_safe(node: ast.ClassDef, scope: ModuleScope,
+                          by_name: Dict[str, Any]) -> bool:
+    """Can this class be constructed without executing I/O or reading a runtime global?
+
+    Conservative and syntactic. ``__init__`` calling ``open``/``read_file``/``requests.get`` is
+    refused, because a class whose construction loads data is not independently callable — it is
+    the object-shaped version of the hidden-global problem, and promoting it would ship a unit
+    that fails on import in a sandbox with no network.
+
+    No ``__init__`` at all is safe: the default constructor does nothing.
+    """
+    init = next((n for n in node.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "__init__"),
+                None)
+    if init is None:
+        return True
+    table = by_name.get("__init__")
+    if table is not None:
+        reads, _writes = _globals_of(table)
+        if any(name in scope.runtime for name in reads):
+            return False
+    for sub in ast.walk(init):
+        if not isinstance(sub, ast.Call):
+            continue
+        fn = sub.func
+        name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+        if name and name in _IO_CALLS:
+            return False
+    return True
 
 
 def _demote_transitively(verdicts: Dict[str, Callability]) -> None:

@@ -139,7 +139,8 @@ class CodeExtractor:
         readers here exactly as it does in a notebook.
         """
         from .analysis import analyze_module, build_unit_slice, iter_units, slice_sha
-        from .analysis.signatures import contract_params, signature_of
+        from .analysis.signatures import (contract_invariants, contract_params,
+                                  signature_of)
         from .contracts import ANALYZER_VERSION, CALLABLE, UnitContract
         from .doc_ids import method_unit_doc_id
         from .pkgmap import requirements_from_source
@@ -160,6 +161,7 @@ class CodeExtractor:
             if node is None:
                 continue
             doc = ast.get_docstring(node) or ""
+            _params = contract_params(node, doc)
             provenance = {"element_id": ctx.anchor(), "parent_doc_id": parent_doc_id,
                           "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
                           "extractor": self.name, "analyzer_version": ANALYZER_VERSION}
@@ -169,7 +171,10 @@ class CodeExtractor:
                 qualified_name=qualname,
                 unit_kind="method" if "." in qualname else "function",
                 signature=signature_of(node),
-                params=contract_params(node, doc),
+                params=_params,
+                # Enforceable form of what the params declare. Without this the expectation was
+                # shown to the model and checked by nothing.
+                invariants=[dataclasses.asdict(i) for i in contract_invariants(_params, node)],
                 returns=(ast.unparse(node.returns) if getattr(node, "returns", None) else ""),
                 docstring=doc,
                 doc_summary=(doc.strip().splitlines() or [""])[0][:200],
