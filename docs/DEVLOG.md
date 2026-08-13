@@ -2519,3 +2519,48 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The plan's remaining M7 items: the Neo4j graph emitter, the ablation arm, and the
   CI artifact re-run job. Live prototype verification remains blocked on the expired CLI
   credential.
+
+## 2026-08-13 · M6.N · The gate stamped ⛔ on a correct answer
+
+**Change** A geographic frame still FAILS on its own, but `run_checks` relaxes it to `pass`
+  when the run shows positive evidence of reproject-then-measure: some frame is projected
+  **and** carries a computed measurement, and the geographic frame carries none. Areal
+  units (`km²`, `m²`, `hectares`, `acres`, and their spellings) added to `_UNIT_ALIASES`,
+  and `check_declared_units` now consults the alias table as well as the literal set.
+
+**Why** The first end-to-end prototype run with a working credential produced a
+  **completely correct answer** — the agent found `calculate_buffers`, used the
+  version-pinned import, reprojected to EPSG:32616 before buffering, and computed
+  1,960.34 km² per buffer against an analytic 1,963.50 (0.16%). It even noticed the
+  buffers overlap and reported the union separately.
+
+  The answer was stamped: **"⛔ A deterministic invariant check FAILED on this run, so its
+  numeric results are not verified."**
+
+  Two causes. The untouched 4326 *input* frame was still bound at module scope — and data
+  arrives in 4326 and you reproject it, so an input frame in a geographic CRS is present in
+  almost every correct geospatial script. And the declared unit `km²` was in neither the
+  known-unit set nor the alias table, so a correctly declared unit came back "unrecognised;
+  not checked".
+
+**Measured** The exact live namespace now verdicts **`fail` → `pass`**. Preserved: a bare
+  4326 frame **fails**; a 4326 frame buffered in place with no numeric column **fails**; a
+  frame holding a measurement computed in degrees **fails even beside a projected frame**.
+  9 areal unit spellings recognised, `bananas` still flagged. Tests **1207 → 1220**.
+
+**Surprised by** My first attempt was wrong in a way the tests caught immediately. I keyed
+  the verdict on "does this frame hold a measurement column" — which would have **missed the
+  motivating case**: `gdf.buffer(25000)` on a 4326 frame produces a wrong *geometry* and no
+  numeric column at all. Seven tests failed, and they were right. The correct rule keeps the
+  strict per-frame FAIL and relaxes only on positive evidence of the right workflow — and it
+  needed **zero** test changes, which is the better signal that it was right.
+
+  Also the **seventh** inline-scope NameError (`_has_metric_column` not in
+  `_inlined_helpers`). The structural binding test written in M6.G caught it before it could
+  reach a run, which is the first time that class of bug has been caught by a test rather
+  than by a live failure.
+
+  Worth stating: a ⛔ on a correct answer is not a cosmetic problem. It is the same
+  channel-flooding failure as `reject_all_nan` failing correct runs, and the end state is a
+  reader who ignores the marker — at which point the gate is worse than absent, because it
+  cost real work and buys nothing.

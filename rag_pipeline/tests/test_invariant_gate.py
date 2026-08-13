@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from agent_runtime.sandbox_verify import (prologue_source, FAIL, PASS, UNKNOWN, check_join_cardinality,
+from agent_runtime.sandbox_verify import (prologue_source, check_declared_units, FAIL, PASS, UNKNOWN, check_join_cardinality,
                                           check_not_all_nan, check_projected_crs,
                                           epilogue_source, run_checks)
 
@@ -689,3 +689,66 @@ def test_the_null_check_discriminates_in_a_real_run(tmp_path, body, expect_clean
     else:
         assert report["verdict"] == FAIL
         assert any(f["check"] == "all_nan" and f["status"] == FAIL for f in report["findings"])
+
+
+# ------------------------------------------- reproject-then-measure is the CORRECT workflow
+
+def test_an_input_frame_that_was_reprojected_before_measuring_is_not_a_failure():
+    """Found by a live prototype run, and it is the flooding case.
+
+    The agent reprojected three Chicago points to EPSG:32616, buffered by 25 km, and produced
+    areas accurate to 0.16% of the analytic value — a completely correct run. The answer was
+    stamped "⛔ A deterministic invariant check FAILED, numeric results are not verified",
+    because the untouched 4326 input frame was still bound at module scope.
+
+    Data arrives in 4326 and you reproject it, so an input frame in a geographic CRS is present
+    in almost every correct geospatial script. Failing on it fails the standard workflow, and a
+    ⛔ on a right answer teaches the reader to ignore ⛔.
+    """
+    ns = {"gdf_wgs84": _geo("EPSG:4326"),
+          "gdf_utm": _geo("EPSG:32616").assign(area_km2=[1960.34, 1960.34])}
+    report = run_checks(ns)
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+    assert "reprojected before measuring" in _find(report, "gdf_wgs84", "projected_crs")["message"]
+
+
+def test_a_bare_geographic_frame_still_fails():
+    """The relaxation is driven by POSITIVE evidence of reprojection, not by the absence of a
+    measurement column. `gdf.buffer(25000)` on a 4326 frame produces a wrong GEOMETRY and no
+    numeric column at all, so keying on a measurement column would miss the motivating case."""
+    assert run_checks({"gdf": _geo("EPSG:4326")})["verdict"] == FAIL
+
+
+def test_a_measurement_computed_in_degrees_fails_even_beside_a_projected_frame():
+    """A number computed in a geographic CRS is wrong regardless of what else the run got right.
+    Only a frame carrying no measurement of its own can be an untouched input."""
+    ns = {"bad": _geo("EPSG:4326").assign(area_km2=[0.196, 0.196]),
+          "good": _geo("EPSG:32616").assign(area_km2=[1960.34, 1960.34])}
+    report = run_checks(ns)
+    assert report["verdict"] == FAIL
+    assert _find(report, "bad", "projected_crs")["metric_column"] == "area_km2"
+
+
+def _find(report, target, check):
+    return next(f for f in report["findings"]
+                if f["target"] == target and f["check"] == check)
+
+
+# ------------------------------------------- units a model actually writes
+
+@pytest.mark.parametrize("unit", ["km²", "km2", "square kilometres", "sq km",
+                                  "m²", "m2", "square metres", "hectares", "acres"])
+def test_an_areal_unit_is_recognised(unit):
+    """`km²` is how a model writes it, observed live — and it was in neither the known-unit set
+    nor the alias table, so a correctly declared unit came back "unrecognised; not checked" and
+    downgraded the whole run. A unit the system asked for, received, and then could not read is
+    worse than not having asked."""
+    findings = check_declared_units({"area": {"value": 2790.47, "unit": unit}})
+    statuses = {f["status"] for f in findings if f["check"] == "declared_units"}
+    assert UNKNOWN not in statuses, f"{unit!r} was not recognised"
+
+
+def test_a_genuinely_unknown_unit_is_still_flagged():
+    """Widening the vocabulary must not turn it into "accept anything"."""
+    findings = check_declared_units({"x": {"value": 1, "unit": "bananas"}})
+    assert any(f["status"] == UNKNOWN for f in findings)

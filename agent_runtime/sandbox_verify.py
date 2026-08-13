@@ -96,6 +96,22 @@ _UNIT_ALIASES = {
     "metre": "metres", "meter": "metres", "metres": "metres", "meters": "metres", "m": "metres",
     "us survey foot": "feet", "foot": "feet", "feet": "feet", "ft": "feet",
     "kilometre": "kilometres", "kilometer": "kilometres", "km": "kilometres",
+    # AREAL units. Their absence was found by a live run: an agent declared `km²` for a buffer
+    # area — correctly — and the gate answered "unrecognised unit 'km²'; not checked". A unit
+    # the system asked for, got, and then could not read is worse than not asking.
+    "m2": "square_metres", "m^2": "square_metres", "m²": "square_metres",
+    "sq m": "square_metres", "sqm": "square_metres",
+    "square metre": "square_metres", "square meter": "square_metres",
+    "square metres": "square_metres", "square meters": "square_metres",
+    "square_metres": "square_metres", "square_meters": "square_metres",
+    "km2": "square_kilometres", "km^2": "square_kilometres", "km²": "square_kilometres",
+    "sq km": "square_kilometres", "sqkm": "square_kilometres",
+    "square kilometre": "square_kilometres", "square kilometer": "square_kilometres",
+    "square kilometres": "square_kilometres", "square kilometers": "square_kilometres",
+    "square_kilometres": "square_kilometres", "square_kilometers": "square_kilometres",
+    "hectare": "hectares", "hectares": "hectares", "ha": "hectares",
+    "acre": "acres", "acres": "acres",
+    "degree": "degrees", "degrees": "degrees", "deg": "degrees", "°": "degrees",
 }
 
 
@@ -106,6 +122,30 @@ def _unit_matches(declared: Any, actual: Optional[str]) -> Optional[bool]:
     if not want or not got:
         return None
     return want == got
+
+
+# Column names that mean "a distance or area was computed and stored here". A geographic frame
+# carrying one of these is evidence that the number in it is in degrees.
+_METRIC_COLUMN_HINTS = ("area", "length", "dist", "perimeter", "buffer", "radius", "km", "_m",
+                        "acre", "hectare", "sqm", "sq_")
+
+
+def _has_metric_column(frame: Any) -> Optional[str]:
+    """A numeric column whose NAME says it holds a measurement, or None."""
+    try:
+        columns = list(frame.columns)
+    except Exception:
+        return None
+    for col in columns:
+        low = str(col).lower()
+        if not any(h in low for h in _METRIC_COLUMN_HINTS):
+            continue
+        try:
+            if frame[col].dtype.kind in "iuf":
+                return str(col)
+        except Exception:
+            continue
+    return None
 
 
 def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
@@ -125,10 +165,28 @@ def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
                         f"could not determine whether {crs!s} is projected", crs=str(crs))
     if projected:
         return _finding("projected_crs", PASS, name, f"projected CRS {crs!s}", crs=str(crs))
+
+    # Geographic. Whether that is WRONG depends on what was computed from it, and a scan of
+    # module scope cannot see that — which is exactly why the call-time contract guard exists.
+    #
+    # Failing on the mere presence of a 4326 frame fails the STANDARD CORRECT WORKFLOW: data
+    # arrives in 4326 and you reproject it, so the input frame is still bound when the run ends.
+    # Observed live — an agent reprojected to EPSG:32616, buffered correctly, produced areas
+    # accurate to 0.16% of the analytic value, and the answer was stamped "⛔ invariant check
+    # FAILED, numeric results are not verified". A ⛔ on a correct answer teaches the reader to
+    # ignore ⛔.
+    metric_column = _has_metric_column(frame)
+    detail = (f" This frame holds a computed measurement ({metric_column!r}), which is therefore "
+              f"in degrees." if metric_column else "")
+    # Still a FAIL on its own. `gdf.buffer(25000)` on a 4326 frame produces a wrong GEOMETRY with
+    # no numeric column at all, so keying the verdict on a measurement column would miss the
+    # motivating case entirely. `run_checks` relaxes this only on positive evidence that the run
+    # reprojected before measuring — see there.
     return _finding("projected_crs", FAIL, name,
                     f"{crs!s} is GEOGRAPHIC: distances and areas computed from this frame are "
-                    f"in degrees, not metres. Reproject (e.g. .to_crs(3857) or a local UTM "
-                    f"zone) before buffering or measuring.", crs=str(crs))
+                    f"in degrees, not metres.{detail} Reproject (e.g. .to_crs(3857) or a local "
+                    f"UTM zone) before buffering or measuring.",
+                    crs=str(crs), metric_column=metric_column)
 
 
 def _looks_like_join_result(frame: Any) -> bool:
@@ -300,7 +358,11 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
             findings.append(_finding("declared_units", FAIL, target,
                                      "unit is null: a number whose unit is unrecorded cannot "
                                      "be verified (25000 is right in metres, wrong in feet)"))
-        elif str(unit).strip().lower() not in _KNOWN_UNITS:
+        elif (str(unit).strip().lower() not in _KNOWN_UNITS
+              and _UNIT_ALIASES.get(str(unit).strip().lower()) is None):
+            # Checked against the ALIAS table as well as the literal set. `km²` — which is how a
+            # model actually writes it, observed live — was in neither, so a correctly declared
+            # unit came back "unrecognised; not checked" and downgraded the whole run.
             findings.append(_finding("declared_units", UNKNOWN, target,
                                      f"unrecognised unit {unit!r}; not checked", unit=str(unit)))
         else:
@@ -671,6 +733,25 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                                      "checked — work done inside a function cannot be "
                                      "verified; assign results to module-level names"))
 
+    # Reproject-then-measure is the CORRECT workflow, and it necessarily leaves the original
+    # geographic frame bound. A per-frame check cannot see that; run_checks can, because it sees
+    # them all. So when some frame is projected AND carries a computed measurement, an unmeasured
+    # geographic frame is an input that was reprojected — which is the right thing to have done,
+    # not a caveat to put on the answer.
+    reprojected = any(f.get("check") == "projected_crs" and f.get("status") == PASS
+                      and _has_metric_column(namespace.get(f.get("target")))
+                      for f in findings if isinstance(f, dict))
+    if reprojected:
+        for f in findings:
+            # Only a geographic frame that holds NO measurement of its own. One that does is a
+            # number computed in degrees regardless of what else the run got right.
+            if (isinstance(f, dict) and f.get("check") == "projected_crs"
+                    and f.get("status") == FAIL and not f.get("metric_column")):
+                f["status"] = PASS
+                f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but this run "
+                                f"reprojected before measuring — the measurements live in a "
+                                f"projected frame, so this is an untouched input.")
+
     # Declared numeric outputs, if the run published any. Checked outside the frame loop
     # because they are scalars the ANSWER will quote, not frames.
     try:
@@ -792,7 +873,8 @@ def _inlined_helpers() -> str:
     """This module's own check functions, indented for injection into the sandbox."""
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
-                check_not_all_nan, _looks_like_join_result, check_join_cardinality,
+                check_not_all_nan, _looks_like_join_result, _has_metric_column,
+                check_join_cardinality,
                 check_finite, check_declared_units,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
                 _looks_like_frame, _has_geometry, install_contract_guards, run_checks):
@@ -805,6 +887,7 @@ def _inlined_helpers() -> str:
             f"    _UNIT_ALIASES = {_UNIT_ALIASES!r}\n"
             f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
             f"    _GEO_MODULES = {set(_GEO_MODULES)!r}\n"
+            f"    _METRIC_COLUMN_HINTS = {tuple(_METRIC_COLUMN_HINTS)!r}\n"
             "    import math\n"
             "    from types import ModuleType\n"
             "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
