@@ -69,3 +69,10 @@ outputs/
 .env.local
 *.env.local
 TODO.md
+
+# Fetched third-party sources (scripts/build_method_library.py, measure_source_fetchability.py).
+# NEVER commit these: the platform's license-id/license-name fields are empty or null for most
+# elements and a spot-checked repo 404s on the GitHub license API, so redistribution rights are
+# unclear. The cache is reproducible — resolve_and_fetch records origin_url + sha256 for each.
+.corpus_cache/
+.source_probe/
