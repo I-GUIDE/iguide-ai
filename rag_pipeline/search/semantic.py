@@ -40,8 +40,28 @@ def _os_index() -> str:
     return getenv("OPENSEARCH_INDEX")
 
 
+_LOGGED_EMBED_URL: Optional[str] = None
+
+
+def _embedding_url() -> str:
+    """The resolved embedding endpoint, logged ONCE at first use.
+
+    Only the *unset* case was ever reported. A URL that is set but wrong — the state this
+    repo shipped in, pointing at a decommissioned host — produced a connection error per
+    query, buried among other logs, and semantic search silently returned nothing. "No
+    semantic results" and "the embedder is unreachable" then look identical from the outside,
+    and every recall number measured in that state understates the system.
+    """
+    global _LOGGED_EMBED_URL
+    url = (os.getenv("FLASK_EMBEDDING_URL") or "").rstrip("/")
+    if url != _LOGGED_EMBED_URL:
+        logger.info("Embedding endpoint resolved to %s", url or "(unset)")
+        _LOGGED_EMBED_URL = url
+    return url
+
+
 def _fetch_embedding_from_service(user_query: str) -> Optional[List[float]]:
-    flask_url = (os.getenv("FLASK_EMBEDDING_URL") or "").rstrip("/")
+    flask_url = _embedding_url()
     if not flask_url:
         logger.error("FLASK_EMBEDDING_URL environment variable not set.")
         return None

@@ -19,8 +19,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+# override=False: an explicitly exported variable must WIN over the file. With
+# override=True a stale .env value (e.g. a decommissioned FLASK_EMBEDDING_URL)
+# silently replaced whatever the caller set, making a per-run override impossible
+# and the reason invisible.
 from dotenv import load_dotenv
-load_dotenv(REPO / ".env", override=True)  # OPENAI_* for the LLM
+load_dotenv(REPO / ".env")  # OPENAI_* for the LLM
 
 # Dev execution flags (set before importing the runtime).
 os.environ["AGENT_KB_BACKEND"] = "local"

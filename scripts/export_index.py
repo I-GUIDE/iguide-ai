@@ -14,10 +14,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+# override=False: an explicitly exported variable must WIN over the file. With
+# override=True a stale .env value (e.g. a decommissioned FLASK_EMBEDDING_URL)
+# silently replaced whatever the caller set, making a per-run override impossible
+# and the reason invisible.
 from dotenv import load_dotenv
 for _cand in (REPO / "rag_pipeline" / ".env", REPO / ".env.bak"):
     if _cand.exists():
-        load_dotenv(dotenv_path=_cand, override=True)
+        load_dotenv(dotenv_path=_cand)
         break
 
 import os

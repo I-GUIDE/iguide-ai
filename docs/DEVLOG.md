@@ -1372,3 +1372,57 @@ Suite **799 passed**, same 3 pre-existing failures.
 **Still open from the audit** (confirmed, not yet fixed): agent skills are enabled by default
 but no SKILL.md bundle is copied into the agent image, so `list_available_skills` is always
 empty in a deployed container; and the analyze/code peer split itself, which M5 retires.
+
+## 2026-08-12 · M1.3 / M4.5 · The embedder came back, and the KB arm paid off
+**Change** embedding config fixed in three places (`semantic._embedding_url` logs the resolved
+  endpoint once; `override=True` dropped from six scripts; compose pins the in-container URL
+  for `mcp-server` and `metadata-extraction-server`); new
+  `scripts/create_agent_indices.py`; `build_method_library.py --index`; and two scoring bugs
+  in `eval_retrieval.py`.
+
+**Why** every retrieval number in this log until now was measured with the semantic arm
+**dead** — `.env` pointed at a decommissioned host, and `semantic.py` logged only the *unset*
+case, so a *wrong* URL was completely silent. That is the worst failure shape: "no semantic
+results" and "the embedder is unreachable" are indistinguishable from the outside.
+
+**Measured** with the local embedder live (384-d, verified against the service, not trusted
+from `AGENT_KB_EMBED_DIM`):
+
+| arm | @8 | @20 |
+|---|---|---|
+| keyword | 22/37 | 29/37 |
+| **semantic** | **26/37** | 27/37 |
+| agent_kb (new) | 16/37 | 16/37 |
+| union | 29/37 | 31/37 |
+| **union + agent_kb** | **32/37** | **34/37 (91.9%)** |
+
+M1.3 exit: agent indices **0 → 5**, kNN dimension verified 5/5 at 384-d, blocks
+**0 → 3,830** and method units **0 → 349** (4,179 docs).
+M4 exit: recall@20 **31/37 → 34/37**, against a ≥33/37 target.
+Elements missed by *every* arm: **8 → 3**, and all three are **absent from the index
+entirely** — a data gap, not a retrieval failure. So 34/37 is the ceiling and retrieval now
+reaches all of it. Suite **799 passed**, same 3 pre-existing failures.
+
+**Surprised by** two instrument bugs that had been quietly distorting the headline number in
+*opposite* directions.
+
+`arm_union` rank-fused and truncated to k. The sweep does no such thing — it concatenates
+every arm and dedupes (`_merge_dedup`), then reranks. Modelling union as RRF-then-cut reported
+a number the system never produces, and a **pessimistic** one: 25/37 where the collected set
+held 29. Worse, my first correction concatenated keyword-then-semantic and still truncated to
+k, which measured *keyword alone* (22/37) and looked like a regression. A collection arm's k
+is the per-arm window; recall belongs over the whole collected set, because that set is the
+ceiling on what the agent can cite.
+
+And `arm_agent_kb` had **the same wrong-key bug I fixed in the sweep one commit earlier** —
+`_ids(payload)` over a dict yields nothing — plus a second one: it would have scored raw block
+ids (`<element>::block::19`) against element ids, which can never prefix-match. Either alone
+reports 0/37 for a working arm. Three instances of one shape now (sweep, this arm, and the
+`results`/`documents` key), which says the shape is the problem: **a function returning a
+container whose failure mode is empty rather than raised.**
+
+The substantive result stands on its own: sub-document evidence contributes **3 elements that
+element-level search cannot reach at any k**, because the match is inside the notebook rather
+than in its title or abstract. That is the moat thesis with a number against it.
+
+**Next** M6, the invariant gate.

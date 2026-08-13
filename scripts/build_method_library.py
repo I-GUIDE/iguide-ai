@@ -75,6 +75,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=1000)
     ap.add_argument("--cache", default=".corpus_cache")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--index", action="store_true",
+                    help="also emit extracted docs to the agent OpenSearch indices "
+                         "(requires AGENT_KB_BACKEND=opensearch and a reachable embedder)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -167,6 +170,19 @@ def main() -> int:
         print(f"  skipped         {len(out['skipped'])}")
         for s in out["skipped"][:5]:
             print(f"    - {s.get('unit')}: {s.get('reason')}")
+
+    if args.index and not args.dry_run:
+        import os as _os
+        from extractors.emitters import opensearch_emitter
+        _os.environ.setdefault("AGENT_KB_BACKEND", "opensearch")
+        print("\nindexing to the agent KB …")
+        summary = opensearch_emitter.emit(manifest)
+        print(f"  backend  {summary.get('backend')}")
+        print(f"  docs     {summary.get('doc_count') or summary.get('indexed')}")
+        for idx, n in sorted((summary.get('indices') or {}).items()):
+            print(f"    {idx:<40}{n}")
+        if summary.get("errors"):
+            print(f"  errors   {len(summary['errors'])}: {summary['errors'][:3]}")
 
     if args.out:
         p = Path(args.out)

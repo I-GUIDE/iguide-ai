@@ -95,12 +95,33 @@ def arm_neo4j(query: str, k: int) -> Optional[List[str]]:
 
 
 def arm_agent_kb(query: str, k: int) -> Optional[List[str]]:
+    """Sub-document evidence, scored by the ELEMENT each block belongs to.
+
+    Two traps, both hit here before this was written properly:
+
+    * ``agent_kb_search`` returns ``{"documents": [...]}``, not a list of hits. Passing the
+      dict to ``_ids`` iterates its KEYS, yields nothing, and returns ``[]`` — which scores as
+      a hard 0 instead of being reported unavailable. (The same wrong key silently disabled
+      this arm in the supervisor's sweep; see M4.3.)
+    * a block's ``doc_id`` is ``<element>::block::<n>``, but the benchmark's expected ids are
+      ELEMENT ids. Scoring raw block ids would report 0/37 for a perfectly working arm, since
+      no block id can ever prefix-match an element id.
+    """
     try:
         from rag_pipeline.search.agent_kb import agent_kb_search
-        hits = agent_kb_search(query, size=k)
+        payload = agent_kb_search(query, size=k) or {}
     except Exception:
         return None
-    return _ids(hits) if hits else None
+    docs = payload.get("documents") or []
+    if not docs:
+        return None
+    out, seen = [], set()
+    for d in docs:
+        parent = str((d or {}).get("parent_doc_id") or "")
+        if parent and parent not in seen:
+            seen.add(parent)
+            out.append(parent)
+    return out or None
 
 
 def _rrf(rankings: List[List[str]], k_rrf: int = 60) -> List[str]:
@@ -113,14 +134,52 @@ def _rrf(rankings: List[List[str]], k_rrf: int = 60) -> List[str]:
     return [d for d, _ in sorted(scores.items(), key=lambda kv: -kv[1])]
 
 
+# Arms that COLLECT rather than rank. For these, k is the window given to each underlying
+# arm, and recall is scored over everything collected — because that set is the ceiling on
+# what the agent can possibly cite: the sweep merges every arm's hits, the reranker ORDERS
+# them, and only then does the supervisor show its top few. Truncating a collection arm to k
+# measures the arbitrary arm that happened to be concatenated first (union@8 read 22/37 —
+# exactly keyword's own 22 — while the collected set held 29).
+COLLECTION_ARMS = {"union", "union+agent_kb"}
+
+
+def _set_union(parts: List[List[str]], k: int) -> List[str]:
+    """Concatenate arms and dedupe, preserving first-seen order — what the agent does.
+
+    ``_direct_search_sweep`` collects each arm's hits and merges them with ``_merge_dedup``;
+    it does NOT rank-fuse and then truncate. Modelling union as RRF-then-cut made this
+    instrument report a number the system never produces, and a PESSIMISTIC one: measured over
+    the 37 expected ids, RRF@8 gave 25/37 where the set union gives 29/37, and RRF@20 gave
+    29/37 against 31/37. The arms are genuinely complementary (at k=8: 19 found by both, 3 by
+    keyword only, 7 by semantic only), so truncating a fused ranking to k discards correct
+    hits that the agent in fact keeps and reranks.
+    """
+    out: List[str] = []
+    seen = set()
+    for ranking in parts:
+        for doc_id in ranking[:k]:
+            if doc_id not in seen:
+                seen.add(doc_id)
+                out.append(doc_id)
+    return out
+
+
 def arm_union(query: str, k: int) -> Optional[List[str]]:
+    """The agent's actual behaviour: every arm's top-k, merged and deduped."""
+    parts = [r for r in (arm_keyword(query, k), arm_semantic(query, k)) if r]
+    return _set_union(parts, k) if parts else None
+
+
+def arm_union_rrf(query: str, k: int) -> Optional[List[str]]:
+    """Rank-fused and truncated to k. Kept to make the gap above reproducible, and as the
+    right model for a ranked-list consumer — but it is NOT what the sweep does."""
     parts = [r for r in (arm_keyword(query, k), arm_semantic(query, k)) if r]
     return _rrf(parts)[:k] if parts else None
 
 
 def arm_union_kb(query: str, k: int) -> Optional[List[str]]:
     parts = [r for r in (arm_keyword(query, k), arm_semantic(query, k), arm_agent_kb(query, k)) if r]
-    return _rrf(parts)[:k] if parts else None
+    return _set_union(parts, k) if parts else None
 
 
 def arm_union_neo4j(query: str, k: int) -> Optional[List[str]]:
@@ -142,6 +201,7 @@ ARMS: Dict[str, Callable[[str, int], Optional[List[str]]]] = {
     "neo4j": arm_neo4j,
     "agent_kb": arm_agent_kb,
     "union": arm_union,
+    "union_rrf": arm_union_rrf,
     "union+agent_kb": arm_union_kb,
     "union+neo4j": arm_union_neo4j,
 }
@@ -210,13 +270,19 @@ def main() -> int:
         for m in methods:
             retrieved = None
             for k in ks:
-                if retrieved is None:
-                    retrieved = ARMS[m](prompt, max(ks))
+                # Re-retrieve per k for collection arms: their result depends on the per-arm
+                # window, so reusing a single max(ks) fetch would report the same number for
+                # every k and hide the window's effect entirely.
+                if retrieved is None or m in COLLECTION_ARMS:
+                    retrieved = ARMS[m](prompt, k if m in COLLECTION_ARMS else max(ks))
                 if retrieved is None:
                     unavailable.add(m)
                     cells.append("—".ljust(13))
                     continue
-                s = score(retrieved, expected, k)
+                # A collection arm is scored over its whole merged set; k was the per-arm
+                # window, not an output cap. See COLLECTION_ARMS.
+                window = len(retrieved) if m in COLLECTION_ARMS else k
+                s = score(retrieved, expected, window)
                 row["arms"][f"{m}@{k}"] = s
                 totals[(m, k)][0] += s["n_found"]
                 totals[(m, k)][1] += s["n_expected"]

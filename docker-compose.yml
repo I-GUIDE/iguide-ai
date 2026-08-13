@@ -41,6 +41,11 @@ services:
       - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
       - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      # Pinned, not inherited from .env: `env_file` supplies the file's value, which has
+      # historically been a decommissioned remote host. agent-api already pins this;
+      # the services that did not were silently embedding-less. In-container the
+      # embedder is reachable by service name, never by 127.0.0.1.
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
     env_file:
       - .env
     volumes:
@@ -147,6 +152,12 @@ services:
     container_name: metadata-extraction-server
     ports:
       - "5001:5001"
+    environment:
+      # Pinned, not inherited from .env: `env_file` supplies the file's value, which has
+      # historically been a decommissioned remote host. agent-api already pins this;
+      # the services that did not were silently embedding-less. In-container the
+      # embedder is reachable by service name, never by 127.0.0.1.
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
     env_file:
       - .env
     restart: unless-stopped
