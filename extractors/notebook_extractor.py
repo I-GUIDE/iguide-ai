@@ -336,7 +336,7 @@ class NotebookExtractor:
             if node is None:
                 continue
             doc = ast.get_docstring(node) or ""
-            _params = contract_params(node, doc)
+            _params = contract_params(node, doc, nodes)
             slice_src = build_unit_slice(module_source, qualname, scope=scope,
                                          verdicts=verdicts,
                                          provenance={"element_id": ctx.anchor(),

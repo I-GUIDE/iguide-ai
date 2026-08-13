@@ -161,7 +161,7 @@ class CodeExtractor:
             if node is None:
                 continue
             doc = ast.get_docstring(node) or ""
-            _params = contract_params(node, doc)
+            _params = contract_params(node, doc, nodes)
             provenance = {"element_id": ctx.anchor(), "parent_doc_id": parent_doc_id,
                           "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
                           "extractor": self.name, "analyzer_version": ANALYZER_VERSION}

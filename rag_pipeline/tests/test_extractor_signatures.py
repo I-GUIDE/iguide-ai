@@ -238,3 +238,88 @@ def test_a_class_guard_does_not_destroy_the_class():
         assert "catchments" in violations[0]["target"]
     finally:
         sys.modules.pop("fake_class_unit_mod", None)
+
+
+# ------------------------------------------------------------------ inference follows calls
+
+HELPER_SRC = '''
+def _ratio(catchments, pop):
+    return catchments.buffer(1000).area / pop.area
+
+def entry_point(catchments: "gpd.GeoDataFrame", pop_data: "gpd.GeoDataFrame"):
+    """The unit an agent actually calls."""
+    return _ratio(catchments, pop_data)
+
+def inline(catchments: "gpd.GeoDataFrame"):
+    return catchments.buffer(1000).area
+
+def no_metric_work(gdf: "gpd.GeoDataFrame"):
+    return len(gdf)
+
+def a(gdf: "gpd.GeoDataFrame"):
+    return b(gdf)
+
+def b(gdf):
+    return a(gdf)
+'''
+
+
+def _bodies():
+    import ast
+
+    from extractors.analysis import iter_units
+
+    return dict(iter_units(ast.parse(HELPER_SRC)))
+
+
+def _crs_invariants(name, *, follow):
+    import ast
+
+    from extractors.analysis.signatures import contract_invariants, contract_params
+
+    bodies = _bodies()
+    node = bodies[name]
+    params = contract_params(node, ast.get_docstring(node) or "",
+                             bodies if follow else None)
+    return [i.target for i in contract_invariants(params, node) if i.check == "projected_crs"]
+
+
+def test_a_public_entry_point_whose_metric_work_is_in_a_helper_gets_the_invariant():
+    """CRS inference was intraprocedural, so it saw only the unit's own body. Measured on the
+    corpus: ``catchment_ratios_area`` computes inline and got ``projected_crs``, while
+    ``catchment_ratios_centroid`` — same public interface, same requirement — delegated to
+    ``calculate_centroid`` and got nothing. The entry points are precisely the units an agent
+    calls. Real gain: ``e2sfca``, ``ae2sfca``, ``catchment_ratios_centroid`` and
+    ``aggregate_ratios_centroid`` went from 3/3/3/2 invariants to 6/6/6/4, and units carrying a
+    CRS invariant went 5 -> 9."""
+    assert _crs_invariants("entry_point", follow=False) == []
+    assert _crs_invariants("entry_point", follow=True) == ["catchments", "pop_data"]
+
+
+def test_inline_metric_work_is_unchanged():
+    assert _crs_invariants("inline", follow=True) == ["catchments"]
+
+
+def test_a_unit_that_does_no_metric_work_gains_nothing():
+    """Zero units lost an invariant and zero gained a spurious one across the 229-unit corpus;
+    an over-eager CRS check would fail correct runs and get the gate switched off."""
+    assert _crs_invariants("no_metric_work", follow=True) == []
+
+
+def test_mutual_recursion_terminates():
+    """``a`` calls ``b`` calls ``a``. A visited set, not a hope."""
+    assert _crs_invariants("a", follow=True) == []
+
+
+def test_the_evidence_names_the_helper_the_operation_was_found_in():
+    """An inference reached through a call must be auditable, or a wrong one is unexplainable.
+    The real corpus records two hops: ".centroid( at line 169 via calculate_centroid() via
+    catchment_ratios_centroid()"."""
+    import ast
+
+    from extractors.analysis.signatures import contract_params
+
+    bodies = _bodies()
+    params = contract_params(bodies["entry_point"], "", bodies)
+    evidence = next(p.evidence for p in params if p.name == "catchments")
+    assert "via _ratio()" in evidence

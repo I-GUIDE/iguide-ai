@@ -16,7 +16,7 @@ replaced rather than patched.
 from __future__ import annotations
 
 import ast
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..contracts import InvariantSpec, ParamSpec
 
@@ -187,17 +187,63 @@ def infer_types(params: List[ParamSpec], docstring: str = "") -> None:
             p.inferred_type, p.evidence = "number", f"parameter name {p.name!r}"
 
 
-def infer_units_and_crs(params: List[ParamSpec], node: ast.AST, docstring: str = "") -> None:
+def _called_names(node: ast.AST) -> List[str]:
+    """Simple names this body calls — ``helper(x)`` and ``mod.helper(x)`` alike."""
+    out: List[str] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        fn = sub.func
+        if isinstance(fn, ast.Name):
+            out.append(fn.id)
+        elif isinstance(fn, ast.Attribute):
+            out.append(fn.attr)
+    return out
+
+
+def _metric_ops(node: ast.AST, bodies: Optional[Dict[str, ast.AST]] = None,
+                *, _seen: Optional[set] = None, _depth: int = 0) -> List[str]:
+    """Metric operations reachable from this body, following calls into *bodies*.
+
+    Purely intraprocedural before this, which meant a function whose metric work lives one
+    call away carried no CRS expectation and therefore no invariant. Measured on the corpus:
+    ``catchment_ratios_area`` computes distances inline and got ``projected_crs``, while
+    ``catchment_ratios_centroid`` — same public interface, same requirement — delegated to a
+    helper and got nothing. The public entry points are exactly the units an agent calls.
+
+    Depth-capped and cycle-safe. The evidence names the helper, so an inference reached
+    through a call is auditable rather than mysterious.
+    """
+    seen = _seen if _seen is not None else set()
+    found: List[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr in _PROJECTED_OPS:
+            found.append(f".{sub.attr}( at line {getattr(sub, 'lineno', 0)}")
+    if not bodies or _depth >= 4:
+        return found
+    simple_of = {name.split(".")[-1]: name for name in bodies}
+    for called in _called_names(node):
+        target = bodies.get(called) or bodies.get(simple_of.get(called, ""))
+        if target is None or called in seen:
+            continue
+        seen.add(called)
+        inner = _metric_ops(target, bodies, _seen=seen, _depth=_depth + 1)
+        found.extend(f"{op} via {called}()" for op in inner)
+    return found
+
+
+def infer_units_and_crs(params: List[ParamSpec], node: ast.AST, docstring: str = "",
+                        bodies: Optional[Dict[str, ast.AST]] = None) -> None:
     """Record a CRS expectation when the body performs a distance/area operation.
 
     Only ``projected`` is asserted here, and only from real AST evidence. An undetermined
     unit stays empty rather than being guessed — the invariant gate treats an undeclared unit
     as "must be declared before this number is presented", which is safe; a wrong guess is not.
+
+    *bodies* maps unit name to AST node for the enclosing module, letting the search follow
+    calls into helpers. Omit it for the old intraprocedural behaviour.
     """
-    ops_found: List[str] = []
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Attribute) and sub.attr in _PROJECTED_OPS:
-            ops_found.append(f".{sub.attr}( at line {getattr(sub, 'lineno', 0)}")
+    ops_found = _metric_ops(node, bodies)
     if not ops_found:
         return
     evidence = "; ".join(sorted(set(ops_found))[:3])
@@ -210,11 +256,17 @@ def infer_units_and_crs(params: List[ParamSpec], node: ast.AST, docstring: str =
                 p.declared_unit = "metres"
 
 
-def contract_params(node: ast.AST, docstring: str = "") -> List[ParamSpec]:
-    """params_of + type inference + unit/CRS inference, in one pass."""
+def contract_params(node: ast.AST, docstring: str = "",
+                    bodies: Optional[Dict[str, ast.AST]] = None) -> List[ParamSpec]:
+    """params_of + type inference + unit/CRS inference, in one pass.
+
+    *bodies* is the enclosing module's unit name -> node map, so CRS inference can follow a
+    call into a helper. Callers that have it should pass it; without it a unit whose metric
+    work is one call away carries no invariant.
+    """
     params = params_of(node)
     infer_types(params, docstring)
-    infer_units_and_crs(params, node, docstring)
+    infer_units_and_crs(params, node, docstring, bodies)
     return params
 
 

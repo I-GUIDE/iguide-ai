@@ -26,7 +26,7 @@ import json
 import sys
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 warnings.filterwarnings("ignore")
 
@@ -52,19 +52,57 @@ from extractors.sources import SourceError, resolve_and_fetch  # noqa: E402
 BACKEND = "https://backend.i-guide.io"
 
 
-def list_elements(element_type: str, limit: int) -> List[Dict[str, Any]]:
+def list_elements(element_type: str, limit: int, cache: Optional[Path] = None,
+                  *, refresh: bool = False) -> List[Dict[str, Any]]:
+    """The element listing, cached to disk.
+
+    The sources were already cached by element id, but the LISTING was not — so a 429 from the
+    platform API aborted the whole run even with 387 MB of notebooks sitting in the cache, which
+    made "resumable" untrue in exactly the case resumability is for. The listing is also the
+    cheapest thing to cache: one file, and the corpus does not change between two runs an hour
+    apart.
+
+    A partial listing is never cached: writing one would silently shrink the corpus on every
+    later run, and a rate limit halfway through page 3 is the normal way that happens.
+    """
+    path = (cache / f"_elements_{element_type}.json") if cache is not None else None
+    if path is not None and path.is_file() and not refresh:
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(rows, list) and rows:
+                print(f"element listing: {len(rows)} from cache ({path})")
+                return rows[:limit]
+        except (OSError, ValueError):
+            pass
+
     out: List[Dict[str, Any]] = []
     page = 0
-    while len(out) < limit:
-        r = requests.get(f"{BACKEND}/api/elements",
-                         params={"element-type": element_type, "from": page * 50, "size": 50},
-                         timeout=60)
-        r.raise_for_status()
-        batch = (r.json() or {}).get("elements") or []
-        if not batch:
-            break
-        out.extend(batch)
-        page += 1
+    complete = False
+    try:
+        while len(out) < limit:
+            r = requests.get(f"{BACKEND}/api/elements",
+                             params={"element-type": element_type, "from": page * 50,
+                                     "size": 50},
+                             timeout=60)
+            r.raise_for_status()
+            batch = (r.json() or {}).get("elements") or []
+            if not batch:
+                complete = True
+                break
+            out.extend(batch)
+            page += 1
+        else:
+            complete = True
+    except requests.RequestException as exc:
+        if not out:
+            raise
+        print(f"  ! listing stopped after {len(out)} elements: {exc}")
+
+    if path is not None and complete and out:
+        try:
+            path.write_text(json.dumps(out), encoding="utf-8")
+        except OSError:
+            pass
     return out[:limit]
 
 
@@ -75,6 +113,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=1000)
     ap.add_argument("--cache", default=".corpus_cache")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--refresh-listing", action="store_true",
+                    help="re-fetch the element listing instead of using the cached copy")
     ap.add_argument("--index", action="store_true",
                     help="also emit extracted docs to the agent OpenSearch indices "
                          "(requires AGENT_KB_BACKEND=opensearch and a reachable embedder)")
@@ -84,7 +124,8 @@ def main() -> int:
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
 
-    elements = list_elements(args.type, args.limit)
+    elements = list_elements(args.type, args.limit, cache,
+                             refresh=args.refresh_listing)
     print(f"{args.type}: {len(elements)} elements\n")
 
     manifest = UnifiedManifest(repo_id="iguide-corpus", source_url=BACKEND, cloned_at="now")

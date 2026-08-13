@@ -2032,3 +2032,38 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   no CRS invariant while their helpers do. Then `_construction_is_safe` (misses
   `os.makedirs`/`os.listdir`, base-class `__init__`, class-body I/O) and `by_name` keyed
   by simple name.
+
+## 2026-08-13 · M6.C · CRS inference follows calls, and the corpus listing is cached
+
+**Change** `signatures.infer_units_and_crs` takes an optional `bodies` map (unit name →
+  AST node) and searches for metric operations through the call graph, cycle-safe and
+  depth-capped at 4. Both extractors pass the module's node map. Separately,
+  `scripts/build_method_library.py` caches the element listing.
+
+**Why** CRS inference walked only the unit's own body. `catchment_ratios_area` computes
+  distances inline and got `projected_crs`; `catchment_ratios_centroid` — same public
+  interface, same requirement — delegates to `calculate_centroid` and got nothing. The
+  public entry points are exactly the units an agent calls.
+
+**Measured**
+  - invariants in the registry **66 → 77**; units carrying a CRS invariant **5 → 9**
+  - the four units that gained: `e2sfca` 3→6, `ae2sfca` 3→6,
+    `catchment_ratios_centroid` 3→6, `aggregate_ratios_centroid` 2→4 — the e2SFCA
+    accessibility family, which is the strongest cluster in this corpus
+  - units that **lost** an invariant: **0**. Units that gained a spurious one: 0 (the
+    no-metric-work case still gets nothing)
+  - evidence records the full path, two hops deep: `.centroid( at line 169 via
+    calculate_centroid() via catchment_ratios_centroid()`
+
+**Surprised by** The corpus rebuild came back with 134 units instead of 229 and I nearly
+  logged that as a regression from this change. It was a **429 from the platform API**
+  mid-listing. The sources were cached by element id — 387 MB of them — but the element
+  *listing* was not, so a rate limit aborted a run that had everything it needed on
+  disk, which made "resumable" untrue in exactly the case resumability exists for. Now
+  cached, with `--refresh-listing` to force a re-fetch. A partial listing is never
+  cached: writing one would silently shrink the corpus on every later run, and a 429
+  halfway through page 3 is the normal way that happens.
+
+**Next** `_construction_is_safe` (misses `os.makedirs`/`os.listdir`, base-class
+  `__init__`, class-body I/O) and `by_name` keyed by simple name, which reads another
+  class's `__init__`.
