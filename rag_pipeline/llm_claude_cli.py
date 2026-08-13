@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from functools import lru_cache
 from typing import Optional
 
@@ -245,6 +246,50 @@ def _build_argv(exe: str, prompt: str, mdl: str, system: Optional[str] = None) -
 
 
 def call(prompt: str, *, system: Optional[str] = None) -> str:
+    """Run one `claude -p` turn, retrying only a SIGNAL death.
+
+    A negative ``returncode`` means the subprocess was killed by a signal — observed live as
+    ``exited -11`` (SIGSEGV) with empty stderr, twice in one server log. That is a crash of the
+    tool, not an answer about the request, and it is transient by nature. Everything else is
+    NOT retried: an auth failure, a budget refusal, a timeout and an API error are all reproducible
+    and re-running them wastes the user's quota to reach the same conclusion slower.
+
+    Why this matters more than a dev-only backend suggests: one crash killed a turn that had
+    already completed two search sweeps, resolved a bounding box, selected a library method and
+    written an evidence summary. Retrying costs one subprocess; not retrying costs all of that.
+    """
+    attempts = max(1, _signal_retries() + 1)
+    last: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            return _call_once(prompt, system=system)
+        except _SignalDeath as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                logger.warning("claude CLI %s; retrying (%d of %d)",
+                               exc, attempt + 2, attempts)
+                time.sleep(min(2.0 * (attempt + 1), 5.0))
+                continue
+            # Out of retries: surface it as the RuntimeError callers already handle, with the
+            # attempt count in the message so a persistent crash is distinguishable from a blip.
+            raise RuntimeError(f"{exc} after {attempts} attempt(s)") from exc
+    raise RuntimeError(str(last) if last else "claude CLI failed")   # unreachable
+
+
+class _SignalDeath(RuntimeError):
+    """The CLI was killed by a signal. Internal: `call` converts it to RuntimeError."""
+
+
+def _signal_retries() -> int:
+    """Retries for a signal death only. 0 disables, which keeps the old behaviour available."""
+    raw = (os.getenv("CLAUDE_CLI_SIGNAL_RETRIES") or "2").strip()
+    try:
+        return max(0, min(5, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _call_once(prompt: str, *, system: Optional[str] = None) -> str:
     """Run one non-interactive `claude -p` turn and return its text.
 
     ``--output-format json`` is used rather than plain text because the wrapper object
@@ -296,6 +341,13 @@ def call(prompt: str, *, system: Optional[str] = None) -> str:
         tail = (proc.stderr or raw or "").strip()[-400:]
         if _is_auth_failure(tail):
             raise ClaudeCliUnavailable(f"{tail}\n\n{_AUTH_HINT}")
+        if proc.returncode < 0:
+            # Killed by a signal (-11 = SIGSEGV observed). Distinguished here rather than in the
+            # caller because only this frame knows it was a signal and not an exit status: the
+            # returncode is normalised away by the time a RuntimeError message is read.
+            raise _SignalDeath(
+                f"was killed by signal {-proc.returncode} (model={mdl})"
+                f"{': ' + tail if tail else ' with no diagnostic output'}")
         raise RuntimeError(f"claude CLI exited {proc.returncode} (model={mdl}): {tail}")
 
     if not raw:

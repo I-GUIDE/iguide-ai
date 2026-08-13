@@ -2299,3 +2299,53 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** Nothing defect-shaped is queued. Remaining plan items: publication paragraph
   chunking, the Neo4j graph emitter with `IMPLEMENTED_BY`, the ablation arm, the CI
   artifact re-run job.
+
+## 2026-08-13 · M6.I · A subprocess crash destroyed a turn that had already done the work
+
+**Change** `llm_claude_cli.call` retries a **signal death** only — `returncode < 0`, raised
+  as an internal `_SignalDeath` and converted to the `RuntimeError` callers already
+  handle. Bounded by `CLAUDE_CLI_SIGNAL_RETRIES` (default 2, clamped 0–5; 0 restores the
+  old behaviour). Nothing else is retried. The message now says *"was killed by signal
+  11 … with no diagnostic output"* instead of *"exited -11"*.
+
+**Why** Reproduced from a live server log, twice in one turn:
+
+  ```
+  RuntimeError: claude CLI exited -11 (model=sonnet):
+  During task with name 'model' ... 'search' ... 'orchestrate'
+  ```
+
+  `-11` is not an exit status — it is SIGSEGV. The process was killed, which is a crash of
+  the tool rather than an answer about the request, and `call()` had no retry of any kind.
+  The exception propagated out of the langgraph node, through `graph_runtime`'s
+  `raise worker_error[0]`, and out of the SSE stream, **discarding a turn that had already
+  completed two search sweeps (20 results), resolved a Chicago bounding box, selected
+  `calculate_primary_regions` from the library and written an evidence summary.**
+
+  The asymmetry is the design: retrying a signal death costs one subprocess, while
+  retrying an auth failure or a budget refusal spends the user's quota to reach the same
+  conclusion slower *and* delays the one message that says what to do. So each mode is
+  asserted, not just the happy path.
+
+**Measured** Against scripted subprocess results — 1 SIGSEGV → recovers in 2 calls;
+  2 SIGSEGVs → recovers in 3; persistent → gives up after 3 and says so; SIGKILL treated
+  the same; and **not retried** (1 call each): clean success, auth failure, structured API
+  error, plain nonzero, empty output, timeout. `CLAUDE_CLI_SIGNAL_RETRIES=0` restores the
+  previous behaviour exactly. Tests **1115 → 1134**.
+
+**Surprised by** The message was actively misleading. `exited -11` invites the reader to
+  look for an exit code of 11, and the returncode's **sign** is the only place the
+  "killed by a signal" fact exists — it is gone by the time anyone reads the string. The
+  empty stderr is itself informative (an abrupt kill leaves nothing) and read as a
+  missing message.
+
+  **Blocked, and reporting rather than working around it:** while reproducing this I found
+  the `claude` CLI now returns `401 — OAuth access token has expired. Re-authenticate to
+  continue.` So the `claude-cli` provider cannot serve a live turn until the user
+  re-authenticates. That is a credential action, so it is theirs to perform. Everything
+  in this entry is verified against scripted subprocess results and the recorded log, not
+  a live call — stated explicitly because "verified" and "verified live" are not the same
+  claim.
+
+**Next** A workflow is auditing what else a single transient LLM failure destroys across
+  `graph_runtime`, the supervisor, the SSE stream and the extraction batch path.
