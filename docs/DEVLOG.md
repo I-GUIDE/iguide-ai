@@ -2564,3 +2564,46 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   channel-flooding failure as `reject_all_nan` failing correct runs, and the end state is a
   reader who ignores the marker — at which point the gate is worse than absent, because it
   cost real work and buys nothing.
+
+## 2026-08-13 · M7.1 · Sandbox image, deployment runbook, CI
+
+**Change** `sandbox/Dockerfile` gains the geospatial stack (from wheels) plus `libexpat1` and a
+  warmed pyproj CRS database. New `docs/DEPLOYMENT.md` and `.github/workflows/verify.yml`
+  (three jobs: pure tests, deployment contract, artifact replay). 8 new deployment-contract
+  assertions. `.corpus_cache` stripped from git history.
+
+**Why** The image's geospatial block was commented out, so every session touching a
+  GeoDataFrame paid a `pip install geopandas` first — and the library's strongest clusters
+  are all geospatial.
+
+**Measured**
+  - image **1.25 GB**, builds in ~7s warm; the full stack imports with `--network none`
+  - a 25 km buffer in EPSG:32616 inside the image gives **1960.34 km²** (analytic 1963.50)
+  - end-to-end in the **digest-pinned** image: `calculate_buffers` imported via the registry's
+    own `import_line`, contract resolved, **exit 0, verdict `pass`, total 5881.03 km²** —
+    the same number the live prototype run produced independently
+  - runtime `pip install`s for that run: **0**
+  - history rewrite: commits **257 → 257**, HEAD tree **byte-identical**, commits containing
+    `.corpus_cache` **2 → 0**, backup ref at `refs/backup/pre-corpus-cache-rewrite`
+  - tests **1220 → 1228**
+
+**Surprised by** The first build succeeded and the image was broken. `import rasterio` died
+  with `libexpat.so.1: cannot open shared object file` — the wheel installs cleanly against
+  `python:3.11-slim` and fails at import, so **a green build proved nothing**. Only running the
+  import caught it. That is now a CI step and a contract test, because it is the exact shape
+  of failure this project keeps producing: a step that reports success while the thing it was
+  meant to establish is false.
+
+  Also: I appended a second `_dockerfile()` helper to the contract tests, which **shadowed** the
+  existing module-level one and silently redirected two passing tests at the wrong file. They
+  still ran and still asserted — against something else. Caught only because the count went
+  1228 → 1226 in the same run I was watching for a different reason.
+
+  Retraction: the plan called for `AGENT_CODE_EXEC_IMAGE` pinned by digest, and I had described
+  digest pinning as already done. `resolve_image_digest` was implemented and correct, but no
+  pinned image existed to point it at — the tag `python:3.11-slim` was still the deployed value.
+
+**Next** Neo4j write-back **dropped**, not deferred: the `IMPLEMENTED_BY` edges already reach
+  OpenSearch, `kb_method_search` reads the registry rather than the graph, and no consumer
+  exists for multi-hop traversal. It would have been the only write to production data in the
+  plan, for no present benefit. Neo4j stays read-only; the read path was fixed earlier today.
