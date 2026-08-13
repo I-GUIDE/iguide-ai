@@ -24,6 +24,8 @@ from ..contracts import InvariantSpec, ParamSpec
 # only apply to frames. Matched by NAME so stringized PEP-563 annotations work, the same
 # technique as ``extractors/geo_handles.py:26 _is_frame_type``.
 _FRAME_HINTS = ("geodataframe", "gdf", "dataframe", "df")
+# The subset that identifies a frame as GEOspatial. Matched before _FRAME_HINTS.
+_GEO_FRAME_HINTS = ("geodataframe", "gdf", "geo_df", "_geo", "geoframe")
 _PATH_HINTS = ("path", "file", "filename", "filepath", "shp", "csv", "src", "dest")
 _URL_HINTS = ("url", "uri", "endpoint", "link")
 _NUM_HINTS = ("count", "n", "k", "limit", "size", "buffer", "distance", "radius", "threshold")
@@ -177,8 +179,20 @@ def infer_types(params: List[ParamSpec], docstring: str = "") -> None:
                     break
             if p.inferred_type != "unknown":
                 continue
-        if _looks_like(p.name, _FRAME_HINTS):
+        if _looks_like(p.name, _GEO_FRAME_HINTS):
             p.inferred_type, p.evidence = "geodataframe", f"parameter name {p.name!r}"
+        elif _looks_like(p.name, _FRAME_HINTS):
+            # A name can say "frame"; only an annotation or a geo-specific name can say
+            # "GEOdataframe". Every _FRAME_HINTS match used to claim geodataframe, so `df`,
+            # `dataframe`, `scaled_df` and `metrics_df` were all typed geo — 18 params on the
+            # corpus, several of them plainly pandas (`plot_histograms(df)`,
+            # `create_train_test_sets(scaled_df)`, `save_results(metrics_df)`).
+            #
+            # That matters because `geodataframe` is the type that earns a `projected_crs`
+            # invariant, and a plain DataFrame at the call site yields `cannot_determine`, which
+            # downgrades the whole run's verdict. A false unknown on a correct run is how the
+            # channel gets flooded and the real signal stops being read.
+            p.inferred_type, p.evidence = "dataframe", f"parameter name {p.name!r}"
         elif _looks_like(p.name, _URL_HINTS):
             p.inferred_type, p.evidence = "url", f"parameter name {p.name!r}"
         elif _looks_like(p.name, _PATH_HINTS):

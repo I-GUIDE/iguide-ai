@@ -323,3 +323,63 @@ def test_the_evidence_names_the_helper_the_operation_was_found_in():
     params = contract_params(bodies["entry_point"], "", bodies)
     evidence = next(p.evidence for p in params if p.name == "catchments")
     assert "via _ratio()" in evidence
+
+
+# ------------------------------------------------------------------ frame vs GEOframe
+
+def _typed(src, fn):
+    import ast
+
+    from extractors.analysis.signatures import contract_invariants, contract_params
+
+    nodes = {n.name: n for n in ast.parse(src).body}
+    params = contract_params(nodes[fn], ast.get_docstring(nodes[fn]) or "", nodes)
+    return ({p.name: p.inferred_type for p in params},
+            [f"{i.check}({i.target})" for i in contract_invariants(params, nodes[fn])])
+
+
+def test_a_plain_frame_name_does_not_claim_geospatial():
+    """Every ``_FRAME_HINTS`` match claimed ``geodataframe``, so ``df``, ``dataframe``,
+    ``scaled_df`` and ``metrics_df`` were all typed geo — 7 of 48 geodataframe params on the
+    corpus, several plainly pandas (``plot_histograms(df)``, ``save_results(metrics_df)``).
+
+    It matters because ``geodataframe`` is the type that earns a ``projected_crs`` invariant, and
+    a plain DataFrame at the call site yields ``cannot_determine``, which downgrades the whole
+    run. A false unknown on a correct run is how the channel floods and the real signal stops
+    being read. A name can say "frame"; only an annotation or a geo-specific name can say
+    "GEOdataframe"."""
+    types, invs = _typed('''
+def plot_histograms(df):
+    return df.hist()
+''', "plot_histograms")
+    assert types == {"df": "dataframe"}
+    assert invs == ["reject_all_nan(df)"], "a plain frame keeps the null check, loses CRS"
+
+
+def test_a_geo_named_frame_still_claims_geospatial():
+    types, invs = _typed('''
+def buffer_areas(gdf):
+    return gdf.buffer(1000).area
+''', "buffer_areas")
+    assert types == {"gdf": "geodataframe"}
+    assert "projected_crs(gdf)" in invs
+
+
+def test_an_annotation_outranks_the_name():
+    """An annotation is a declaration; a name is a heuristic."""
+    types, _ = _typed('''
+def annotated(frame: "gpd.GeoDataFrame"):
+    return frame.buffer(1).area
+''', "annotated")
+    assert types == {"frame": "geodataframe"}
+
+
+def test_the_e2sfca_argument_names_are_still_read_as_geospatial():
+    """``agdf``/``ogdf`` carry ``gdf`` and are genuinely GeoDataFrames in that notebook —
+    narrowing the geo signal must not cost the units that motivated it."""
+    types, invs = _typed('''
+def sum_attribute_proportional_to_area(agdf, ogdf):
+    return agdf.area / ogdf.area
+''', "sum_attribute_proportional_to_area")
+    assert set(types.values()) == {"geodataframe"}
+    assert "projected_crs(agdf)" in invs and "projected_crs(ogdf)" in invs

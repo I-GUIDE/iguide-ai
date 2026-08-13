@@ -2153,3 +2153,46 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   'n'/'k', 6 DataFrames typed `geodataframe`); `reject_all_nan` failing correct runs on
   input shape; contract taken from the LAST definition while the shipped slice comes from
   the FIRST.
+
+## 2026-08-13 · M6.F · A name can say "frame"; only an annotation can say "GEOframe"
+
+**Change** `infer_types` splits `_GEO_FRAME_HINTS` (`geodataframe`, `gdf`, `geo_df`,
+  `_geo`, `geoframe`) from the general `_FRAME_HINTS`. A name-only match now types
+  `dataframe`; an annotation still wins outright.
+
+**Why** Every `_FRAME_HINTS` match claimed `geodataframe`, so `df`, `dataframe`,
+  `scaled_df` and `metrics_df` were all typed geospatial. `geodataframe` is the type that
+  earns a `projected_crs` invariant, and a plain DataFrame at the call site yields
+  `cannot_determine`, which downgrades the whole run's verdict. A false unknown on a
+  correct run is how the channel floods and the real signal stops being read.
+
+**Measured**
+  - `geodataframe` params **48 → 41**; `dataframe` **8 → 15**. The 7 retyped include
+    `plot_histograms(df)`, `create_train_test_sets(scaled_df)`, `save_results(metrics_df)`
+    and `extract_24h_before_peak(df)`.
+  - invariants: `projected_crs` **21 → 21**, `reject_all_nan` **56 → 56**, total **77 →
+    77**.
+  - `agdf`/`ogdf` in the e2SFCA family stay geospatial, and they keep their
+    `projected_crs` — narrowing the signal cost nothing that motivated it.
+
+**Surprised by** **Zero invariants changed.** None of those 7 units performs a metric
+  operation, so none had a `crs_expectation` to lose. So this is a latent-correctness fix
+  and an *advertising* fix, not a measured enforcement gain — and the advertising is the
+  part that bites today, because `params[].inferred_type` is what `get_method_contract`
+  shows the agent when it chooses a method. Telling it `plot_histograms` takes a
+  GeoDataFrame is wrong regardless of whether an invariant fires.
+
+  **Two audit findings did not reproduce, and I am recording that rather than quietly
+  dropping them:**
+  - "113 of 137 params typed `number` on the letters 'n'/'k'" — actual: 195 of 631 params
+    are `number`, and exactly **4** come from a name of 1–2 characters, all of them `k`
+    in clustering functions (`kmeans_map`, `top_abs_corr_features`, `community_inequality`,
+    `intra_inter_idx`) where `k` genuinely is a number. Not a defect at any scale.
+  - "the contract comes from the LAST definition while the shipped slice comes from the
+    FIRST" — actual: **0 of 227** shipped slices define their symbol more than once, so
+    there is no divergence to fix. The concern is real in principle for notebooks that
+    redefine a cell; it does not occur in this corpus.
+
+**Next** `reject_all_nan` failing correct runs on input shape — the last of the ranked
+  audit findings. Then the deferred plan items: publication paragraph chunking, the Neo4j
+  graph emitter, the ablation arm, and the CI artifact re-run job.
