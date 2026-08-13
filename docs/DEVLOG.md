@@ -1806,3 +1806,33 @@ side list was the bug in two different costumes.
 **Still the user's call, not mine:** whether the agent may serve private content (43 of 799
 elements), whether the method library should be exposed as an API, and multi-worker serving.
 Those are product and access-control decisions, not implementation.
+
+## 2026-08-13 · M6.4 · The requirement travels with the search result
+**Change** `search_methods` returns a `requires` list (`projected_crs(gdf)`,
+  `reject_all_nan(resources)`) per hit; `None` when a unit declares nothing. 3 tests.
+
+**Why** an end-to-end run exposed this. Asked to find `calculate_buffers`, read its contract and
+run it, the agent called `kb_method_search`, **never called `get_method_contract`**, and so never
+saw that the method requires a projected CRS. It reprojected to EPSG:26971 anyway and its answer
+said "required by the projected-CRS invariant" — the right action, described with an authority it
+did not have. A requirement the caller must satisfy belongs where the caller first sees the
+method; a second tool call the model may not make is not a reliable channel.
+
+Verified on the real registry:
+
+```
+calculate_buffers          requires=['projected_crs(gdf)', 'reject_all_nan(gdf)']
+calculate_primary_regions  requires=['projected_crs(resources)', 'reject_all_nan(resources)',
+                                     'projected_crs(spatial_units)', 'reject_all_nan(spatial_units)']
+calculate_comprehensive_stats  requires=None
+```
+
+`None` rather than `[]` on purpose: an empty list reads as "checked, nothing required", which is
+a different claim from "this unit declares nothing". Suite **1001 passed**, same 3 pre-existing.
+
+**Worth recording precisely, because I nearly overstated it:** the end-to-end run is evidence
+that the *path* works, NOT that the contract drove the model's choice. The stream shows
+`get_method_contract` was never called and no invariant text ever reached the model. The proof
+that enforcement works is the direct container test — a 4326 frame into a contract-bearing unit
+gives `verdict=fail` naming the unit and parameter, a UTM frame gives `pass`. Two different
+claims; only one of them was demonstrated by the agent run.

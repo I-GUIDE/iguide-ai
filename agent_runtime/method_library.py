@@ -172,6 +172,13 @@ def _summarize(key: str, entry: Dict[str, Any], score: float) -> Dict[str, Any]:
                 "candidates": entry.get("candidates") or [],
                 "doc_summary": entry.get("doc_summary"), "score": round(score, 2)}
     prov = entry.get("provenance") or {}
+    # Invariants are included in the SEARCH result, not only in get_method_contract. Observed:
+    # an agent found `calculate_buffers`, never called get_method_contract, and so never saw
+    # that the method requires a projected CRS — it happened to reproject anyway and then
+    # described that as satisfying the invariant, which is the right action for the wrong
+    # reason. A requirement the caller must satisfy belongs where the caller first sees the
+    # method; a second tool call it may not make is not a reliable channel.
+    invariants = [i for i in (entry.get("invariants") or []) if isinstance(i, dict)]
     return {
         "symbol": key,
         "signature": entry.get("signature"),
@@ -180,6 +187,7 @@ def _summarize(key: str, entry: Dict[str, Any], score: float) -> Dict[str, Any]:
         "element_id": prov.get("element_id"),
         "slice_sha": entry.get("slice_sha"),
         "requirements": (entry.get("requirements") or {}).get("pip") or [],
+        "requires": [f"{i.get('check')}({i.get('target')})" for i in invariants] or None,
         "score": round(score, 2),
     }
 

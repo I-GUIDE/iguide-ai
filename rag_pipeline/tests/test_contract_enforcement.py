@@ -314,3 +314,48 @@ def test_a_unit_with_no_invariants_is_not_injected(monkeypatch):
         "ke_x.plain": {"module": "iguide_methods.ke_x.v_abc", "library_symbol": "plain",
                        "invariants": []}})
     assert contracts_for_code("from iguide_methods.ke_x.v_abc import plain\n") == {}
+
+
+# ------------------------------------------------------------------ discovery surfaces it
+
+def test_search_results_carry_the_requirements():
+    """Observed end to end: an agent found `calculate_buffers`, never called
+    get_method_contract, and so never saw that the method requires a projected CRS. It happened
+    to reproject anyway and then described that as satisfying the invariant — the right action
+    for the wrong reason. A requirement the caller must satisfy belongs where the caller first
+    sees the method; a second tool call it may not make is not a reliable channel.
+    """
+    from agent_runtime.method_library import search_methods
+
+    registry = {"ke_x.buffer_it": {
+        "library_symbol": "buffer_it", "module": "iguide_methods.ke_x.v_abc",
+        "signature": "def buffer_it(gdf, radius)", "doc_summary": "Buffer a layer.",
+        "slice_sha": "abc", "requirements": {"pip": ["geopandas"]},
+        "invariants": [{"check": "projected_crs", "target": "gdf", "args": {}},
+                       {"check": "reject_all_nan", "target": "gdf", "args": {}}]}}
+    hit = search_methods("buffer_it", registry=registry)[0]
+    assert hit["requires"] == ["projected_crs(gdf)", "reject_all_nan(gdf)"]
+
+
+def test_a_unit_with_no_invariants_reports_none_not_an_empty_list():
+    """None renders as absent; [] would read as "checked, nothing required"."""
+    from agent_runtime.method_library import search_methods
+
+    registry = {"ke_x.plain": {"library_symbol": "plain",
+                               "module": "iguide_methods.ke_x.v_abc",
+                               "signature": "def plain(x)", "doc_summary": "Plain.",
+                               "slice_sha": "abc", "invariants": []}}
+    assert search_methods("plain", registry=registry)[0]["requires"] is None
+
+
+def test_the_requirement_names_the_parameter():
+    """"needs a projected CRS" is not actionable on a two-frame signature; the parameter is."""
+    from agent_runtime.method_library import search_methods
+
+    registry = {"ke_x.f": {
+        "library_symbol": "f", "module": "iguide_methods.ke_x.v_abc",
+        "signature": "def f(demand, supply)", "doc_summary": "Accessibility.",
+        "slice_sha": "abc",
+        "invariants": [{"check": "projected_crs", "target": "demand", "args": {}}]}}
+    assert search_methods("f accessibility", registry=registry)[0]["requires"] == \
+        ["projected_crs(demand)"]
