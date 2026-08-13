@@ -174,6 +174,25 @@ def resolve_parent_elements_local(hits: List[Dict[str, Any]]) -> Dict[str, Dict[
     return elements
 
 
+_LOCAL_BACKEND_WARNED = False
+
+
+def _warn_local_backend_once() -> None:
+    """Say it once per process. Same reasoning as the resolved-embedding-URL log: a silently
+    wrong backend produces plausible output and no signal at all."""
+    global _LOCAL_BACKEND_WARNED
+    if _LOCAL_BACKEND_WARNED:
+        return
+    _LOCAL_BACKEND_WARNED = True
+    try:
+        import logging
+        logging.getLogger(__name__).warning(
+            "agent KB is using the LOCAL file-backed store while OPENSEARCH_NODE is set; "
+            "export AGENT_KB_BACKEND=opensearch to search the indexed corpus")
+    except Exception:
+        pass
+
+
 def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embed: bool = True,
                     resolve_parents: bool = True) -> Dict[str, Any]:
     """Search the agent KB; return normalized, parent-linked evidence.
@@ -188,10 +207,25 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         from extractors import kb_store
         from extractors.indices import all_agent_indices
         use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
+        base["backend"] = "opensearch" if use_opensearch else "local"
         if not use_opensearch:
             hits = kb_store.local_search(query, all_agent_indices(), size)
             docs = normalize_hits(hits, [], size)
             elements = resolve_parent_elements_local(hits) if resolve_parents else {}
+            if os.getenv("OPENSEARCH_NODE"):
+                # The default is local so tests and offline runs never touch the cluster, and
+                # that default is right. But it means a server that simply does not set the
+                # variable reads a file-backed store scored by token overlap instead of the
+                # indexed corpus — and the symptom is "fewer results", which reads as a
+                # retrieval-quality problem rather than a configuration one.
+                #
+                # Observed: a live prototype turn showed `agent_kb_search -> no results` while
+                # the same query against the cluster returned 8. Nothing anywhere said which
+                # store had been consulted.
+                base["note"] = ("searched the LOCAL file-backed store, NOT the cluster — a "
+                                "cluster IS configured (OPENSEARCH_NODE is set); export "
+                                "AGENT_KB_BACKEND=opensearch to search the indexed corpus")
+                _warn_local_backend_once()
         else:
             if client is None and not os.getenv("OPENSEARCH_NODE"):
                 return {**base, "note": "AGENT_KB_BACKEND=opensearch but OPENSEARCH_NODE not set"}
@@ -210,13 +244,20 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         if elements:
             for d in docs:
                 d["element"] = elements.get(d["parent_doc_id"])
-        return {
+        out = {
             "source": "agent_kb", "backend": ("opensearch" if use_opensearch else "local"),
             "count": len(docs), "documents": docs,
             "citation_ids": [d["parent_doc_id"] for d in docs],   # cite the ORIGINAL element
             "block_ids": [d["doc_id"] for d in docs],
             "elements": elements,
         }
+        # Carried, not rebuilt away. The success path used to construct a fresh dict, so the
+        # "you are reading the local store while a cluster is configured" note was computed and
+        # then dropped — a diagnostic that exists only in a variable is not a diagnostic. `count`
+        # and `documents` precede nothing that gets truncated, but `note` must survive too.
+        if base.get("note"):
+            out["note"] = base["note"]
+        return out
     except Exception as exc:
         return {**base, "note": f"agent_kb_search error: {type(exc).__name__}: {exc}"}
 

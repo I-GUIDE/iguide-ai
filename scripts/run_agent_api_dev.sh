@@ -10,6 +10,11 @@
 #   AGENT_CHAT_AUTH_OPTIONAL  =1 to run with no auth at all (local only).
 #   AGENT_CORS_ORIGINS        must include the prototype's origin, e.g.
 #                             http://localhost:8131, or the browser blocks the request.
+#   AGENT_KB_BACKEND          defaults to `local` in agent_kb.py so tests stay offline. This
+#                             script sets it to `opensearch` when OPENSEARCH_NODE is present,
+#                             because a dev server reading the file-backed store instead of the
+#                             indexed corpus looks like a retrieval-quality problem, not a
+#                             config one. Set it yourself to override.
 #
 # Usage:
 #   scripts/run_agent_api_dev.sh                 # keyed: dev-key, CORS for :8131
@@ -51,6 +56,22 @@ for candidate in "$REPO/.env" "/Users/yfkang/i-guide-platform-flask-servers/.env
 done
 
 export PORT="${PORT:-5002}"
+
+# The agent KB defaults to the LOCAL file-backed store (agent_kb.py) so tests and offline runs
+# never reach the cluster — that default is right for them and wrong for a dev server driving the
+# prototype. Measured: a live turn logged `agent_kb_search -> no results` while the same query
+# against the cluster returned 8, and nothing anywhere reported which store had been read.
+if [ -n "${OPENSEARCH_NODE:-}" ]; then
+  export AGENT_KB_BACKEND="${AGENT_KB_BACKEND:-opensearch}"
+fi
+echo "[run_agent_api_dev] agent KB backend: ${AGENT_KB_BACKEND:-local (no OPENSEARCH_NODE)}"
+
+# The method library is mounted read-only into the sandbox and read agent-side for
+# kb_method_search. Without this, both silently report an empty library.
+if [ -z "${AGENT_METHOD_LIBRARY_DIR:-}" ] && [ -d "$REPO/agent_chat_files/method_library" ]; then
+  export AGENT_METHOD_LIBRARY_DIR="$REPO/agent_chat_files/method_library"
+fi
+echo "[run_agent_api_dev] method library: ${AGENT_METHOD_LIBRARY_DIR:-none built}"
 export AGENT_CHAT_API_KEY="${AGENT_CHAT_API_KEY:-dev-key}"
 export AGENT_CORS_ORIGINS="${AGENT_CORS_ORIGINS:-http://localhost:8131,http://127.0.0.1:8131}"
 # The prototype runs outside the compose network, so the in-container embedding

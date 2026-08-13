@@ -171,9 +171,19 @@ def kb_method_search_tool(query: str, limit: Optional[int] = None) -> str:
 
     results = search_methods(query, limit=_safe_int(limit, default=8, maximum=25) or 8)
     summary = library_summary()
-    payload: Dict[str, Any] = {"source": "method_library", "results": results,
+    # `count` is emitted because the CLIENT cannot derive it: a method-unit row has `symbol`
+    # and `signature` but no title/name/doc_id/url, so the prototype's row builder skipped every
+    # one and rendered "kb_method_search -> no results" for 10 real hits. The server knows how
+    # many it found; it should say so rather than leave the reader to infer it.
+    # `count` comes BEFORE `results`, and that ordering is load-bearing. The trace payload is
+    # truncated for display and the client salvages what it can by regex, so a scalar placed
+    # after a long array is simply gone — which is how 10 real hits rendered as
+    # "kb_method_search -> no results (log truncated)". `json.dumps` preserves dict order, so the
+    # summary survives the cut. Put the counts first; put the bulk last.
+    payload: Dict[str, Any] = {"source": "method_library", "count": len(results),
                                "library": {"units": summary["units"],
-                                           "elements": summary["elements"]}}
+                                           "elements": summary["elements"]},
+                               "results": results}
     if not summary["units"]:
         # An empty library and a query that matched nothing are different situations, and the
         # model cannot tell them apart from an empty result list. Left implicit, it reports

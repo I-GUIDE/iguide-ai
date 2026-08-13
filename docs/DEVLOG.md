@@ -2247,3 +2247,55 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The ranked audit queue is now empty. Remaining plan items, none of them defect
   work: publication paragraph chunking, the Neo4j graph emitter with the `IMPLEMENTED_BY`
   edge, the ablation arm, and the CI artifact re-run job.
+
+## 2026-08-13 · M6.H · Driving the prototype: the trace said "no results" for ten real hits
+
+**Change** `kb_method_search` emits `count`, placed **before** the `results` array;
+  `agent_kb_search` reports the `backend` it used and, when it read the local store while a
+  cluster is configured, says so in a note (carried through the success path) plus a
+  once-per-process warning; the prototype's row builder and its truncated-payload salvage
+  both accept `symbol`; `run_agent_api_dev.sh` resolves `AGENT_KB_BACKEND` and
+  `AGENT_METHOD_LIBRARY_DIR` and prints both.
+
+**Why** Every one of these was found by driving the prototype, and none by the suite.
+
+  The trace line read `kb_method_search → no results (log truncated)` for a call that
+  returned **ten** methods. Two independent causes. The client builds a row from
+  `title|name|doc_id|id|url` and a method unit has **none** of those — only `symbol` — so
+  every row was skipped and the count fell through to zero. And the payload is truncated
+  for display, with the client salvaging by regex from the fragment, so `count` placed
+  after a long array is gone precisely when it is needed.
+
+  `agent_kb_search → no results` was a different problem: the backend defaults to the
+  **local** file-backed store, and neither `.env` nor the launcher set
+  `AGENT_KB_BACKEND`. So the server read a token-overlap file store while the cluster with
+  4,179 indexed docs sat reachable — the entire agent-KB indexing effort inert, with
+  "fewer results" as the only symptom.
+
+**Measured**
+  - `kb_method_search` in the live trace: **"no results" → "10 results"**, with the method
+    symbols now listed as document lines
+  - `count` recoverable from an 80/150/400/2000-char truncation: **0/4 → 4/4**
+  - launcher output now states `agent KB backend: opensearch` and the library path, where
+    before it stated neither
+  - the agent then selected a real library method (`calculate_primary_regions`, SPASTC) and
+    reasoned about it — the retrieval→contract chain working through the UI
+  - tests **1101 → 1115**
+
+**Surprised by** How much of a detour the display bug caused. I read "no results", concluded
+  the method library was broken, and went looking for the extraction defect — the library
+  was fine the whole time. A trace that misreports is worse than one that says nothing,
+  because it sends the reader somewhere specific and wrong. That is the same failure this
+  whole milestone series has been about, and it had reached the developer-facing surface.
+
+  A second instance in the same fix: `agent_kb_search`'s success path built a fresh return
+  dict, so the note explaining *which store it read* was computed and dropped. The
+  diagnostic existed in a variable and nowhere else.
+
+  Also learned: werkzeug logs an SSE `POST` at stream **start**, so "POST … 200" is not a
+  completion signal. I used it as one and twice concluded a turn had finished while it was
+  still running.
+
+**Next** Nothing defect-shaped is queued. Remaining plan items: publication paragraph
+  chunking, the Neo4j graph emitter with `IMPLEMENTED_BY`, the ablation arm, the CI
+  artifact re-run job.

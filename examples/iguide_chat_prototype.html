@@ -607,7 +607,9 @@ function looseJson(text){
   // Truncated payload: pull out what we can without a parser.
   const num=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*(-?\\d+)')); return m?Number(m[1]):null; };
   const str=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); return m?decodeJsonEscapes(m[1]):null; };
-  const titles=[]; const re=/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
+  // `symbol` as well as `title`: a kb_method_search row has no title, so a truncated method
+  // search salvaged zero rows and rendered as "no results".
+  const titles=[]; const re=/"(?:title|symbol)"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
   while((m=re.exec(s))&&titles.length<40) titles.push(decodeJsonEscapes(m[1]));
   const urls=[]; const ru=/"url"\s*:\s*"(https?:(?:[^"\\]|\\.)*)"/g;
   while((m=ru.exec(s))&&urls.length<40) urls.push(decodeJsonEscapes(m[1]));
@@ -637,7 +639,10 @@ function toolArgSummary(name,args){
 /* Documents/results carried by a tool payload, normalized to {title,url}. */
 function payloadItems(obj){
   const rows=[];
-  const push=(d)=>{ if(!d) return; const t=d.title||d.name||d.doc_id||d.id; if(t||d.url) rows.push({title:t,url:d.url}); };
+  // `symbol` is here because a kb_method_search row has no title/name/doc_id/url at all, so
+  // every one was skipped and the line rendered as "no results" for real hits.
+  const push=(d)=>{ if(!d) return; const t=d.title||d.name||d.doc_id||d.id||d.symbol;
+                    if(t||d.url) rows.push({title:t,url:d.url}); };
   if(Array.isArray(obj.documents)) obj.documents.forEach(push);
   if(Array.isArray(obj.results)) obj.results.forEach(push);
   if(!rows.length && Array.isArray(obj.__titles)){
