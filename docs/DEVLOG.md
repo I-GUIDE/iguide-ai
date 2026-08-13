@@ -1887,3 +1887,88 @@ replay completed (outputs identical)
 
 A retired `v_<sha>` is now a hard stop with the symbol named, because the recorded sha is the
 whole point of pinning. Suite **1005 passed**, 0 failed.
+
+## 2026-08-13 · M6.A · Tier A: nine ways the gate reported success without checking
+
+**Change** Nine fixes from the 41-agent contract-chain audit, all in the
+  extraction → contract → enforcement → answer chain.
+
+  *Reaching the answer* — `supervisor/graph.py:_gate_failures` kept `id(node)` in a
+  visited set while each `json.loads` graph was reachable only from its call frame, so
+  CPython recycled addresses between branches and the walk returned before reading a
+  later result's `verification`. Now anchors each parsed graph for the walk's lifetime.
+  `_gate_issues_from` keys on the **verdict**, not on surviving `status=="fail"`
+  findings: `_read_checks` truncates at 12, so the judgement can outlive its evidence,
+  and `cannot_determine` never gated anything at all.
+
+  *Seeing the frame* — `_has_geometry` tested for a column literally named `geometry`;
+  PostGIS exports default to `geom`. Candidates are now ordered geometry-first, because
+  globals were walked in definition order and capped at 12, so the late output frames —
+  the ones a number is quoted from — were exactly the ones dropped, silently.
+
+  *Projected ≠ metres* — EPSG:3435 (Illinois East, US survey feet) is `is_projected`,
+  so a buffer declared in metres was 3.28× too large and passed. `_crs_unit` /
+  `_unit_matches` compare the CRS axis unit against the declared one.
+
+  *Containers* — `e2sfca(catchments)` takes a **list** of frames; the guard tested the
+  bound argument with `_looks_like_frame`, which a list is not, so the invariant was
+  skipped for every unit whose interface is a collection.
+
+  *Import spellings* — `library_units_used` was a regex over one physical line, so
+  three spellings the system itself emits resolved **zero** units and therefore
+  installed zero guards: an `as` alias, a parenthesised list (every advertised
+  `import_line` exceeds 79 chars, so wrapping is the *expected* case), and the
+  element-package alias that `import_line`'s own docstring calls supported. Now `ast`,
+  and registry lookup falls back to element-package + symbol rather than exact
+  `v_<sha>` string equality.
+
+  *Exit paths* — the gate is registered with `atexit` **from the prologue**. An
+  epilogue appended after the user's code is never even defined when that code ends in
+  `sys.exit(main())`, the standard script skeleton.
+
+**Why** Every one of these reports as success. That is the specific failure this gate
+  exists to prevent, and it had it internally.
+
+**Measured**
+  - fail positions missed by the reconciliation walk: **9/19 → 0/19** (14/21 on a
+    second run of the same matrix — it depends on the allocator, which is why a
+    single-case test can pass on the very run that ships a wrong number)
+  - truncated `fail` report reaching the answer: **0 → 1 issue**;
+    `cannot_determine` run: **0 → 1 issue**
+  - import spellings resolving a contract: **3/6 → 6/6**
+  - EPSG:3435 against a `metres` contract: **pass → fail**; 32616/3857 still pass
+  - exit paths writing a report: **1/4 → 4/4**
+  - live container, documented element-package spelling: 4326 → `fail` naming
+    `calculate_buffers(gdf)` first; 32616 → `pass`
+  - tests **1005 → 1061**, green by default
+
+**Surprised by** Two things, both corrections of my own claims.
+
+  First, I reported the previous batch as "all four exit paths now write checks.json,
+  and `cannot_determine` is A3 correctly refusing to pass an unreachable run." That was
+  wrong. The verdict was `cannot_determine` because `_iguide_gate_body()` returned a
+  hand-listed tuple of two names while the gate also called `capture_environment()` and
+  read `DECLARED_OUTPUTS` — both locals of that function. Two NameErrors, swallowed by
+  the gate's own `except`, surfacing as an honest-looking unknown. `environment.json`
+  and `declared_outputs.json` were not written **at all**, which would have left every
+  replay with nothing to compare. It now returns `dict(locals())`, which cannot drift.
+  Confined to the uncommitted batch; committed history was sound.
+
+  That is the **fourth** NameError inside this gate's own guard (`math as _math`,
+  `ModuleType`, and now the tuple). Asserting that `checks.json` *exists* catches none
+  of them — asserting the absence of an `error` key is what does, and that assertion is
+  now a parametrized test over all four exit paths in a real subprocess.
+
+  Second, the A3 coverage guard keyed on `sys.modules`, which is process-global: it
+  reported geopandas as loaded because some unrelated module imported it, so every
+  pure-arithmetic run was called unverifiable. Flooding the channel with unknowns is
+  how a real one stops being read. Now scoped to module objects bound in the namespace
+  under inspection.
+
+  Also: moving the atexit registration into the prologue means exec'ing it anywhere
+  schedules a report into the CWD at interpreter exit — it was dropping three files
+  into the repo root at the end of every pytest run.
+
+**Next** ~23 further confirmed audit findings. The load-bearing one is that
+  `params_of` returns `[]` for a `ClassDef`, so 26 class units carry 0 invariants while
+  22 of them advertise `def X()`.

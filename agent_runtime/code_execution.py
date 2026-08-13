@@ -374,12 +374,25 @@ def contracts_for_code(code: str) -> Dict[str, Any]:
         module, symbol = ref.get("module"), ref.get("symbol")
         if not (module and symbol):
             continue
+        # Match on the ELEMENT PACKAGE plus symbol, not on the exact `v_<sha>` module string.
+        # Exact-string equality meant the element-package alias
+        # (`from iguide_methods.ke_x import symbol`) resolved nothing, so importing a unit the
+        # documented friendly way turned enforcement off silently.
+        element_pkg = module.split(".")[1] if module.count(".") >= 1 else ""
         entry = next((v for v in registry.values()
                       if isinstance(v, dict) and v.get("module") == module
                       and v.get("library_symbol") == symbol), None)
+        if entry is None and element_pkg:
+            entry = next((v for v in registry.values()
+                          if isinstance(v, dict) and not v.get("ambiguous")
+                          and v.get("library_symbol") == symbol
+                          and v.get("element_package") == element_pkg), None)
         invariants = [i for i in ((entry or {}).get("invariants") or []) if isinstance(i, dict)]
         if invariants:
-            out[f"{symbol}"] = {"module": module, "symbol": symbol, "invariants": invariants}
+            # Keyed and patched on the REGISTRY's module, which is the one that actually holds
+            # the function object — the alias path resolves to the same unit.
+            out[symbol] = {"module": (entry or {}).get("module") or module,
+                           "symbol": symbol, "invariants": invariants}
     return out
 
 
@@ -401,11 +414,18 @@ def _read_checks(work: Path) -> Dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         return {}
-    # Keep the payload small: the model needs the verdict and what failed, not every pass.
-    findings = [f for f in (data.get("findings") or [])
-                if isinstance(f, dict) and f.get("status") != "pass"]
+    # Keep the payload small, but never at the cost of the evidence for the verdict. The cap
+    # used to slice an unsorted list, so a report with 12 cannot_determine findings ahead of a
+    # single `fail` shipped verdict="fail" with no fail finding — and the gate keyed on
+    # findings, so nothing reacted.
+    order = {"fail": 0, "cannot_determine": 1}
+    findings = sorted((f for f in (data.get("findings") or [])
+                       if isinstance(f, dict) and f.get("status") != "pass"),
+                      key=lambda f: order.get(f.get("status"), 2))
+    truncated = max(0, len(findings) - 12)
     return {"verdict": data.get("verdict"), "counts": data.get("counts") or {},
             "inspected": data.get("inspected") or [], "findings": findings[:12],
+            **({"findings_truncated": truncated} if truncated else {}),
             **({"error": data["error"]} if data.get("error") else {})}
 
 

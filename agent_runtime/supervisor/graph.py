@@ -478,38 +478,80 @@ def _claim_numbers(text: str) -> List[str]:
 def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
     """Every invariant-gate FAILURE recorded anywhere in the execution context.
 
-    The gate's report is nested inside each ``execute_code`` tool result, so this walks rather
-    than indexes: the shape of a peer's result dict is not a contract, and a missed nesting
-    level would silently disable the block below — the failure mode this whole area keeps
-    producing.
+    The gate's report is nested inside each ``execute_code`` tool result, which arrives as a
+    JSON *string* inside a ToolMessage, so this walks rather than indexes.
+
+    Two defects fixed here, both of which let a wrong number reach the answer unflagged:
+
+    **id() reuse.** The visited set held ``id(node)`` for every node across the whole
+    traversal, while ``json.loads`` builds a graph reachable only from its call frame. That
+    graph is freed when the branch returns, CPython reallocates a later result's dict at the
+    same address, and the walk returns before reading its ``verification``. Reproduced with
+    real ``ExecResult`` payloads: **14 of 21** (N results x fail position) combinations
+    returned zero gate findings. Multiple ``execute_code`` calls per turn is the NORMAL case —
+    the tool description tells the model to fix and re-run — so this fired on the most natural
+    sequence of all: a passing load followed by a failing measurement.
+
+    Fixed by keeping a reference to each parsed graph for the walk's lifetime, so no address is
+    recycled while its ids are still in the set.
+
+    **Keyed on findings, not the verdict.** A report can carry ``verdict="fail"`` with no
+    ``status=="fail"`` finding surviving — ``_read_checks`` caps the list at 12 — and
+    ``cannot_determine`` never gated anything at all, so an unverifiable run was relabelled
+    "Grounded". Now the VERDICT decides, and a fail with no surviving finding still yields an
+    issue.
     """
     found: List[Dict[str, Any]] = []
-    seen: List[int] = []
+    seen: set = set()
+    keep: List[Any] = []          # anchors parsed graphs so their ids cannot be recycled
 
     def walk(node: Any, depth: int = 0) -> None:
-        if depth > 8 or len(found) >= 12 or id(node) in seen:
+        if depth > 12 or len(found) >= 24 or id(node) in seen:
             return
-        seen.append(id(node))
+        seen.add(id(node))
         if isinstance(node, dict):
             report = node.get("verification")
-            if isinstance(report, dict) and report.get("verdict") == "fail":
-                for f in (report.get("findings") or []):
-                    if isinstance(f, dict) and f.get("status") == "fail":
-                        found.append(f)
+            if isinstance(report, dict):
+                found.extend(_gate_issues_from(report))
             for value in node.values():
                 walk(value, depth + 1)
         elif isinstance(node, (list, tuple)):
             for value in node:
                 walk(value, depth + 1)
         elif isinstance(node, str) and '"verification"' in node:
-            # Tool results often arrive as a JSON STRING inside a ToolMessage, not as a dict.
             try:
-                walk(json.loads(node), depth + 1)
+                parsed = json.loads(node)
             except ValueError:
-                pass
+                return
+            keep.append(parsed)   # must outlive the recursive walk; see the docstring
+            walk(parsed, depth + 1)
 
     walk(execution_context)
     return found
+
+
+def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Gate findings for one verification report, keyed on the VERDICT.
+
+    ``cannot_determine`` counts. An unverifiable number and a verified one must not reach the
+    answer the same way — that asymmetry is the whole point of the gate, and keying on fail
+    findings alone meant an all-unknown run was actively relabelled "Grounded: flagged claims
+    are supported by the execution record."
+    """
+    verdict = str(report.get("verdict") or "")
+    if verdict not in {"fail", "cannot_determine"}:
+        return []
+    blocking = [f for f in (report.get("findings") or [])
+                if isinstance(f, dict) and f.get("status") in {"fail", "cannot_determine"}]
+    if blocking:
+        return blocking
+    # A verdict with no surviving finding is still a verdict: `_read_checks` truncates, so the
+    # evidence can be gone while the judgement stands. Synthesise rather than fall silent.
+    counts = report.get("counts") or {}
+    return [{"check": "invariant_gate", "status": verdict, "target": "this run",
+             "message": (f"the invariant gate returned {verdict!r} "
+                         f"(counts {counts}) but its findings were not retained; "
+                         f"treat the numbers from this run as unverified")}]
 
 
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
@@ -532,6 +574,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     #     is right there in stdout, so without this the gate would say "degrees squared" and
     #     the reconciliation would answer "it is in the record, so it is grounded."
     gate = _gate_failures(execution_context)
+    gate_verdict = ("fail" if any(g.get("status") == "fail" for g in gate)
+                    else ("cannot_determine" if gate else ""))
 
     if not _audit_flagged(audit) and not gate:
         return audit
@@ -567,11 +611,18 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}"}
                        for f in gate]
-        return {**(audit or {}), "hallucination_detected": True, "severity": "high",
+        headline = ("A deterministic invariant check FAILED on this run, so its numeric results "
+                    "are not verified."
+                    if gate_verdict == "fail" else
+                    "A deterministic invariant check COULD NOT VERIFY this run, so its numeric "
+                    "results are unconfirmed — this is not the same as them being wrong.")
+        return {**(audit or {}), "hallucination_detected": True,
+                # cannot_determine is a real caveat but not a detected error; calling it high
+                # would train the reader to ignore the label.
+                "severity": "high" if gate_verdict == "fail" else "medium",
                 "issues": gate_issues + kept,
-                "summary": ("A deterministic invariant check FAILED on this run, so its numeric "
-                            "results are not verified. " + str((audit or {}).get("summary") or "")).strip(),
-                "invariant_gate": "fail"}
+                "summary": (headline + " " + str((audit or {}).get("summary") or "")).strip(),
+                "invariant_gate": gate_verdict}
 
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],

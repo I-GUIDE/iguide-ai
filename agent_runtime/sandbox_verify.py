@@ -27,11 +27,15 @@ from __future__ import annotations
 import inspect
 import json
 import math
+from types import ModuleType
 from typing import Any, Dict, List, Optional
 
 PASS = "pass"
 FAIL = "fail"
 UNKNOWN = "cannot_determine"
+
+# Namespace-scoped signal for the coverage check; see run_checks.
+_GEO_MODULES = frozenset({"geopandas", "rasterio", "shapely", "rioxarray", "xarray"})
 
 CHECKS_FILENAME = "checks.json"
 ENVIRONMENT_FILENAME = "environment.json"
@@ -75,6 +79,35 @@ def _is_projected(crs: Any) -> Optional[bool]:
     return None
 
 
+def _crs_unit(crs: Any) -> Optional[str]:
+    """The CRS's linear axis unit, lowercased, or None when unavailable."""
+    try:
+        info = getattr(crs, "axis_info", None) or []
+        for axis in info:
+            unit = getattr(axis, "unit_name", None)
+            if isinstance(unit, str) and unit.strip():
+                return unit.strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+_UNIT_ALIASES = {
+    "metre": "metres", "meter": "metres", "metres": "metres", "meters": "metres", "m": "metres",
+    "us survey foot": "feet", "foot": "feet", "feet": "feet", "ft": "feet",
+    "kilometre": "kilometres", "kilometer": "kilometres", "km": "kilometres",
+}
+
+
+def _unit_matches(declared: Any, actual: Optional[str]) -> Optional[bool]:
+    """True/False, or None when either side is unknown."""
+    want = _UNIT_ALIASES.get(str(declared or "").strip().lower())
+    got = _UNIT_ALIASES.get(str(actual or "").strip().lower())
+    if not want or not got:
+        return None
+    return want == got
+
+
 def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
     """A distance/area/buffer result is only meaningful in a PROJECTED CRS.
 
@@ -114,9 +147,12 @@ def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
         return _finding("all_nan", UNKNOWN, name, "frame has no columns")
     if len(frame) == 0:
         return _finding("all_nan", FAIL, name, "frame is empty (0 rows)")
+    geom = _geometry_column(frame)
     bad: List[str] = []
     for col in columns:
-        if str(col) == "geometry":
+        if geom is not None and str(col) == geom:
+            continue          # a null geometry is its own problem, not a null-column one
+        if geom is None and str(col) == "geometry":
             continue
         try:
             if bool(frame[col].isna().all()):
@@ -253,6 +289,30 @@ VIOLATIONS_GLOBAL = "_IGUIDE_CONTRACT_VIOLATIONS"
 
 
 def check_contract_arg(unit: str, invariant: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]:
+    """Dispatch, descending one level into a container argument.
+
+    A contract on ``catchments: List[gpd.GeoDataFrame]`` was a guaranteed no-op: the value is a
+    list, ``_looks_like_frame`` rejects it, and the check returned None — not even
+    cannot_determine. Nine shipped invariants on the e2SFCA family were decorative, and those
+    are exactly the frames whose ``.area`` is taken.
+    """
+    if isinstance(value, (list, tuple)) and value:
+        for index, item in enumerate(value[:8]):
+            found = _check_one_arg(unit, invariant, item, suffix=f"[{index}]")
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, dict) and value:
+        for key, item in list(value.items())[:8]:
+            found = _check_one_arg(unit, invariant, item, suffix=f"[{key!r}]")
+            if found is not None:
+                return found
+        return None
+    return _check_one_arg(unit, invariant, value)
+
+
+def _check_one_arg(unit: str, invariant: Dict[str, Any], value: Any,
+                   suffix: str = "") -> Optional[Dict[str, Any]]:
     """Check ONE declared invariant against ONE actual argument, or None if satisfied.
 
     Enforced at CALL time, by wrapping the imported unit, for a reason that is not incidental:
@@ -262,26 +322,45 @@ def check_contract_arg(unit: str, invariant: Dict[str, Any], value: Any) -> Opti
     """
     check = str(invariant.get("check") or "")
     target = str(invariant.get("target") or "?")
-    where = f"{unit}({target})"
+    where = f"{unit}({target}{suffix})"
 
     if check == "projected_crs":
+        declared_unit = (invariant.get("args") or {}).get("unit")
         crs = _crs_of(value)
         if crs is None:
             if not _looks_like_frame(value):
                 return None                     # not a frame; the contract does not apply
             return _finding(check, UNKNOWN, where,
                             f"{unit} declares {target} must be in a projected CRS "
-                            f"(results in {invariant.get('args', {}).get('unit', 'metres')}), "
+                            f"(results in {declared_unit or 'metres'}), "
                             f"but the frame passed has no CRS set")
         projected = _is_projected(crs)
         if projected is False:
             return _finding(check, FAIL, where,
                             f"{unit} declares {target} must be in a PROJECTED CRS — its body "
                             f"performs a metric operation — but {crs!s} is geographic, so the "
-                            f"result is in degrees. Reproject before calling.", crs=str(crs))
+                            f"result is in degrees. Reproject to a local projected CRS "
+                            f"(a UTM or state-plane zone in {declared_unit or 'metres'}) "
+                            f"before calling.", crs=str(crs))
         if projected is None:
             return _finding(check, UNKNOWN, where,
                             f"could not determine whether {crs!s} is projected", crs=str(crs))
+        # Projected is not enough. A state-plane CRS in US survey feet satisfies "projected"
+        # while making every length 3.28x wrong — the original degrees-vs-metres error class,
+        # in feet, blessed by the check built to catch it.
+        actual_unit = _crs_unit(crs)
+        matches = _unit_matches(declared_unit, actual_unit)
+        if matches is False:
+            return _finding(check, FAIL, where,
+                            f"{unit} declares {target} in {declared_unit}, but {crs!s} measures "
+                            f"in {actual_unit} — every length and area from this frame is off by "
+                            f"the unit ratio. Reproject to a CRS in {declared_unit}.",
+                            crs=str(crs), crs_unit=actual_unit, declared_unit=str(declared_unit))
+        if matches is None and declared_unit:
+            return _finding(check, UNKNOWN, where,
+                            f"{crs!s} is projected but its linear unit ({actual_unit or 'unknown'}) "
+                            f"could not be compared to the declared {declared_unit}",
+                            crs=str(crs))
         return None
 
     if check == "crs_equals":
@@ -411,11 +490,35 @@ def _looks_like_frame(obj: Any) -> bool:
     return hasattr(obj, "columns") and hasattr(obj, "index") and hasattr(obj, "select_dtypes")
 
 
-def _has_geometry(obj: Any) -> bool:
+def _geometry_column(obj: Any) -> Optional[str]:
+    """The ACTIVE geometry column, or None.
+
+    This used to be ``"geometry" in obj.columns``. ``read_postgis`` defaults to ``geom``,
+    geoparquet keeps whatever the writer used, and ``rename_geometry`` is routine — so a real
+    GeoDataFrame was listed as inspected and reported clean while its buffer ran in degrees. Ask
+    the object what its geometry column IS rather than guessing its name.
+    """
+    for probe in ("geometry",):
+        try:
+            name = getattr(getattr(obj, probe), "name", None)
+            if isinstance(name, str) and name:
+                return name
+        except Exception:
+            pass
+    name = getattr(obj, "_geometry_column_name", None)
+    if isinstance(name, str) and name:
+        return name
     try:
-        return "geometry" in list(getattr(obj, "columns", []))
+        for col in list(getattr(obj, "columns", [])):
+            if "geometry" in str(getattr(obj[col], "dtype", "")).lower():
+                return str(col)
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _has_geometry(obj: Any) -> bool:
+    return _geometry_column(obj) is not None
 
 
 def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, Any]:
@@ -430,14 +533,24 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
         if isinstance(violation, dict):
             findings.append(violation)
 
+    # Geometry-bearing frames FIRST. Globals were walked in definition order and capped at
+    # max_frames with a silent `continue`, so in a multi-step run the late output frames — the
+    # ones a number is quoted from — were exactly the ones dropped, and the report said `pass`
+    # with no sign of truncation.
+    candidates: List[tuple] = []
     for name, obj in list(namespace.items()):
-        if name.startswith("_") or len(inspected) >= max_frames:
+        if name.startswith("_"):
             continue
         try:
             if not _looks_like_frame(obj):
                 continue
+            candidates.append((0 if _has_geometry(obj) else 1, name, obj))
         except Exception:
             continue
+    candidates.sort(key=lambda row: row[0])
+    skipped = [name for _rank, name, _obj in candidates[max_frames:]]
+
+    for _rank, name, obj in candidates[:max_frames]:
         inspected.append(name)
         for fn in (check_not_all_nan, check_join_cardinality):
             try:
@@ -452,6 +565,28 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
             except Exception as exc:
                 findings.append(_finding("projected_crs", UNKNOWN, name, f"check errored: {exc}"))
 
+    # A3: work done inside `def main()` leaves module scope empty, and the verdict was built
+    # from finding counts alone — so one clean declared output scored `pass` with
+    # `inspected: []`. A geospatial run whose frames were never reachable is UNVERIFIED.
+    if not inspected:
+        # Scoped to the namespace under inspection, NOT to sys.modules. `sys.modules` is
+        # process-global: it reports geopandas as loaded because some *other* module imported
+        # it, so a script doing pure arithmetic was called unverifiable. A bound module object
+        # in the namespace being checked is the precise signal — the user's own
+        # `import geopandas as gpd` at module scope — and it is testable.
+        geo_bound = False
+        for _name, _obj in list(namespace.items()):
+            mod = getattr(_obj, "__name__", None) if isinstance(_obj, ModuleType) else None
+            if mod and mod.split(".")[0] in _GEO_MODULES:
+                geo_bound = True
+                break
+        if geo_bound:
+            findings.append(_finding("coverage", UNKNOWN, "module scope",
+                                     "a geospatial library is imported but no frame-like "
+                                     "binding was reachable at module scope, so no frame was "
+                                     "checked — work done inside a function cannot be "
+                                     "verified; assign results to module-level names"))
+
     # Declared numeric outputs, if the run published any. Checked outside the frame loop
     # because they are scalars the ANSWER will quote, not frames.
     try:
@@ -460,6 +595,13 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
     except Exception as exc:
         findings.append(_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
                                  f"check errored: {exc}"))
+
+    if skipped:
+        # Never a silent cap: an uninspected frame is an unknown, not a pass.
+        findings.append(_finding("coverage", UNKNOWN, ", ".join(skipped[:8]),
+                                 f"{len(skipped)} frame-like binding(s) exceeded the inspection "
+                                 f"budget of {max_frames} and were NOT checked",
+                                 skipped=skipped[:24]))
 
     counts = {PASS: 0, FAIL: 0, UNKNOWN: 0}
     for f in findings:
@@ -495,19 +637,34 @@ def write_checks(namespace: Dict[str, Any], path: str = CHECKS_FILENAME) -> Dict
     return report
 
 
-_EPILOGUE = '''
+_PROLOGUE = '''
+# --- I-GUIDE invariant gate: registered BEFORE your code runs; does not change your results ---
+{contracts_literal}
+_IGUIDE_GATE_DONE = False
 
-# --- I-GUIDE invariant gate (appended automatically; does not affect your results) ---
-def _iguide_run_invariant_gate():
-    # Unaliased: the inlined checks below are this module's real source, so they reference
-    # `math` and `json` by their ordinary names. Importing them only as _math/_json left
-    # check_finite raising "name 'math' is not defined" INSIDE the guard, which surfaced as a
-    # cannot_determine — a check silently degraded rather than reporting.
-    import json, math
-    _ns = dict(globals())
+
+def _iguide_gate_body():
 {body}
+    # `locals()`, not a hand-listed tuple. The tuple form returned only
+    # (run_checks, install_contract_guards) while the gate below also called
+    # capture_environment() and read DECLARED_OUTPUTS -- both locals of THIS function, so both
+    # raised NameError inside the gate's own `except Exception`, which reported the run as
+    # `cannot_determine` with no findings. Indistinguishable from an honest "could not verify",
+    # and it survived a four-exit-path probe that only checked that checks.json existed.
+    # Returning the whole scope cannot drift as helpers are added.
+    return dict(locals())
+
+
+def _iguide_run_invariant_gate():
+    global _IGUIDE_GATE_DONE
+    if _IGUIDE_GATE_DONE:
+        return
+    _IGUIDE_GATE_DONE = True
+    import json
+    _h = _iguide_gate_body()
+    _ns = dict(globals())
     try:
-        _rep = run_checks(_ns)
+        _rep = _h["run_checks"](_ns)
     except Exception as _e:
         _rep = {{"schema": 1, "findings": [], "counts": {{"pass": 0, "fail": 0,
                 "cannot_determine": 1}}, "verdict": "cannot_determine",
@@ -517,42 +674,27 @@ def _iguide_run_invariant_gate():
             json.dump(_rep, _fh, default=str)
     except OSError:
         pass
-    # Environment capture, from inside: an agent-side pip freeze would describe the AGENT's
-    # environment, not the container that produced the number.
     try:
         with open({env_filename!r}, "w", encoding="utf-8") as _fh:
-            json.dump(capture_environment(), _fh, default=str)
+            json.dump(_h["capture_environment"](), _fh, default=str)
     except Exception:
         pass
-    # The declared output VALUES, so a re-run has something to COMPARE rather than merely
-    # repeat. The checks report per-output findings; the findings are not the numbers.
     try:
         with open({declared_filename!r}, "w", encoding="utf-8") as _fh:
-            json.dump(_ns.get(DECLARED_OUTPUTS) or {{}}, _fh, default=str)
+            json.dump(_ns.get(_h["DECLARED_OUTPUTS"]) or {{}}, _fh, default=str)
     except Exception:
         pass
 
 
+# atexit, and registered from the PROLOGUE. An epilogue appended after the user's code is never
+# even DEFINED when that code ends in `sys.exit(main())` — the standard script skeleton — so the
+# run exited 0, discarded an already-recorded violation, and wrote no checks.json. Registering
+# before the user's code runs is the only placement that survives every exit path.
 try:
-    _iguide_run_invariant_gate()
+    import atexit as _iguide_atexit
+    _iguide_atexit.register(_iguide_run_invariant_gate)
 except Exception:
     pass
-'''
-
-
-
-_PROLOGUE = '''
-# --- I-GUIDE contract guards (appended automatically; does not change your results) ---
-{contracts_literal}
-
-
-def _iguide_install_contract_guards():
-{body}
-    try:
-        install_contract_guards(globals(), {contracts_global})
-    except Exception:
-        pass
-
 
 try:
     _iguide_install_contract_guards()
@@ -562,56 +704,84 @@ except Exception:
 '''
 
 
-def prologue_source(contracts: Optional[Dict[str, Any]] = None) -> str:
-    """Code to run BEFORE the user's, wrapping library units with their declared invariants.
+def _inlined_helpers() -> str:
+    """This module's own check functions, indented for injection into the sandbox."""
+    parts: List[str] = []
+    for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
+                check_not_all_nan, check_join_cardinality, check_finite, check_declared_units,
+                capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
+                _looks_like_frame, _has_geometry, install_contract_guards, run_checks):
+        src = inspect.getsource(obj)
+        parts.append("\n".join("    " + line if line.strip() else line
+                               for line in src.splitlines()))
+    return ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
+            f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
+            f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
+            f"    _UNIT_ALIASES = {_UNIT_ALIASES!r}\n"
+            f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
+            f"    _GEO_MODULES = {set(_GEO_MODULES)!r}\n"
+            "    import math\n"
+            "    from types import ModuleType\n"
+            "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
 
-    Returns "" when there is nothing to guard, so a run that imports no library unit pays
-    nothing. The contracts are injected as a literal rather than read from the mounted
-    registry: the mount is optional and the sandbox has no network, and a guard that silently
-    does not install is worse than no guard at all — it would read as "the contract passed".
+
+def prologue_source(contracts: Optional[Dict[str, Any]] = None) -> str:
+    """Everything the gate needs, injected BEFORE the user's code.
+
+    Always emitted when the gate is enabled — not only when there are contracts to guard —
+    because this is where the atexit registration lives, and that registration is what makes the
+    gate survive ``sys.exit()``, an uncaught exception, and ``os._exit``-free early returns.
+
+    Contracts are injected as a literal rather than read from the mounted registry: the mount is
+    optional and the sandbox has no network, and a guard that silently fails to install reads
+    exactly like a contract that passed.
     """
     import json as _json
 
-    if not contracts:
-        return ""
-    parts: List[str] = []
-    for obj in (_finding, _crs_of, _is_projected, check_not_all_nan, check_contract_arg,
-                _looks_like_frame, install_contract_guards):
-        src = inspect.getsource(obj)
-        parts.append("\n".join("    " + line if line.strip() else line
-                               for line in src.splitlines()))
-    body = ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
-            f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
-            "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
+    contracts = contracts or {}
     literal = f"{CONTRACTS_GLOBAL} = " + _json.dumps(contracts, default=str)
-    return _PROLOGUE.format(contracts_literal=literal, body=body,
-                            contracts_global=CONTRACTS_GLOBAL)
+    installer = (
+        "def _iguide_install_contract_guards():\n"
+        f"    _iguide_gate_body()['install_contract_guards']"
+        f"(globals(), {CONTRACTS_GLOBAL})\n"
+        if contracts else
+        "def _iguide_install_contract_guards():\n    return None\n")
+    return _PROLOGUE.format(contracts_literal=literal + "\n\n\n" + installer,
+                            body=_inlined_helpers(), filename=CHECKS_FILENAME,
+                            env_filename=ENVIRONMENT_FILENAME,
+                            declared_filename=DECLARED_FILENAME)
 
 
 def epilogue_source() -> str:
-    """Self-contained checker source to append to sandboxed code.
+    """A second, inline invocation appended AFTER the user's code.
 
-    The check functions are inlined rather than imported: the method-library mount may be
-    absent (nothing ingested yet) and the sandbox has no network, so an import-based epilogue
-    would silently do nothing exactly when a library-free run most needs checking.
+    Belt and braces: the prologue's atexit registration is what guarantees the report, but an
+    inline call runs the checks while the interpreter is still in a normal state, which produces
+    better diagnostics when a check itself misbehaves. ``_IGUIDE_GATE_DONE`` makes the pair
+    idempotent, so whichever fires first wins and the other is a no-op.
     """
-    import inspect
-
-    parts: List[str] = []
-    for obj in (_finding, _crs_of, _is_projected, check_projected_crs, check_not_all_nan,
-                check_join_cardinality, check_finite, check_declared_units, capture_environment,
-                check_contract_arg, _looks_like_frame, _has_geometry, run_checks):
-        src = inspect.getsource(obj)
-        parts.append("\n".join("    " + line if line.strip() else line
-                               for line in src.splitlines()))
-    body = ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
-            f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
-            f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
-            f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
-            "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
-    return _EPILOGUE.format(body=body, filename=CHECKS_FILENAME,
-                            env_filename=ENVIRONMENT_FILENAME,
-                            declared_filename=DECLARED_FILENAME)
+    return (
+        "\n\n# --- I-GUIDE invariant gate (inline; the prologue also registers it atexit) ---\n"
+        "try:\n"
+        "    _iguide_run_invariant_gate()\n"
+        "except NameError:\n"
+        # The prologue defines the gate. If only the epilogue was emitted, a bare
+        # `except Exception: pass` silently wrote NO report -- indistinguishable from a gate
+        # that was never enabled, which is the exact failure shape this gate exists to catch.
+        # Record the refusal instead.
+        "    try:\n"
+        "        import json as _j, pathlib as _p\n"
+        "        _p.Path(%r).write_text(_j.dumps({\n"
+        "            'verdict': 'cannot_determine', 'inspected': [], 'findings': [{\n"
+        "                'check': 'gate', 'status': 'cannot_determine', 'target': 'runtime',\n"
+        "                'message': 'the invariant gate prologue was not installed, so nothing "
+        "was checked'}],\n"
+        "            'counts': {'pass': 0, 'fail': 0, 'cannot_determine': 1}}), "
+        "encoding='utf-8')\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "except Exception:\n"
+        "    pass\n" % CHECKS_FILENAME)
 
 
 __all__ = ["run_checks", "write_checks", "epilogue_source", "capture_environment",

@@ -15,11 +15,12 @@ Two properties are asserted throughout:
 
 from __future__ import annotations
 
+import ast
 import json
 
 import pytest
 
-from agent_runtime.sandbox_verify import (FAIL, PASS, UNKNOWN, check_join_cardinality,
+from agent_runtime.sandbox_verify import (prologue_source, FAIL, PASS, UNKNOWN, check_join_cardinality,
                                           check_not_all_nan, check_projected_crs,
                                           epilogue_source, run_checks)
 
@@ -167,16 +168,30 @@ def test_underscore_names_are_skipped():
 
 # ------------------------------------------------------------------ the injected epilogue
 
-def test_the_epilogue_is_self_contained(tmp_path, monkeypatch):
+def test_the_injected_gate_is_self_contained(tmp_path, monkeypatch):
     """It runs in the sandbox where the method library may be absent and there is no network,
-    so it must not depend on importing anything of ours."""
-    src = epilogue_source()
-    assert "import agent_runtime" not in src
-    assert "iguide_methods" not in src
+    so it must not depend on importing anything of ours.
+
+    The gate body moved into the PROLOGUE so that its atexit registration exists before the
+    user's code runs — a script ending in ``sys.exit(main())`` never even defines an appended
+    epilogue. The assembled pair is what the sandbox executes, so it is what gets tested.
+    """
+    src = prologue_source(None) + epilogue_source()
+    # Checked against the parsed IMPORT statements, not against the text. The gate inlines its
+    # own helpers, docstrings and all, and one of those docstrings mentions
+    # `from iguide_methods...` as prose -- a substring assertion fails on the explanation while
+    # saying nothing about what the code actually imports.
+    imported = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not imported & {"agent_runtime", "iguide_methods", "geopandas", "pandas"}, imported
 
     monkeypatch.chdir(tmp_path)
-    ns = {"gdf": _geo("EPSG:4326")}
-    exec(compile(src, "<epilogue>", "exec"), ns)
+    ns = {"gdf": _geo("EPSG:4326"), "__name__": "__main__"}
+    exec(compile(src, "<script>", "exec"), ns)
     report = json.loads((tmp_path / "checks.json").read_text())
     assert report["verdict"] == FAIL
     assert _status(report["findings"], "gdf", "projected_crs") == FAIL
@@ -374,8 +389,178 @@ def test_declared_outputs_survive_the_epilogue(tmp_path, monkeypatch):
     from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
 
     monkeypatch.chdir(tmp_path)
-    ns = {DECLARED_OUTPUTS: {"radius": {"value": 25000, "unit": None}}}
-    exec(compile(epilogue_source(), "<epilogue>", "exec"), ns)
+    ns = {DECLARED_OUTPUTS: {"radius": {"value": 25000, "unit": None}}, "__name__": "__main__"}
+    exec(compile(prologue_source(None) + epilogue_source(), "<script>", "exec"), ns)
     report = json.loads((tmp_path / "checks.json").read_text())
     assert report["verdict"] == FAIL
     assert any(f["check"] == "declared_units" for f in report["findings"])
+
+
+# ------------------------------------------------------------------ the gate cannot go quiet
+
+def test_the_epilogue_alone_records_that_nothing_was_checked(tmp_path, monkeypatch):
+    """The epilogue calls a gate the PROLOGUE defines. If only the epilogue is ever emitted,
+    the call raises NameError — and a bare ``except Exception: pass`` around it wrote no report
+    at all, which is indistinguishable from a gate that was deliberately disabled.
+
+    An absent report must never be the way "we checked nothing" is communicated.
+    """
+    monkeypatch.chdir(tmp_path)
+    ns: dict = {"gdf": _geo("EPSG:4326"), "__name__": "__main__"}
+    exec(compile(epilogue_source(), "<epilogue>", "exec"), ns)
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] == UNKNOWN
+    assert any("prologue was not installed" in f["message"] for f in report["findings"])
+
+
+@pytest.mark.parametrize("tail", [
+    "sys.exit(main())",          # the standard script skeleton
+    "main()\nexit()",
+    "main()\nraise RuntimeError('boom')",
+    "main()",
+])
+def test_every_exit_path_writes_a_report_with_no_internal_error(tmp_path, tail):
+    """Three separate NameErrors have now been swallowed by the gate's own ``except`` and
+    surfaced as a bare ``cannot_determine``: ``math as _math``, ``ModuleType``, and a
+    ``_iguide_gate_body`` that returned two of the four names the gate used — which silently
+    stopped ``environment.json`` and ``declared_outputs.json`` being written at all, leaving a
+    replay with nothing to compare.
+
+    Asserting only that checks.json EXISTS does not catch any of them; the absence of an
+    ``error`` key is what does. This runs a real subprocess so the exit paths are real.
+    """
+    import subprocess
+    import sys as _sys
+
+    body = ("import geopandas as gpd\n"
+            "from shapely.geometry import Point\n"
+            "def main():\n"
+            "    g = gpd.GeoDataFrame({'a': [1]}, geometry=[Point(0, 0)], crs='EPSG:4326')\n"
+            "    g['b'] = g.buffer(0.2)\n"
+            "    return 0\n")
+    (tmp_path / "run.py").write_text(
+        prologue_source(None) + body + tail + "\n" + epilogue_source(), encoding="utf-8")
+    subprocess.run([_sys.executable, "run.py"], cwd=tmp_path, capture_output=True, text=True)
+
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert "error" not in report, f"the gate errored internally: {report.get('error')}"
+    assert (tmp_path / "environment.json").is_file(), "no env capture = no reproducibility"
+    # Work done inside main() leaves module scope empty, so the honest verdict is UNKNOWN with
+    # a coverage finding that SAYS SO -- not a pass, and not a bare unexplained unknown.
+    assert report["verdict"] == UNKNOWN
+    assert any(f["check"] == "coverage" for f in report["findings"])
+
+
+def test_a_run_with_no_geospatial_library_can_still_pass(tmp_path, monkeypatch):
+    """The coverage guard keyed on ``sys.modules``, which is process-global: geopandas being
+    loaded by some unrelated module made every pure-arithmetic run unverifiable. Flooding the
+    channel with unknowns is how a real one stops being read."""
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
+
+    monkeypatch.chdir(tmp_path)
+    ns = {DECLARED_OUTPUTS: {"n": {"value": 3, "unit": "count"}}, "__name__": "__main__"}
+    exec(compile(prologue_source(None) + epilogue_source(), "<script>", "exec"), ns)
+    assert json.loads((tmp_path / "checks.json").read_text())["verdict"] == PASS
+
+
+def test_a_geospatial_run_whose_frames_are_unreachable_cannot_pass(tmp_path, monkeypatch):
+    """The same guard, in the case it exists for: a bound geo module and no frame to inspect."""
+    import geopandas
+
+    monkeypatch.chdir(tmp_path)
+    ns = {"gpd": geopandas, "main": lambda: None, "__name__": "__main__"}
+    exec(compile(prologue_source(None) + epilogue_source(), "<script>", "exec"), ns)
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] == UNKNOWN
+    assert any(f["check"] == "coverage" for f in report["findings"])
+
+
+# ------------------------------------------------- the frame the number came from (A4, A7)
+
+def test_a_geometry_column_that_is_not_named_geometry_is_still_found():
+    """``_has_geometry`` tested for a column literally named ``geometry``. GeoPandas lets the
+    active geometry be any column — ``geom``, ``the_geom``, ``centroid`` are all common, and
+    PostGIS exports default to ``geom`` — so a frame carrying real geometry in a differently
+    named column was never CRS-checked at all, and reported clean."""
+    from agent_runtime.sandbox_verify import _geometry_column, check_projected_crs
+
+    gdf = _geo("EPSG:4326").rename_geometry("geom")
+    assert _geometry_column(gdf) == "geom"
+    assert check_projected_crs("gdf", gdf)["status"] == FAIL
+
+
+def test_geometry_bearing_frames_are_inspected_before_plain_ones():
+    """The frame budget is 12 and globals were walked in DEFINITION order, so in a multi-step
+    run the late output frames — the ones a number is quoted from — were exactly the ones
+    dropped, and the report said ``pass`` with no sign of truncation."""
+    ns = {f"df{i}": _pd().DataFrame({"a": [1, 2]}) for i in range(14)}
+    ns["result_gdf"] = _geo("EPSG:4326")          # defined LAST, would have been cut
+    report = run_checks(ns)
+    assert report["verdict"] == FAIL
+    assert "result_gdf" in report["inspected"]
+
+
+def test_a_truncated_inspection_says_so():
+    """A silent cap is the failure mode this whole module exists to prevent."""
+    ns = {f"df{i}": _pd().DataFrame({"a": [1, 2]}) for i in range(20)}
+    report = run_checks(ns)
+    coverage = [f for f in report["findings"] if f["check"] == "coverage"]
+    assert coverage and "NOT checked" in coverage[0]["message"]
+    assert report["verdict"] == UNKNOWN
+
+
+def _pd():
+    import pandas
+    return pandas
+
+
+# ------------------------------------------------- projected is not the same as metres (A6)
+
+@pytest.mark.parametrize("epsg,declared,expected", [
+    ("EPSG:32616", "metres", PASS),     # UTM 16N, metres
+    ("EPSG:3857", "metres", PASS),      # web mercator, metres
+    # Illinois East state plane in US SURVEY FEET. `is_projected` is True, so the CRS check
+    # passed and a buffer declared in metres was silently 3.28x too large. "Projected" answers
+    # a different question than "in the unit you declared".
+    ("EPSG:3435", "metres", FAIL),
+    ("EPSG:3435", "feet", PASS),
+])
+def test_a_projected_crs_in_the_wrong_unit_fails_a_declared_unit(epsg, declared, expected):
+    from agent_runtime.sandbox_verify import _crs_unit, _unit_matches
+
+    gdf = _geo(epsg)
+    actual = _crs_unit(gdf.crs)
+    matched = _unit_matches(declared, actual)
+    assert matched is not None, f"{epsg} axis unit was unreadable ({actual!r})"
+    assert (PASS if matched else FAIL) == expected
+
+
+# ------------------------------------------------- contracts on containers (A9)
+
+def test_a_contract_descends_into_a_list_of_frames():
+    """``e2sfca(catchments)`` takes a LIST of frames. The guard bound the argument and tested it
+    with ``_looks_like_frame``, which a list is not, so the invariant declared on that parameter
+    was skipped — silently, for every unit whose interface is a collection."""
+    from agent_runtime.sandbox_verify import check_contract_arg
+
+    inv = {"check": "projected_crs", "target": "catchments"}
+    found = check_contract_arg("e2sfca", inv, [_geo("EPSG:4326"), _geo("EPSG:4326")])
+    assert found and found["status"] == FAIL
+    assert "catchments[0]" in found["target"], found["target"]
+
+
+def test_a_contract_descends_into_a_dict_of_frames():
+    from agent_runtime.sandbox_verify import check_contract_arg
+
+    inv = {"check": "projected_crs", "target": "layers"}
+    found = check_contract_arg("overlay", inv, {"tracts": _geo("EPSG:4326")})
+    assert found and found["status"] == FAIL
+    assert "layers['tracts']" in found["target"] or "layers[tracts]" in found["target"]
+
+
+def test_a_container_of_correct_frames_passes():
+    """No false positives, or the guard gets switched off."""
+    from agent_runtime.sandbox_verify import check_contract_arg
+
+    inv = {"check": "projected_crs", "target": "catchments"}
+    assert check_contract_arg("e2sfca", inv, [_geo("EPSG:32616")]) is None

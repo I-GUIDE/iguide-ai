@@ -105,7 +105,10 @@ def test_a_geographic_argument_fails_the_declared_invariant():
     found = check_contract_arg("buffer_it", PROJECTED_INV, _geo("EPSG:4326"))
     assert found and found["status"] == FAIL
     assert "buffer_it declares gdf" in found["message"]
-    assert "Reproject before calling" in found["message"]
+    assert "before calling" in found["message"]
+    assert "UTM or state-plane" in found["message"], (
+        "naming the fix concretely is the difference between a diagnosis and a "
+        "complaint the model cannot act on")
 
 
 def test_a_projected_argument_satisfies_it():
@@ -233,10 +236,19 @@ def test_a_function_whose_signature_cannot_be_read_still_runs():
 
 # ------------------------------------------------------------------ the injected prologue
 
-def test_no_contracts_means_no_prologue():
-    """A run importing no library unit pays nothing."""
-    assert prologue_source(None) == ""
-    assert prologue_source({}) == ""
+def test_no_contracts_means_no_guards_but_still_a_gate():
+    """A run importing no library unit installs no guards -- but STILL gets the gate.
+
+    The prologue used to return "" with no contracts. It cannot any more: the prologue is where
+    the gate is registered with atexit, and that registration is the only placement that
+    survives ``sys.exit(main())``, an uncaught exception, and an early ``exit()``. So "no
+    contracts" now means "no monkeypatching", not "no verification".
+    """
+    for empty in (None, {}):
+        src = prologue_source(empty)
+        assert "_iguide_atexit.register" in src, "the gate must survive every exit path"
+        assert "install_contract_guards(globals()" not in src, "nothing to guard"
+        assert "return None" in src, "the installer is a no-op, not absent"
 
 
 def test_the_prologue_compiles_and_is_self_contained():
@@ -254,10 +266,23 @@ def test_the_contracts_are_injected_as_a_literal():
     assert "load_registry" not in src
 
 
-def test_the_prologue_cannot_break_a_run():
+def test_the_prologue_cannot_break_a_run(tmp_path, monkeypatch):
+    """A module that cannot be imported must not stop the analysis it was going to guard.
+
+    ``chdir`` is not incidental. The prologue registers the gate with ``atexit``, so exec'ing it
+    anywhere schedules a report to be written into the CWD when that interpreter exits — this
+    test was dropping checks.json, environment.json and declared_outputs.json into the repo
+    root at the end of every pytest run. That is the cost of the registration living in the
+    prologue, which is also the only placement that survives ``sys.exit()``.
+    """
+    monkeypatch.chdir(tmp_path)
     src = prologue_source({"f": {"module": "does.not.exist", "symbol": "f",
                                 "invariants": [PROJECTED_INV]}})
-    exec(compile(src, "<prologue>", "exec"), {})
+    ns: dict = {}
+    exec(compile(src, "<prologue>", "exec"), ns)
+    # It installed nothing (the module is unimportable) and it raised nothing.
+    ns["_iguide_run_invariant_gate"]()
+    assert (tmp_path / "checks.json").is_file()
 
 
 # ------------------------------------------------------------------ reaching the verdict
@@ -359,3 +384,44 @@ def test_the_requirement_names_the_parameter():
         "invariants": [{"check": "projected_crs", "target": "demand", "args": {}}]}}
     assert search_methods("f accessibility", registry=registry)[0]["requires"] == \
         ["projected_crs(demand)"]
+
+
+# ------------------------------------------------------------------ import spellings (A5)
+
+@pytest.mark.parametrize("code,expected", [
+    ("from iguide_methods.ke_x.v_abc import load_data", ["load_data"]),
+    # An alias. The regex required `import <name>` at the end of the line, so `as` killed it.
+    ("from iguide_methods.ke_x.v_abc import load_data as loader", ["load_data"]),
+    # Parenthesised/wrapped. EVERY advertised import_line exceeds 79 characters, so a wrapped
+    # list is the expected spelling, not an exotic one.
+    ("from iguide_methods.ke_x.v_abc import (\n    load_data,\n    plot_map,\n)",
+     ["load_data", "plot_map"]),
+    ("from iguide_methods.ke_x.v_abc import load_data, plot_map", ["load_data", "plot_map"]),
+    # The element-package alias, which import_line's own docstring says "keeps working".
+    ("from iguide_methods.ke_x import load_data", ["load_data"]),
+    ("import geopandas as gpd\nfrom shapely.geometry import Point", []),
+    ("from iguide_methods.ke_x.v_abc import *", []),          # no symbol to guard
+    ("def f(:\n  pass", []),                                   # unparseable: no crash
+])
+def test_every_import_spelling_the_system_emits_is_recognised(code, expected):
+    """``library_units_used`` decides whether contract guards get installed at all. It was a
+    regex over one physical line, so three spellings the system itself produces resolved ZERO
+    units — and a run with no guards installed reports exactly like a run whose contracts all
+    passed. Parsed with ``ast`` now."""
+    from agent_runtime.artifacts import library_units_used
+
+    assert sorted(u["symbol"] for u in library_units_used(code)) == sorted(expected)
+
+
+def test_an_alias_is_recorded_so_the_local_name_can_be_mapped_back():
+    from agent_runtime.artifacts import library_units_used
+
+    unit = library_units_used(
+        "from iguide_methods.ke_x.v_abc import load_data as loader")[0]
+    assert unit["alias"] == "loader" and unit["slice_sha"] == "abc"
+
+
+def test_a_relative_import_is_not_mistaken_for_the_library():
+    from agent_runtime.artifacts import library_units_used
+
+    assert library_units_used("from .iguide_methods import x") == []

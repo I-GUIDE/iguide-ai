@@ -24,7 +24,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -90,25 +89,50 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-_IMPORT_RE = re.compile(r"^\s*from\s+(iguide_methods\.[\w.]+)\s+import\s+([\w, ]+)", re.M)
-
-
 def library_units_used(code: str) -> List[Dict[str, str]]:
     """Method-library units the code imports, with their version-pinned module path.
 
-    The ``v_<slice_sha>`` segment is the whole point: it records WHICH version of an extracted
-    unit produced the result, so a re-run after a re-ingest imports the same code rather than
-    a newer one that happens to share a name.
+    Parsed with ``ast``, not a regex. The regex form matched only
+    ``from iguide_methods.X.v_sha import name[, name]`` on one physical line, so THREE spellings
+    the system itself produces resolved zero units — and therefore installed zero contract
+    guards, leaving the run reporting clean:
+
+      * ``import calculate_buffers as buffer_frame`` — an alias
+      * ``from iguide_methods.X.v_sha import (a,\n    b)`` — a parenthesised/wrapped list, and
+        every advertised import line exceeds 79 characters, so wrapping is the expected case
+      * ``from iguide_methods.ke_x import symbol`` — the element-package alias, which
+        ``import_line``'s own docstring concedes "keeps working"
+
+    ``alias`` is recorded so a caller can map the local name back to the unit; the guard patches
+    the module attribute, so an alias is guarded either way once the unit is found.
     """
+    import ast
+
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return []
     out: List[Dict[str, str]] = []
-    for module, symbols in _IMPORT_RE.findall(code or ""):
-        sha = ""
-        for part in module.split("."):
-            if part.startswith("v_"):
-                sha = part[2:]
-        for symbol in (s.strip() for s in symbols.split(",")):
-            if symbol:
-                out.append({"symbol": symbol, "module": module, "slice_sha": sha})
+    seen: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level:
+            continue
+        module = node.module or ""
+        if module != "iguide_methods" and not module.startswith("iguide_methods."):
+            continue
+        sha = next((part[2:] for part in module.split(".") if part.startswith("v_")), "")
+        for alias in node.names:
+            symbol = alias.name
+            if not symbol or symbol == "*":
+                continue
+            key = (module, symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            row = {"symbol": symbol, "module": module, "slice_sha": sha}
+            if alias.asname:
+                row["alias"] = alias.asname
+            out.append(row)
     return out
 
 
