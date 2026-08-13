@@ -193,6 +193,15 @@ def make_code_execution_tools(
             # package name: one run guessed `from method_library import ...` (the host
             # directory name) and failed with ModuleNotFoundError. The importable package is
             # `iguide_methods`, whatever the mount is called.
+            # The gate can only check a UNIT if the run declares one; nothing in a frame
+            # distinguishes 21500 metres from 21500 feet.
+            "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
+            "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
+            "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
+            "failed gate means the reported numbers are not verified and the answer will say "
+            "so. For any number your answer will quote, declare it as "
+            "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\"}} "
+            "(optional \"min\"/\"max\" get range-checked); a null unit blocks verification. "
             "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
             "`iguide_methods` — extracted, independently callable functions from platform "
             "elements, already present with NO install and NO network. Get an exact, "

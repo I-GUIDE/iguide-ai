@@ -1471,3 +1471,54 @@ for writing the adversarial cases before trusting the implementation.
 **Next** the remaining checks (declared units on numeric outputs, output bounds), and wiring
 the verdict into `_reconcile_audit_with_artifacts` so an unverified number cannot be presented
 as verified.
+
+## 2026-08-13 · M6.2 · The gate now BLOCKS, and the last two checks
+**Change** `_gate_failures()` + reconciliation changes in `supervisor/graph.py`;
+  `check_declared_units` (units + optional bounds) in `sandbox_verify.py`; `execute_code`'s
+  description teaches the `IGUIDE_OUTPUTS` convention. 42 gate tests.
+
+**Why** M6.1 made the gate *observe*. It did not make it *matter*, and there was a specific
+hole. `_reconcile_audit_with_artifacts` rule (2) drops a disputed number when that number
+appears in the execution record — but **a wrong number appears in the record too**.
+`AREA: 0.196` is right there in stdout, so the gate would say "that is degrees squared" and the
+reconciliation would answer "it is in the record, so it is grounded." Rule (2) is now disabled
+whenever the gate failed, and the gate flags **even when the LLM auditor found nothing**,
+because the gate knows a distance was computed in degrees and an auditor reading prose cannot.
+
+**Measured** in a real container, all five checks:
+
+| case | exit | verdict | why |
+|---|---|---|---|
+| geographic buffer | **0** | **fail** | `projected_crs` on both frames |
+| projected + declared unit | 0 | **pass** | — |
+| projected, unit omitted | 0 | **fail** | `declared_units`: no unit given |
+
+and on the answer path:
+
+| situation | before | after |
+|---|---|---|
+| number from a gate-**failed** run | cleared as grounded | **flagged, severity high** |
+| number from a gate-**passed** run | cleared | cleared (M6a suppression intact) |
+| gate failed, auditor **silent** | nothing | **flagged** |
+
+Suite **841 passed**, same 3 pre-existing failures.
+
+`declared_units` exists because no amount of frame inspection can distinguish 21500 metres from
+21500 feet. A null unit is a FAIL, not an omission — the number most likely to be wrong is
+exactly the one whose unit nobody wrote down. Bounds are checked only when the run declares
+them; inventing a plausible range would manufacture false positives.
+
+**Surprised by** two things, both about test fixtures rather than code.
+
+First, I "found" a rule-(2) regression that did not exist: my fixture used
+`severity: "medium"`, and `_audit_flagged` gates on `{"high"}` only — so the function returned
+early and never reached the rule I thought I had broken. The lesson is narrow but real: when a
+test of a guard passes suspiciously, check that the guard was entered.
+
+Second, the epilogue imported `math as _math` while the inlined checks — which are this
+module's own source — reference bare `math`. `check_finite` raised `NameError` *inside* its
+guard, so it surfaced as `cannot_determine`: a check that had silently stopped checking while
+still reporting. Exactly the failure shape this gate exists to prevent, in the gate itself.
+
+**Next** M2's reproducibility half — `stage_url`/`stage_object`, artifact emission and
+`rerun_artifact.py`.

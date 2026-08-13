@@ -168,6 +168,78 @@ def check_finite(name: str, value: Any) -> Dict[str, Any]:
     return _finding("finite_value", PASS, name, f"{f}")
 
 
+# Names a run is expected to declare when it reports a number the answer will quote. The
+# convention is cheap on the model's side and it is the only way a *unit* can be checked at
+# all: 21500 is correct in metres and wrong in feet, and no amount of frame inspection can
+# distinguish them.
+DECLARED_OUTPUTS = "IGUIDE_OUTPUTS"
+
+_KNOWN_UNITS = {"metres", "meters", "m", "kilometres", "kilometers", "km", "feet", "ft",
+                "miles", "mi", "degrees", "deg", "count", "percent", "%", "ratio",
+                "square_metres", "m2", "square_kilometres", "km2", "hectares", "acres",
+                "index", "none", "dimensionless"}
+
+
+def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
+    """Every numeric output the run declares must carry a unit and be in a plausible range.
+
+    ``IGUIDE_OUTPUTS`` is expected to look like::
+
+        IGUIDE_OUTPUTS = {"buffer_radius": {"value": 25000, "unit": "metres"},
+                          "areas_covered": {"value": 77, "unit": "count",
+                                            "min": 0, "max": 100}}
+
+    A ``unit`` of ``None`` is a FAIL rather than an omission: the plan's rule is that a null
+    unit blocks "verified", because the number most likely to be wrong is exactly the one whose
+    unit nobody wrote down. ``min``/``max`` are optional and only checked when given — an
+    invented plausible range would be a false positive generator.
+    """
+    findings: List[Dict[str, Any]] = []
+    if outputs is None:
+        return findings
+    if not isinstance(outputs, dict):
+        return [_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
+                         f"expected a dict, got {type(outputs).__name__}")]
+    if not outputs:
+        return findings
+    for key, spec in list(outputs.items())[:24]:
+        target = str(key)
+        if not isinstance(spec, dict):
+            findings.append(check_finite(target, spec))
+            findings.append(_finding("declared_units", FAIL, target,
+                                     "declared without a unit — give "
+                                     "{'value': x, 'unit': 'metres'}"))
+            continue
+        value = spec.get("value")
+        findings.append(check_finite(target, value))
+        unit = spec.get("unit")
+        if unit is None or str(unit).strip() == "":
+            findings.append(_finding("declared_units", FAIL, target,
+                                     "unit is null: a number whose unit is unrecorded cannot "
+                                     "be verified (25000 is right in metres, wrong in feet)"))
+        elif str(unit).strip().lower() not in _KNOWN_UNITS:
+            findings.append(_finding("declared_units", UNKNOWN, target,
+                                     f"unrecognised unit {unit!r}; not checked", unit=str(unit)))
+        else:
+            findings.append(_finding("declared_units", PASS, target, f"unit {unit}",
+                                     unit=str(unit)))
+        lo, hi = spec.get("min"), spec.get("max")
+        try:
+            f = float(value)
+        except Exception:
+            continue
+        if lo is not None and f < float(lo):
+            findings.append(_finding("output_bounds", FAIL, target,
+                                     f"{f} is below the declared minimum {lo}"))
+        elif hi is not None and f > float(hi):
+            findings.append(_finding("output_bounds", FAIL, target,
+                                     f"{f} is above the declared maximum {hi}"))
+        elif lo is not None or hi is not None:
+            findings.append(_finding("output_bounds", PASS, target,
+                                     f"{f} within [{lo}, {hi}]"))
+    return findings
+
+
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
@@ -209,6 +281,15 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
             except Exception as exc:
                 findings.append(_finding("projected_crs", UNKNOWN, name, f"check errored: {exc}"))
 
+    # Declared numeric outputs, if the run published any. Checked outside the frame loop
+    # because they are scalars the ANSWER will quote, not frames.
+    try:
+        declared = namespace.get(DECLARED_OUTPUTS)
+        findings.extend(check_declared_units(declared))
+    except Exception as exc:
+        findings.append(_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
+                                 f"check errored: {exc}"))
+
     counts = {PASS: 0, FAIL: 0, UNKNOWN: 0}
     for f in findings:
         counts[f["status"]] = counts.get(f["status"], 0) + 1
@@ -247,7 +328,11 @@ _EPILOGUE = '''
 
 # --- I-GUIDE invariant gate (appended automatically; does not affect your results) ---
 def _iguide_run_invariant_gate():
-    import json as _json, math as _math
+    # Unaliased: the inlined checks below are this module's real source, so they reference
+    # `math` and `json` by their ordinary names. Importing them only as _math/_json left
+    # check_finite raising "name 'math' is not defined" INSIDE the guard, which surfaced as a
+    # cannot_determine — a check silently degraded rather than reporting.
+    import json, math
     _ns = dict(globals())
 {body}
     try:
@@ -258,7 +343,7 @@ def _iguide_run_invariant_gate():
                 "error": "%s: %s" % (type(_e).__name__, _e)}}
     try:
         with open({filename!r}, "w", encoding="utf-8") as _fh:
-            _json.dump(_rep, _fh, default=str)
+            json.dump(_rep, _fh, default=str)
     except OSError:
         pass
 
@@ -281,16 +366,19 @@ def epilogue_source() -> str:
 
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, check_projected_crs, check_not_all_nan,
-                check_join_cardinality, check_finite, _looks_like_frame, _has_geometry,
-                run_checks):
+                check_join_cardinality, check_finite, check_declared_units, _looks_like_frame,
+                _has_geometry, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))
     body = ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
+            f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
+            f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
             "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
     return _EPILOGUE.format(body=body, filename=CHECKS_FILENAME)
 
 
 __all__ = ["run_checks", "write_checks", "epilogue_source", "CHECKS_FILENAME",
-           "PASS", "FAIL", "UNKNOWN", "check_projected_crs", "check_not_all_nan",
-           "check_join_cardinality", "check_finite"]
+           "PASS", "FAIL", "UNKNOWN", "DECLARED_OUTPUTS", "check_projected_crs",
+           "check_not_all_nan", "check_join_cardinality", "check_finite",
+           "check_declared_units"]

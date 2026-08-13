@@ -245,3 +245,137 @@ def test_a_corrupt_report_does_not_raise(tmp_path):
 
     (tmp_path / "checks.json").write_text("{not json")
     assert _read_checks(tmp_path) == {}
+
+
+# ------------------------------------------------------------------ the gate BLOCKS the answer
+
+def _run_ctx(verdict, findings=(), stdout="AREA: 0.196\n"):
+    """An execute_code tool result as it actually arrives: a JSON STRING inside a tool call."""
+    return {"code_result": {"tool_calls": [{"name": "execute_code", "result": json.dumps({
+        "ok": True, "exit_code": 0, "stdout": stdout,
+        "verification": {"verdict": verdict, "findings": list(findings)}})}]}}
+
+
+_CRS_FINDING = {"status": FAIL, "check": "projected_crs", "target": "buffered",
+                "message": "EPSG:4326 is GEOGRAPHIC: reproject before measuring."}
+
+
+def test_gate_failures_are_found_through_a_json_string_tool_result():
+    """Tool results arrive as JSON strings inside ToolMessages, not as dicts — indexing a
+    fixed path instead of walking would silently find nothing."""
+    from agent_runtime.supervisor.graph import _gate_failures
+
+    assert len(_gate_failures(_run_ctx(FAIL, [_CRS_FINDING]))) == 1
+    assert _gate_failures(_run_ctx(PASS)) == []
+
+
+def test_a_number_in_an_UNVERIFIED_record_is_no_longer_treated_as_grounded():
+    """The hole this closes. Rule (2) drops a disputed number when it appears in the execution
+    record — but a wrong number appears there too. `AREA: 0.196` is right in stdout, so the
+    gate would say "degrees squared" and the reconciliation would answer "it is in the record."
+    """
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    audit = {"hallucination_detected": True, "severity": "high",
+             "issues": [{"claim": "the area is 0.196", "reason": "units unclear"}]}
+    out = _reconcile_audit_with_artifacts(audit, artifacts=[],
+                                          execution_context=_run_ctx(FAIL, [_CRS_FINDING]))
+    assert out["hallucination_detected"] is True
+    assert out["severity"] == "high"
+    assert out.get("invariant_gate") == "fail"
+
+
+def test_a_number_in_a_VERIFIED_record_is_still_cleared():
+    """The M6a false-positive suppression must survive: 5/5 -> 0/5 was the whole point."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    audit = {"hallucination_detected": True, "severity": "high",
+             "issues": [{"claim": "there were 21500 incidents", "reason": "not in evidence"}]}
+    out = _reconcile_audit_with_artifacts(
+        audit, artifacts=[], execution_context=_run_ctx(PASS, stdout="incidents: 21500\n"))
+    assert out["hallucination_detected"] is False
+
+
+def test_the_gate_flags_even_when_the_auditor_found_nothing():
+    """Deterministic beats prose: the gate knows a distance was computed in degrees, and an
+    auditor reading the answer text has no way to."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    silent = {"hallucination_detected": False, "severity": "none", "issues": []}
+    out = _reconcile_audit_with_artifacts(silent, artifacts=[],
+                                          execution_context=_run_ctx(FAIL, [_CRS_FINDING]))
+    assert out["hallucination_detected"] is True
+    assert "not verified" in out["summary"]
+
+
+def test_the_gate_issue_carries_the_remedy_not_just_a_complaint():
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    out = _reconcile_audit_with_artifacts({"hallucination_detected": False, "severity": "none",
+                                           "issues": []}, artifacts=[],
+                                          execution_context=_run_ctx(FAIL, [_CRS_FINDING]))
+    assert "reproject" in out["issues"][0]["reason"].lower()
+
+
+def test_a_clean_run_with_no_audit_is_left_completely_alone():
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    silent = {"hallucination_detected": False, "severity": "none", "issues": []}
+    assert _reconcile_audit_with_artifacts(silent, artifacts=[],
+                                           execution_context=_run_ctx(PASS)) is silent
+
+
+# ------------------------------------------------------------------ declared units + bounds
+
+def _declared(outputs):
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
+    return run_checks({DECLARED_OUTPUTS: outputs})
+
+
+def test_a_declared_output_with_a_unit_passes():
+    rep = _declared({"radius": {"value": 25000, "unit": "metres", "min": 0, "max": 1e6}})
+    assert rep["verdict"] == PASS
+
+
+def test_a_null_unit_blocks_verification():
+    """The plan's rule: a null unit blocks 'verified', because the number most likely to be
+    wrong is the one whose unit nobody wrote down. 25000 is right in metres, wrong in feet."""
+    assert _declared({"radius": {"value": 25000, "unit": None}})["verdict"] == FAIL
+
+
+def test_a_bare_number_with_no_unit_at_all_fails():
+    assert _declared({"radius": 25000})["verdict"] == FAIL
+
+
+def test_a_value_outside_its_declared_bounds_fails():
+    assert _declared({"pct": {"value": 140, "unit": "percent", "min": 0, "max": 100}})["verdict"] == FAIL
+
+
+def test_bounds_are_only_checked_when_declared():
+    """Inventing a plausible range would generate false positives."""
+    assert _declared({"x": {"value": 1e12, "unit": "metres"}})["verdict"] == PASS
+
+
+def test_a_nan_output_fails():
+    assert _declared({"mean": {"value": float("nan"), "unit": "metres"}})["verdict"] == FAIL
+
+
+def test_an_unrecognised_unit_is_unknown_not_a_failure():
+    assert _declared({"x": {"value": 1, "unit": "furlongs"}})["verdict"] == UNKNOWN
+
+
+def test_no_declared_outputs_adds_no_findings():
+    """Most runs will not declare any; that must not itself downgrade the verdict."""
+    rep = run_checks({"gdf": _geo().to_crs(3857)})
+    assert rep["verdict"] == PASS
+
+
+def test_declared_outputs_survive_the_epilogue(tmp_path, monkeypatch):
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
+
+    monkeypatch.chdir(tmp_path)
+    ns = {DECLARED_OUTPUTS: {"radius": {"value": 25000, "unit": None}}}
+    exec(compile(epilogue_source(), "<epilogue>", "exec"), ns)
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] == FAIL
+    assert any(f["check"] == "declared_units" for f in report["findings"])

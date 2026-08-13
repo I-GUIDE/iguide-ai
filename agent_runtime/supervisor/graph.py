@@ -475,6 +475,43 @@ def _claim_numbers(text: str) -> List[str]:
     return [m.replace(",", "") for m in re.findall(r"\d[\d,]{2,}", text or "")]
 
 
+def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
+    """Every invariant-gate FAILURE recorded anywhere in the execution context.
+
+    The gate's report is nested inside each ``execute_code`` tool result, so this walks rather
+    than indexes: the shape of a peer's result dict is not a contract, and a missed nesting
+    level would silently disable the block below — the failure mode this whole area keeps
+    producing.
+    """
+    found: List[Dict[str, Any]] = []
+    seen: List[int] = []
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 8 or len(found) >= 12 or id(node) in seen:
+            return
+        seen.append(id(node))
+        if isinstance(node, dict):
+            report = node.get("verification")
+            if isinstance(report, dict) and report.get("verdict") == "fail":
+                for f in (report.get("findings") or []):
+                    if isinstance(f, dict) and f.get("status") == "fail":
+                        found.append(f)
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value, depth + 1)
+        elif isinstance(node, str) and '"verification"' in node:
+            # Tool results often arrive as a JSON STRING inside a ToolMessage, not as a dict.
+            try:
+                walk(json.loads(node), depth + 1)
+            except ValueError:
+                pass
+
+    walk(execution_context)
+    return found
+
+
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
                                     execution_context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -484,7 +521,19 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     (3) carries a reason that itself concedes the claim is grounded/correct (and no genuine
     contradiction marker). The verdict is cleared if no substantive issues remain. Genuine
     unsupported claims (a wrong statistic, an invented finding) are preserved."""
-    if not _audit_flagged(audit):
+    # The invariant gate is DETERMINISTIC and therefore authoritative here. Two consequences,
+    # and the second is the one the plan asks for: an unverified number must not be presented
+    # as verified.
+    #
+    #   * it flags even when the LLM auditor found nothing. The gate knows a distance was
+    #     computed in degrees; the auditor reading prose has no way to.
+    #   * it DISABLES rule (2) below. That rule drops a disputed number when the number appears
+    #     in the execution record — but a wrong number appears in the record too. `AREA: 0.196`
+    #     is right there in stdout, so without this the gate would say "degrees squared" and
+    #     the reconciliation would answer "it is in the record, so it is grounded."
+    gate = _gate_failures(execution_context)
+
+    if not _audit_flagged(audit) and not gate:
         return audit
     issues = (audit or {}).get("issues") or []
     blob = ""
@@ -508,9 +557,22 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             continue  # (3) the auditor's own reason concedes grounding
         nums = _claim_numbers(claim)
-        if nums and blob and all(n in blob for n in nums):
-            continue  # (2) every disputed number is present in the execution record
+        if nums and blob and not gate and all(n in blob for n in nums):
+            continue  # (2) every disputed number is present in a VERIFIED execution record
         kept.append(it)
+
+    if gate:
+        # Prepended: the deterministic finding is the one the reader must see first, and it
+        # carries the remedy ("reproject before measuring"), not just a complaint.
+        gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
+                        "reason": f"invariant gate ({f.get('check')}): {f.get('message')}"}
+                       for f in gate]
+        return {**(audit or {}), "hallucination_detected": True, "severity": "high",
+                "issues": gate_issues + kept,
+                "summary": ("A deterministic invariant check FAILED on this run, so its numeric "
+                            "results are not verified. " + str((audit or {}).get("summary") or "")).strip(),
+                "invariant_gate": "fail"}
+
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],
                 "summary": "Grounded: flagged claims are supported by the produced artifact(s) and the execution record."}
