@@ -64,6 +64,11 @@ COPY MCP_server/ ./MCP_server/
 # Agent knowledge-base ingestion package — the search/code peers' agent_kb_search and
 # get_kb_block tools import `extractors` (kb_store, indices) at call time.
 COPY extractors/ ./extractors/
+# Curated SKILL bundles. skills.py looks in REPO_ROOT/.agents/skills and REPO_ROOT/skills, and
+# the image copied neither — so `list_available_skills` returned EMPTY in every deployed
+# container while working fine on a developer checkout. A capability that silently disappears
+# in deployment is worse than one that was never built.
+COPY .agents/ ./.agents/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request
@@ -71,7 +76,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 
 # Create writable upload directory and non-root user
 RUN useradd -m -u 1000 appuser \
-    && mkdir -p /app/agent_chat_files/uploads \
+    && mkdir -p /app/agent_chat_files/uploads /app/agent_chat_files/skills \
     && chown -R appuser:appuser /app
 USER appuser
 

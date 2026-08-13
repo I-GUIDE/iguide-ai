@@ -73,6 +73,11 @@ services:
     environment:
       # Service wiring (override anything in .env)
       - FLASK_EMBEDDING_URL=http://embedding-server:5000
+      # GENERATED skills go on the shared volume, not container-local disk, and that path is
+      # added to the discovery roots. Written to /app/.agents/skills they would vanish on every
+      # restart — and the image runs as non-root, so that directory is not even writable.
+      - AGENT_GENERATED_SKILLS_ROOT=/app/agent_chat_files/skills
+      - AGENT_SKILL_PATHS=/app/agent_chat_files/skills
       - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       - PORT=5002
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files

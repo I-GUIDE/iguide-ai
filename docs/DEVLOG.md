@@ -1727,3 +1727,26 @@ generic `load_dataset`, and my `EMIT_LIBRARY` assertion tested for the literal s
 
 **Next** remaining: the SKILL bundle never reaching the agent image, and the `.corpus_cache`
 blobs still in commit `6f6d030`.
+
+## 2026-08-13 · M7.5 · Skills that survive deployment
+**Change** `rag_pipeline/Dockerfile` copies `.agents/`; compose points
+  `AGENT_GENERATED_SKILLS_ROOT` and `AGENT_SKILL_PATHS` at the persistent
+  `agent_chat_files` volume. New `test_deployment_contract.py` (6 tests).
+
+**Why** `skills.py` discovers bundles under `REPO_ROOT/.agents/skills` and `REPO_ROOT/skills`,
+and the image copied **neither**. `list_available_skills` therefore returned an empty list in
+every deployed container while working perfectly on a developer checkout — the worst shape of
+gap, because it only appears where nobody is watching a test suite. Generated skills had the
+same problem twice over: written to `/app/.agents/skills` they would vanish on every restart,
+and the image runs as non-root so that path is not writable anyway.
+
+The new file asserts the packaging contract generally, not just this one bug: every package the
+agent imports is copied, the embedding URL is pinned for all three services that need it,
+`LLM_PROVIDER=claude-cli` never appears in compose, and `AGENT_ALLOW_WORKFLOW_EXEC=1` cannot
+drift on. Suite **962 passed**, same 3 pre-existing failures.
+
+**Not done, deliberately:** the 174 `.corpus_cache` blobs remain in commit `6f6d030`. The
+branch is unpushed so a rewrite is cheap and safe, but rewriting history is not something to do
+unasked; `git filter-branch -f --index-filter 'git rm -r --cached --ignore-unmatch
+.corpus_cache' 6f6d030^..HEAD` is the fix when wanted. The working tree and all future commits
+are already clean (untracked + gitignored in the M7.1 commit).
