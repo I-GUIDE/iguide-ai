@@ -190,11 +190,38 @@ def main() -> int:
     # is really just a missing check.
     from agent_runtime.sandbox_verify import epilogue_source
     (work / "script.py").write_text(code + epilogue_source() + _CAPTURE, encoding="utf-8")
+    # The METHOD LIBRARY must be mounted, exactly as the sandbox mounts it. Without this,
+    # replaying any run that imports a library unit dies with
+    # `ModuleNotFoundError: No module named 'iguide_methods'` — so the reproducibility claim
+    # failed for precisely the runs that use the system's differentiator.
+    from agent_runtime.code_execution import METHOD_LIBRARY_MOUNT, method_library_dir
+
+    library = method_library_dir()
+    units = manifest.get("library_units") or []
+    mounts = ["-v", f"{work}:/work:rw"]
+    if units and not library:
+        print(f"\ncannot replay: the artifact imports {len(units)} library unit(s) but no method "
+              f"library is available. Build it (scripts/build_method_library.py) or set "
+              f"AGENT_METHOD_LIBRARY_DIR.")
+        return 2
+    if library:
+        mounts += ["-v", f"{library}:{METHOD_LIBRARY_MOUNT}:ro"]
+        # A re-ingest can retire a v_<sha> module. The recorded sha is the whole point of
+        # pinning, so a missing one is a hard stop rather than a surprise ImportError later.
+        missing = [u for u in units
+                   if not (Path(library) / (str(u.get("module", "")).replace(".", "/") + ".py")).is_file()]
+        if missing:
+            print("\ncannot replay: recorded library version(s) no longer exist — "
+                  + ", ".join(f"{u['symbol']}@{u.get('slice_sha')}" for u in missing))
+            return 2
+        print(f"library    {library} mounted read-only"
+              + (f", {len(units)} pinned unit(s) present" if units else ""))
+
     deps = manifest.get("dependencies") or []
     if deps:
         print(f"deps       installing {deps}")
         inst = subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{work}:/work:rw", "--memory", "1g",
+            ["docker", "run", "--rm", *mounts, "--memory", "1g",
              image, "pip", "install", "--no-cache-dir", "--target", "/work/.deps", *deps],
             capture_output=True, text=True, timeout=900)
         if inst.returncode != 0:
@@ -202,8 +229,8 @@ def main() -> int:
             return 2
 
     proc = subprocess.run(
-        ["docker", "run", "--rm", "--network", "none", "--memory", "2g",
-         "-v", f"{work}:/work:rw", "--env", "PYTHONPATH=/work/.deps",
+        ["docker", "run", "--rm", "--network", "none", "--memory", "2g", *mounts,
+         "--env", f"PYTHONPATH=/work/.deps:{METHOD_LIBRARY_MOUNT}",
          "-w", "/work", image, "python", "/work/script.py"],
         capture_output=True, text=True, timeout=1800)
     print(f"\nreplay exit {proc.returncode}")
@@ -224,10 +251,21 @@ def main() -> int:
           f"-> replay {checks.get('verdict')}")
 
     if not replay:
+        if proc.returncode != 0:
+            # The replay died, so of course it published nothing. Reporting "the run declared no
+            # outputs" here blames the ARTIFACT for the replayer's failure — and the artifact may
+            # have declared them perfectly, as this very check did while the library was unmounted.
+            print(f"\nREPLAY FAILED (exit {proc.returncode}): nothing to compare because the "
+                  f"replay did not finish. This is not a defect in the artifact.")
+            return 1
+        if original:
+            print(f"\nDIFFERED: the original declared {sorted(original)} and the replay "
+                  f"published nothing.")
+            return 1
         print("\nREPEATED, NOT VERIFIED: the run declared no IGUIDE_OUTPUTS, so there is "
               "nothing to compare. Declare the numbers the answer quotes to make this "
               "artifact checkable.")
-        return 0 if proc.returncode == 0 else 1
+        return 0
 
     differences: List[str] = []
     no_baseline: List[str] = []

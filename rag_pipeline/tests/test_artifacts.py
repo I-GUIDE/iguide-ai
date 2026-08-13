@@ -186,3 +186,43 @@ def test_comparison_unwraps_the_declared_spec():
 
     assert _value_of({"value": 25000, "unit": "metres"}) == 25000
     assert _value_of(25000) == 25000
+
+
+# ------------------------------------------------------------------ replay must mount the library
+
+def test_the_manifest_records_the_pinned_units_a_replay_must_mount():
+    """A replay needs to know WHICH library versions to make available. Without the mount, any
+    artifact that imports a unit dies with ModuleNotFoundError: no module named 'iguide_methods'
+    — so the reproducibility claim failed for exactly the runs that use the method library."""
+    m = artifacts.build_manifest(
+        code="from iguide_methods.ke_x.v_abc import load_data\nload_data('f')\n",
+        work=None, image="python:3.11-slim", backend="local")
+    assert m["library_units"] == [{"symbol": "load_data",
+                                   "module": "iguide_methods.ke_x.v_abc",
+                                   "slice_sha": "abc"}]
+
+
+def test_the_replay_script_mounts_the_library_and_extends_pythonpath():
+    from pathlib import Path
+
+    src = Path("scripts/rerun_artifact.py").read_text(encoding="utf-8")
+    assert "METHOD_LIBRARY_MOUNT" in src, "the library is never mounted into the replay"
+    assert "PYTHONPATH" in src and "METHOD_LIBRARY_MOUNT" in src
+
+
+def test_the_replay_refuses_when_a_pinned_version_is_gone():
+    """A re-ingest can retire a v_<sha> module. The recorded sha is the point of pinning, so a
+    missing one is a hard stop rather than a surprise ImportError mid-run."""
+    from pathlib import Path
+
+    src = Path("scripts/rerun_artifact.py").read_text(encoding="utf-8")
+    assert "no longer exist" in src
+
+
+def test_a_failed_replay_does_not_blame_the_artifact():
+    """Reporting "the run declared no outputs" when the REPLAY died blames the artifact for the
+    replayer's failure — which is exactly what happened while the library was unmounted."""
+    from pathlib import Path
+
+    src = Path("scripts/rerun_artifact.py").read_text(encoding="utf-8")
+    assert "not a defect in the artifact" in src

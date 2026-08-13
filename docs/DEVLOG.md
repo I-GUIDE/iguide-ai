@@ -1853,3 +1853,37 @@ marker already existed in `pytest.ini` and these tests simply never used it.
 |---|---|---|
 | `pytest` (fresh clone, no services) | 1001 passed, **3 failed** | **1001 passed, 0 failed**, 4 deselected |
 | `pytest -m integration` | — | 3 failed, 1 skipped (as expected without services) |
+
+## 2026-08-13 · M2.9 · The replay could not replay the runs that matter
+**Change** `rerun_artifact.py` mounts the method library read-only at `METHOD_LIBRARY_MOUNT` and
+  extends `PYTHONPATH`; refuses when a recorded `v_<sha>` module no longer exists; and no longer
+  blames the artifact when the REPLAY is what failed. 4 tests.
+
+**Why** found by my own regression check, not by a test. Replaying an artifact whose code imports
+a library unit died with:
+
+```
+ModuleNotFoundError: No module named 'iguide_methods'
+gate       original pass -> replay None
+REPEATED, NOT VERIFIED: the run declared no IGUIDE_OUTPUTS …
+```
+
+Two defects in one output. The replay never mounted the library, so **the reproducibility claim
+failed for exactly the runs that use the system's differentiator** — every earlier replay I
+demonstrated used only pandas/geopandas and so never touched it. And the message then blamed the
+ARTIFACT: it declared its outputs perfectly, and the replay published none because it had
+crashed. A tool that misattributes its own failure to the thing it is auditing is worse than one
+that just fails.
+
+**Measured** the same artifact, after:
+
+```
+library    …/method_library mounted read-only, 1 pinned unit(s) present
+image      python@sha256:a3ab0b96…  (pinned by digest)
+gate       original pass -> replay pass
+total_area: replay=3920685613.18   original=3920685613.18   ==
+replay completed (outputs identical)
+```
+
+A retired `v_<sha>` is now a hard stop with the symbol named, because the recorded sha is the
+whole point of pinning. Suite **1005 passed**, 0 failed.
