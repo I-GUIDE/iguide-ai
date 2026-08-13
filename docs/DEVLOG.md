@@ -1578,3 +1578,53 @@ what makes the gate verdict comparable across runs.
 
 **Next** the dataset extractor's two shipping defects — native-CRS bounds written into a
 `geo_shape` field (181/619 docs carry a bbox), and `.xlsx` parsed as CSV.
+
+## 2026-08-13 · M7.1 · Dataset bounding boxes that survive indexing, and formats read as themselves
+**Change** new leaf `rag_pipeline/search/geo_shapes.py` (`to_wgs84_bounds`, `bbox_geo_shape`,
+  `plausible_wgs84`; `infer_geo_shape` moved here and re-exported from `spatial.py`);
+  `data_extractor` reprojects instead of writing native bounds, gains `.xlsx`/`.parquet`
+  readers, a `metadata` family for `.json`/`.xml`, and tar/gzip containers; the hand-rolled
+  lat/lon scan is replaced by the tested `_pick_coord_column`/`parse_coordinate`. 24 tests.
+
+**Why** two defects were losing data on every ingest, both silently.
+
+`_envelope` wrote the file's **native** bounds straight into `spatial-bounding-box-geojson`.
+That field is mapped `{type: geo_shape, ignore_malformed: true}`, so UTM metres did not fail
+the write — OpenSearch dropped the field and the document indexed cleanly. The dataset was then
+absent from every spatial query with nothing anywhere recording that it happened. On the live
+index **181 of 619 docs carry a bbox**.
+
+`.xlsx` routed to `csv.reader`, which reads the binary container without raising and returns a
+garbage single-column header — worse than an error, because the asset indexes with nonsense
+that looks like real metadata.
+
+**Measured**
+
+| input | before | after |
+|---|---|---|
+| UTM 16N Chicago bounds | written raw → dropped at index time | reprojected to `[-87.72, 41.82, -87.48, 42.00]` |
+| bounds with no CRS, in metres | assumed 4326 → dropped | **no bbox** + note, native bounds kept |
+| CRS says 4326, bounds in metres | written → dropped | **no bbox** + note |
+| `.xlsx` schema | garbage 1-column header | `{latitude, longitude, value}`, 2 rows |
+| `.tar` / `.tgz` / `.gz` | "could not read container" | members + family counts |
+| STAC item with a declared bbox | unhandled sidecar, no bbox | declared bbox used |
+| `spatial.py` import cost for a shape | 1.23 s (Flask + spaCy) | **0.021 s** |
+
+Suite **886 passed**, same 3 pre-existing failures.
+
+The asymmetry drives every choice here: an absent bbox is incomplete, a wrong one is wrong —
+and since `ignore_malformed` makes them indistinguishable downstream, a note recorded at
+extraction time is the only way to tell them apart afterwards. So a dataset that HAS bounds and
+gets no bbox now also emits a warning: "no spatial extent" and "we had one and could not use
+it" are different facts, and only the second is a bug to chase.
+
+**Surprised by** `_HANDLERS`. It mapped a family to a **function object**, captured at import.
+Reassigning `_handle_raster` on the module therefore had no effect whatsoever — the dict still
+held the original — which is why two of my tests failed while the code under test was correct.
+It now maps to a NAME resolved at call time. Same shape as the `default_top_k` default-argument
+bug from M1.2 and the `arm_agent_kb` wrong-key bug from M4.5: **a value captured early that
+looks like a live reference.** Third distinct instance, so it is worth naming as a pattern
+rather than fixing case by case.
+
+**Next** M3's reconciling re-ingest — there is still no delete anywhere, so a notebook that
+loses a cell leaves orphan `::block::<n>` docs forever, and 3,830 blocks are now indexed.
