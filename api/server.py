@@ -520,6 +520,48 @@ def _parse_enabled_search_methods(value):
     return normalize_search_methods(value)
 
 
+# --------------------------------------------------------------------------- #
+# Turning an exception into something a user can act on
+# --------------------------------------------------------------------------- #
+
+def _classify_stream_error(exc: BaseException) -> dict:
+    """A stable user-facing message plus a machine-readable class, from a raw exception.
+
+    The stream used to emit ``{"error": str(e)}`` verbatim, so a user could be shown
+    ``claude CLI was killed by signal 11 (model=sonnet) with no diagnostic output after 3
+    attempt(s)`` — accurate, and useless to them. It names an internal tool, gives no action,
+    and reads like a crash report because it is one.
+
+    The raw text is kept under ``detail`` rather than dropped: whoever is debugging still needs
+    it, and the prototype renders it below the message.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = str(exc).lower()
+
+    if type(exc).__name__ == "ClaudeCliUnavailable" or "re-authenticate" in low or (
+            "401" in low and "auth" in low):
+        return {"code": "llm_unauthenticated", "retryable": False,
+                "error": "The language-model backend is not authenticated, so this request "
+                         "could not be answered. This needs an operator to restore "
+                         "credentials — retrying will not help.",
+                "detail": text}
+    if any(m in low for m in ("killed by signal", "timed out", "429", "529",
+                             "transient", "overloaded", "503", "502")):
+        return {"code": "llm_transient", "retryable": True,
+                "error": "The language-model backend failed partway through this request. "
+                         "This is usually temporary — please try again.",
+                "detail": text}
+    if "connection" in low or "unreachable" in low or "refused" in low:
+        return {"code": "backend_unreachable", "retryable": True,
+                "error": "A backend service could not be reached while answering this "
+                         "request. Please try again shortly.",
+                "detail": text}
+    return {"code": "internal_error", "retryable": True,
+            "error": "Something went wrong while answering this request. Please try again; "
+                     "if it keeps happening, report the detail below.",
+            "detail": text}
+
+
 def _sse_event(name, data):
     payload = json.dumps(data or {}, ensure_ascii=True, default=str)
     return f"event: {name}\ndata: {payload}\n\n"
@@ -2043,13 +2085,16 @@ def agent_chat_stream():
                         continue
 
             except ValueError as e:
+                # A validation error IS actionable as written — it describes the caller's own
+                # malformed request — so it is passed through rather than genericised.
                 logger.error(f"Agent chat stream validation error: {str(e)}")
-                yield _sse_event("error", {"error": str(e)})
+                yield _sse_event("error", {"error": str(e), "code": "invalid_request",
+                                           "retryable": False})
             except Exception as e:
                 logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
                 if error_emitted:
                     return
-                error_payload = {"error": str(e)}
+                error_payload = _classify_stream_error(e)
                 diagnostics = getattr(e, "diagnostics", None)
                 if diagnostics:
                     error_payload["diagnostics"] = diagnostics

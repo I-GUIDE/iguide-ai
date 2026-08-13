@@ -115,6 +115,7 @@ class SupervisorState(TypedDict, total=False):
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
     searched_queries: List[str]    # every query string actually searched (incl. refinements)
+    peer_failures: List[Dict[str, Any]]   # peers that raised; see _run_peer
 
 
 def is_supervisor_enabled() -> bool:
@@ -387,6 +388,87 @@ def _heuristic_decision(distilled: Dict[str, Any]) -> str:
     if not distilled.get("has_evidence") and "search" not in distilled.get("actions_taken", []):
         return "search"
     return "done"
+
+
+def _peer_error_budget() -> int:
+    """Peer failures tolerated before the run stops trying and answers with what it has.
+
+    Without a budget a failing peer is re-routed to until ``max_steps``, paying its full
+    latency each time to fail identically — 8 steps of it in the default configuration. The
+    loop already tolerates 8 *unproductive* steps; it should not also tolerate 8 *broken* ones.
+    """
+    raw = (os.getenv("AGENT_PEER_ERROR_BUDGET") or "2").strip()
+    try:
+        return max(1, min(8, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _is_fatal_peer_error(exc: BaseException) -> bool:
+    """Whether retrying any peer is pointless because the model itself is unreachable."""
+    try:
+        from rag_pipeline.llm_claude_cli import ClaudeCliUnavailable
+    except Exception:
+        return False
+    return isinstance(exc, ClaudeCliUnavailable)
+
+
+def _run_peer(name: str, call, state: SupervisorState):
+    """Run a peer, returning ``(result, failure)``. Never raises.
+
+    A peer raising used to abort the whole ``graph.invoke``. Reproduced: a search that had
+    already merged 20 documents into state, then raised on its second sweep, left
+    ``synthesize`` unreached and the user with a raw exception string — while
+    ``synthesize_node`` already knows how to answer from partial evidence, from history, or
+    from neither. The capability existed; the exception simply prevented it being reached.
+
+    The sibling orchestration arm has done this since it was written
+    (``legacy/graph_nodes.py:265-283``, which returns a tool-result describing the failure
+    rather than raising), so this is the supervisor catching up rather than a new idea.
+    """
+    try:
+        return call(), None
+    except BaseException as exc:                      # noqa: BLE001 - deliberately total
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        failure = {"peer": name, "error": f"{type(exc).__name__}: {exc}"[:300],
+                   "fatal": _is_fatal_peer_error(exc)}
+        try:
+            import logging
+            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
+        except Exception:
+            pass
+        emit_trace_event(
+            "node_completed",
+            {"stage": name, "status": "error",
+             "message": f"{name} peer failed: {failure['error'][:160]}"},
+            node=name,
+        )
+        return None, failure
+
+
+def _with_failure(update: Dict[str, Any], state: SupervisorState,
+                  failure: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Append a peer failure to the accumulated list without dropping the node's own update."""
+    if failure is None:
+        return update
+    update["peer_failures"] = [*(state.get("peer_failures") or []), failure]
+    return update
+
+
+def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
+    """The user-visible statement that part of the turn did not run."""
+    names = []
+    for f in failures:
+        name = str(f.get("peer") or "a step")
+        if name not in names:
+            names.append(name)
+    label = {"search": "search", "analyze": "analysis", "code": "code execution",
+             "synthesize": "answer composition"}
+    pretty = [label.get(n, n) for n in names]
+    joined = pretty[0] if len(pretty) == 1 else ", ".join(pretty[:-1]) + f" and {pretty[-1]}"
+    return (f"⚠️ Partial answer: {joined} failed during this turn, so this reply is based on "
+            f"what completed before the failure. Re-running may produce a fuller answer.")
 
 
 def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
@@ -2203,6 +2285,7 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
 
 def build_supervisor_graph(
     *,
+    checkpointer: Optional[Any] = None,
     decide_fn: Optional[DecideFn] = None,
     search_fn: Optional[SearchFn] = None,
     analyze_fn: Optional[AnalyzeFn] = None,
@@ -2245,7 +2328,14 @@ def build_supervisor_graph(
             return actions.count(cap) >= _max_peer_runs()
         needs = [n for n in needs if not _dead(n)]
 
-        if step >= state.get("max_steps", DEFAULT_MAX_STEPS):
+        failures = state.get("peer_failures") or []
+        if any(f.get("fatal") for f in failures):
+            # The model backend itself is unreachable. Every remaining peer would pay its full
+            # latency to fail the same way, and so would a re-route.
+            nxt, remaining, why = "done", [], "model backend unavailable"
+        elif len(failures) >= _peer_error_budget():
+            nxt, remaining, why = "done", [], f"peer error budget ({len(failures)} failures)"
+        elif step >= state.get("max_steps", DEFAULT_MAX_STEPS):
             nxt, remaining, why = "done", [], "max_steps"
         elif needs:
             # Fulfill the oldest peer request first (FIFO), then continue the loop.
@@ -2254,10 +2344,22 @@ def build_supervisor_graph(
             nxt = cap if cap in _CAPABILITIES else "done"
             remaining, why = needs[1:], f"request by {req.get('by')}"
         else:
-            nxt = decide(state, _distill(state))
+            # The decider calls the model too, so it is the FIRST thing that fails when the
+            # backend is down — before any peer has run, which made peer containment moot in
+            # exactly the case it exists for. Falling back to a deterministic route keeps the
+            # turn moving: search if nothing has been retrieved yet, otherwise answer with what
+            # there is.
+            decided, decide_failure = _run_peer("decide", lambda: decide(state, _distill(state)),
+                                                state)
+            if decide_failure is not None:
+                nxt = "search" if not (state.get("evidence") or []) else "done"
+                remaining, why = needs, f"decider unavailable → {nxt}"
+                failures = [*failures, decide_failure]
+            else:
+                nxt = decided
+                remaining, why = needs, "decision"
             if nxt not in ALLOWED_ACTIONS:
                 nxt = "done"
-            remaining, why = needs, "decision"
             # Backstop: a peer that just ran and already produced its result should
             # not be re-run back-to-back (it self-iterates internally). Prevents the
             # decider from looping on the same action until max_steps.
@@ -2271,17 +2373,30 @@ def build_supervisor_graph(
             {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
             node="supervisor",
         )
-        return {
+        update: Dict[str, Any] = {
             "next_action": nxt,
             "actions": [*(state.get("actions") or []), nxt],
             "step": step + 1,
             "needs": remaining,
         }
+        if len(failures) != len(state.get("peer_failures") or []):
+            update["peer_failures"] = failures
+        return update
 
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        raw = do_search(q, state) or []
+        raw, failure = _run_peer("search", lambda: do_search(q, state), state)
+        if failure is not None:
+            # Return the state we still have. `evidence` already in state survives because a
+            # node update MERGES; returning early simply adds nothing to it.
+            emit_trace_event("node_completed",
+                             {"stage": "search", "message": "Search failed; continuing with "
+                                                            "the evidence already gathered"},
+                             node="search")
+            return _with_failure({"searched_queries": list(state.get("searched_queries") or [])},
+                                 state, failure)
+        raw = raw or []
         if isinstance(raw, dict):
             docs = raw.get("documents") or []
             _, needs = _extract_needs(raw)
@@ -2362,7 +2477,11 @@ def build_supervisor_graph(
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
-        clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
+        raw, failure = _run_peer(
+            "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
+        if failure is not None:
+            return _with_failure({}, state, failure)
+        clean, needs = _extract_needs(raw)
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         update: Dict[str, Any] = {"analysis_results": clean}
         enq = _enqueue_needs(state.get("needs"), needs, "analyze")
@@ -2373,7 +2492,11 @@ def build_supervisor_graph(
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        clean, needs = _extract_needs(do_code(q, state.get("evidence") or [], state))
+        raw, failure = _run_peer(
+            "code", lambda: do_code(q, state.get("evidence") or [], state), state)
+        if failure is not None:
+            return _with_failure({}, state, failure)
+        clean, needs = _extract_needs(raw)
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
         update: Dict[str, Any] = {"code_result": clean}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
@@ -2381,7 +2504,85 @@ def build_supervisor_graph(
             update["needs"] = enq
         return update
 
+    def _deterministic_answer(state: SupervisorState, reason: str) -> str:
+        """An answer composed WITHOUT the model, for when the model is what failed.
+
+        Retrieval is the expensive half of a turn and it usually survives — so hand it back
+        rather than throwing it away. Naming the failure matters as much as listing the
+        documents: the existing no-grounding fallback says the knowledge base has nothing on
+        the topic, and saying that when the MODEL broke is a factual claim the system is not
+        entitled to make. Evidence found and evidence unreachable are different answers.
+        """
+        evidence = state.get("evidence") or []
+        lines = [f"I could not compose an answer: {reason}"]
+        if evidence:
+            lines.append("")
+            lines.append(f"The search did complete — {len(evidence)} relevant "
+                         f"{'item was' if len(evidence) == 1 else 'items were'} retrieved "
+                         f"before the failure:")
+            for doc in evidence[:8]:
+                if not isinstance(doc, dict):
+                    continue
+                title = str(doc.get("title") or doc.get("doc_id") or "untitled").strip()
+                url = str(doc.get("url") or doc.get("link") or "").strip()
+                lines.append(f"- [{title}]({url})" if url.startswith("http") else f"- {title}")
+            if len(evidence) > 8:
+                lines.append(f"- …and {len(evidence) - 8} more")
+            lines.append("")
+            lines.append("Re-running the question should compose these into an answer.")
+        else:
+            lines.append("")
+            lines.append("No search results were retrieved either, so this is not evidence "
+                         "that the platform has nothing on the topic — the request did not "
+                         "get far enough to find out.")
+        return "\n".join(lines)
+
     def synthesize_node(state: SupervisorState) -> Dict[str, Any]:
+        """Containment wrapper. The body is `_synthesize_core`.
+
+        Guarded because the failure this whole path exists to survive is *the model being
+        unreachable*, and `_synthesize_core` calls the model. Containing the peers and leaving
+        synthesis exposed moves the crash one node later and buys nothing — verified by
+        reproducing exactly that.
+        """
+        failures = state.get("peer_failures") or []
+        try:
+            update = _synthesize_core(state)
+        except BaseException as exc:                  # noqa: BLE001 - deliberately total
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+            try:
+                import logging
+                logging.getLogger(__name__).warning("synthesis failed: %s", reason)
+            except Exception:
+                pass
+            emit_trace_event("node_completed",
+                             {"stage": "synthesize", "status": "error",
+                              "message": f"Synthesis failed: {reason[:160]}"},
+                             node="synthesize")
+            final = _deterministic_answer(state, reason)
+            merged = {**state, "answer": final, "audit": {}}
+            return {"answer": final, "final_answer": final,
+                    "audit": {"hallucination_detected": False, "severity": "none", "issues": [],
+                              "summary": "Composed without the model; synthesis failed."},
+                    "peer_failures": [*failures,
+                                      {"peer": "synthesize", "error": reason, "fatal": False}],
+                    "distilled": {**_distill(merged), "answer": final}}
+
+        # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
+        # and presenting it as a normal answer hides that a capability the user asked for did
+        # not run.
+        if failures:
+            note = _peer_failure_note(failures)
+            for key in ("answer", "final_answer"):
+                if isinstance(update.get(key), str) and update[key].strip():
+                    update[key] = f"{update[key]}\n\n---\n\n{note}"
+            if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
+                update["distilled"]["answer"] = update["final_answer"]
+        return update
+
+    def _synthesize_core(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         evidence = state.get("evidence") or []
         ar, cr = state.get("analysis_results"), state.get("code_result")
@@ -2411,15 +2612,31 @@ def build_supervisor_graph(
                 return {"answer": general, "final_answer": general, "audit": {},
                         "distilled": {**_distill(merged_g), "answer": general}}
         if not has_grounding and not has_history:
-            # Nothing was retrieved or produced AND there's no conversation to draw on (e.g. a
-            # cold first-turn query whose search backend is down or the KB has no match). Compose
-            # an honest, query-specific "no supporting evidence" reply with the LLM — the prompt
-            # forbids answering the question or inventing facts, so this acknowledges the gap
-            # without fabricating. Fall back to a deterministic (env-overridable) constant if the
-            # model is unavailable or returns nothing, so we never ship an empty answer.
-            final = (_compose_insufficiency_reply(llm, q)
-                     or os.getenv("AGENT_NO_GROUNDING_MESSAGE")
-                     or NO_GROUNDING_FALLBACK)
+            # Nothing was retrieved or produced AND there's no conversation to draw on. TWO very
+            # different situations reach this branch and they must not produce the same answer:
+            #
+            #   * the search ran and the corpus genuinely has nothing — "no matching content" is
+            #     a true statement;
+            #   * the search RAISED, so nothing was retrieved because the lookup never completed
+            #     — and saying "the knowledge base has no matching content" is then a factual
+            #     claim the system has no basis for. Reproduced: a search peer killed by a
+            #     transient crash produced exactly that sentence.
+            #
+            # The second case reports the failure instead of inventing a fact about the corpus.
+            if state.get("peer_failures"):
+                final = _deterministic_answer(
+                    state,
+                    "; ".join(str(f.get("error") or "a step failed")
+                              for f in (state.get("peer_failures") or [])[:2])[:200])
+            else:
+                # Compose an honest, query-specific "no supporting evidence" reply with the LLM
+                # — the prompt forbids answering the question or inventing facts, so this
+                # acknowledges the gap without fabricating. Fall back to a deterministic
+                # (env-overridable) constant if the model is unavailable or returns nothing, so
+                # we never ship an empty answer.
+                final = (_compose_insufficiency_reply(llm, q)
+                         or os.getenv("AGENT_NO_GROUNDING_MESSAGE")
+                         or NO_GROUNDING_FALLBACK)
             audit = {}
         else:
             # We have retrieval/execution grounding OR a conversation to work from. The latter
@@ -2512,7 +2729,21 @@ def build_supervisor_graph(
     builder.add_edge("analyze", "supervisor")
     builder.add_edge("code", "supervisor")
     builder.add_edge("synthesize", END)
-    return builder.compile()
+    # Compiled WITH a checkpointer so a run's partial state survives the process that produced
+    # it. Previously bare, which made `evidence`/`analysis_results`/`code_result` exist only
+    # inside the in-flight `invoke` — not merely unused on failure but unrecoverable in
+    # principle.
+    #
+    # `run_supervisor` gives every run its OWN thread id (see there). That is deliberate: binding
+    # the caller's conversation thread would make a second turn RESUME the first — inheriting its
+    # `step`, `actions` and `evidence`, so a follow-up question would start at step 8 and route
+    # straight to `done`. Recoverability was the goal; cross-turn resumption is a different
+    # feature with a different design.
+    if checkpointer is None:
+        from agent_runtime.executor_factory import DEFAULT_CHECKPOINTER
+
+        checkpointer = DEFAULT_CHECKPOINTER
+    return builder.compile(checkpointer=checkpointer)
 
 
 def run_supervisor(
@@ -2525,8 +2756,16 @@ def run_supervisor(
     **graph_kwargs: Any,
 ) -> Dict[str, Any]:
     """Build + run the supervisor graph; return the full final state."""
+    import uuid
+
     graph = build_supervisor_graph(llm=llm, **graph_kwargs)
-    return graph.invoke(
+    # A checkpoint namespace PER RUN, not per conversation. The caller's `thread_id` still
+    # travels in the state (peers use it for their own nested threads); it must not become the
+    # checkpoint key, or a second turn would resume the first — inheriting its `step`, `actions`
+    # and `evidence`, so a follow-up would start at step 8 and route straight to `done`.
+    run_thread = f"{thread_id or 'auto'}::run::{uuid.uuid4().hex[:12]}"
+    config = {"configurable": {"thread_id": run_thread}}
+    state = graph.invoke(
         {
             "query": query,
             "chat_history": chat_history or [],
@@ -2536,8 +2775,14 @@ def run_supervisor(
             "actions": [],
             "step": 0,
             "max_steps": max_steps,
-        }
+        },
+        config,
     )
+    # Handed back so a caller that wants the partial state after an unexpected failure has a
+    # key to read it with. Recording it is the difference between "unused" and "unrecoverable".
+    if isinstance(state, dict):
+        state.setdefault("checkpoint_thread_id", run_thread)
+    return state
 
 
 __all__ = [

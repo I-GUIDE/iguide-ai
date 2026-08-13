@@ -2469,3 +2469,53 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   exception string. Notably the refuter established that `synthesize_node` **already** has
   three graceful degradations — they are simply unreachable, because the exception aborts
   the graph before `synthesize` is routed to.
+
+## 2026-08-13 · M6.M · One failed model call no longer destroys a turn
+
+**Change** Five boundaries, all previously unguarded. `_run_peer` contains `search`,
+  `analyze`, `code` **and the decider**; `synthesize_node` wraps `_synthesize_core` with a
+  model-free fallback that hands back the retrieved documents; the supervisor gained a
+  `peer_failures` list and an error budget (`AGENT_PEER_ERROR_BUDGET`, default 2, plus
+  immediate stop on a fatal backend failure); the graph compiles **with** a checkpointer
+  under a per-run namespace; `agent_chat_service` records the turn before re-raising; and
+  `api/server.py` classifies the exception into an actionable message with a machine-readable
+  code, keeping the raw text under `detail`.
+
+**Why** The audit reproduced it: `search call 2 | evidence in state: 10` → `RAISED` →
+  `synthesize ran: False`. One peer raising unwound the whole `graph.invoke`, and the user
+  got a raw Python exception string.
+
+  The capability to degrade already existed — `synthesize_node` can answer from partial
+  evidence, from history, or state an honest insufficiency, and the sibling arm
+  (`legacy/graph_nodes.py:265-283`) has caught sub-agent exceptions since it was written.
+  Nothing was missing but a `try` at the boundary.
+
+**Measured** Same reproduction, after: the turn produces an answer, the 20 documents
+  survive, and the answer carries a partial-answer note. Model entirely unavailable
+  (decider + every peer + synthesis all failing) still yields an answer. A broken peer runs
+  **≤3** times instead of up to `max_steps`; a fatal backend failure is asked **once**. Two
+  turns on one conversation thread get distinct checkpoints and the second does not inherit
+  the first's `step`. A failed turn is recorded with its question and reason, and the
+  exception still reaches the caller. Tests **1177 → 1207**.
+
+**Surprised by** Containing the peers alone accomplished nothing, and I only found that
+  because I re-ran the reproduction instead of trusting the change. The failure being
+  survived is *the model being unreachable* — and `_synthesize_core` calls the model, so the
+  crash simply moved one node later. The decider is worse: it calls the model too and runs
+  **first**, so in a real outage it fails before any peer, which would have made peer
+  containment moot in exactly the case it exists for.
+
+  The honesty defect was the sharpest one. With search contained but its failure unlabelled,
+  the run reached the no-grounding branch and told the user *"the knowledge base has no
+  matching content"* — a factual claim about the corpus, made when nothing had been looked
+  up. Evidence-found and evidence-unreachable are different answers, and only one of them is
+  the system's to assert.
+
+  A design note worth recording: binding the *conversation* thread to the checkpointer would
+  have made a second turn resume the first, inheriting its `step`, `actions` and `evidence`
+  so a follow-up would start at step 8 and route straight to `done`. Recoverability and
+  cross-turn resumption look like the same feature and are not.
+
+**Next** The plan's remaining M7 items: the Neo4j graph emitter, the ablation arm, and the
+  CI artifact re-run job. Live prototype verification remains blocked on the expired CLI
+  credential.
