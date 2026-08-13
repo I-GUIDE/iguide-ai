@@ -79,6 +79,20 @@ STATUS_NO_TEXT = "no_text"
 DEGRADED_STATUSES = {STATUS_UNPARSEABLE, STATUS_UNAVAILABLE, STATUS_NO_TEXT}
 
 
+def _is_fatal(exc: BaseException) -> bool:
+    """Whether this failure will repeat for every remaining call, so a batch must stop.
+
+    An expired credential is the motivating case, and it is not hypothetical — the CLI's OAuth
+    token expired mid-session during this work. Matched on the TYPE the provider raises, not on
+    the wording of a message.
+    """
+    try:
+        from rag_pipeline.llm_claude_cli import ClaudeCliUnavailable
+    except Exception:
+        return False
+    return isinstance(exc, ClaudeCliUnavailable)
+
+
 def _empty_spec(status: str, summary: str = "", **extra: Any) -> Dict[str, Any]:
     spec = {"summary": summary, "steps": [], "datasets_referenced": [], "tools_referenced": [],
             "params": {}, "status": status, "degraded": status in DEGRADED_STATUSES}
@@ -197,44 +211,63 @@ def extract_method(text: str, *, max_chars: int = 12000,
     all_chunks = paragraph_chunks(text, max_chars=max_chars, max_chunks=10 ** 6)
     budget = max_chunks if max_chunks > 0 else _max_chunks()
     chunks = all_chunks[:budget]
-    coverage = {"chunks_used": len(chunks), "chunks_total": len(all_chunks),
-                "chars_seen": sum(len(c) for c in chunks), "chars_total": len(text)}
+    # Three counts, because two different things reduce coverage and they have DIFFERENT
+    # remedies: the budget caps how many chunks are attempted (raise PUB_MAX_CHUNKS), and a
+    # crashing model reduces how many of those produce anything (re-run). Reporting one number
+    # for both told an operator to raise a budget that was never the constraint.
+    coverage = {"chunks_total": len(all_chunks), "chunks_attempted": len(chunks),
+                "chars_total": len(text)}
 
     try:
         from rag_pipeline.llm_utils import call_llm
     except Exception as exc:
         return _empty_spec(STATUS_UNAVAILABLE, text[:500].strip(),
-                           error=f"{type(exc).__name__}: {exc}"[:200], **coverage)
+                           error=f"{type(exc).__name__}: {exc}"[:200],
+                           chunks_parsed=0, chars_seen=0, **coverage)
 
     parsed_specs: List[Dict[str, Any]] = []
     failures: List[str] = []
+    chars_parsed = 0
     for index, chunk in enumerate(chunks):
         try:
             parsed = _extract_json(call_llm(_PROMPT + chunk))
         except Exception as exc:
             failures.append(f"chunk {index}: {type(exc).__name__}: {exc}"[:160])
+            if _is_fatal(exc):
+                # A credential does not fix itself. Continuing would call the model once per
+                # remaining chunk of every remaining paper, turning one expired token into a
+                # corpus of empty specs that each look like "this paper describes no method" —
+                # and burning the batch's whole runtime to produce them. Stop and say why.
+                raise
             continue
         if parsed:
             parsed_specs.append(parsed)
+            chars_parsed += len(chunk)
         else:
             failures.append(f"chunk {index}: unparseable")
 
     if not parsed_specs:
         # Nothing usable came back. Which kind of nothing depends on whether the calls raised.
-        status = STATUS_UNAVAILABLE if any("Error" in f or ":" in f and "unparseable" not in f
-                                           for f in failures) else STATUS_UNPARSEABLE
+        status = (STATUS_UNAVAILABLE
+                  if any("unparseable" not in f for f in failures) else STATUS_UNPARSEABLE)
         return _empty_spec(status, text[:500].strip(),
-                           error="; ".join(failures)[:300] or None, **coverage)
+                           error="; ".join(failures)[:300] or None,
+                           chunks_parsed=0, chars_seen=0, **coverage)
 
     merged = _merge_specs(parsed_specs)
     complete = len(parsed_specs) == len(all_chunks) and not failures
     merged["status"] = STATUS_EXTRACTED if complete else STATUS_PARTIAL
+    # `chars_seen` is the text the spec is actually BASED ON, so a chunk that crashed does not
+    # count towards it. It read `sum(len(c) for c in chunks)` — every chunk launched — which
+    # reported full coverage for a run where half of them died.
+    merged["chars_seen"] = chars_parsed
     # `degraded` stays False: real steps were extracted and the spec is usable. `status` and the
     # coverage counts carry the qualification, so a reader can tell a full pass from a partial one
     # without the two being collapsed into one flag.
     merged["degraded"] = False
     merged.update(coverage)
     merged["chunks_parsed"] = len(parsed_specs)
+    merged["chars_seen"] = chars_parsed
     if failures:
         merged["chunk_failures"] = failures[:8]
     return merged
@@ -309,7 +342,9 @@ class PublicationExtractor:
         status = method.get("status") or STATUS_EXTRACTED
         degraded = bool(method.get("degraded"))
         contents = f"{title}\n{body}".strip()
-        used, total = method.get("chunks_used"), method.get("chunks_total")
+        total = method.get("chunks_total")
+        attempted = method.get("chunks_attempted")
+        parsed = method.get("chunks_parsed")
         if degraded:
             # Prefixed, not appended: the evidence view truncates, and a caveat that only
             # appears after 4000 characters is a caveat nobody reads. An empty `steps` list must
@@ -322,10 +357,20 @@ class PublicationExtractor:
             # WERE extracted, so this is not a failure — but a spec built from part of a paper
             # must not read as the paper's whole method. Without this the coverage counts existed
             # only in `extracted` and nothing the agent reads ever mentioned them.
-            seen = f"{used} of {total} sections" if used and total else "part of the document"
+            # The count that matters is chunks that PRODUCED a spec. Rendering chunks launched
+            # said "4 of 4 sections" for a run where two of them crashed — complete coverage,
+            # next to a status of `llm_partial` that said the opposite.
+            seen = (f"{parsed} of {total} sections" if parsed and total
+                    else "part of the document")
+            why = ""
+            if attempted and total and attempted < total:
+                why = (f" Coverage was capped at {attempted} section(s) by PUB_MAX_CHUNKS.")
+            if parsed is not None and attempted and parsed < attempted:
+                why += (f" {attempted - parsed} section(s) failed to extract and were lost, "
+                        f"which a re-run may recover.")
             contents = (f"[PARTIAL METHOD SPEC] Extracted from {seen} of this publication, so "
                         f"steps described elsewhere in the paper may be missing. What follows is "
-                        f"real but may be incomplete.\n\n" + contents)
+                        f"real but may be incomplete.{why}\n\n" + contents)
 
         source_fields = {k: f[k] for k in ("authors", "contributor", "abstract", "tags", "license", "doi")
                          if f.get(k)}
@@ -341,7 +386,8 @@ class PublicationExtractor:
                        "is_method_spec": not degraded,
                        # Coverage is queryable, not just prose: "which specs were built from a
                        # truncated read" is a corpus-quality question someone will need to ask.
-                       "chunks_used": used, "chunks_total": total,
+                       "chunks_total": total, "chunks_attempted": attempted,
+                       "chunks_parsed": parsed,
                        "chars_seen": method.get("chars_seen"),
                        "chars_total": method.get("chars_total"),
                        "chunk_failures": method.get("chunk_failures") or [],
@@ -363,8 +409,15 @@ class PublicationExtractor:
         warnings = ([f"publication: {status}" + (f" ({method['error']})" if method.get("error") else "")]
                     if degraded else [])
         if not degraded and status == STATUS_PARTIAL:
-            warnings.append(f"publication: {status} — read {used} of {total} sections; raise "
-                            f"PUB_MAX_CHUNKS to cover more")
+            # Name the ACTUAL constraint. "raise PUB_MAX_CHUNKS" is useless advice when the
+            # budget was never the limit, and it sends an operator to change the one thing that
+            # would not have helped.
+            if attempted and total and attempted < total:
+                warnings.append(f"publication: {status} — budget capped the read at "
+                                f"{attempted} of {total} sections; raise PUB_MAX_CHUNKS")
+            if parsed is not None and attempted and parsed < attempted:
+                warnings.append(f"publication: {status} — {attempted - parsed} of {attempted} "
+                                f"section(s) failed to extract; a re-run may recover them")
         return ExtractionResult(assets=[asset], edges=edges, warnings=warnings)
 
 

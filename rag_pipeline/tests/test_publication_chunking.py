@@ -94,7 +94,7 @@ def test_a_long_paper_is_read_in_chunks_not_truncated(fake_llm):
     paper = _paper()
     spec = extract_method(paper, max_chunks=20)
     assert fake_llm["n"] == 5, "one LLM call per chunk"
-    assert spec["chunks_used"] == spec["chunks_total"] == 5
+    assert spec["chunks_parsed"] == spec["chunks_attempted"] == spec["chunks_total"] == 5
     assert spec["status"] == STATUS_EXTRACTED
     # The old path sent 12000 of 48661 characters and called that complete.
     assert spec["chars_seen"] > 40000 and spec["chars_total"] > 40000
@@ -103,7 +103,8 @@ def test_a_long_paper_is_read_in_chunks_not_truncated(fake_llm):
 def test_a_budgeted_read_is_partial_and_says_by_how_much(fake_llm):
     spec = extract_method(_paper(), max_chunks=2)
     assert spec["status"] == STATUS_PARTIAL
-    assert spec["chunks_used"] == 2 and spec["chunks_total"] == 5
+    assert spec["chunks_attempted"] == 2 and spec["chunks_total"] == 5
+    assert spec["chunks_parsed"] == 2
     assert spec["chars_seen"] < spec["chars_total"]
     assert fake_llm["n"] == 2, "the budget is the cost dial; it must be respected"
 
@@ -117,7 +118,7 @@ def test_partial_is_not_degraded():
 def test_a_paper_that_fits_in_one_chunk_is_complete_not_partial(fake_llm):
     spec = extract_method("Intro.\n\nMethods: we buffered points by 25 km.")
     assert spec["status"] == STATUS_EXTRACTED
-    assert spec["chunks_used"] == spec["chunks_total"] == 1
+    assert spec["chunks_parsed"] == spec["chunks_attempted"] == spec["chunks_total"] == 1
 
 
 # ------------------------------------------------------------------ the reduce step
@@ -189,7 +190,7 @@ def test_one_bad_chunk_does_not_discard_the_good_ones(monkeypatch):
     assert spec["status"] == STATUS_PARTIAL, "not complete, and not a failure either"
     assert spec["degraded"] is False
     assert len(spec["steps"]) == 4, "4 of 5 chunks parsed"
-    assert spec["chunks_parsed"] == 4 and spec["chunks_used"] == 5
+    assert spec["chunks_parsed"] == 4 and spec["chunks_attempted"] == 5
     assert any("chunk 1" in f for f in spec["chunk_failures"]), (
         "which chunk failed must be recorded, not just that one did")
 
@@ -212,7 +213,7 @@ def test_a_partial_spec_is_prefixed_so_the_caveat_survives_truncation(fake_llm, 
     assert asset.contents.startswith("[PARTIAL METHOD SPEC]")
     assert "2 of 5 sections" in asset.contents
     assert asset.extracted["is_method_spec"] is True, "the steps are real"
-    assert asset.extracted["chunks_used"] == 2 and asset.extracted["chunks_total"] == 5
+    assert asset.extracted["chunks_parsed"] == 2 and asset.extracted["chunks_total"] == 5
     assert any("llm_partial" in w for w in result.warnings), (
         "an operator running a batch needs to know coverage was capped")
 
@@ -242,3 +243,131 @@ def test_the_chunk_budget_is_clamped_and_never_raises(raw, expected, monkeypatch
 
     monkeypatch.setenv("PUB_MAX_CHUNKS", raw)
     assert publication_extractor._max_chunks() == expected
+
+
+# ------------------------------------------------------------------ coverage must not overcount
+
+def test_a_crashed_chunk_does_not_count_as_coverage(monkeypatch):
+    """``chunks_used``/``chars_seen`` were computed from the chunks LAUNCHED, before the loop that
+    calls the model — so a run where half the chunks crashed reported FULL coverage.
+
+    Reproduced: 2 of 4 chunks killed by a transient crash rendered as "Extracted from 4 of 4
+    sections", with 39,007 of 39,061 characters seen, next to a status of ``llm_partial`` that
+    said the opposite. Every number contradicted the one field that was right.
+    """
+    from rag_pipeline import llm_utils
+
+    calls = {"n": 0}
+
+    def crashy(_p):
+        calls["n"] += 1
+        if calls["n"] in (2, 4):
+            raise RuntimeError("claude CLI was killed by signal 11 after 3 attempt(s)")
+        return json.dumps({"summary": "s", "steps": [f"step {calls['n']}"],
+                           "datasets_referenced": [], "tools_referenced": [], "params": {}})
+
+    llm_utils.register_llm_callable(crashy)
+    try:
+        spec = extract_method(_paper(), max_chunks=20)
+    finally:
+        llm_utils.register_llm_callable(None)
+
+    assert spec["chunks_attempted"] == spec["chunks_total"] == 5
+    assert spec["chunks_parsed"] == 3, "three of five chunks produced a spec"
+    assert spec["chars_seen"] < spec["chars_total"], (
+        "chars_seen is the text the spec is BASED ON; a crashed chunk contributed none of it")
+    assert spec["chars_seen"] < 0.75 * spec["chars_total"], (
+        "two lost chunks must show up as a real reduction, not a rounding difference")
+
+
+def test_a_capped_read_and_a_crashed_read_get_different_remedies(tmp_path, monkeypatch):
+    """Two different things reduce coverage and they have different fixes. Reporting one number
+    for both told an operator to "raise PUB_MAX_CHUNKS" when the budget was never the constraint —
+    sending them to change the one thing that would not have helped."""
+    from extractors.base import ExtractContext
+    from extractors.publication_extractor import PublicationExtractor
+    from rag_pipeline import llm_utils
+
+    (tmp_path / "p.txt").write_text(_paper(), encoding="utf-8")
+    ctx = ExtractContext(repo_id="r", element_id="e", source_url="u", commit_sha="c")
+
+    calls = {"n": 0}
+
+    def crashy(_p):
+        calls["n"] += 1
+        if calls["n"] in (2, 4):
+            raise RuntimeError("killed by signal 11")
+        return json.dumps({"summary": "s", "steps": ["a"], "datasets_referenced": [],
+                           "tools_referenced": [], "params": {}})
+
+    monkeypatch.setenv("PUB_MAX_CHUNKS", "20")
+    llm_utils.register_llm_callable(crashy)
+    try:
+        crashed = PublicationExtractor().extract(str(tmp_path / "p.txt"), ctx=ctx)
+    finally:
+        llm_utils.register_llm_callable(None)
+
+    assert "failed to extract" in " ".join(crashed.warnings)
+    assert "PUB_MAX_CHUNKS" not in " ".join(crashed.warnings), (
+        "the budget was not the constraint; naming it is wrong advice")
+    assert "3 of 5 sections" in crashed.assets[0].contents
+
+    monkeypatch.setenv("PUB_MAX_CHUNKS", "2")
+    llm_utils.register_llm_callable(lambda _p: json.dumps(
+        {"summary": "s", "steps": ["a"], "datasets_referenced": [],
+         "tools_referenced": [], "params": {}}))
+    try:
+        capped = PublicationExtractor().extract(str(tmp_path / "p.txt"), ctx=ctx)
+    finally:
+        llm_utils.register_llm_callable(None)
+
+    assert "PUB_MAX_CHUNKS" in " ".join(capped.warnings)
+    assert "failed to extract" not in " ".join(capped.warnings)
+
+
+# ------------------------------------------------------------------ a batch must be able to stop
+
+def test_an_expired_credential_stops_the_paper_instead_of_grinding_through_it():
+    """Not hypothetical: the CLI's OAuth token expired mid-session during this work.
+
+    A credential does not fix itself, so continuing calls the model once per remaining chunk of
+    every remaining paper — turning one expired token into a corpus of empty specs that each read
+    as "this paper describes no method", and burning the batch's whole runtime to produce them.
+    """
+    from rag_pipeline import llm_utils
+    from rag_pipeline.llm_claude_cli import ClaudeCliUnavailable
+
+    calls = {"n": 0}
+
+    def expired(_p):
+        calls["n"] += 1
+        raise ClaudeCliUnavailable("Failed to authenticate. API Error: 401 OAuth access token "
+                                   "has expired.")
+
+    llm_utils.register_llm_callable(expired)
+    try:
+        with pytest.raises(ClaudeCliUnavailable):
+            extract_method(_paper(), max_chunks=20)
+    finally:
+        llm_utils.register_llm_callable(None)
+    assert calls["n"] == 1, "it must stop at the first chunk, not attempt all five"
+
+
+def test_a_transient_crash_is_not_treated_as_fatal():
+    """The other half: a crash that might not recur must still let the remaining chunks try, or
+    one blip costs the whole paper."""
+    from rag_pipeline import llm_utils
+
+    calls = {"n": 0}
+
+    def crashy(_p):
+        calls["n"] += 1
+        raise RuntimeError("killed by signal 11 after 3 attempt(s)")
+
+    llm_utils.register_llm_callable(crashy)
+    try:
+        spec = extract_method(_paper(), max_chunks=20)
+    finally:
+        llm_utils.register_llm_callable(None)
+    assert calls["n"] == 5, "every chunk is attempted"
+    assert spec["status"] == STATUS_UNAVAILABLE and spec["degraded"] is True

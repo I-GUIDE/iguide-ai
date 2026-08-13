@@ -2416,3 +2416,56 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   raising discards the whole turn (no checkpointer, no error edge, no error budget, while
   the same loop tolerates 8 unproductive steps); and a failed turn leaves no record, so
   the user's own question is dropped from history. Both are orchestration-core changes.
+
+## 2026-08-13 · M6.L · The chunking I wrote an hour ago reported full coverage for a half-failed read
+
+**Change** `publication_extractor`: coverage split into `chunks_total` / `chunks_attempted`
+  / `chunks_parsed`, with `chars_seen` counting only chunks that produced a spec. The
+  prefix and the operator warning name the **actual** constraint — budget-capped and
+  crash-lost are different problems with different remedies. `ClaudeCliUnavailable` is now
+  batch-fatal: it stops the paper instead of being retried per chunk.
+
+**Why** Two confirmed findings from the resumed audit, both in code committed in M6.K.
+
+  `coverage` was built from `len(chunks)` — the chunks *launched* — before the loop that
+  calls the model. Reproduced: 2 of 4 chunks killed by a transient crash rendered as
+  **"Extracted from 4 of 4 sections"** with 39,007 of 39,061 characters seen, sitting next
+  to a status of `llm_partial` that said the opposite. Every number contradicted the one
+  field that was right, and `chunks_parsed` — which told the truth — was computed and then
+  dropped before it reached `extracted`.
+
+  Worse, the warning said *"raise PUB_MAX_CHUNKS to cover more"*. The budget was never the
+  constraint; that sends an operator to change the one thing that would not have helped.
+
+  Separately: a `ClaudeCliUnavailable` was caught per chunk like any other failure. An
+  expired credential does not fix itself, so a batch would call the model once per
+  remaining chunk of every remaining paper — turning one expired token into 180 empty
+  specs that each read as "this paper describes no method", and burning the batch's whole
+  runtime to produce them. Not hypothetical: **the CLI's OAuth token expired during this
+  session.**
+
+**Measured** Same 4-chunk paper, 2 chunks crashing: coverage now reads
+  `attempted=4 parsed=2`, `chars_seen` **39,007 → 22,751**, prefix **"4 of 4" → "2 of 4"**,
+  and the warning changed from *"raise PUB_MAX_CHUNKS"* to *"2 of 4 sections failed to
+  extract; a re-run may recover them"*. A genuinely budget-capped read still says
+  *"budget capped the read at 2 of 4 sections; raise PUB_MAX_CHUNKS"* and does **not**
+  mention failures. An expired credential stops after **1** call, not 4; a transient crash
+  still attempts all of them. Tests **1173 → 1177**.
+
+**Surprised by** This is the second consecutive commit where an audit found the defect in
+  the commit before it, and both times the shape was identical to what the commit was
+  fixing. M6.K's whole point was "a partial read must not be indistinguishable from a
+  complete one" — and it shipped a partial read that reported itself as complete.
+
+  My own tests passed. They asserted coverage only on the paths where nothing crashed,
+  because I wrote them from the same mental model as the code, minutes later. The audit's
+  refuter found it by reading the assignment order — `coverage` built before the loop —
+  which is visible in ten seconds to anyone not already convinced the code was right.
+
+**Next** Four confirmed findings remain, all orchestration-core and all flagged for the
+  user's decision rather than acted on: a peer node raising discards the turn (reproduced:
+  `evidence in state: 10` → `RAISED` → `synthesize ran: False`); the supervisor compiles
+  without a checkpointer; a failed turn leaves no record; and the user sees the raw Python
+  exception string. Notably the refuter established that `synthesize_node` **already** has
+  three graceful degradations — they are simply unreachable, because the exception aborts
+  the graph before `synthesize` is routed to.
