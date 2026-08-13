@@ -131,6 +131,16 @@ def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
                     f"zone) before buffering or measuring.", crs=str(crs))
 
 
+def _looks_like_join_result(frame: Any) -> bool:
+    """Whether this frame carries the fingerprint of a spatial/relational join."""
+    try:
+        columns = {str(c) for c in frame.columns}
+    except Exception:
+        return False
+    return bool(columns & {"index_right", "index_left"}) or any(
+        str(c).endswith(("_left", "_right")) for c in columns)
+
+
 def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
     """An entirely-null column is a failed join or a failed parse wearing a result's shape.
 
@@ -138,6 +148,16 @@ def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
     it missed the commonest case: pandas types an all-``None`` column as ``object``, so the
     column produced by an unmatched join — the exact thing this check exists for — was
     excluded from the check by its own dtype.
+
+    **FAIL requires join evidence.** An all-null column is only provably a defect when the frame
+    is a join result; in an INPUT it is ordinary data — a dataset with an optional column that
+    happens to be empty (``apt_number``, ``middle_name``) is not broken. Reproduced: a correct
+    run over such a frame was verdicted ``fail`` and blocked. Without that distinction the check
+    fails correct runs, and a gate that fails correct runs gets switched off, which costs the
+    unmatched-join detection this exists for.
+
+    An unverifiable suspicion is still REPORTED — ``cannot_determine`` carries its message all
+    the way to the user's caveat — it just does not claim the numbers are wrong.
     """
     try:
         columns = list(frame.columns)
@@ -146,23 +166,47 @@ def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
     if not columns:
         return _finding("all_nan", UNKNOWN, name, "frame has no columns")
     if len(frame) == 0:
-        return _finding("all_nan", FAIL, name, "frame is empty (0 rows)")
+        # NOT a fail. A filter that matches nothing and a spatial query with no hits are both
+        # correct outcomes with zero rows, and calling them errors blocks a right answer. It is
+        # still worth saying out loud, because an empty frame is also what a broken filter
+        # produces, and the reader is the one who can tell.
+        return _finding("all_nan", UNKNOWN, name,
+                        "frame is empty (0 rows) — correct for a filter or query that matched "
+                        "nothing, but also what a failed filter produces; confirm which")
     geom = _geometry_column(frame)
     bad: List[str] = []
+    checked: List[str] = []
     for col in columns:
         if geom is not None and str(col) == geom:
             continue          # a null geometry is its own problem, not a null-column one
         if geom is None and str(col) == "geometry":
             continue
         try:
+            checked.append(str(col))
             if bool(frame[col].isna().all()):
                 bad.append(str(col))
         except Exception:
             continue
     if bad:
-        return _finding("all_nan", FAIL, name,
-                        f"column(s) entirely null: {', '.join(bad)} — usually an unmatched "
-                        f"join or a failed parse, not a real result", columns=bad)
+        if _looks_like_join_result(frame):
+            return _finding("all_nan", FAIL, name,
+                            f"column(s) entirely null: {', '.join(bad)} — this frame is a join "
+                            f"result, so an all-null column means nothing matched; any count or "
+                            f"ratio computed from it is wrong", columns=bad)
+        if len(bad) == len(checked):
+            return _finding("all_nan", FAIL, name,
+                            f"EVERY non-geometry column is entirely null ({', '.join(bad)}), so "
+                            f"an upstream step produced no data at all", columns=bad)
+        # Some columns null, no join evidence, others populated. RECORDED but not alarming: a
+        # dataset with an empty optional column (`apt_number`, `middle_name`) is ordinary, and a
+        # correct run over one must be able to reach `pass`.
+        #
+        # This deliberately matches the call-site rule in `_check_one_arg`. Two different answers
+        # to the same question in one module is how the confusion this check keeps causing starts.
+        return _finding("all_nan", PASS, name,
+                        f"populated, though {len(bad)} of {len(checked)} column(s) are entirely "
+                        f"null ({', '.join(bad)}) — ordinary for an optional field, but check it "
+                        f"if a number was computed from one of them", columns=bad)
     return _finding("all_nan", PASS, name, "no entirely-null columns")
 
 
@@ -377,9 +421,35 @@ def _check_one_arg(unit: str, invariant: Dict[str, Any], value: Any,
     if check == "reject_all_nan":
         if not _looks_like_frame(value):
             return None
-        finding = check_not_all_nan(where, value)
-        # Only a real failure is interesting here: "this frame is fine" is noise on every call.
-        return finding if finding.get("status") == FAIL else None
+        # Narrower than the module-scope check, and deliberately so. This invariant exists to
+        # catch a FAILED UPSTREAM STEP -- "the caller learns which step broke, not just that the
+        # end was NaN" -- so the signal is a frame that carries no data at all, not a frame with
+        # one empty optional column.
+        #
+        # Reusing check_not_all_nan wholesale flagged any input whose optional column happened to
+        # be empty (`apt_number`, `middle_name`), on every single call. A caveat that appears on
+        # correct runs is a caveat nobody reads, and it would have arrived on the answer itself
+        # now that cannot_determine reaches the user.
+        try:
+            columns = [c for c in list(value.columns) if str(c) != (_geometry_column(value) or "geometry")]
+            rows = int(len(value))
+        except Exception:
+            return None
+        if rows == 0:
+            return _finding(check, UNKNOWN, where,
+                            f"{unit} was called with an EMPTY {target} (0 rows), so any result "
+                            f"is computed over no data — check the step that produced it")
+        if columns:
+            try:
+                empty = [str(c) for c in columns if bool(value[c].isna().all())]
+            except Exception:
+                return None
+            if len(empty) == len(columns):
+                return _finding(check, FAIL, where,
+                                f"every non-geometry column of {target} is entirely null when "
+                                f"{unit} is called, so an upstream step produced nothing; any "
+                                f"number derived from this is meaningless", columns=empty)
+        return None
 
     return None
 
@@ -722,7 +792,8 @@ def _inlined_helpers() -> str:
     """This module's own check functions, indented for injection into the sandbox."""
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
-                check_not_all_nan, check_join_cardinality, check_finite, check_declared_units,
+                check_not_all_nan, _looks_like_join_result, check_join_cardinality,
+                check_finite, check_declared_units,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
                 _looks_like_frame, _has_geometry, install_contract_guards, run_checks):
         src = inspect.getsource(obj)

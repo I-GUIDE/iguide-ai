@@ -71,19 +71,63 @@ def test_the_failure_message_says_how_to_fix_it():
 
 def test_an_object_dtype_all_null_column_is_caught():
     """The first version used select_dtypes("number"), which excludes an all-None column
-    because pandas types it as object — exactly what an unmatched join produces."""
-    frame = pd.DataFrame({"a": [None, None], "b": [1, 2]})
+    because pandas types it as object — exactly what an unmatched join produces.
+
+    The frame carries ``index_right`` because that is what the docstring above describes — an
+    unmatched join. Without join evidence the same shape is an ordinary dataset with an empty
+    optional column, and a correct run over one has to be able to reach ``pass``; the dtype
+    detection this test is about is identical either way."""
+    frame = pd.DataFrame({"a": [None, None], "b": [1, 2], "index_right": [0, 1]})
     out = check_not_all_nan("joined", frame)
     assert out["status"] == FAIL and "a" in out["columns"]
 
 
+def test_an_all_null_column_in_a_JOIN_result_is_a_hard_failure():
+    """With join evidence there is no ambiguity: nothing matched, so any count or ratio computed
+    from the result is wrong. This is the case the check exists for, and it must stay a fail."""
+    frame = pd.DataFrame({"a": [1, 2], "index_right": [0, 1], "joined": [None, None]})
+    out = check_not_all_nan("joined", frame)
+    assert out["status"] == FAIL
+    assert "nothing matched" in out["message"]
+
+
+def test_merge_suffixes_also_count_as_join_evidence():
+    """``pd.merge`` does not add ``index_right``; it adds ``_left``/``_right`` suffixes on
+    collisions. Keying only on the sjoin marker would miss the commonest unmatched merge."""
+    frame = pd.DataFrame({"pop_left": [1, 2], "count_right": [None, None]})
+    assert check_not_all_nan("merged", frame)["status"] == FAIL
+
+
 def test_a_numeric_all_nan_column_is_caught():
-    frame = pd.DataFrame({"a": [float("nan")] * 3, "b": [1, 2, 3]})
+    frame = pd.DataFrame({"a": [float("nan")] * 3, "b": [1, 2, 3], "index_left": [0, 1, 2]})
     assert check_not_all_nan("df", frame)["status"] == FAIL
 
 
-def test_an_empty_frame_fails():
-    assert check_not_all_nan("df", pd.DataFrame({"a": []}))["status"] == FAIL
+def test_a_sparse_optional_column_is_recorded_without_downgrading_the_run():
+    """A dataset with an empty optional column (``apt_number``, ``middle_name``) is ordinary, and
+    a correct run over one must reach ``pass``. The observation is still recorded in the finding,
+    so anyone reading checks.json sees it — it just does not claim the numbers are unverified.
+
+    Deliberately the same rule as the call site in ``_check_one_arg``. Two different answers to
+    the same question in one module is how the confusion this check keeps causing starts."""
+    out = check_not_all_nan("tracts", pd.DataFrame({"tract": [1, 2], "apt_no": [None, None]}))
+    assert out["status"] == PASS
+    assert out["columns"] == ["apt_no"], "the observation must still be recorded"
+
+
+def test_every_column_null_is_a_failure_even_without_join_evidence():
+    """Nothing came through at all. That needs no join marker to be unambiguous."""
+    out = check_not_all_nan("df", pd.DataFrame({"a": [None, None], "b": [None, None]}))
+    assert out["status"] == FAIL and "EVERY non-geometry column" in out["message"]
+
+
+def test_an_empty_frame_is_reported_but_not_called_wrong():
+    """A filter that matches nothing and a spatial query with no hits are both CORRECT outcomes
+    with zero rows. Calling them errors blocks a right answer — and it is also what a broken
+    filter produces, so it is still said out loud."""
+    out = check_not_all_nan("df", pd.DataFrame({"a": []}))
+    assert out["status"] == UNKNOWN
+    assert "matched nothing" in out["message"] and "failed filter" in out["message"]
 
 
 def test_partial_nulls_are_not_a_failure():
@@ -564,3 +608,84 @@ def test_a_container_of_correct_frames_passes():
 
     inv = {"check": "projected_crs", "target": "catchments"}
     assert check_contract_arg("e2sfca", inv, [_geo("EPSG:32616")]) is None
+
+
+def test_no_name_in_the_inlined_gate_is_unbound():
+    """The structural guard against the bug this module keeps producing.
+
+    ``_inlined_helpers()`` copies selected functions into the sandbox script by source text. Any
+    module-level name one of them references — a sibling helper, a constant, an import — is NOT
+    carried along, so it raises ``NameError`` inside the gate's own ``except``, and the run is
+    reported ``cannot_determine`` with a plausible-looking message. It has happened six times:
+    ``math as _math``, ``ModuleType``, ``_GEO_MODULES``, ``DECLARED_OUTPUTS``,
+    ``capture_environment``, and ``_looks_like_join_result``.
+
+    Every previous fix was whack-a-mole, and each one was found by a run that happened to
+    exercise that path — the sparse-column case above was found in a live container, not by the
+    suite. Binding analysis over the generated source catches all of them at once, including the
+    next one.
+    """
+    import builtins
+
+    body = next(n for n in ast.parse(prologue_source(None)).body
+                if isinstance(n, ast.FunctionDef) and n.name == "_iguide_gate_body")
+    bound = set(dir(builtins)) | {"__name__", "__file__"}
+    for node in ast.walk(body):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    loaded = {n.id for n in ast.walk(body)
+              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    assert not (loaded - bound), (
+        f"these names are referenced by the inlined gate but never bound in it, so they will "
+        f"raise NameError inside the sandbox and be reported as cannot_determine: "
+        f"{sorted(loaded - bound)}")
+
+
+@pytest.mark.parametrize("body,expect_clean", [
+    # A correct run over a real dataset whose OPTIONAL column is empty. Must not be flagged.
+    ("""
+import geopandas as gpd
+from shapely.geometry import Point
+tracts = gpd.GeoDataFrame({'tract': [1, 2], 'apt_number': [None, None]},
+                          geometry=[Point(447000, 4636000), Point(448000, 4637000)],
+                          crs='EPSG:32616')
+tracts['area_m2'] = tracts.buffer(500).area
+""", True),
+    # An unmatched spatial join. Must be flagged.
+    ("""
+import geopandas as gpd
+from shapely.geometry import Point
+left = gpd.GeoDataFrame({'a': [1, 2]}, geometry=[Point(0, 0), Point(1, 1)], crs='EPSG:32616')
+right = gpd.GeoDataFrame({'val': [9]}, geometry=[Point(900, 900)], crs='EPSG:32616')
+joined = gpd.sjoin(left, right, how='left', predicate='intersects')
+""", False),
+])
+def test_the_null_check_discriminates_in_a_real_run(tmp_path, body, expect_clean):
+    """Runs the assembled script in a subprocess, so every check executes against live frames.
+
+    This is the shape that caught ``_looks_like_join_result``: the parametrized exit-path test
+    above exercises the coverage path only, so a NameError in the null check survived it."""
+    import subprocess
+    import sys as _sys
+
+    (tmp_path / "run.py").write_text(prologue_source(None) + body + epilogue_source(),
+                                     encoding="utf-8")
+    subprocess.run([_sys.executable, "run.py"], cwd=tmp_path, capture_output=True, text=True)
+    report = json.loads((tmp_path / "checks.json").read_text())
+
+    errored = [f for f in report["findings"] if "check errored" in f.get("message", "")]
+    assert not errored, f"a check raised inside its own guard: {errored}"
+
+    if expect_clean:
+        assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+    else:
+        assert report["verdict"] == FAIL
+        assert any(f["check"] == "all_nan" and f["status"] == FAIL for f in report["findings"])

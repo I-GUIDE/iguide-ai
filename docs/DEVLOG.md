@@ -2196,3 +2196,54 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** `reject_all_nan` failing correct runs on input shape — the last of the ranked
   audit findings. Then the deferred plan items: publication paragraph chunking, the Neo4j
   graph emitter, the ablation arm, and the CI artifact re-run job.
+
+## 2026-08-13 · M6.G · reject_all_nan failed correct runs; and the sixth NameError in the gate
+
+**Change** `check_not_all_nan` now discriminates on evidence rather than on shape:
+  join-result or every-column-null → `fail`; empty frame → `cannot_determine`; some
+  columns null with others populated → `pass` **with the observation recorded**. The
+  call-time guard in `_check_one_arg` uses the same rule instead of reusing the
+  module-scope check wholesale. `_looks_like_join_result` added to the inlined helpers.
+
+**Why** An all-null column is only provably a defect when the frame is a join result. In
+  an input it is ordinary data — a dataset with an empty optional column (`apt_number`,
+  `middle_name`) is not broken. Reproduced: a correct run over such a frame was verdicted
+  `fail` and blocked, and an empty result from a filter that legitimately matched nothing
+  was also `fail`. A gate that fails correct runs gets switched off, which costs the
+  unmatched-join detection the check exists for.
+
+**Measured** In a real container:
+  - correct run, sparse optional column: **`fail` → `pass`**
+  - unmatched `sjoin`: **`fail`, still** — naming `index_right, val` and "nothing matched"
+  - `pd.merge` suffixes (`_left`/`_right`) also count as join evidence; keying only on the
+    sjoin marker would have missed the commonest unmatched merge
+  - call site: a sparse input is silent, an all-null input is `fail`, an empty input is
+    `cannot_determine`
+  - tests **1093 → 1101**
+
+**Surprised by** Two things.
+
+  First, the recalibration exposed that `_check_one_arg` returned `finding if status ==
+  FAIL else None` — so downgrading `reject_all_nan` made the call-time check record
+  **nothing at all**. Fixing one silent-noop created another, and the only reason I saw it
+  is that I ran the live container.
+
+  Second: `_looks_like_join_result` was not in `_inlined_helpers()`, so the check raised
+  `NameError` inside the gate's own `except` and every run came back
+  `cannot_determine: check errored`. That is the **sixth** instance — `math as _math`,
+  `ModuleType`, `_GEO_MODULES`, `DECLARED_OUTPUTS`, `capture_environment`, and now this.
+  Every previous fix was whack-a-mole found by whichever run happened to hit that path;
+  the parametrized exit-path test added yesterday exercises only the *coverage* path, so
+  it sailed through.
+
+  Replaced with a structural test: parse the generated gate body, collect every `Name`
+  load, and assert each is bound within it. That catches all six retroactively and the
+  next one prospectively. It is the test I should have written the first time.
+
+  Also worth recording so it is not mistaken for a regression: the suite reported 226s on
+  one run and 37s on the next with no change in between — a cold-cache artefact, not the
+  new subprocess tests. Slowest single test is 2.41s.
+
+**Next** The ranked audit queue is now empty. Remaining plan items, none of them defect
+  work: publication paragraph chunking, the Neo4j graph emitter with the `IMPLEMENTED_BY`
+  edge, the ablation arm, and the CI artifact re-run job.

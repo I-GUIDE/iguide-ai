@@ -134,13 +134,41 @@ def test_crs_equals_compares_exactly():
     assert bad and bad["status"] == FAIL and bad["expected"] == "EPSG:4326"
 
 
-def test_reject_all_nan_only_reports_real_failures():
-    """"This frame is fine" on every call would bury the findings that matter."""
+def test_reject_all_nan_at_the_call_site_flags_a_broken_input_not_a_sparse_one():
+    """"This frame is fine" on every call would bury the findings that matter — and so would
+    "this frame has a null column" on every call.
+
+    This invariant exists to catch a FAILED UPSTREAM STEP: "the caller learns which step broke,
+    not just that the end was NaN". So the signal is a frame carrying no data at all, not a frame
+    with one empty optional column. Reusing the module-scope check wholesale flagged any input
+    whose optional column happened to be empty (``apt_number``, ``middle_name``) on every single
+    call — and since the gate's cannot_determine now reaches the user's answer, that noise would
+    have landed on correct runs.
+    """
     pd = pytest.importorskip("pandas")
     inv = {"check": "reject_all_nan", "target": "df"}
     assert check_contract_arg("f", inv, pd.DataFrame({"a": [1, 2]})) is None
-    bad = check_contract_arg("f", inv, pd.DataFrame({"a": [None, None]}))
-    assert bad and bad["status"] == FAIL
+    assert check_contract_arg("f", inv, pd.DataFrame({"a": [1, 2], "apt": [None, None]})) is None
+
+    broken = check_contract_arg("f", inv, pd.DataFrame({"a": [None, None], "b": [None, None]}))
+    assert broken and broken["status"] == FAIL
+    assert "upstream step produced nothing" in broken["message"]
+
+    empty = check_contract_arg("f", inv, pd.DataFrame({"a": [], "b": []}))
+    assert empty and empty["status"] == UNKNOWN
+    assert "EMPTY df" in empty["message"]
+
+
+def test_a_geo_frame_whose_only_populated_column_is_geometry_is_flagged():
+    """Geometry is excluded from the null scan (a null geometry is its own finding), so a frame
+    with geometry and nothing else must not read as "one column is fine"."""
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import Point
+
+    frame = gpd.GeoDataFrame({"v": [None, None]},
+                             geometry=[Point(0, 0), Point(1, 1)], crs="EPSG:32616")
+    got = check_contract_arg("f", {"check": "reject_all_nan", "target": "df"}, frame)
+    assert got and got["status"] == FAIL
 
 
 def test_an_unknown_check_name_is_ignored_rather_than_guessed():
