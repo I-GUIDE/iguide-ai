@@ -86,31 +86,158 @@ def _empty_spec(status: str, summary: str = "", **extra: Any) -> Dict[str, Any]:
     return spec
 
 
-def extract_method(text: str, *, max_chars: int = 12000) -> Dict[str, Any]:
-    """LLM method extraction, with an explicit STATUS rather than a free-text note.
+STATUS_PARTIAL = "llm_partial"
+
+# Not in DEGRADED_STATUSES: a partial extraction produced real steps and is a usable method spec.
+# It is a *qualified* success, and conflating it with "the LLM was unreachable" would throw away
+# the steps that were extracted.
+
+
+def paragraph_chunks(text: str, *, max_chars: int = 12000, max_chunks: int = 0) -> List[str]:
+    """Split on PARAGRAPH boundaries, never mid-sentence.
+
+    ``text[:12000]`` cut the document at a fixed offset — mid-word, mid-sentence, and for any
+    paper longer than ~12 KB it discarded the Methods section entirely whenever that section came
+    late, which in a standard paper layout is most of the time. The model then reported the
+    honest truth about the text it was shown, and the result was recorded as the method of the
+    paper.
+
+    A paragraph that is itself longer than ``max_chars`` is emitted whole rather than split: a
+    hard cut inside a paragraph is the very thing this exists to avoid, and the model tolerates
+    an over-long chunk better than a truncated sentence.
+    """
+    body = (text or "").strip()
+    if not body:
+        return []
+    cap = max(1, int(max_chars))
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    if not paragraphs:
+        paragraphs = [body]
+
+    chunks: List[str] = []
+    current = ""
+    for para in paragraphs:
+        if not current:
+            current = para
+        elif len(current) + 2 + len(para) <= cap:
+            current = f"{current}\n\n{para}"
+        else:
+            chunks.append(current)
+            current = para
+    if current:
+        chunks.append(current)
+    limit = max_chunks if max_chunks > 0 else _max_chunks()
+    return chunks[:limit] if limit > 0 else chunks
+
+
+def _max_chunks() -> int:
+    """Chunk budget per publication. Each chunk is one LLM call, so this is the cost dial."""
+    raw = (os.getenv("PUB_MAX_CHUNKS") or "4").strip()
+    try:
+        return max(1, min(20, int(raw)))
+    except ValueError:
+        return 4
+
+
+def _merge_specs(specs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reduce per-chunk specs into one, preserving step ORDER and de-duplicating.
+
+    Order matters because ``steps`` is documented as ordered: a method's third step read before
+    its first is not a method. Chunks arrive in document order, so concatenating in arrival order
+    preserves it; the dedupe is case-insensitive on whitespace-normalised text, because the same
+    step described in two chunks is one step, not two.
+    """
+    steps: List[str] = []
+    seen_steps: set = set()
+    datasets: List[Any] = []
+    tools: List[Any] = []
+    params: Dict[str, Any] = {}
+    summaries: List[str] = []
+
+    for spec in specs:
+        for step in (spec.get("steps") or []):
+            key = " ".join(str(step).split()).lower()
+            if key and key not in seen_steps:
+                seen_steps.add(key)
+                steps.append(step)
+        for src, dst in ((spec.get("datasets_referenced") or [], datasets),
+                         (spec.get("tools_referenced") or [], tools)):
+            for item in src:
+                if item not in dst:
+                    dst.append(item)
+        got = spec.get("params")
+        if isinstance(got, dict):
+            for k, v in got.items():
+                params.setdefault(k, v)      # first chunk to name a parameter wins
+        summary = str(spec.get("summary") or "").strip()
+        if summary and summary not in summaries:
+            summaries.append(summary)
+
+    return {"summary": " ".join(summaries)[:1000], "steps": steps,
+            "datasets_referenced": datasets, "tools_referenced": tools, "params": params}
+
+
+def extract_method(text: str, *, max_chars: int = 12000,
+                   max_chunks: int = 0) -> Dict[str, Any]:
+    """LLM method extraction over paragraph chunks, with an explicit STATUS.
 
     The distinction that matters: an empty ``steps`` list from a paper that genuinely describes
     no reproducible method, and an empty ``steps`` list because the LLM was unreachable, are
     completely different facts. Downstream both used to render as "this publication describes no
     method" — a claim the extractor was never entitled to make.
+
+    Chunked rather than truncated, and the coverage is RECORDED: ``chunks_used`` /
+    ``chunks_total`` / ``chars_seen`` / ``chars_total``. A spec built from 4 of 30 chunks and one
+    built from the whole paper must not be indistinguishable, which is exactly what a silent
+    ``text[:12000]`` made them.
     """
     if not text.strip():
         return _empty_spec(STATUS_NO_TEXT)
+
+    all_chunks = paragraph_chunks(text, max_chars=max_chars, max_chunks=10 ** 6)
+    budget = max_chunks if max_chunks > 0 else _max_chunks()
+    chunks = all_chunks[:budget]
+    coverage = {"chunks_used": len(chunks), "chunks_total": len(all_chunks),
+                "chars_seen": sum(len(c) for c in chunks), "chars_total": len(text)}
+
     try:
         from rag_pipeline.llm_utils import call_llm
-        raw = call_llm(_PROMPT + text[:max_chars])
-        parsed = _extract_json(raw)
-        if parsed:
-            parsed.setdefault("steps", []); parsed.setdefault("datasets_referenced", [])
-            parsed.setdefault("tools_referenced", []); parsed.setdefault("params", {})
-            parsed.setdefault("summary", "")
-            parsed["status"] = STATUS_EXTRACTED
-            parsed["degraded"] = False
-            return parsed
-        return _empty_spec(STATUS_UNPARSEABLE, text[:500].strip())
     except Exception as exc:
         return _empty_spec(STATUS_UNAVAILABLE, text[:500].strip(),
-                           error=f"{type(exc).__name__}: {exc}"[:200])
+                           error=f"{type(exc).__name__}: {exc}"[:200], **coverage)
+
+    parsed_specs: List[Dict[str, Any]] = []
+    failures: List[str] = []
+    for index, chunk in enumerate(chunks):
+        try:
+            parsed = _extract_json(call_llm(_PROMPT + chunk))
+        except Exception as exc:
+            failures.append(f"chunk {index}: {type(exc).__name__}: {exc}"[:160])
+            continue
+        if parsed:
+            parsed_specs.append(parsed)
+        else:
+            failures.append(f"chunk {index}: unparseable")
+
+    if not parsed_specs:
+        # Nothing usable came back. Which kind of nothing depends on whether the calls raised.
+        status = STATUS_UNAVAILABLE if any("Error" in f or ":" in f and "unparseable" not in f
+                                           for f in failures) else STATUS_UNPARSEABLE
+        return _empty_spec(status, text[:500].strip(),
+                           error="; ".join(failures)[:300] or None, **coverage)
+
+    merged = _merge_specs(parsed_specs)
+    complete = len(parsed_specs) == len(all_chunks) and not failures
+    merged["status"] = STATUS_EXTRACTED if complete else STATUS_PARTIAL
+    # `degraded` stays False: real steps were extracted and the spec is usable. `status` and the
+    # coverage counts carry the qualification, so a reader can tell a full pass from a partial one
+    # without the two being collapsed into one flag.
+    merged["degraded"] = False
+    merged.update(coverage)
+    merged["chunks_parsed"] = len(parsed_specs)
+    if failures:
+        merged["chunk_failures"] = failures[:8]
+    return merged
 
 
 def implemented_by_edges(spec_doc_id: str, tools_referenced: Any) -> List[ProvenanceEdge]:
@@ -182,6 +309,7 @@ class PublicationExtractor:
         status = method.get("status") or STATUS_EXTRACTED
         degraded = bool(method.get("degraded"))
         contents = f"{title}\n{body}".strip()
+        used, total = method.get("chunks_used"), method.get("chunks_total")
         if degraded:
             # Prefixed, not appended: the evidence view truncates, and a caveat that only
             # appears after 4000 characters is a caveat nobody reads. An empty `steps` list must
@@ -189,6 +317,15 @@ class PublicationExtractor:
             contents = (f"[METHOD SPEC UNAVAILABLE: {status}] No method steps were extracted "
                         f"from this publication — this is an extraction failure, NOT evidence "
                         f"that the paper describes no method.\n\n" + contents)
+        elif status == STATUS_PARTIAL:
+            # A qualified success, and the qualification is prefixed for the same reason. Steps
+            # WERE extracted, so this is not a failure — but a spec built from part of a paper
+            # must not read as the paper's whole method. Without this the coverage counts existed
+            # only in `extracted` and nothing the agent reads ever mentioned them.
+            seen = f"{used} of {total} sections" if used and total else "part of the document"
+            contents = (f"[PARTIAL METHOD SPEC] Extracted from {seen} of this publication, so "
+                        f"steps described elsewhere in the paper may be missing. What follows is "
+                        f"real but may be incomplete.\n\n" + contents)
 
         source_fields = {k: f[k] for k in ("authors", "contributor", "abstract", "tags", "license", "doi")
                          if f.get(k)}
@@ -202,6 +339,12 @@ class PublicationExtractor:
                        "status": status,
                        "degraded": degraded,
                        "is_method_spec": not degraded,
+                       # Coverage is queryable, not just prose: "which specs were built from a
+                       # truncated read" is a corpus-quality question someone will need to ask.
+                       "chunks_used": used, "chunks_total": total,
+                       "chars_seen": method.get("chars_seen"),
+                       "chars_total": method.get("chars_total"),
+                       "chunk_failures": method.get("chunk_failures") or [],
                        "error": method.get("error"),
                        "parent_type": "Publication", "parent_title": title},
         )
@@ -219,10 +362,14 @@ class PublicationExtractor:
         edges.extend(implemented_by_edges(doc_id, method.get("tools_referenced") or []))
         warnings = ([f"publication: {status}" + (f" ({method['error']})" if method.get("error") else "")]
                     if degraded else [])
+        if not degraded and status == STATUS_PARTIAL:
+            warnings.append(f"publication: {status} — read {used} of {total} sections; raise "
+                            f"PUB_MAX_CHUNKS to cover more")
         return ExtractionResult(assets=[asset], edges=edges, warnings=warnings)
 
 
 _: Extractor = PublicationExtractor()  # type: ignore[assignment]
 
-__all__ = ["PublicationExtractor", "extract_method", "STATUS_EXTRACTED",
-           "STATUS_UNPARSEABLE", "STATUS_UNAVAILABLE", "STATUS_NO_TEXT", "DEGRADED_STATUSES"]
+__all__ = ["PublicationExtractor", "extract_method", "paragraph_chunks", "STATUS_EXTRACTED",
+           "STATUS_PARTIAL", "STATUS_UNPARSEABLE", "STATUS_UNAVAILABLE", "STATUS_NO_TEXT",
+           "DEGRADED_STATUSES"]

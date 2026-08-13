@@ -2349,3 +2349,70 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 
 **Next** A workflow is auditing what else a single transient LLM failure destroys across
   `graph_runtime`, the supervisor, the SSE stream and the extraction batch path.
+
+## 2026-08-13 · M6.J · The retry I had just added was unreachable, and discarded a real answer
+
+**Change** `llm_claude_cli`: a complete result is returned regardless of exit status; the
+  signal check runs in the payload branch too; transient upstream statuses
+  (408/409/425/429/500/502/503/504/529) are retried, classified from `api_error_status`.
+  `_SignalDeath` and `_TransientApi` share a `_Transient` base so the retry loop has one
+  concept of "worth trying again".
+
+**Why** An adversarial audit of **M6.I found two defects in M6.I**. The CLI writes its
+  result object when the turn finishes; if it is then killed during teardown, the old
+  ordering raised `RuntimeError: claude CLI error (exit=-11): REAL ANSWER` — putting a
+  completed, paid-for answer inside the text of the exception complaining about it. And
+  the signal check lived only in the no-payload branch, so the retry was unreachable
+  whenever the dying process had flushed any JSON, which is the common case.
+
+**Measured** 12 modes: complete-answer-then-SIGSEGV returns the answer in **1** call;
+  SIGSEGV with a partial payload, with no output, and SIGKILL recover in **2**;
+  408/429/500/502/503/504/529 recover in **2**; 400/403/404/422 and a clean success take
+  exactly **1**; a persistent 429 gives up after 3 and names the status.
+  Tests **1134 → 1163**.
+
+**Surprised by** M6.I's own tests all passed. They scripted a bare SIGSEGV with empty
+  stdout — the one signal case the code already handled — so the suite confirmed the
+  claim while the common case was broken and the worst case destroyed an answer. I wrote
+  those tests immediately after writing the code, from the same mental model, which is
+  exactly when a test is least likely to be independent of it.
+
+  Note on the audit itself: it reported `count: 0, "no findings survived adversarial
+  verification"`. That was an **artifact** — 10 of its 12 agents died on a session limit,
+  so the refute stage never ran and `confirmed` was empty by construction. Reading only
+  the summary would have concluded the code was clean. The findings were in the journal.
+  Same failure shape this whole milestone series is about, this time in my own tooling.
+
+## 2026-08-13 · M6.K · Reading a whole paper instead of its first 12,000 characters
+
+**Change** `publication_extractor.paragraph_chunks` + map/reduce over chunks, budgeted by
+  `PUB_MAX_CHUNKS` (default 4, clamped 1–20). New `STATUS_PARTIAL`, deliberately **not**
+  in `DEGRADED_STATUSES`. Coverage recorded (`chunks_used`/`chunks_total`/`chars_seen`/
+  `chars_total`/`chunk_failures`) and **prefixed** onto `contents`. Separately,
+  `llm_utils.call_llm` no longer swallows an exception from an injected callable.
+
+**Why** `text[:12000]` cut at a fixed offset, mid-word and mid-sentence, discarding
+  everything after it. In a standard paper layout the Methods section comes late, so the
+  model answered honestly about the text it was shown and the result was recorded as *the
+  method of the paper*. Measured on a 48,661-character document: the old path saw **25%**
+  and reported `llm_extracted`.
+
+**Measured** On that document — `PUB_MAX_CHUNKS=2` → 2/5 sections, 45% of characters,
+  `llm_partial`, prefixed and warned; `=4` → 4/5, 91%, still partial; `=20` → 5/5, 99%,
+  `llm_extracted`, no caveat. Steps keep document order and dedupe across chunks;
+  datasets/tools union; one unparseable chunk costs that chunk, not the extraction (4 of 5
+  steps survive, and *which* chunk failed is recorded). Tests **1163 → 1173**.
+
+**Surprised by** `call_llm` caught exceptions from an **injected** callable and returned
+  "I could not compose an answer due to a generation error." — while a real provider's
+  exception propagated. So the test seam did not behave like production in the one respect
+  a failure test cares about, and `llm_unavailable` (the call raised) was **unreachable**
+  through it: a raising double always arrived as `llm_unparseable`. The plan's stated
+  benefit — that the degradation path becomes cheap to exercise offline — was not true.
+  Nothing depended on the canned string; removing it left all 1,173 tests green and the
+  three statuses now discriminate.
+
+**Next** The audit's remaining findings, none yet independently verified: a peer node
+  raising discards the whole turn (no checkpointer, no error edge, no error budget, while
+  the same loop tolerates 8 unproductive steps); and a failed turn leaves no record, so
+  the user's own question is dropped from history. Both are orchestration-core changes.
