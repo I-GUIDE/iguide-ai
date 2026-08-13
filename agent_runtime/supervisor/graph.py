@@ -427,6 +427,15 @@ def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
     """
     if not audit:
         return False
+    # The DETERMINISTIC gate always flags, at any severity. `cannot_determine` is recorded as
+    # medium on purpose -- an unverifiable number is not a detected error, and calling it high
+    # would train the reader to ignore the label -- but this function passed only `high`, so
+    # every cannot_determine verdict was computed, reconciled, and then dropped before it
+    # reached the answer. The plan's requirement is that it be reported, never swallowed.
+    #
+    # The severity floor still applies to the LLM auditor, whose medium is soft over-reach.
+    if str(audit.get("invariant_gate") or "").strip():
+        return True
     severity = str(audit.get("severity") or "").strip().lower()
     return severity in _AUDIT_FLAG_SEVERITIES
 
@@ -441,13 +450,44 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
         return answer
     severity = str((audit or {}).get("severity") or "").strip().lower()
     summary = str((audit or {}).get("summary") or "").strip()
-    note = (
-        "⚠️ Grounding check: parts of this answer may not be fully supported by the "
-        "retrieved evidence"
-    )
-    if severity:
-        note += f" (severity: {severity})"
-    note += f". {summary}" if summary else "."
+    gate = str((audit or {}).get("invariant_gate") or "").strip()
+
+    # A deterministic gate failure is NOT an evidence-support problem, and describing it as one
+    # understates it: a geographic-CRS buffer is a wrong number, not a claim that is merely
+    # under-cited. The two get different headlines.
+    if gate in {"fail", "cannot_determine"}:
+        # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
+        # rather than restating it -- two headlines in a row read as a template, not a warning.
+        icon = "⛔" if gate == "fail" else "⚠️"
+        note = f"{icon} {summary}" if summary else (
+            f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
+            f"on this run, so its numeric results are not verified.")
+    else:
+        note = ("⚠️ Grounding check: parts of this answer may not be fully supported by "
+                "the retrieved evidence")
+        if severity:
+            note += f" (severity: {severity})"
+        note += f". {summary}" if summary else "."
+
+    # The specific findings, WITH their remedies. Only the summary was appended before, so the
+    # user was told a check failed and never told what failed or what to do -- and it is the
+    # gate's own message that carries "reproject to a local projected CRS (a UTM or state-plane
+    # zone in metres) before calling". Producing a remedy and then discarding it is worse than
+    # not computing one.
+    lines: List[str] = []
+    for issue in ((audit or {}).get("issues") or [])[:4]:
+        if not isinstance(issue, dict):
+            continue
+        claim = str(issue.get("claim") or "").strip()
+        reason = str(issue.get("reason") or "").strip()
+        if not reason:
+            continue
+        lines.append(f"- {claim}: {reason}" if claim else f"- {reason}")
+    extra = len([i for i in ((audit or {}).get("issues") or []) if isinstance(i, dict)]) - len(lines)
+    if lines:
+        note += "\n\n" + "\n".join(lines)
+        if extra > 0:
+            note += f"\n- …and {extra} more"
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
 
 

@@ -132,3 +132,83 @@ def test_a_clean_run_keeps_its_grounded_verdict():
     out = _reconciled(PASSING)
     assert out is not None and out["severity"] == "none"
     assert "invariant_gate" not in out and out["hallucination_detected"] is False
+
+
+# ------------------------------------------------------------------ the caveat the USER reads
+
+from agent_runtime.supervisor.graph import _apply_grounding_caveat  # noqa: E402
+
+ANSWER = "The service area covers 21.5 km."
+REMEDY = ("EPSG:4326 is geographic, so the result is in degrees. Reproject to a local "
+          "projected CRS (a UTM or state-plane zone in metres) before calling.")
+
+
+def _caveat(report):
+    ctx = {"messages": [{"role": "tool", "content": _tool_result(report)}]}
+    audit = _reconcile_audit_with_artifacts(
+        {"hallucination_detected": False, "severity": "none", "issues": [], "summary": ""},
+        [{"name": "map.png"}], ctx)
+    return _apply_grounding_caveat(ANSWER, audit)
+
+
+def test_the_remedy_reaches_the_user_not_just_the_complaint():
+    """Only ``summary`` was appended, so the user was told a check failed and never told WHAT
+    failed or what to do about it. The remedy lives in each issue's ``reason`` — it is the gate's
+    own message that says "reproject to a local projected CRS". Producing a remedy and then
+    discarding it is worse than not computing one."""
+    out = _caveat({"verdict": "fail", "counts": {"fail": 1},
+                   "findings": [{"check": "projected_crs", "status": "fail",
+                                 "target": "calculate_buffers(gdf)", "message": REMEDY}]})
+    assert ANSWER in out
+    assert "Reproject to a local projected CRS" in out
+    assert "calculate_buffers(gdf)" in out, "the user needs to know WHICH call"
+
+
+def test_a_gate_failure_is_not_described_as_an_evidence_problem():
+    """"May not be fully supported by the retrieved evidence" is the wrong category for a
+    geographic-CRS buffer: that is a wrong number, not an under-cited claim."""
+    out = _caveat({"verdict": "fail", "counts": {"fail": 1},
+                   "findings": [{"check": "projected_crs", "status": "fail", "target": "gdf",
+                                 "message": REMEDY}]})
+    assert "retrieved evidence" not in out
+    assert "not verified" in out
+
+
+def test_cannot_determine_reaches_the_user_at_all():
+    """``_audit_flagged`` passed only severity ``high``, and a cannot_determine gate is recorded
+    as ``medium`` on purpose — an unverifiable number is not a detected error. The consequence was
+    that every cannot_determine verdict was computed, reconciled, and then silently dropped
+    before it reached the answer. The plan's requirement is the opposite: reported, never
+    swallowed."""
+    out = _caveat({"verdict": "cannot_determine", "counts": {"cannot_determine": 1},
+                   "findings": [{"check": "coverage", "status": "cannot_determine",
+                                 "target": "module scope",
+                                 "message": "no frame was reachable at module scope"}]})
+    assert out != ANSWER, "the caveat never reached the user"
+    assert "COULD NOT VERIFY" in out
+    assert "not the same as them being wrong" in out, (
+        "unverified must not read as wrong, or the label stops being believed")
+    assert "no frame was reachable" in out
+
+
+def test_a_passing_run_gets_no_caveat():
+    assert _caveat(PASSING) == ANSWER
+
+
+def test_the_llm_auditors_soft_medium_is_still_suppressed():
+    """The severity floor exists to suppress the LLM auditor's medium-severity over-reach, which
+    is a different thing from the deterministic gate's medium. Raising the floor for the gate
+    must not raise it for the auditor."""
+    out = _apply_grounding_caveat(ANSWER, {
+        "hallucination_detected": True, "severity": "medium",
+        "summary": "One statistic may be over-stated.",
+        "issues": [{"claim": "42% of tracts", "reason": "not in the retrieved evidence"}]})
+    assert out == ANSWER
+
+
+def test_the_issue_list_is_capped_so_the_answer_is_not_flooded():
+    findings = [{"check": "projected_crs", "status": "fail", "target": f"gdf{i}",
+                 "message": REMEDY} for i in range(9)]
+    out = _caveat({"verdict": "fail", "counts": {"fail": 9}, "findings": findings})
+    assert out.count("- computed value") == 4
+    assert "and 5 more" in out

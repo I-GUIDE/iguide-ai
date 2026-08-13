@@ -2108,3 +2108,48 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   `reject_all_nan` failing correct runs on input shape; contract taken from the LAST
   definition while the shipped slice comes from the FIRST; `_apply_grounding_caveat`
   appending only `summary` so the gate's remedy never reaches the user.
+
+## 2026-08-13 · M6.E · The gate's remedy now reaches the user, and cannot_determine reaches them at all
+
+**Change** `_apply_grounding_caveat` appends the audit's **issues** with their reasons,
+  not only the summary; a deterministic gate verdict gets its own headline instead of the
+  evidence-support wording; `_audit_flagged` returns true whenever `invariant_gate` is
+  set, at any severity.
+
+**Why** Two failures at the very last link, after everything upstream was fixed:
+
+  1. The caveat appended only `summary`, so the user was told a check failed and never
+     told *what* failed or what to do. The remedy lives in each issue's `reason` — it is
+     the gate's own message that carries "reproject to a local projected CRS (a UTM or
+     state-plane zone in metres) before calling". Computing a remedy and discarding it is
+     worse than not computing one.
+  2. `_audit_flagged` passed only severity `high`. A `cannot_determine` gate verdict is
+     recorded as `medium` **on purpose** — an unverifiable number is not a detected
+     error, and calling it high would train the reader to ignore the label — so every
+     cannot_determine verdict was computed, reconciled into the audit, and then silently
+     dropped before reaching the answer. The plan requires the opposite: "an explicit
+     cannot-determine outcome that is reported, never swallowed."
+
+  Also: "parts of this answer may not be fully supported by the retrieved evidence" is
+  the wrong category for a geographic-CRS buffer. That is a wrong number, not an
+  under-cited claim, and describing it as the latter understates it.
+
+**Measured** Caveat text for a failing run **0 → 1 remedy** and now names the call
+  (`calculate_buffers(gdf)`). `cannot_determine` caveats reaching the user **0 → 1**. A
+  passing run still gets no caveat, and the LLM auditor's soft medium is still suppressed
+  — the severity floor was raised for the deterministic gate only. Issue list capped at 4
+  with an "…and N more" tail, so a 9-finding run does not flood the answer.
+  Tests **1083 → 1089**.
+
+**Surprised by** The severity floor and the gate's severity choice were each individually
+  right and jointly wrong. `_audit_flagged`'s docstring correctly explains why it passes
+  only `high` (the auditor sets `hallucination_detected` even for soft over-reach), and
+  `_reconcile_audit_with_artifacts`'s comment correctly explains why cannot_determine is
+  medium. Neither was aware of the other, and the two together deleted the outcome. That
+  is the fifth instance this week of a check that stops checking while still reporting
+  success — this time assembled out of two correct decisions.
+
+**Next** Name-substring type inference (113/137 params typed `number` off the letters
+  'n'/'k', 6 DataFrames typed `geodataframe`); `reject_all_nan` failing correct runs on
+  input shape; contract taken from the LAST definition while the shipped slice comes from
+  the FIRST.
