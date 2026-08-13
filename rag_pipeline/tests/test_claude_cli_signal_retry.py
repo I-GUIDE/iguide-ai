@@ -184,3 +184,80 @@ def test_the_retry_count_is_clamped_and_never_raises(raw, expected, monkeypatch)
     reproducible crash into a very slow reproducible crash."""
     monkeypatch.setenv("CLAUDE_CLI_SIGNAL_RETRIES", raw)
     assert llm_claude_cli._signal_retries() == expected
+
+
+# ------------------------------------------------------------------ a crash AFTER the answer
+
+SEGV_AFTER_ANSWER = _Proc(-11, '{"type":"result","is_error":false,"result":"REAL ANSWER"}')
+SEGV_PARTIAL = _Proc(-11, '{"type":"result","is_error":true,"subtype":"crash","result":"partial"}')
+
+
+def test_a_completed_answer_is_never_discarded_over_an_exit_status(scripted):
+    """The CLI writes its result object when the turn FINISHES. If the process is then killed
+    during teardown, the work is done and paid for.
+
+    The first version of this retry did not help here at all, because the payload branch is
+    evaluated before the returncode and raised:
+
+        RuntimeError: claude CLI error (exit=-11): REAL ANSWER
+
+    — putting the answer inside the text of the exception complaining about it. Found by an
+    adversarial audit of the commit that added the retry, not by the tests that came with it.
+    """
+    calls = scripted(SEGV_AFTER_ANSWER)
+    assert llm_claude_cli.call("hi") == "REAL ANSWER"
+    assert calls["n"] == 1, "a finished answer must not be re-requested either"
+
+
+def test_a_signal_death_with_partial_output_is_still_retried(scripted):
+    """Checking the signal only in the no-payload branch made the retry unreachable whenever the
+    dying process had already flushed some JSON — which is the common case, since it writes
+    progress as it goes."""
+    calls = scripted(SEGV_PARTIAL, OK)
+    assert llm_claude_cli.call("hi") == "ANSWER"
+    assert calls["n"] == 2
+
+
+# ------------------------------------------------------------------ transient upstream statuses
+
+def _api(status: int, message: str = "upstream said no") -> _Proc:
+    import json as _json
+
+    return _Proc(1, _json.dumps({"type": "result", "is_error": True,
+                                 "api_error_status": status, "result": message}))
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504, 529])
+def test_a_transient_upstream_status_is_retried(scripted, status):
+    """429 is a rate limit and 529 is Anthropic's overloaded signal; both are explicitly
+    retryable, and 5xx is a server fault rather than a property of the prompt. Classified from the
+    structured `api_error_status` field, not by matching the wording of an error string."""
+    calls = scripted(_api(status), OK)
+    assert llm_claude_cli.call("hi") == "ANSWER"
+    assert calls["n"] == 2
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 422])
+def test_a_permanent_upstream_status_is_not_retried(scripted, status):
+    """Retrying a malformed request reaches the same answer slower while spending quota."""
+    calls = scripted(_api(status))
+    with pytest.raises(RuntimeError):
+        llm_claude_cli.call("hi")
+    assert calls["n"] == 1
+
+
+def test_a_401_is_an_auth_failure_not_a_transient_status(scripted):
+    """It has a fix the user must perform, so it must reach them immediately rather than after
+    three attempts — and it must carry the re-authentication hint."""
+    calls = scripted(_api(401, "Failed to authenticate. API Error: 401 OAuth access token "
+                               "has expired. Re-authenticate to continue."))
+    with pytest.raises(llm_claude_cli.ClaudeCliUnavailable):
+        llm_claude_cli.call("hi")
+    assert calls["n"] == 1
+
+
+def test_a_persistent_rate_limit_gives_up_rather_than_hammering(scripted):
+    calls = scripted(_api(429))
+    with pytest.raises(RuntimeError, match="429"):
+        llm_claude_cli.call("hi")
+    assert calls["n"] == 3

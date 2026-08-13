@@ -263,7 +263,7 @@ def call(prompt: str, *, system: Optional[str] = None) -> str:
     for attempt in range(attempts):
         try:
             return _call_once(prompt, system=system)
-        except _SignalDeath as exc:
+        except _Transient as exc:
             last = exc
             if attempt + 1 < attempts:
                 logger.warning("claude CLI %s; retrying (%d of %d)",
@@ -276,8 +276,23 @@ def call(prompt: str, *, system: Optional[str] = None) -> str:
     raise RuntimeError(str(last) if last else "claude CLI failed")   # unreachable
 
 
-class _SignalDeath(RuntimeError):
-    """The CLI was killed by a signal. Internal: `call` converts it to RuntimeError."""
+class _Transient(RuntimeError):
+    """A failure worth retrying. Internal: `call` converts it to RuntimeError when exhausted."""
+
+
+class _SignalDeath(_Transient):
+    """The CLI was killed by a signal."""
+
+
+class _TransientApi(_Transient):
+    """The upstream API returned a status that resolves on its own."""
+
+
+# Statuses that mean "ask again", not "this request is wrong". 429 is a rate limit and 529 is
+# Anthropic's overloaded signal; both are explicitly retryable, and 5xx is a server fault rather
+# than a property of the prompt. 401/403/400 are excluded on purpose: retrying an expired token
+# or a malformed request reaches the same answer slower while spending the user's quota.
+_TRANSIENT_API_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 
 
 def _signal_retries() -> int:
@@ -326,16 +341,45 @@ def _call_once(prompt: str, *, system: Optional[str] = None) -> str:
     # Parse BEFORE judging returncode: a failed run still returns a structured reason.
     if isinstance(payload, dict):
         detail = str(payload.get("result") or "")
+
+        # A COMPLETED answer is never thrown away over an exit status. The CLI writes its result
+        # object when the turn finishes; if the process is then killed during teardown, the work
+        # is done and paid for. The previous order raised
+        #   RuntimeError: claude CLI error (exit=-11): REAL ANSWER
+        # -- discarding the answer into the text of the exception complaining about it.
+        if not payload.get("is_error") and isinstance(payload.get("result"), str):
+            if proc.returncode != 0:
+                logger.warning("claude CLI returned a complete result then exited %s; "
+                               "using the result", proc.returncode)
+            _last_model = mdl
+            return payload["result"]
+
+        if _is_auth_failure(detail):
+            raise ClaudeCliUnavailable(f"{detail.strip()}\n\n{_AUTH_HINT}")
+
+        # A retryable upstream status. The CLI reports it structurally as `api_error_status`, so
+        # this is a field read rather than a guess at the wording of an error string.
+        status = payload.get("api_error_status")
+        if isinstance(status, int) and status in _TRANSIENT_API_STATUSES:
+            raise _TransientApi(
+                f"upstream API returned {status} (model={mdl}), which is transient"
+                f"{': ' + detail[:160] if detail else ''}")
+
+        # Killed by a signal WITH a payload: still a crash, still transient, still retried.
+        # Checking the signal only in the no-payload branch below made the retry unreachable
+        # whenever the dying process had already flushed partial JSON -- which is the common
+        # case, since it writes progress as it goes.
+        if proc.returncode < 0:
+            raise _SignalDeath(
+                f"was killed by signal {-proc.returncode} (model={mdl}) after emitting "
+                f"{'an error payload' if payload.get('is_error') else 'partial output'}"
+                f"{': ' + detail[:160] if detail else ''}")
+
         if payload.get("is_error") or proc.returncode != 0:
-            if _is_auth_failure(detail):
-                raise ClaudeCliUnavailable(f"{detail.strip()}\n\n{_AUTH_HINT}")
             raise RuntimeError(
                 f"claude CLI error (model={mdl}, subtype={payload.get('subtype')}, "
                 f"exit={proc.returncode}): {detail[:300]}"
             )
-        if isinstance(payload.get("result"), str):
-            _last_model = mdl
-            return payload["result"]
 
     if proc.returncode != 0:
         tail = (proc.stderr or raw or "").strip()[-400:]
