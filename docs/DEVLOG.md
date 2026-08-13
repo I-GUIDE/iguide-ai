@@ -1522,3 +1522,59 @@ still reporting. Exactly the failure shape this gate exists to prevent, in the g
 
 **Next** M2's reproducibility half — `stage_url`/`stage_object`, artifact emission and
 `rerun_artifact.py`.
+
+## 2026-08-13 · M2.8 · The reproducibility half: artifacts that replay
+**Change** new `agent_runtime/artifacts.py` and `scripts/rerun_artifact.py`; the sandbox
+  epilogue now also writes `environment.json` and `declared_outputs.json`; every run emits
+  `run.py` + `manifest.json` + `inputs.jsonl` (`AGENT_ARTIFACT_EMIT`, on by default). 21 tests.
+
+**Why** the compose path worked since M2.7, but nothing recorded a run well enough to repeat
+it, so "solid, complex, **reproducible**" had two of three. Four things had to be pinned:
+
+* **the image by digest.** `python:3.11-slim` resolves to different bytes next month, so an
+  artifact holding the tag records nothing about its environment.
+* **the environment from inside.** An agent-side `pip freeze` describes the *agent*, not the
+  container that produced the number.
+* **the inputs by sha256**, so a replay can assert it read the same bytes rather than a file
+  with the same name.
+* **the declared output values**, so the replay has something to *compare* rather than repeat.
+
+**Measured** a real run, then replayed in a clean container:
+
+```
+image      python@sha256:a3ab0b96…  (pinned by digest)
+env        python 3.11.15, 13 packages   (captured in-container)
+gate       original pass -> replay pass
+total_buffer_area:  replay=3920685613.182  original=3920685613.182  ==
+replay completed (outputs identical)                                   exit 0
+```
+
+and with the manifest's baseline tampered to `4200000000.0`:
+
+```
+total_buffer_area:  replay=3920685613.182  original=4200000000.0  != DIFFERS
+DIFFERED (1)                                                           exit 1
+```
+
+**1/1 declared numeric output identical**, and the exit codes discriminate — which is the
+property that makes this worth running in CI. Suite **862 passed**, same 3 pre-existing.
+
+**Surprised by** how nearly this shipped as theatre. Two defects, both of which would have left
+a script that always reports success:
+
+The manifest first recorded `declared_outputs` from the **gate's findings** — so it stored
+`"unit is null"` where the value should be, keeping the complaint and losing the measurement.
+The replay would have had nothing to compare and would have said so only in a footnote.
+
+And the comparison loop *printed* each value and appended to a `differences` list that nothing
+ever populated. It returned 0 unconditionally. A reproducibility check that cannot fail is
+worse than none, because it converts an open question into a false assurance. Fixed to compare
+with a 1e-9 relative tolerance — exact float equality would flag a re-ordered sum and train
+everyone to ignore the script.
+
+Also: `run.py` deliberately holds the model's source *without* the injected epilogue, so the
+persisted artifact is what the model wrote; the replay re-appends the epilogue itself, which is
+what makes the gate verdict comparable across runs.
+
+**Next** the dataset extractor's two shipping defects — native-CRS bounds written into a
+`geo_shape` field (181/619 docs carry a bbox), and `.xlsx` parsed as CSV.

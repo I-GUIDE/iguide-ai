@@ -33,6 +33,8 @@ FAIL = "fail"
 UNKNOWN = "cannot_determine"
 
 CHECKS_FILENAME = "checks.json"
+ENVIRONMENT_FILENAME = "environment.json"
+DECLARED_FILENAME = "declared_outputs.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +246,40 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
 # Driver
 # --------------------------------------------------------------------------- #
 
+def capture_environment() -> Dict[str, Any]:
+    """The interpreter's own account of itself, recorded from INSIDE the sandbox.
+
+    An agent-side `pip freeze` describes the agent's environment, not the container's — and
+    the container is what produced the number. Only code running in the run can report the
+    interpreter and the distributions that were actually importable, including whatever the
+    per-session ``.deps`` directory contributed.
+
+    Best-effort throughout: a run that cannot enumerate its packages should still record its
+    Python version rather than nothing at all.
+    """
+    import sys
+
+    env: Dict[str, Any] = {"python": sys.version.split()[0],
+                           "python_full": sys.version.replace("\n", " "),
+                           "platform": sys.platform,
+                           "executable": sys.executable}
+    packages: Dict[str, str] = {}
+    try:
+        from importlib import metadata as _md
+        for dist in _md.distributions():
+            try:
+                name = (dist.metadata or {}).get("Name") or ""
+                if name:
+                    packages[str(name)] = str(dist.version or "")
+            except Exception:
+                continue
+    except Exception as exc:
+        env["packages_error"] = f"{type(exc).__name__}: {exc}"
+    env["packages"] = dict(sorted(packages.items()))
+    env["package_count"] = len(packages)
+    return env
+
+
 def _looks_like_frame(obj: Any) -> bool:
     return hasattr(obj, "columns") and hasattr(obj, "index") and hasattr(obj, "select_dtypes")
 
@@ -346,6 +382,20 @@ def _iguide_run_invariant_gate():
             json.dump(_rep, _fh, default=str)
     except OSError:
         pass
+    # Environment capture, from inside: an agent-side pip freeze would describe the AGENT's
+    # environment, not the container that produced the number.
+    try:
+        with open({env_filename!r}, "w", encoding="utf-8") as _fh:
+            json.dump(capture_environment(), _fh, default=str)
+    except Exception:
+        pass
+    # The declared output VALUES, so a re-run has something to COMPARE rather than merely
+    # repeat. The checks report per-output findings; the findings are not the numbers.
+    try:
+        with open({declared_filename!r}, "w", encoding="utf-8") as _fh:
+            json.dump(_ns.get(DECLARED_OUTPUTS) or {{}}, _fh, default=str)
+    except Exception:
+        pass
 
 
 try:
@@ -366,8 +416,8 @@ def epilogue_source() -> str:
 
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, check_projected_crs, check_not_all_nan,
-                check_join_cardinality, check_finite, check_declared_units, _looks_like_frame,
-                _has_geometry, run_checks):
+                check_join_cardinality, check_finite, check_declared_units, capture_environment,
+                _looks_like_frame, _has_geometry, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))
@@ -375,10 +425,13 @@ def epilogue_source() -> str:
             f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
             f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
             "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
-    return _EPILOGUE.format(body=body, filename=CHECKS_FILENAME)
+    return _EPILOGUE.format(body=body, filename=CHECKS_FILENAME,
+                            env_filename=ENVIRONMENT_FILENAME,
+                            declared_filename=DECLARED_FILENAME)
 
 
-__all__ = ["run_checks", "write_checks", "epilogue_source", "CHECKS_FILENAME",
+__all__ = ["run_checks", "write_checks", "epilogue_source", "capture_environment",
+           "CHECKS_FILENAME", "ENVIRONMENT_FILENAME", "DECLARED_FILENAME",
            "PASS", "FAIL", "UNKNOWN", "DECLARED_OUTPUTS", "check_projected_crs",
            "check_not_all_nan", "check_join_cardinality", "check_finite",
            "check_declared_units"]

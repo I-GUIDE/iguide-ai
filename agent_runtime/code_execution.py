@@ -285,6 +285,11 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
     return allowed[:MAX_DEPS], rejected
 
 
+def artifacts_enabled() -> bool:
+    from agent_runtime.artifacts import artifacts_enabled as _enabled
+    return _enabled()
+
+
 def invariant_gate_enabled() -> bool:
     """Whether to append the in-sandbox invariant checks. **On by default.**
 
@@ -611,9 +616,20 @@ class CodeExecutor:
                 if size_mb > WORKSPACE_MAX_MB:
                     stderr = (str(stderr or "") + f"\n[workspace {size_mb:.0f}MB exceeds "
                               f"{WORKSPACE_MAX_MB:.0f}MB cap; older files may be reclaimed]").strip()
+            verification = _read_checks(work)
+            # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
+            # environment, input hashes, library slice_shas) + inputs.jsonl. Emitted before
+            # returning so it lands beside the run, and guarded inside emit() so a failure to
+            # write provenance can never fail a successful analysis.
+            if artifacts_enabled():
+                from agent_runtime import artifacts as _artifacts
+                _artifacts.emit(code=(code or ""), work=work,
+                                image=getattr(self, "image", ""), backend=self.backend,
+                                dependencies=deps, tier=tier_name, staged=sorted(staged),
+                                verification=verification)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps,
-                              verification=_read_checks(work))
+                              verification=verification)
         finally:
             if not persistent:
                 shutil.rmtree(work, ignore_errors=True)
