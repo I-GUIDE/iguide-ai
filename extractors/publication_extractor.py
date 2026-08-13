@@ -68,11 +68,34 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# First-class extraction status. This used to be a free-text `note`, which meant the ONE thing
+# a reader needs to know — "was a method actually extracted, or is this an empty shell?" —
+# required string matching on a message that also carried exception class names.
+STATUS_EXTRACTED = "llm_extracted"
+STATUS_UNPARSEABLE = "llm_unparseable"
+STATUS_UNAVAILABLE = "llm_unavailable"
+STATUS_NO_TEXT = "no_text"
+
+DEGRADED_STATUSES = {STATUS_UNPARSEABLE, STATUS_UNAVAILABLE, STATUS_NO_TEXT}
+
+
+def _empty_spec(status: str, summary: str = "", **extra: Any) -> Dict[str, Any]:
+    spec = {"summary": summary, "steps": [], "datasets_referenced": [], "tools_referenced": [],
+            "params": {}, "status": status, "degraded": status in DEGRADED_STATUSES}
+    spec.update(extra)
+    return spec
+
+
 def extract_method(text: str, *, max_chars: int = 12000) -> Dict[str, Any]:
-    """LLM method extraction; degrades to a text-excerpt spec with a note offline."""
+    """LLM method extraction, with an explicit STATUS rather than a free-text note.
+
+    The distinction that matters: an empty ``steps`` list from a paper that genuinely describes
+    no reproducible method, and an empty ``steps`` list because the LLM was unreachable, are
+    completely different facts. Downstream both used to render as "this publication describes no
+    method" — a claim the extractor was never entitled to make.
+    """
     if not text.strip():
-        return {"summary": "", "steps": [], "datasets_referenced": [], "tools_referenced": [],
-                "params": {}, "note": "no_text_extracted"}
+        return _empty_spec(STATUS_NO_TEXT)
     try:
         from rag_pipeline.llm_utils import call_llm
         raw = call_llm(_PROMPT + text[:max_chars])
@@ -81,12 +104,62 @@ def extract_method(text: str, *, max_chars: int = 12000) -> Dict[str, Any]:
             parsed.setdefault("steps", []); parsed.setdefault("datasets_referenced", [])
             parsed.setdefault("tools_referenced", []); parsed.setdefault("params", {})
             parsed.setdefault("summary", "")
+            parsed["status"] = STATUS_EXTRACTED
+            parsed["degraded"] = False
             return parsed
-        return {"summary": text[:500].strip(), "steps": [], "datasets_referenced": [],
-                "tools_referenced": [], "params": {}, "note": "llm_unparseable"}
+        return _empty_spec(STATUS_UNPARSEABLE, text[:500].strip())
     except Exception as exc:
-        return {"summary": text[:500].strip(), "steps": [], "datasets_referenced": [],
-                "tools_referenced": [], "params": {}, "note": f"llm_skipped: {type(exc).__name__}"}
+        return _empty_spec(STATUS_UNAVAILABLE, text[:500].strip(),
+                           error=f"{type(exc).__name__}: {exc}"[:200])
+
+
+def implemented_by_edges(spec_doc_id: str, tools_referenced: Any) -> List[ProvenanceEdge]:
+    """IMPLEMENTED_BY edges from a method spec to library units whose symbol it names.
+
+    Deliberately conservative:
+
+    * matches the FULL symbol only, so "model" does not link to every unit containing it;
+    * skips names shorter than 4 characters and a small stoplist of generic verbs, which are
+      the ones that would otherwise link a paper to half the library;
+    * marks every edge ``confidence: low`` / ``by: symbol_match``. An edge asserting that a
+      paper's method IS this function, on the strength of a shared name, would be a fabricated
+      provenance claim — and provenance is the one thing here that has to be trustworthy.
+
+    Returns [] when no library has been built, rather than guessing at symbols.
+    """
+    generic = {"load", "read", "plot", "map", "run", "main", "model", "train", "test",
+               "data", "get", "set", "make", "build", "process", "analyze", "compute"}
+    try:
+        from agent_runtime.method_library import load_registry
+        registry = load_registry()
+    except Exception:
+        return []
+    if not registry:
+        return []
+    by_symbol: Dict[str, List[str]] = {}
+    for key, entry in registry.items():
+        if not isinstance(entry, dict) or entry.get("ambiguous") or entry.get("alias_for"):
+            continue
+        symbol = str(entry.get("library_symbol") or "").strip().lower()
+        if symbol:
+            by_symbol.setdefault(symbol, []).append(key)
+
+    edges: List[ProvenanceEdge] = []
+    seen: set = set()
+    for raw in (tools_referenced or []):
+        name = str(raw or "").strip().lower()
+        # A paper writes "we used geopandas.sjoin"; the unit is named `sjoin`.
+        name = name.rsplit(".", 1)[-1].rsplit("(", 1)[0].strip()
+        if len(name) < 4 or name in generic:
+            continue
+        for qualified in by_symbol.get(name, []):
+            if qualified in seen:
+                continue
+            seen.add(qualified)
+            edges.append(ProvenanceEdge(
+                src=spec_doc_id, rel="IMPLEMENTED_BY", dst=qualified,
+                detail={"confidence": "low", "by": "symbol_match", "matched_name": name}))
+    return edges
 
 
 class PublicationExtractor:
@@ -106,7 +179,16 @@ class PublicationExtractor:
         body = method.get("summary") or ""
         if steps:
             body += "\n\nSteps:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+        status = method.get("status") or STATUS_EXTRACTED
+        degraded = bool(method.get("degraded"))
         contents = f"{title}\n{body}".strip()
+        if degraded:
+            # Prefixed, not appended: the evidence view truncates, and a caveat that only
+            # appears after 4000 characters is a caveat nobody reads. An empty `steps` list must
+            # never be presentable as "this paper describes no method".
+            contents = (f"[METHOD SPEC UNAVAILABLE: {status}] No method steps were extracted "
+                        f"from this publication — this is an extraction failure, NOT evidence "
+                        f"that the paper describes no method.\n\n" + contents)
 
         source_fields = {k: f[k] for k in ("authors", "contributor", "abstract", "tags", "license", "doi")
                          if f.get(k)}
@@ -116,7 +198,11 @@ class PublicationExtractor:
             contents=contents, source_fields=source_fields,
             extracted={"steps": steps, "datasets_referenced": method.get("datasets_referenced") or [],
                        "tools_referenced": method.get("tools_referenced") or [],
-                       "params": method.get("params") or {}, "note": method.get("note"),
+                       "params": method.get("params") or {},
+                       "status": status,
+                       "degraded": degraded,
+                       "is_method_spec": not degraded,
+                       "error": method.get("error"),
                        "parent_type": "Publication", "parent_title": title},
         )
         edges: List[ProvenanceEdge] = [
@@ -125,10 +211,18 @@ class PublicationExtractor:
         for ds in (method.get("datasets_referenced") or []):
             edges.append(ProvenanceEdge(src=doc_id, rel="USES", dst=str(ds),
                                         detail={"confidence": "low", "by": "name_match"}))
-        warnings = [f"publication: {method['note']}"] if method.get("note") else []
+        # IMPLEMENTED_BY: link a described method to callable units that appear to implement it.
+        # Declared in base.py from the start and never written by anything, so a paper's method
+        # spec and the code that realises it had no connection at all — which is the whole point
+        # of extracting both. Name matching only, and it SAYS so: `confidence: low` and
+        # `by: symbol_match`, because a shared name is a hint, not proof.
+        edges.extend(implemented_by_edges(doc_id, method.get("tools_referenced") or []))
+        warnings = ([f"publication: {status}" + (f" ({method['error']})" if method.get("error") else "")]
+                    if degraded else [])
         return ExtractionResult(assets=[asset], edges=edges, warnings=warnings)
 
 
 _: Extractor = PublicationExtractor()  # type: ignore[assignment]
 
-__all__ = ["PublicationExtractor", "extract_method"]
+__all__ = ["PublicationExtractor", "extract_method", "STATUS_EXTRACTED",
+           "STATUS_UNPARSEABLE", "STATUS_UNAVAILABLE", "STATUS_NO_TEXT", "DEGRADED_STATUSES"]

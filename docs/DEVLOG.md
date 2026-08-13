@@ -1673,3 +1673,57 @@ filter cannot test the filter. It now honours the term query, which is the only 
 test worth having, since an unscoped diff would wipe every other notebook sharing the index.
 
 **Next** M5 (retire the analyze peer) and the remaining M7 element types.
+
+## 2026-08-13 · M7.2–M7.4 · All four element types produce units; M5 refused on measurement
+**Change** `code_extractor` promotes callable units (and no longer treats an argparse *import*
+  as a CLI); `publication_extractor` gains a first-class `status` and writes the first
+  **IMPLEMENTED_BY** edges; `data_extractor` generates a provenance-carrying
+  `load_<slug>(staged_path)` unit per dataset. 78 new tests.
+
+**Measured** element types with callable-unit contracts: **1 → 4**.
+
+| type | unit | verified |
+|---|---|---|
+| notebook | per top-level function | 203 units in the corpus library |
+| **code** | per top-level function, same analyzer path | `load_points` callable w/ geopandas; `needs_config` blocked on a runtime global |
+| **dataset** | generated `load_<slug>(staged_path)` | source **compiles and executes**; declares its CRS invariant |
+| **publication** | spec-only, `is_method_spec` + `status` | degraded specs prefix `contents`, never present as "no method" |
+
+`IMPLEMENTED_BY` edges **0 → >0**: matched against the real 203-unit registry,
+`plot_choropleth_map` and `spatial_join_and_count` link to their units while `run` / `data` /
+`get` / `load` link to nothing. Every edge carries `confidence: low`, `by: symbol_match` —
+asserting a paper's method IS a function on the strength of a shared name would be fabricated
+provenance, and provenance is the one thing here that has to be trustworthy.
+Suite **956 passed**, same 3 pre-existing failures.
+
+**M5 (retire the analyze peer) is deliberately NOT done.** Its justification is turns wasted on
+analyze↔code ping-pong, so I measured it across every live run this session:
+
+| decision | runs |
+|---|---|
+| code | 4 |
+| search | 2 |
+| analyze | 1 |
+| **turns using BOTH peers** | **0** |
+| **analyze↔code ping-pong** | **0** |
+
+The supervisor picks one peer and finishes. The plan's own M5 exit criterion — "ping-pong
+measured → 0" — is already satisfied, so the refactor would be **44 sites of risk in the
+orchestration core for no measured gain**. Small sample and one backend, so `pre-m5-analyze-retire`
+is tagged if that changes. M4.4 also gave the analyze peer the method library, so the two peers
+have converged in capability, which weakens the "jumping between them" argument further.
+
+**Surprised by** the generated loader. The first version assembled its docstring with a
+conditional indent that skipped lines starting with a triple quote — which un-indented the
+docstring and made **every** generated loader a `SyntaxError`. It looked right in the source and
+the extractor reported success, because nothing compiled it. `build_loader_unit` now compiles its
+own output and returns None on failure. Generated code has to be checked by whatever generates
+it; there is no reviewer in that path.
+
+Also: two of my three test failures this round were wrong expectations, not wrong code — an
+empty dataset title falls back to the FILENAME (`load_f_dat`), which is more informative than a
+generic `load_dataset`, and my `EMIT_LIBRARY` assertion tested for the literal string
+`"EMIT_LIBRARY"` instead of its value `"library"`.
+
+**Next** remaining: the SKILL bundle never reaching the agent image, and the `.corpus_cache`
+blobs still in commit `6f6d030`.

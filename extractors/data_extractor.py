@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import zipfile
 from pathlib import Path
@@ -30,6 +31,8 @@ from .base import (
 )
 from .doc_ids import dataset_doc_id, resource_type_for
 from .fileclass import CONTAINER_EXT, RASTER_EXT, TABULAR_EXT, VECTOR_EXT
+
+logger = logging.getLogger(__name__)
 
 _LATS = {"lat", "latitude", "y"}
 _LONS = {"lon", "lng", "long", "longitude", "x"}
@@ -364,6 +367,105 @@ def extract_dataset_metadata(path: str) -> Dict[str, Any]:
     return meta
 
 
+
+def _sha_of(source: str) -> str:
+    """Content address for a generated slice — same scheme as an extracted one."""
+    import hashlib
+    return hashlib.sha1((source or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _slug(text: str) -> str:
+    """A safe python identifier fragment from a title/filename."""
+    import re as _re
+    out = _re.sub(r"[^0-9a-zA-Z]+", "_", str(text or "")).strip("_").lower()
+    out = _re.sub(r"_+", "_", out)[:48]
+    if not out or out[0].isdigit():
+        out = f"ds_{out}" if out else "dataset"
+    return out
+
+
+def build_loader_unit(meta: Dict[str, Any], *, title: str, rel_path: str,
+                      provenance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A generated ``load_<slug>(staged_path)`` unit for a dataset, or None.
+
+    Not synthetic filler: this is exactly the staging step several eval tasks declined, and it
+    is what lets the agent open a platform dataset without inventing a reader or guessing a
+    CRS. Three properties make it worth generating rather than leaving to the model:
+
+    * **the reader is chosen from what extraction actually observed** — raster / vector /
+      tabular — instead of the model guessing from a file extension;
+    * **the declared CRS travels with the loader**, so a frame that arrives without one is set
+      explicitly and the invariant gate has something real to check;
+    * **it takes a STAGED LOCAL PATH.** No URL, no bucket, no credential. Staging happens
+      agent-side, which is why the sandbox can keep ``--network none``.
+
+    Returns None for a family with no sensible reader (a container, a metadata sidecar) rather
+    than emitting a loader that cannot work.
+    """
+    family = meta.get("family")
+    readers = {
+        "raster": ("rasterio", "import rasterio",
+                   "return rasterio.open(staged_path)"),
+        "vector": ("geopandas", "import geopandas as gpd",
+                   "return gpd.read_file(staged_path)"),
+        "tabular": ("pandas", "import pandas as pd",
+                    "return pd.read_csv(staged_path)"),
+    }
+    if family not in readers:
+        return None
+    pkg, import_line, read_line = readers[family]
+    if family == "tabular" and str(meta.get("format", "")).upper() in {"XLSX", "XLS"}:
+        read_line = "return pd.read_excel(staged_path)"
+    elif family == "tabular" and "arquet" in str(meta.get("format", "")):
+        read_line = "return pd.read_parquet(staged_path)"
+
+    symbol = f"load_{_slug(title or rel_path)}"
+    crs = str(meta.get("crs") or "").strip()
+    schema = meta.get("schema") or meta.get("variables") or []
+    docline = f"Load {title!r} ({meta.get('format') or family})."
+
+    # Built line by line at a fixed indent and COMPILED before returning. The first version
+    # assembled the docstring with a conditional indent that skipped lines starting with a
+    # triple quote — which un-indented the docstring itself and made every generated loader a
+    # SyntaxError. Generated code has to be compiled by whatever generates it; there is no
+    # reviewer in this path.
+    doc: List[str] = [f'    """{docline}', ""]
+    doc.append(f"    Source element : {provenance.get('element_id')}")
+    doc.append(f"    Source file    : {rel_path}")
+    if crs:
+        doc.append(f"    Declared CRS   : {crs}")
+    if schema:
+        doc.append(f"    Fields         : {', '.join(map(str, schema[:12]))}")
+    doc.append('    """')
+
+    read_expr = read_line[len("return "):]
+    body: List[str] = [f"def {symbol}(staged_path):", *doc]
+    if crs and family == "vector":
+        # Sets a MISSING crs, never overrides a present one: the file is authoritative about
+        # its own projection, and silently reassigning it would be the same class of error the
+        # invariant gate exists to catch.
+        body += [f"    frame = {read_expr}",
+                 '    if getattr(frame, "crs", None) is None:',
+                 f'        frame = frame.set_crs("{crs}")',
+                 "    return frame"]
+    else:
+        body += [f"    return {read_expr}"]
+
+    source = f"{import_line}\n\n\n" + "\n".join(body) + "\n"
+    try:
+        compile(source, f"<loader:{symbol}>", "exec")
+    except SyntaxError as exc:
+        logger.warning("generated loader for %s did not compile: %s", title, exc)
+        return None
+
+    return {"symbol": symbol, "source": source, "requirements": {"pip": [pkg]},
+            "signature": f"def {symbol}(staged_path)",
+            "doc_summary": docline,
+            "returns": {"raster": "rasterio.DatasetReader", "vector": "GeoDataFrame",
+                        "tabular": "DataFrame"}[family],
+            "crs": crs, "family": family}
+
+
 class DataExtractor:
     name = "dataset"
 
@@ -414,13 +516,68 @@ class DataExtractor:
                        "bbox_from": meta.get("bbox_from"),
                        "parent_type": "Dataset", "parent_title": title},
         )
+        # A generated loader, emitted as a MethodUnit so it reaches iguide_methods through the
+        # same path as an extracted notebook function. This is what makes `dataset` a type the
+        # agent can OPEN rather than only read about.
+        unit_asset = self._loader_asset(meta, doc_id=doc_id, title=title, rel_path=fname, ctx=ctx)
+
         warnings = [f"dataset: {meta['note']}"] if meta.get("note") else []
         # A dataset that HAS bounds but got no bbox is a coverage loss worth surfacing, not a
         # silent omission: it is the difference between "no spatial extent" and "we had one and
         # could not use it".
         if meta.get("bounds") and "spatial-bounding-box-geojson" not in spatial:
             warnings.append(f"dataset: no spatial bbox emitted — {bbox_note}")
-        return ExtractionResult(assets=[asset], warnings=warnings)
+        assets = [asset] + ([unit_asset] if unit_asset else [])
+        return ExtractionResult(assets=assets, warnings=warnings)
+
+    def _loader_asset(self, meta: Dict[str, Any], *, doc_id: str, title: str,
+                      rel_path: str, ctx: ExtractContext) -> Optional[AssetRecord]:
+        """Wrap a generated loader as a MethodUnit asset, or None when none applies."""
+        import dataclasses
+
+        from .base import EMIT_LIBRARY, KIND_METHOD_UNIT
+        from .contracts import CALLABLE, ANALYZER_VERSION, Callability, UnitContract
+        from .doc_ids import method_unit_doc_id
+
+        provenance = {"element_id": ctx.anchor(), "parent_doc_id": doc_id,
+                      "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
+                      "extractor": self.name, "analyzer_version": ANALYZER_VERSION,
+                      "generated": True}
+        unit = build_loader_unit(meta, title=title, rel_path=rel_path, provenance=provenance)
+        if not unit:
+            return None
+        contract = UnitContract(
+            qualified_name=unit["symbol"], unit_kind="function",
+            signature=unit["signature"], params=[],
+            returns=unit["returns"], docstring=unit["doc_summary"],
+            doc_summary=unit["doc_summary"],
+            # GENERATED code, so callability is asserted by construction rather than analysed:
+            # it has one parameter, imports exactly one library, and was compiled above. Running
+            # the analyser over our own template would only re-derive that.
+            callability=Callability(verdict=CALLABLE,
+                                    reason="generated loader: single staged-path argument",
+                                    requires_imports=list(unit["requirements"]["pip"])),
+            slice_sha=_sha_of(unit["source"]),
+            library_symbol=unit["symbol"],
+            requirements=unit["requirements"],
+            invariants=([{"check": "crs_equals", "target": "return",
+                          "args": {"crs": unit["crs"]}}] if unit.get("crs") else []),
+            provenance=provenance,
+        )
+        unit_doc_id = method_unit_doc_id(doc_id, unit["symbol"])
+        targets = [EMIT_OPENSEARCH]
+        if EMIT_LIBRARY in (ctx.targets or ()):
+            targets.append(EMIT_LIBRARY)
+        return AssetRecord(
+            asset_id=unit_doc_id, kind=KIND_METHOD_UNIT,
+            resource_type=resource_type_for(KIND_METHOD_UNIT), doc_id=unit_doc_id,
+            emit_targets=targets, source_rel_path=rel_path,
+            title=f"{unit['symbol']} — {title}",
+            contents=f"{unit['signature']}\n\n{unit['doc_summary']}",
+            unit=dataclasses.asdict(contract), slice_source=unit["source"],
+            extracted={"parent_doc_id": doc_id, "parent_type": "Dataset",
+                       "callable": True, "unit_name": unit["symbol"], "generated": True},
+        )
 
 
 _: Extractor = DataExtractor()  # type: ignore[assignment]

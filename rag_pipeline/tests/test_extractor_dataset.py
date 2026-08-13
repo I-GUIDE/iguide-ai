@@ -244,3 +244,141 @@ def test_a_binary_format_without_pandas_says_so_instead_of_guessing(tmp_path, mo
     meta = extract_dataset_metadata(str(path))
     assert "requires pandas" in meta.get("note", "")
     assert "schema" not in meta
+
+
+# ------------------------------------------------------------------ generated loaders (M7)
+
+from extractors.data_extractor import build_loader_unit  # noqa: E402
+
+
+def _loader(family, fmt="GeoJSON", crs="EPSG:4326", title="Chicago Communities", **extra):
+    meta = {"family": family, "format": fmt, "crs": crs, **extra}
+    return build_loader_unit(meta, title=title, rel_path="f.dat",
+                             provenance={"element_id": "ds01"})
+
+
+@pytest.mark.parametrize("family,pkg,returns", [
+    ("vector", "geopandas", "GeoDataFrame"),
+    ("raster", "rasterio", "rasterio.DatasetReader"),
+    ("tabular", "pandas", "DataFrame"),
+])
+def test_a_loader_is_generated_per_family(family, pkg, returns):
+    unit = _loader(family)
+    assert unit["requirements"]["pip"] == [pkg]
+    assert unit["returns"] == returns
+
+
+def test_the_generated_source_actually_executes():
+    """Generated code has to be compiled by whatever generates it — there is no reviewer in
+    this path. The first version assembled the docstring with a conditional indent that skipped
+    lines starting with a triple quote, un-indenting the docstring and making every loader a
+    SyntaxError."""
+    unit = _loader("vector")
+    ns = {}
+    exec(compile(unit["source"], "<loader>", "exec"), ns)
+    assert unit["symbol"] in ns and callable(ns[unit["symbol"]])
+
+
+def test_a_family_with_no_sensible_reader_yields_none():
+    """A container or a metadata sidecar gets no loader, rather than one that cannot work."""
+    assert _loader("container", fmt="zip") is None
+    assert _loader("metadata", fmt="STAC") is None
+
+
+def test_the_loader_takes_a_staged_path_not_a_url():
+    """Staging happens agent-side; no URL, no bucket, no credential reaches the sandbox. That
+    is why --network none can stay closed."""
+    unit = _loader("vector")
+    assert unit["signature"] == f"def {unit['symbol']}(staged_path)"
+    assert "http" not in unit["source"]
+    assert "bucket" not in unit["source"] and "boto3" not in unit["source"]
+
+
+def test_a_declared_crs_is_set_only_when_missing():
+    """The file is authoritative about its own projection; silently reassigning it would be
+    the same class of error the invariant gate exists to catch."""
+    source = _loader("vector", crs="EPSG:4326")["source"]
+    assert 'if getattr(frame, "crs", None) is None' in source
+    assert 'set_crs("EPSG:4326")' in source
+
+
+def test_no_crs_means_no_set_crs_call():
+    assert "set_crs" not in _loader("vector", crs="")["source"]
+
+
+def test_xlsx_and_parquet_get_the_right_reader():
+    assert "read_excel" in _loader("tabular", fmt="XLSX")["source"]
+    assert "read_parquet" in _loader("tabular", fmt="GeoParquet")["source"]
+    assert "read_csv" in _loader("tabular", fmt="CSV")["source"]
+
+
+def test_the_loader_docstring_carries_provenance():
+    source = _loader("vector", schema=["id", "name"])["source"]
+    assert "Source element : ds01" in source
+    assert "Declared CRS   : EPSG:4326" in source
+    assert "id, name" in source
+
+
+@pytest.mark.parametrize("title,expected_prefix", [
+    ("Chicago Communities", "load_chicago_communities"),
+    ("2024 Survey Points", "load_ds_2024"),
+    ("weird!! name??", "load_weird_name"),
+    # An empty title falls back to the FILENAME, which is more informative than a generic
+    # "load_dataset" — several platform datasets carry no title at all.
+    ("", "load_f_dat"),
+])
+def test_symbol_names_are_safe_identifiers(title, expected_prefix):
+    unit = _loader("vector", title=title)
+    assert unit["symbol"].startswith(expected_prefix)
+    assert unit["symbol"].isidentifier()
+
+
+# ------------------------------------------------------------------ the loader as an asset
+
+def test_a_dataset_emits_a_loader_method_unit(tmp_path):
+    from extractors.base import EMIT_LIBRARY
+
+    path = tmp_path / "communities.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"name": "Loop"},
+         "geometry": {"type": "Point", "coordinates": [-87.63, 41.88]}}]}))
+    result = _extract(path, title="Chicago Communities")
+    units = [a for a in result.assets if getattr(a, "unit", None)]
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.unit["library_symbol"] == "load_chicago_communities"
+    assert unit.unit["callability"]["verdict"] == "callable"
+    assert EMIT_LIBRARY in unit.emit_targets
+    ns = {}
+    exec(compile(unit.slice_source, "<loader>", "exec"), ns)
+    assert "load_chicago_communities" in ns
+
+
+def test_the_loader_unit_declares_its_crs_invariant(tmp_path):
+    """So the gate has something real to check on the frame this returns."""
+    path = tmp_path / "x.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {},
+         "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}}]}))
+    unit = [a for a in _extract(path, title="X").assets if getattr(a, "unit", None)][0]
+    assert unit.unit["invariants"] == [
+        {"check": "crs_equals", "target": "return", "args": {"crs": "EPSG:4326"}}]
+
+
+def test_a_container_dataset_emits_no_loader(tmp_path):
+    archive = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("a.shp", "x")
+    result = _extract(archive, title="Bundle")
+    assert [a for a in result.assets if getattr(a, "unit", None)] == []
+
+
+def test_the_loader_is_content_addressed(tmp_path):
+    """Same scheme as an extracted slice, so re-ingesting an unchanged dataset is a no-op."""
+    path = tmp_path / "x.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {},
+         "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}}]}))
+    a = [x for x in _extract(path, title="X").assets if getattr(x, "unit", None)][0]
+    b = [x for x in _extract(path, title="X").assets if getattr(x, "unit", None)][0]
+    assert a.unit["slice_sha"] == b.unit["slice_sha"] and len(a.unit["slice_sha"]) == 12
