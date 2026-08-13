@@ -2067,3 +2067,44 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** `_construction_is_safe` (misses `os.makedirs`/`os.listdir`, base-class
   `__init__`, class-body I/O) and `by_name` keyed by simple name, which reads another
   class's `__init__`.
+
+## 2026-08-13 · M6.D · Two classes that could not be constructed shipped as callable
+
+**Change** `analysis/callability._construction_is_safe` rewritten: filesystem inspection
+  added to `_IO_CALLS` (with `os.path.join`/`dirname`/etc. explicitly exempted as string
+  arithmetic), calls followed into the class's own methods and module-level functions,
+  the **class body** and `__new__` and class decorators checked, and the runtime-global
+  lookup resolved from the class's own method table. It returns the *reason* instead of a
+  bool, so the verdict names the disqualifying call and its line.
+
+**Why** Four gaps, each of which let a class that cannot be constructed in the sandbox
+  ship as `callable`:
+  - the vocabulary listed readers and network calls but no filesystem *inspection*;
+  - only `__init__`'s own body was walked, so I/O one call away was invisible;
+  - class-body statements run at **import** of the slice — worse than an unsafe
+    `__init__`, because the failure takes down every sibling unit in the module;
+  - `by_name["__init__"]` was keyed by **simple name across the whole module**, so with
+    more than one class defining `__init__` — 4 of 26 promoted slices — the
+    runtime-global check answered about whichever table won the dict.
+
+**Measured**
+  - units **229 → 227**, needs_instance **56 → 58**. Exactly the two false-callables,
+    no collateral: `TIFDataset` (`os.listdir` in `__init__`, then `raise ValueError` when
+    the directory has no `.tif`) and `OptimizedWeatherDownloader` (`os.makedirs`
+    directly, *and* via `setup_logging()`).
+  - the demotion is verified by construction, not by inspection: the `TIFDataset` shape
+    raises `FileNotFoundError: /work/images` on a fresh path and `ValueError` on an empty
+    directory. **1/1 of the shipped contract's own call fails.**
+  - no false positives: a constructor doing only `os.path.join(os.path.dirname(root))`
+    stays `callable`, and 24 of 26 class units are unaffected.
+
+**Surprised by** This milestone *reduces* the headline number, and that is the correct
+  direction. The plan's own criterion says so — "a false-callable ships a broken unit; a
+  false-not-callable only costs coverage" — but it is worth stating plainly that 229 was
+  an overcount I had reported twice.
+
+**Next** Remaining from the audit: name-substring type inference (113/137 params typed
+  `number` off the letters 'n'/'k', 6 DataFrames typed `geodataframe`);
+  `reject_all_nan` failing correct runs on input shape; contract taken from the LAST
+  definition while the shipped slice comes from the FIRST; `_apply_grounding_caveat`
+  appending only `summary` so the gate's remedy never reaches the user.

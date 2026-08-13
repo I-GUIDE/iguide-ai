@@ -296,10 +296,11 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
             # corpus — but only when CONSTRUCTING it is safe. If `__init__` opens a file or hits
             # the network, the class is the object-shaped version of the hidden-global problem
             # and importing its slice into a sandbox with no network fails.
-            if not _construction_is_safe(node, scope, by_name):
+            unsafe = _construction_is_safe(node, scope, by_name, _class_tables)
+            if unsafe:
                 c.verdict = NEEDS_INSTANCE
-                c.reason = (f"constructing {simple!r} performs I/O or reads a runtime value, so "
-                            f"it cannot be instantiated in an isolated sandbox")
+                c.reason = (f"constructing {simple!r} is not isolated: {unsafe} — it cannot be "
+                            f"instantiated in a sandbox with no network and no staged files")
         elif "." in qualname:
             # A bound method reads no globals — `self` is a PARAMETER — so every check above
             # passes and these were verdicted `callable`: 24 of 40 units on the first corpus.
@@ -330,39 +331,144 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
     return verdicts, scope, summary
 
 
-_IO_CALLS = ("open", "read_file", "read_csv", "read_parquet", "read_excel", "get", "post",
-             "request", "urlopen", "connect", "download", "load", "Session", "system", "run")
+_IO_CALLS = frozenset((
+    # network / process
+    "get", "post", "request", "urlopen", "connect", "download", "Session", "system", "run",
+    # readers
+    "open", "read_file", "read_csv", "read_parquet", "read_excel", "load", "loadtxt", "imread",
+    "read_text", "read_bytes", "from_file", "load_state_dict",
+    # writers
+    "to_file", "to_csv", "to_parquet", "write_text", "write_bytes", "savefig", "save",
+    # FILESYSTEM INSPECTION. Absent from the first version, and it is the case that actually
+    # bit: `TIFDataset.__init__` calls os.listdir(images_dir) and then RAISES ValueError when
+    # the directory holds no .tif files, so constructing it in a fresh sandbox fails every
+    # time -- and it was verdicted `callable`.
+    "makedirs", "mkdir", "listdir", "scandir", "iterdir", "glob", "rglob", "walk", "exists",
+    "isfile", "isdir", "stat", "remove", "unlink", "rmtree", "copy", "copytree", "move",
+    "chdir", "mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryDirectory",
+))
+
+# Never treated as I/O even though the name matches a member of _IO_CALLS above. `os.path.join`
+# and `os.path.dirname` are pure string manipulation, and `.get` is overwhelmingly a dict read.
+_IO_SAFE_QUALIFIED = frozenset((
+    "os.path.join", "os.path.dirname", "os.path.basename", "os.path.splitext",
+    "os.path.abspath", "os.path.normpath", "os.path.relpath", "os.path.expanduser",
+    "os.sep", "posixpath.join",
+))
 
 
-def _construction_is_safe(node: ast.ClassDef, scope: ModuleScope,
-                          by_name: Dict[str, Any]) -> bool:
-    """Can this class be constructed without executing I/O or reading a runtime global?
+def _io_call_in(node: ast.AST, bodies: Dict[str, ast.AST], *,
+                _seen: Optional[set] = None, _depth: int = 0) -> Optional[str]:
+    """The first I/O call reachable from *node*, following calls into *bodies*.
 
-    Conservative and syntactic. ``__init__`` calling ``open``/``read_file``/``requests.get`` is
-    refused, because a class whose construction loads data is not independently callable — it is
-    the object-shaped version of the hidden-global problem, and promoting it would ship a unit
-    that fails on import in a sandbox with no network.
-
-    No ``__init__`` at all is safe: the default constructor does nothing.
+    Intraprocedural before this, which missed the commonest shape:
+    ``OptimizedWeatherDownloader.__init__`` calls ``self.setup_logging()``, and it is
+    ``setup_logging`` that calls ``os.makedirs``. The construction is exactly as unsafe either
+    way, and the indirection is one line of code.
     """
-    init = next((n for n in node.body
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "__init__"),
-                None)
-    if init is None:
-        return True
-    table = by_name.get("__init__")
-    if table is not None:
-        reads, _writes = _globals_of(table)
-        if any(name in scope.runtime for name in reads):
-            return False
-    for sub in ast.walk(init):
+    seen = _seen if _seen is not None else set()
+    for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         fn = sub.func
         name = getattr(fn, "attr", None) or getattr(fn, "id", None)
-        if name and name in _IO_CALLS:
-            return False
-    return True
+        if not name:
+            continue
+        try:
+            qualified = ast.unparse(fn)
+        except Exception:
+            qualified = name
+        if name in _IO_CALLS and qualified not in _IO_SAFE_QUALIFIED:
+            return f"{qualified}() at line {getattr(sub, 'lineno', 0)}"
+        if _depth < 4 and name in bodies and name not in seen:
+            seen.add(name)
+            found = _io_call_in(bodies[name], bodies, _seen=seen, _depth=_depth + 1)
+            if found:
+                return f"{found} via {name}()"
+    return None
+
+
+def _construction_is_safe(node: ast.ClassDef, scope: ModuleScope,
+                          by_name: Dict[str, Any],
+                          class_tables: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """``None`` when the class can be constructed safely, else the reason it cannot.
+
+    Conservative and syntactic. A class whose construction loads data is not independently
+    callable — it is the object-shaped version of the hidden-global problem, and promoting it
+    ships a unit that fails in a sandbox with no network and no staged files.
+
+    Returns the REASON rather than a bool so the verdict can say which call disqualified the
+    class; "performs I/O" with no location is not actionable.
+
+    Four things are checked, in decreasing order of severity:
+
+    * the **class body**, whose statements run at IMPORT of the slice, not at construction —
+      a failure there takes down every sibling unit in the module, not just this one;
+    * ``__new__`` and any class decorator, both of which also run before ``__init__``;
+    * ``__init__``, following calls into the class's own methods and module-level functions;
+    * runtime-global reads in ``__init__``, looked up in the CLASS's own method table.
+    """
+    methods = {s.name: s for s in node.body
+               if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    # The class's own methods first, then module-level defs -- so `self.setup_logging()`
+    # resolves to this class's method rather than a same-named function elsewhere.
+    bodies: Dict[str, ast.AST] = {}
+    for name, target in scope.defs.items() if isinstance(scope.defs, dict) else []:
+        if isinstance(target, ast.AST):
+            bodies[name] = target
+    bodies.update(methods)
+
+    # 1. Class-body statements execute at class-creation time, i.e. on IMPORT.
+    for stmt in node.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass)):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue                                  # the docstring
+        found = _io_call_in(stmt, {})                  # no call-following: body scope only
+        if found:
+            return f"class body performs I/O at import time: {found}"
+
+    # 2. Anything else that runs before or instead of __init__.
+    for deco in (node.decorator_list or []):
+        found = _io_call_in(deco, bodies)
+        if found:
+            return f"class decorator performs I/O: {found}"
+    new = methods.get("__new__")
+    if new is not None:
+        found = _io_call_in(new, bodies)
+        if found:
+            return f"__new__ performs I/O: {found}"
+
+    init = methods.get("__init__")
+    if init is None:
+        return None            # the default constructor does nothing
+
+    # 3. Runtime-global reads, from THIS class's method table.
+    #
+    # `by_name.get("__init__")` was keyed by simple name across the whole module, so with more
+    # than one class defining __init__ -- 4 of 26 promoted slices -- it read whichever table won
+    # the dict, and the answer was about a different class entirely.
+    table = None
+    if class_tables is not None:
+        ctable = class_tables.get(node.name)
+        if ctable is not None:
+            for child in _function_tables(ctable):
+                if child.get_name() == "__init__":
+                    table = child
+                    break
+    if table is None:
+        table = by_name.get("__init__")
+    if table is not None:
+        reads, _writes = _globals_of(table)
+        offender = next((n for n in sorted(reads) if n in scope.runtime), None)
+        if offender:
+            return f"__init__ reads module-level value {offender!r}"
+
+    # 4. I/O in __init__, or in anything it calls.
+    found = _io_call_in(init, bodies)
+    if found:
+        return f"__init__ performs I/O: {found}"
+    return None
 
 
 def _demote_transitively(verdicts: Dict[str, Callability]) -> None:

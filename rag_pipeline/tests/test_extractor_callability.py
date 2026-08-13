@@ -392,3 +392,124 @@ def test_a_promoted_class_slice_executes():
     src = "class Calc:\n    def __init__(self, k=2):\n        self.k = k\n    def scale(self, x):\n        return x * self.k\n"
     ns = _executes(src, "Calc")
     assert "Calc" in ns and ns["Calc"](3).scale(2) == 6
+
+
+# ------------------------------------------------------------------ constructing a class
+
+def _verdict(src, name):
+    from extractors.analysis import analyze_module
+
+    verdicts, _scope, _summary = analyze_module(src)
+    return verdicts[name]
+
+
+def test_filesystem_inspection_in_init_is_not_callable():
+    """The vocabulary listed readers and network calls but no filesystem INSPECTION, and that is
+    the case that actually bit. ``TIFDataset.__init__`` calls ``os.listdir(images_dir)`` and then
+    raises ``ValueError`` when the directory holds no ``.tif`` files, so in a fresh sandbox it
+    fails with ``FileNotFoundError`` before it can even get to the raise — and it shipped
+    verdicted ``callable``.
+
+    A false-callable ships a broken unit; a false-not-callable only costs coverage. That
+    asymmetry is why this errs toward refusing."""
+    c = _verdict('''
+import os
+class TIFDataset:
+    def __init__(self, images_dir):
+        self.files = sorted(f for f in os.listdir(images_dir) if f.endswith(".tif"))
+        if not self.files:
+            raise ValueError("none")
+''', "TIFDataset")
+    assert c.verdict == "needs_instance"
+    assert "os.listdir()" in c.reason, "the reason must name the disqualifying call"
+
+
+def test_io_reached_through_a_method_init_calls_is_found():
+    """``OptimizedWeatherDownloader.__init__`` calls ``self.setup_logging()``, and it is
+    ``setup_logging`` that calls ``os.makedirs``. The construction is exactly as unsafe, and the
+    indirection is one line."""
+    c = _verdict('''
+import os
+class Downloader:
+    def __init__(self, out):
+        self.setup_logging()
+    def setup_logging(self):
+        os.makedirs("/data/logs", exist_ok=True)
+''', "Downloader")
+    assert c.verdict == "needs_instance"
+    assert "via setup_logging()" in c.reason
+
+
+def test_pure_path_arithmetic_is_not_io():
+    """``os.path.join`` and ``os.path.dirname`` are string manipulation. Refusing them would
+    demote most constructors that touch a filename at all, and a check that over-refuses gets
+    the whole promotion gate turned off."""
+    c = _verdict('''
+import os
+class Paths:
+    def __init__(self, root):
+        self.p = os.path.join(os.path.dirname(root), "a")
+''', "Paths")
+    assert c.verdict == "callable", c.reason
+
+
+def test_a_class_body_read_runs_at_import_and_is_refused():
+    """Worse than an unsafe ``__init__``: a class-body statement executes when the SLICE IS
+    IMPORTED, so it takes down every sibling unit in the module, not just this one."""
+    c = _verdict('''
+import pandas as pd
+class Config:
+    table = pd.read_csv("cfg.csv")
+    def __init__(self):
+        pass
+''', "Config")
+    assert c.verdict == "needs_instance"
+    assert "import time" in c.reason
+
+
+def test_io_in_new_is_refused():
+    """``__new__`` runs before ``__init__``; checking only ``__init__`` misses it entirely."""
+    c = _verdict('''
+import requests
+class Remote:
+    def __new__(cls):
+        requests.get("http://x")
+        return super().__new__(cls)
+''', "Remote")
+    assert c.verdict == "needs_instance" and "__new__" in c.reason
+
+
+def test_two_classes_are_judged_separately():
+    """The runtime-global check read ``by_name["__init__"]``, keyed by SIMPLE name across the
+    whole module — so with more than one class defining ``__init__`` (4 of 26 promoted slices) it
+    answered about whichever table won the dict. Now resolved from the class's own table."""
+    src = '''
+import os
+class Safe:
+    def __init__(self, a):
+        self.a = a
+class Unsafe:
+    def __init__(self, p):
+        self.f = os.listdir(p)
+'''
+    assert _verdict(src, "Safe").verdict == "callable"
+    assert _verdict(src, "Unsafe").verdict == "needs_instance"
+
+
+def test_a_runtime_global_read_in_init_is_attributed_to_the_right_class():
+    src = '''
+import geopandas as gpd
+LOADED = gpd.read_file("x.shp")
+
+class Clean:
+    def __init__(self, frame):
+        self.frame = frame
+
+class Hidden:
+    def __init__(self):
+        self.frame = LOADED
+'''
+    assert _verdict(src, "Clean").verdict == "callable"
+    hidden = _verdict(src, "Hidden")
+    assert hidden.verdict in ("needs_instance", "needs_globals")
+    assert "LOADED" in hidden.reason
