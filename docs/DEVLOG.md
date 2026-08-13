@@ -1628,3 +1628,48 @@ rather than fixing case by case.
 
 **Next** M3's reconciling re-ingest — there is still no delete anywhere, so a notebook that
 loses a cell leaves orphan `::block::<n>` docs forever, and 3,830 blocks are now indexed.
+
+## 2026-08-13 · M3.2 · Re-ingest that reconciles, and bulk writes
+**Change** `opensearch_emitter` gains `reconcile_plan` / `existing_doc_ids` /
+  `_delete_orphans`, bulk index+embed via `helpers.bulk`, `run_fingerprint` +
+  `ingest_runs` for skip-if-unchanged, and `_assert_agent_indices` as a hard safety rail.
+  16 tests.
+
+**Why** re-ingest meant "write the new docs" and nothing else. There is **no delete anywhere
+in this repo** outside `memory_module`, so a notebook that lost a cell kept its old
+`::block::<n>` documents forever — and kept having them retrieved as evidence for code that no
+longer exists. With 3,830 blocks now indexed from the corpus, that stopped being theoretical.
+
+**Measured** against the live cluster:
+
+| step | indexed | orphans found | deleted | docs under the parent |
+|---|---|---|---|---|
+| ingest 5 cells | 5 | 0 | 0 | 5 |
+| re-ingest identical | 5 | 0 | 0 | 5 |
+| notebook drops to 3 cells | 3 | **2** | **2** | **3** |
+
+M3 exit criterion met: orphans after a cell deletion **≥1 → 0**. Writes now go through
+`helpers.bulk` — the corpus backfill was 4,179 index calls plus 4,179 embed updates, ~8,300
+round trips. Suite **902 passed**, same 3 pre-existing failures.
+
+Three deliberate choices, each because the failure mode is severe:
+
+* **Delete by explicit id, not `delete_by_query`.** The ids come from a diff just computed, so
+  no query exists that could match more than intended.
+* **A search failure yields the EMPTY diff.** If the current state cannot be read, treating an
+  unreadable index as "nothing is there" would delete the element's entire history.
+* **`_assert_agent_indices` refuses anything outside the agent prefix, and any collision with
+  `OPENSEARCH_INDEX`.** This module deletes documents now; a misconfigured prefix resolving to
+  the platform index would be unrecoverable from here.
+
+`run_fingerprint` hashes the DOCS rather than a commit sha, deliberately: a re-ingest of the
+same commit through a changed extractor must not be skipped, and that is exactly the case where
+skipping would hide a regression.
+
+**Surprised by** my own fake client. `FakeClient.search` returned every doc regardless of the
+query, so `test_the_diff_is_scoped_to_ONE_parent` failed against correct code — and, worse,
+would have *passed* whether or not the code scoped by parent at all. A fake that ignores the
+filter cannot test the filter. It now honours the term query, which is the only version of that
+test worth having, since an unscoped diff would wipe every other notebook sharing the index.
+
+**Next** M5 (retire the analyze peer) and the remaining M7 element types.
