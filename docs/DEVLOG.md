@@ -1836,3 +1836,20 @@ that the *path* works, NOT that the contract drove the model's choice. The strea
 that enforcement works is the direct container test — a 4326 frame into a contract-bearing unit
 gives `verdict=fail` naming the unit and parameter, a UTM frame gives `pass`. Two different
 claims; only one of them was demonstrated by the agent run.
+
+## 2026-08-13 · M0.9 · A default test run is green
+**Change** the three live-service tests are marked `@pytest.mark.integration`, and `pytest.ini`
+  gains `addopts = -m "not integration"`.
+
+**Why** those three failed for the entire session and I reported them as "pre-existing" in every
+commit message. They are not broken — they need a reachable OpenSearch cluster, the embedding
+server and Neo4j, and they were the only red in the suite. A suite that is red by default trains
+everyone to skim the summary line, which is exactly how a real regression gets through; the
+marker already existed in `pytest.ini` and these tests simply never used it.
+
+**Measured**
+
+| run | before | after |
+|---|---|---|
+| `pytest` (fresh clone, no services) | 1001 passed, **3 failed** | **1001 passed, 0 failed**, 4 deselected |
+| `pytest -m integration` | — | 3 failed, 1 skipped (as expected without services) |
