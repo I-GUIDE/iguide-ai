@@ -285,6 +285,19 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
     return allowed[:MAX_DEPS], rejected
 
 
+def invariant_gate_enabled() -> bool:
+    """Whether to append the in-sandbox invariant checks. **On by default.**
+
+    Default-on is deliberate: the failure it catches — a distance computed in a geographic
+    CRS — produces a plausible number and no error, so a gate that is off by default protects
+    nobody. Set ``AGENT_INVARIANT_GATE`` to a falsy value to disable it. The epilogue cannot
+    fail a run (every check is guarded and the writer swallows OSError), so the cost of
+    leaving it on is one JSON file.
+    """
+    return (os.getenv("AGENT_INVARIANT_GATE", "1") or "").strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
 def is_code_exec_enabled() -> bool:
     """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
     value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
@@ -307,6 +320,8 @@ class ExecResult:
     backend: str = ""
     code: str = ""   # the executed source (also saved as a downloadable artifact)
     installed: List[str] = field(default_factory=list)  # pip deps installed before the run
+    # Findings from the in-sandbox invariant gate. Empty dict = the gate did not run.
+    verification: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -324,7 +339,36 @@ class ExecResult:
             "installed": self.installed,
             "artifacts": self.artifacts,
             "backend": self.backend,
+            # Surfaced INSIDE the tool result, not appended to the answer afterwards, so the
+            # model can react in-loop: reproject and re-run rather than caveat a wrong number.
+            "verification": self.verification,
         }
+
+
+def _read_checks(work: Path) -> Dict[str, Any]:
+    """Load the invariant gate's report, if it wrote one.
+
+    Absent is not a failure: the gate may be disabled, or the run may have died before the
+    epilogue. Absent and "checked, all fine" must stay distinguishable, so this returns {} for
+    absent rather than a synthetic pass.
+    """
+    from agent_runtime.sandbox_verify import CHECKS_FILENAME
+
+    path = work / CHECKS_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # Keep the payload small: the model needs the verdict and what failed, not every pass.
+    findings = [f for f in (data.get("findings") or [])
+                if isinstance(f, dict) and f.get("status") != "pass"]
+    return {"verdict": data.get("verdict"), "counts": data.get("counts") or {},
+            "inspected": data.get("inspected") or [], "findings": findings[:12],
+            **({"error": data["error"]} if data.get("error") else {})}
 
 
 def _artifact_index_path(work: Path) -> Path:
@@ -534,7 +578,16 @@ class CodeExecutor:
                 backend=self.backend, code=(code or ""),
             )
         try:
-            (work / "script.py").write_text(code or "", encoding="utf-8")
+            # The invariant gate runs as an epilogue on the SAME interpreter, so it inspects
+            # the live frames the code produced rather than its source text — the only way to
+            # know what CRS a frame was actually in when .buffer() was called. Appended to the
+            # written script but NOT to `code`, so the source persisted as an artifact and
+            # echoed back to the model stays exactly what the model wrote.
+            script = (code or "")
+            if invariant_gate_enabled():
+                from agent_runtime.sandbox_verify import epilogue_source
+                script = script + epilogue_source()
+            (work / "script.py").write_text(script, encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors = _stage_inputs(work, input_files)
             try:
@@ -559,7 +612,8 @@ class CodeExecutor:
                     stderr = (str(stderr or "") + f"\n[workspace {size_mb:.0f}MB exceeds "
                               f"{WORKSPACE_MAX_MB:.0f}MB cap; older files may be reclaimed]").strip()
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
-                              artifacts, self.backend, code=(code or ""), installed=deps)
+                              artifacts, self.backend, code=(code or ""), installed=deps,
+                              verification=_read_checks(work))
         finally:
             if not persistent:
                 shutil.rmtree(work, ignore_errors=True)

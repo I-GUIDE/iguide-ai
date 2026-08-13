@@ -1426,3 +1426,48 @@ element-level search cannot reach at any k**, because the match is inside the no
 than in its title or abstract. That is the moat thesis with a number against it.
 
 **Next** M6, the invariant gate.
+
+## 2026-08-12 · M6.1 · The invariant gate, running on the real frames
+**Change** new `agent_runtime/sandbox_verify.py` — deterministic checks executed as an
+  epilogue INSIDE the sandbox, writing `checks.json`; read back into
+  `ExecResult.verification` and surfaced in the tool result. `AGENT_INVARIANT_GATE`, on by
+  default. 27 tests.
+
+**Why in-sandbox and not an AST pass.** A source check can see `.buffer(25000)`; it cannot
+know what CRS the frame was in when that ran, because that depends on what the data loaded
+as. Only the live object knows.
+
+**Measured** in a real container (`--network none`, read-only rootfs), the motivating replay:
+
+| | geographic frame | projected frame |
+|---|---|---|
+| exit code | **0** | 0 |
+| printed area | **0.196** | 1 960 342 806 |
+| gate verdict | **fail** | pass |
+
+The wrong run *succeeds*. It prints a number with a plausible shape, and nothing in the
+runtime objects to it — the gate is the only thing that says "that figure is in degrees²".
+Suite **826 passed**, same 3 pre-existing failures.
+
+Three checks so far: projected-CRS-before-measurement, entirely-null columns (the unmatched-
+join signature), and join cardinality reported so silent row inflation is visible. Findings go
+INSIDE the tool result rather than onto the answer afterwards, so the model can reproject and
+re-run in-loop instead of caveating a wrong number.
+
+**Surprised by** two of my own defaults being wrong in the same direction — toward reporting
+"fine" when nothing was actually established.
+
+`check_not_all_nan` used `select_dtypes("number")`. pandas types an all-`None` column as
+`object`, so the column produced by an unmatched join — precisely the thing the check exists
+for — was excluded from the check *by its own dtype*.
+
+And the verdict was `FAIL if any failed else PASS if any passed`. A frame with **no CRS**
+still passes the null check, so a result nobody could verify came back marked `pass`. The
+precedence is now fail > cannot_determine > pass: one unknown downgrades the whole run. That
+asymmetry is the point of the gate — a confident wrong number is worse than an admitted
+unknown — and I had coded the opposite by reflex. My own test caught it, which is the argument
+for writing the adversarial cases before trusting the implementation.
+
+**Next** the remaining checks (declared units on numeric outputs, output bounds), and wiring
+the verdict into `_reconcile_audit_with_artifacts` so an unverified number cannot be presented
+as verified.
