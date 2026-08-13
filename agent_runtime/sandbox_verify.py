@@ -441,7 +441,21 @@ def install_contract_guards(namespace: Dict[str, Any], contracts: Dict[str, Any]
             return guarded
 
         try:
-            setattr(module, symbol, make_guard(original, unit_name, invariants))
+            if isinstance(original, type):
+                # A CLASS is guarded by patching its __init__, never by replacing the class.
+                # functools.wraps on a class returns a plain function, which silently breaks
+                # `isinstance(x, DoubleConv)` (arg 2 must be a type) and `class Sub(DoubleConv)`
+                # (not an acceptable base type) -- and the units that carry classes here are
+                # torch nn.Module layers, exactly the things that get subclassed and
+                # isinstance-checked. Patching __init__ keeps the class identity intact and
+                # still sees every constructor argument; a subclass calling super().__init__
+                # is checked too.
+                init = original.__dict__.get("__init__")
+                if init is None:
+                    continue           # inherited __init__: patching it would guard the base
+                original.__init__ = make_guard(init, unit_name, invariants)
+            else:
+                setattr(module, symbol, make_guard(original, unit_name, invariants))
             wrapped += 1
         except Exception:
             continue

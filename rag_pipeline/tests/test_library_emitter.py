@@ -312,3 +312,97 @@ def test_dir_lists_the_units_without_importing_them(lib):
         "print(sorted(n for n in dir(P) if not n.startswith('_')))"))
     assert r.returncode == 0, r.stderr[-300:]
     assert "'good'" in r.stdout and "'heavy'" in r.stdout
+
+
+# --------------------------------------------------------------- re-ingest must not accumulate
+
+def _reg(lib):
+    return json.loads(
+        (lib / library_emitter.PACKAGE_NAME / "_registry.json").read_text(encoding="utf-8"))
+
+
+def _q(element_id, symbol):
+    """The registry's qualified key. Computed, because the element package name embeds the
+    element TITLE, so hardcoding it makes the test fixture-shaped rather than behaviour-shaped."""
+    return f"{library_emitter.element_package(element_id, 'Demo')}.{symbol}"
+
+
+def _units(reg):
+    return {k: v for k, v in reg.items()
+            if isinstance(v, dict) and not v.get("alias_for") and not v.get("ambiguous")}
+
+
+def test_a_unit_the_element_no_longer_defines_is_dropped(lib):
+    """The registry was merge-only and there is no delete anywhere in the ingest path. Measured
+    after one rebuild of the real corpus: 446 non-alias entries for 229 modules on disk, so ~217
+    described units from earlier analyzer versions — and the SAME symbol appeared twice with
+    different contracts, ``def DoubleConv()`` from an old build alongside the corrected
+    ``DoubleConv(in_c, out_c)``.
+
+    A stale contract is worse than a missing one: the agent is handed a signature that no longer
+    matches the shipped code and has no way to tell. After the fix the count matches the modules
+    on disk exactly, 229/229."""
+    library_emitter.emit(_manifest(_unit_asset("kept", "elem1", "def kept(x):\n    return x\n",
+                                               sha="aaa"),
+                                   _unit_asset("gone", "elem1", "def gone(x):\n    return x\n",
+                                               sha="bbb")), root=lib)
+    assert set(_units(_reg(lib))) == {_q("elem1", "kept"), _q("elem1", "gone")}
+
+    # re-extract elem1; it no longer defines `gone`
+    out = library_emitter.emit(
+        _manifest(_unit_asset("kept", "elem1", "def kept(x):\n    return x\n", sha="aaa")),
+        root=lib)
+    assert set(_units(_reg(lib))) == {_q("elem1", "kept")}
+    assert _q("elem1", "gone") in out.get("pruned", []), "a prune must be reported, never silent"
+
+
+def test_pruning_never_touches_an_element_this_run_did_not_visit(lib):
+    """6 of 180 elements fail to fetch on any given run. Dropping their working units because a
+    network call failed would be a worse bug than the staleness this fixes."""
+    library_emitter.emit(_manifest(_unit_asset("a", "elem1", "def a():\n    pass\n", sha="aaa")),
+                         root=lib)
+    library_emitter.emit(_manifest(_unit_asset("b", "elem2", "def b():\n    pass\n", sha="bbb")),
+                         root=lib)
+    assert set(_units(_reg(lib))) == {_q("elem1", "a"), _q("elem2", "b")}
+
+    library_emitter.emit(_manifest(_unit_asset("a", "elem1", "def a():\n    pass\n", sha="aaa")),
+                         root=lib)
+    assert _q("elem2", "b") in _units(_reg(lib)), "elem2 was not re-extracted; its units must survive"
+
+
+def test_a_bare_alias_does_not_dangle_after_its_target_is_pruned(lib):
+    library_emitter.emit(_manifest(_unit_asset("gone", "elem1", "def gone():\n    pass\n",
+                                               sha="bbb")), root=lib)
+    assert _reg(lib)["gone"]["alias_for"] == _q("elem1", "gone")
+
+    library_emitter.emit(_manifest(_unit_asset("other", "elem1", "def other():\n    pass\n",
+                                               sha="ccc")), root=lib)
+    reg = _reg(lib)
+    assert "gone" not in reg, "an alias pointing at a pruned entry resolves to nothing"
+    assert reg["other"]["alias_for"] == _q("elem1", "other")
+
+
+def test_an_ambiguous_name_becomes_unambiguous_again_when_one_definer_drops_it(lib):
+    """Ambiguity is recomputed from what survives, not accumulated. Left as a permanent stub, a
+    name that is no longer contested would keep refusing to resolve forever."""
+    library_emitter.emit(_manifest(_unit_asset("dup", "elem1", "def dup():\n    pass\n", sha="a"),
+                                   ), root=lib)
+    library_emitter.emit(_manifest(_unit_asset("dup", "elem2", "def dup():\n    pass\n", sha="b"),
+                                   ), root=lib)
+    assert _reg(lib)["dup"].get("ambiguous") is True
+
+    library_emitter.emit(_manifest(_unit_asset("kept", "elem2", "def kept():\n    pass\n",
+                                               sha="c")), root=lib)
+    reg = _reg(lib)
+    assert reg["dup"].get("ambiguous") is not True
+    assert reg["dup"]["alias_for"] == _q("elem1", "dup")
+
+
+def test_unit_kind_reaches_the_registry(lib):
+    """0 of 657 entries carried it. "class" vs "function" is an ACTION difference for the
+    caller — construct an object, or call a function — and the extractor had it all along."""
+    asset = _unit_asset("Thing", "elem1", "class Thing:\n    pass\n", sha="aaa")
+    asset.unit["unit_kind"] = "class"
+    asset.unit["signature"] = "Thing(a, b)  # class"
+    library_emitter.emit(_manifest(asset), root=lib)
+    assert _reg(lib)[_q("elem1", "Thing")]["unit_kind"] == "class"

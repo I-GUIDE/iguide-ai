@@ -126,3 +126,115 @@ def test_a_main_block_is_still_an_entry_point():
 def test_a_named_entry_function_wins():
     has, ep, _p = _entry("def run_workflow(a, b):\n    return a + b\n")
     assert has is True and ep == "run_workflow"
+
+from extractors.analysis.signatures import params_of, signature_of  # noqa: E402
+
+
+# ------------------------------------------------------------------ class units
+
+CLASS_SRC = '''
+class DoubleConv(nn.Module):
+    """Two convolutions."""
+    def __init__(self, in_c, out_c):
+        super().__init__()
+
+class NoInit(SomeBase):
+    def forward(self): pass
+
+class CatchmentBuilder:
+    def __init__(self, catchments: "gpd.GeoDataFrame", radius_m: float = 5000):
+        self.buf = catchments.buffer(radius_m)
+'''
+
+
+def _cls(name):
+    import ast
+
+    tree = ast.parse(CLASS_SRC)
+    return next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+
+
+def test_a_class_advertises_its_constructor_call_not_def_x():
+    """``def DoubleConv()`` was doubly wrong: a class is not a ``def``, and the constructor
+    arguments were all dropped. Following that contract raises TypeError immediately, because
+    the shipped code is ``def __init__(self, in_c, out_c)``. Measured on the live registry:
+    35 units advertised a zero-argument ``def``; after the fix, 5 do — and all 5 are genuinely
+    no-argument functions."""
+    sig = signature_of(_cls("DoubleConv"))
+    assert sig.startswith("DoubleConv(in_c, out_c)")
+    assert "class" in sig and not sig.startswith("def ")
+
+
+def test_a_class_with_no_constructor_of_its_own_says_so_rather_than_implying_no_args():
+    """Whether it takes arguments depends on a base class this analyser deliberately does not
+    resolve — the base may live in another module entirely. ``(...)`` is honest; ``()`` is a
+    claim."""
+    sig = signature_of(_cls("NoInit"))
+    assert "(...)" in sig and "SomeBase" in sig
+
+
+def test_class_params_come_from_init_without_self():
+    params = params_of(_cls("DoubleConv"))
+    assert [p.name for p in params] == ["in_c", "out_c"]
+
+
+def test_a_class_constructor_gets_enforceable_invariants():
+    """``params_of`` returned ``[]`` for every ClassDef, and ``contract_invariants`` iterates
+    parameters — so a class whose constructor buffers a GeoDataFrame carried ZERO invariants and
+    a geographic frame passed to it was never checked.
+
+    Note for the record: on the current corpus this fix adds no invariants, because all 26
+    promoted classes are neural-net layers and torch Datasets and none takes a frame. The chain
+    was broken; this corpus just does not exercise it."""
+    from extractors.analysis.signatures import contract_invariants, contract_params
+
+    node = _cls("CatchmentBuilder")
+    params = contract_params(node, "")
+    invs = contract_invariants(params, node)
+    assert ("projected_crs", "catchments") in [(i.check, i.target) for i in invs]
+
+
+def test_a_class_guard_does_not_destroy_the_class():
+    """``functools.wraps`` on a class returns a plain FUNCTION, so replacing the module
+    attribute breaks ``isinstance(x, C)`` (arg 2 must be a type) and ``class Sub(C)`` (not an
+    acceptable base type). Every class in this library is a torch ``nn.Module`` or ``Dataset`` —
+    precisely the things that get subclassed and isinstance-checked. The guard patches
+    ``__init__`` instead, which keeps identity and still sees every constructor argument."""
+    import sys
+    import types
+
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    from agent_runtime.sandbox_verify import VIOLATIONS_GLOBAL, install_contract_guards
+
+    mod = types.ModuleType("fake_class_unit_mod")
+
+    class Builder:
+        def __init__(self, catchments, radius_m=5000):
+            self.buf = catchments.buffer(radius_m)
+
+    mod.Builder = Builder
+    sys.modules["fake_class_unit_mod"] = mod
+    try:
+        ns: dict = {}
+        assert install_contract_guards(ns, {"Builder": {
+            "module": "fake_class_unit_mod", "symbol": "Builder",
+            "invariants": [{"check": "projected_crs", "target": "catchments"}]}}) == 1
+        assert mod.Builder is Builder and isinstance(mod.Builder, type)
+
+        def frame(crs):
+            return gpd.GeoDataFrame({"a": [1]}, geometry=[Point(0, 0)], crs=crs)
+
+        class Sub(mod.Builder):
+            pass
+
+        assert isinstance(Sub(frame("EPSG:32616")), mod.Builder)
+        assert ns.get(VIOLATIONS_GLOBAL) == [], "a projected frame must not be flagged"
+
+        mod.Builder(frame("EPSG:4326"))
+        violations = ns[VIOLATIONS_GLOBAL]
+        assert len(violations) == 1 and violations[0]["status"] == "fail"
+        assert "catchments" in violations[0]["target"]
+    finally:
+        sys.modules.pop("fake_class_unit_mod", None)

@@ -169,7 +169,11 @@ class CodeExtractor:
                                          provenance=provenance)
             contract = UnitContract(
                 qualified_name=qualname,
-                unit_kind="method" if "." in qualname else "function",
+                # A ClassDef was labelled "function" here, so the contract said `def X()`
+                # for 35 units in the live registry. The caller CONSTRUCTS a class; being
+                # told to call it as a function is a different action.
+                unit_kind=("class" if isinstance(node, ast.ClassDef)
+                           else "method" if "." in qualname else "function"),
                 signature=signature_of(node),
                 params=_params,
                 # Enforceable form of what the params declare. Without this the expectation was

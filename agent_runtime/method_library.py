@@ -181,6 +181,9 @@ def _summarize(key: str, entry: Dict[str, Any], score: float) -> Dict[str, Any]:
     invariants = [i for i in (entry.get("invariants") or []) if isinstance(i, dict)]
     return {
         "symbol": key,
+        # Surfaced explicitly, not left implicit in the signature text: constructing a class and
+        # calling a function are different actions, and the caller decides which to write.
+        "unit_kind": entry.get("unit_kind"),
         "signature": entry.get("signature"),
         "doc_summary": entry.get("doc_summary"),
         "import_line": import_line(entry),
@@ -244,6 +247,7 @@ def get_contract(symbol: str, *, registry: Optional[Dict[str, Any]] = None) -> D
     prov = resolved.get("provenance") or {}
     return {
         "symbol": entry.get("alias_for") or name,
+        "unit_kind": resolved.get("unit_kind"),
         "signature": resolved.get("signature"),
         "doc_summary": resolved.get("doc_summary"),
         "params": resolved.get("params") or [],
@@ -265,7 +269,11 @@ def library_summary() -> Dict[str, Any]:
              if isinstance(v, dict) and not v.get("alias_for") and not v.get("ambiguous")]
     ambiguous = [k for k, v in reg.items() if isinstance(v, dict) and v.get("ambiguous")]
     elements = {(v.get("provenance") or {}).get("element_id") for v in units}
-    return {"units": len(units), "elements": len(elements - {None}),
+    kinds: Dict[str, int] = {}
+    for v in units:
+        kinds[str(v.get("unit_kind") or "unknown")] = \
+            kinds.get(str(v.get("unit_kind") or "unknown"), 0) + 1
+    return {"units": len(units), "elements": len(elements - {None}), "kinds": kinds,
             "ambiguous_names": sorted(ambiguous), "registry_entries": len(reg),
             "root": str(library_root() or "")}
 

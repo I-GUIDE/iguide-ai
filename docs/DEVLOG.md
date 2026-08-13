@@ -1972,3 +1972,63 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** ~23 further confirmed audit findings. The load-bearing one is that
   `params_of` returns `[]` for a `ClassDef`, so 26 class units carry 0 invariants while
   22 of them advertise `def X()`.
+
+## 2026-08-13 · M6.B · Class units: a contract that raises TypeError, and a registry that never forgot
+
+**Change** `signatures.signature_of` / `params_of` handle `ast.ClassDef`; a class now
+  advertises its **constructor call** (`DoubleConv(in_c, out_c)  # class`) with params
+  read from `__init__` minus `self`. `install_contract_guards` guards a class by
+  patching `__init__` rather than replacing the class. `library_emitter` records
+  `unit_kind` and prunes registry entries for elements it re-extracted, rebuilding bare
+  aliases and ambiguity from what survives. `method_library.search_methods` /
+  `get_contract` / `library_summary` surface `unit_kind`.
+
+**Why** A `ClassDef` has no `.args`, so it fell through the function path: `params_of`
+  returned `[]` and `signature_of` emitted `def DoubleConv()`. That advertisement is
+  wrong twice over — a class is not a `def`, and every constructor argument was
+  dropped. `DoubleConv`'s shipped code is `def __init__(self, in_c, out_c)`, so an
+  agent following the contract gets `TypeError` immediately.
+
+  Separately, the registry was merge-only and there is no delete anywhere in the ingest
+  path, so it accumulated entries from every previous build.
+
+**Measured**
+  - registry entries **657 → 440**; non-alias units **446 → 229**, now exactly the 229
+    module files on disk. The 217 dropped were stale duplicates — the same symbol
+    appearing twice with *different* contracts (`def DoubleConv()` from an old build
+    alongside the corrected `DoubleConv(in_c, out_c)`).
+  - units advertising a zero-argument `def X()`: **35 → 5**, and all 5 remaining are
+    genuinely no-argument functions (verified against the shipped source).
+  - class units with constructor params recorded: **0 → 22 of 26**. The other 4 have no
+    `__init__` of their own and are advertised `(...)  # class, inherits <base>` —
+    honest, because resolving a base class means resolving a name from another module.
+  - advertised params vs shipped `__init__` across all 26: **24 match exactly, 2
+    correctly say `(...)`, 0 mismatches**.
+  - `unit_kind` in the registry: **0 of 657 → 229 of 229** (26 class, 203 function).
+  - tests **1061 → 1071**.
+
+**Surprised by** The fix adds **zero invariants**. The audit finding reads as "26 class
+  units carry 0 invariants", which sounds like the invariant chain was broken for
+  classes — and it was, structurally: `contract_invariants` iterates parameters, so an
+  empty `params_of` guaranteed an empty result. But all 26 promoted classes are
+  neural-net layers and torch `Dataset`s; across their 80 constructor parameters the
+  inferred types are 39 `number`, 39 `unknown`, 2 `str`, and **not one frame**. So 0 is
+  the correct answer for this corpus. The chain is verified by a synthetic
+  `CatchmentBuilder` whose `__init__` buffers a GeoDataFrame, which now gets
+  `projected_crs(catchments)`.
+
+  The guard mechanism was the real latent hazard: `functools.wraps` on a class returns
+  a plain function, so replacing the module attribute would have broken
+  `isinstance(x, C)` and `class Sub(C)` — and every class here is an `nn.Module` or
+  `Dataset`, exactly what gets subclassed and isinstance-checked. It would have fired
+  the first time a geospatial class was ingested.
+
+  Also noted while measuring: `catchment_ratios_centroid` gets `reject_all_nan` but not
+  `projected_crs`, while `catchment_ratios_area` gets both. That is the
+  intraprocedural-inference finding — the centroid variant's metric operation is in a
+  helper — and it is next.
+
+**Next** `infer_units_and_crs` is intraprocedural, so the e2SFCA public entry points get
+  no CRS invariant while their helpers do. Then `_construction_is_safe` (misses
+  `os.makedirs`/`os.listdir`, base-class `__init__`, class-body I/O) and `by_name` keyed
+  by simple name.

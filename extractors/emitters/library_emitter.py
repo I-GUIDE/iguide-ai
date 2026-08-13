@@ -256,6 +256,8 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
                               []).append(a)
 
     registry: Dict[str, Any] = {}
+    emitted: set = set()          # qualified keys written by THIS run
+    touched: set = set()          # element packages this run re-extracted
     registry_path = pkg / "_registry.json"
     if registry_path.exists() and not dry_run:
         try:
@@ -306,6 +308,10 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
                 "qualified_name": unit.get("qualified_name"),
                 "element_package": subpkg_name,
                 "signature": unit.get("signature"),
+                # "class" vs "function" is an ACTION difference for the caller -- construct an
+                # object or call a function -- and it was dropped here, so 0 of 657 registry
+                # entries carried it while the extractor had it all along.
+                "unit_kind": unit.get("unit_kind"),
                 "doc_summary": unit.get("doc_summary"),
                 "params": unit.get("params"),
                 "returns": unit.get("returns"),
@@ -323,18 +329,8 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
             # that admits the ambiguity.
             qualified = f"{subpkg_name}.{symbol}"
             registry[qualified] = entry
-            prior = registry.get(symbol)
-            if prior is None:
-                registry[symbol] = dict(entry, alias_for=qualified)
-            elif prior.get("alias_for") != qualified:
-                registry[symbol] = {
-                    "ambiguous": True,
-                    "library_symbol": symbol,
-                    "candidates": sorted({prior.get("alias_for") or prior.get("module", ""),
-                                          qualified}),
-                    "doc_summary": f"{symbol!r} is defined by more than one element; "
-                                   f"import it by its qualified name.",
-                }
+            emitted.add(qualified)
+            touched.add(subpkg_name)
             summary["written"].append(f"{subpkg_name}/{module_name}.py::{symbol}")
 
         if exports and not dry_run:
@@ -343,6 +339,46 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
             reqs = _requirements_for(element_units)
             if reqs:
                 (subpkg / "requirements.txt").write_text("\n".join(reqs) + "\n", encoding="utf-8")
+
+    # Prune entries for elements this run RE-EXTRACTED but that it no longer defines, then
+    # rebuild every bare alias from what survives.
+    #
+    # The registry was merge-only, and there is no delete anywhere in the ingest path. Measured
+    # after one rebuild: 446 non-alias entries for 229 modules on disk -- so ~217 entries
+    # described units from earlier analyzer versions. The same symbol appeared twice with
+    # DIFFERENT contracts (`def DoubleConv()` from an old build alongside the correct
+    # `DoubleConv(in_c, out_c)`), and `library_summary` reported 446 units where 229 exist. A
+    # stale contract is worse than a missing one: the agent is handed a signature that no longer
+    # matches the shipped code and has no way to tell.
+    #
+    # Scoped to `touched`: an element that failed to fetch this run keeps its entries, because
+    # dropping working units on a transient network error would be its own bug.
+    for key in [k for k, v in list(registry.items())
+                if isinstance(v, dict) and not v.get("alias_for") and not v.get("ambiguous")
+                and v.get("element_package") in touched and k not in emitted]:
+        registry.pop(key, None)
+        summary.setdefault("pruned", []).append(key)
+
+    by_symbol: Dict[str, List[str]] = {}
+    for key, value in registry.items():
+        if isinstance(value, dict) and not value.get("alias_for") and not value.get("ambiguous"):
+            by_symbol.setdefault(str(value.get("library_symbol") or key.split(".")[-1]),
+                                 []).append(key)
+    for symbol, keys in by_symbol.items():
+        if len(keys) == 1:
+            registry[symbol] = dict(registry[keys[0]], alias_for=keys[0])
+        else:
+            # A resolver that returns "whichever element was ingested last" is worse than one
+            # that admits the ambiguity.
+            registry[symbol] = {
+                "ambiguous": True, "library_symbol": symbol, "candidates": sorted(keys),
+                "doc_summary": f"{symbol!r} is defined by more than one element; "
+                               f"import it by its qualified name."}
+    # A bare alias whose qualified target was pruned would otherwise dangle.
+    for key in [k for k, v in list(registry.items())
+                if isinstance(v, dict) and v.get("alias_for")
+                and v["alias_for"] not in registry]:
+        registry.pop(key, None)
 
     if not dry_run:
         (pkg / "__init__.py").write_text(_PKG_INIT, encoding="utf-8")

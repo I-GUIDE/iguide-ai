@@ -43,14 +43,59 @@ def _unparse(node: Optional[ast.AST]) -> str:
         return ""
 
 
+def _init_of(node: ast.AST) -> Optional[ast.AST]:
+    """A class's ``__init__``, searched only in its OWN body.
+
+    Not inherited: resolving a base class means resolving a name that may come from another
+    module entirely, and guessing a superclass's constructor is worse than declining to.
+    """
+    if not isinstance(node, ast.ClassDef):
+        return None
+    for stmt in node.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
+            return stmt
+    return None
+
+
 def signature_of(node: ast.AST) -> str:
-    """``def name(<full args>) -> <return>`` with annotations, defaults and markers intact."""
+    """The call signature a caller would write, with annotations and defaults intact.
+
+    For a class this is the CONSTRUCTOR call, ``DoubleConv(in_c, out_c)`` — not ``def
+    DoubleConv()``, which is what a ClassDef produced when it fell through to the function path
+    with no ``.args`` attribute. That advertisement was wrong twice over: it called a class a
+    ``def``, and it dropped every constructor argument. Measured on the live registry, 35 units
+    advertised ``def X()``; following the contract for ``DoubleConv``, whose shipped code is
+    ``def __init__(self, in_c, out_c)``, raises TypeError immediately.
+    """
     name = getattr(node, "name", "<anonymous>")
+    if isinstance(node, ast.ClassDef):
+        init = _init_of(node)
+        if init is None:
+            bases = ", ".join(_unparse(b) for b in (node.bases or []) if _unparse(b))
+            # No __init__ of its own. Whether it takes arguments depends on a base class this
+            # analyser deliberately does not resolve, so say that rather than imply zero args.
+            return f"{name}(...)  # class{f', inherits {bases}' if bases else ''}"
+        args = _strip_self(_unparse(getattr(init, "args", None)))
+        return f"{name}({args})  # class"
     prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     args = _unparse(getattr(node, "args", None))
     returns = _unparse(getattr(node, "returns", None))
     sig = f"{prefix} {name}({args})"
     return f"{sig} -> {returns}" if returns else sig
+
+
+def _strip_self(args: str) -> str:
+    """Drop the leading ``self``/``cls`` — a caller never passes it."""
+    text = (args or "").strip()
+    for first in ("self", "cls"):
+        if text == first:
+            return ""
+        if text.startswith(first + ","):
+            return text[len(first) + 1:].strip()
+        if text.startswith(first + ":") or text.startswith(first + " "):
+            head, _, tail = text.partition(",")
+            return tail.strip() if _ else ""
+    return text
 
 
 def _mk(name: str, kind: str, annotation: Any, default: Any, required: bool) -> ParamSpec:
@@ -63,7 +108,18 @@ def params_of(node: ast.AST) -> List[ParamSpec]:
 
     The previous implementation read only ``node.args.args``, so positional-only and
     keyword-only parameters were invisible and no default was ever recorded.
+
+    A ``ClassDef`` has no ``.args`` at all, so it returned ``[]`` and the whole downstream chain
+    went quiet: ``contract_invariants`` iterates parameters, so a class unit carried ZERO
+    invariants no matter what its constructor did with a GeoDataFrame, and a run passing a
+    geographic frame to one was never checked. Class parameters come from ``__init__``, minus
+    ``self``.
     """
+    if isinstance(node, ast.ClassDef):
+        init = _init_of(node)
+        if init is None:
+            return []
+        return [p for p in params_of(init) if p.name not in ("self", "cls")]
     a = getattr(node, "args", None)
     if a is None:
         return []
