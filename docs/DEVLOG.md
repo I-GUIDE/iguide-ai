@@ -2607,3 +2607,42 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   OpenSearch, `kb_method_search` reads the registry rather than the graph, and no consumer
   exists for multi-hop traversal. It would have been the only write to production data in the
   plan, for no present benefit. Neo4j stays read-only; the read path was fixed earlier today.
+
+## 2026-08-14 · M7.2 · One command that walks every seam
+
+**Change** `scripts/smoke_end_to_end.py` — six stages (config, library, retrieval,
+  sandbox+gate, live API, replay), each asserting an outcome and printing the number it
+  measured. A check that cannot run reports **SKIP with its reason, listed separately at
+  the end**; exit code is the failure count.
+
+**Why** A checklist in a document inherits the exact failure this project keeps producing:
+  you tick "library builds" without noticing the units it built cannot be imported. Each
+  stage here asserts the outcome instead, and a skip is never a pass.
+
+**Measured** Against the live system: 16 passed, 1 failed, 2 skipped. The pass rows carry
+  their evidence — `227 units / 227 modules on disk`, `calculate_buffers at rank 1`,
+  `correct run verdicts pass in 6s`, `degrees buffer verdicts fail`,
+  `rejects an unauthenticated call: 403`, `one real turn answered in 8s`.
+
+**Surprised by** Twice, by my own check.
+
+  It reported 6 modules across ~30 units as undeclared dependencies. Every one was declared
+  correctly — I was comparing the **import** name against the **distribution** name.
+  `import ee` is satisfied by `earthengine-api`, `sklearn` by `scikit-learn`, `PIL` by
+  `pillow`; translating between those namespaces is precisely what `pkgmap` exists for. So
+  the check was wrong and the extraction was right, and I nearly filed it as a corpus defect
+  because an independent audit had reported something adjacent. It now resolves through
+  `pkgmap`, and a declared-but-not-installed dependency is reported as *expected* rather
+  than as a failure.
+
+  And the deliberately-wrong run printed **the same number as the correct one**: 5881.03.
+  Buffering by 25,000 *degrees* gives π×25000²/1e6 = 1963.5 per point — the arithmetic is
+  identical and only the units differ, so three points sum to ~5881 either way. I flagged it
+  as a suspicious duplicate before working out that it is the single best illustration of why
+  this gate exists. Magnitude gives a reader no signal at all; only the CRS does. The gate
+  said `fail`.
+
+**Next** The gap analysis's ranked list, unstarted: gate coverage (10 of 12 realistic
+  wrong-number scenarios pass), data access for the code peer, dataset source validation
+  (66 of 130 curated datasets return an HTML landing page written to disk as data), and the
+  extraction driver's missing per-type dispatch.
