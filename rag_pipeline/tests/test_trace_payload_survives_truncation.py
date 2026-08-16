@@ -84,6 +84,11 @@ def test_the_prototype_row_builder_accepts_a_symbol():
 def test_an_empty_library_and_an_unmatched_query_stay_distinguishable():
     """Pre-existing behaviour worth pinning: "nothing ingested" and "nothing matched" are
     different situations and the model cannot tell them apart from an empty list."""
-    payload = json.loads(_payload("zzz_no_such_method_anywhere_zzz"))
+    # The probe must contain NO real English word. The previous one,
+    # "zzz_no_such_method_anywhere_zzz", tokenises to include "method" — which is a perfectly
+    # real word that legitimately appears in a library of methods, so once the library grew past
+    # a few hundred units the query stopped being nonsense and started matching. The test was
+    # pinning a property of the small corpus, not of the code.
+    payload = json.loads(_payload("qqzzxx wgblrt vfnkpd"))
     assert payload["count"] == 0
     assert "note" in payload and "units from" in payload["note"]
