@@ -2646,3 +2646,62 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   wrong-number scenarios pass), data access for the code peer, dataset source validation
   (66 of 130 curated datasets return an HTML landing page written to disk as data), and the
   extraction driver's missing per-type dispatch.
+
+## 2026-08-16 · M8.1 · The only edge extraction emits that a graph would want
+
+**Change** `extractors/analysis/citations.py` (new, pure) parses platform element references
+  out of notebook text, and `notebook_extractor` emits them as `CITES` / `USES` edges. The scan
+  sits **above** the cell loop's two `continue`s so markdown cells are included — a citation
+  usually lives in prose, and a markdown cell with no code cell after it never becomes anyone's
+  `md_context`. Self-citations are dropped. `base.py`'s relation vocabulary gains `CITES` and a
+  note recording what the other six actually are.
+
+**Why** I have been designing a store for edges that did not need one. Measured over the 174
+  cached corpus notebooks: 4,212 edges, of which **4,071 (96.7%) satisfy
+  `dst.startswith(src + "::")`** — a pure function of the id, already recoverable by the shipped
+  `doc_ids.parent_doc_id:73`, and already queryable via the prefix/parent term at
+  `agent_kb.py:318-321`. `cross_element` was **0**. The extraction graph was a forest of stars,
+  and no partition or traversal over it could say anything. Meanwhile authors *do* link elements
+  to each other — in prose and in `wget` lines — and `_FILE_TOKEN_RE:53` only ever matched data
+  file extensions, so nothing looked.
+
+**Measured** 179 i-guide.io URLs in the corpus, 100 carrying an element UUID. Through the real
+  extractor over all 174 notebooks, 0 failures: **99 cross-element edges (CITES 92, USES 7)**
+  from 29 elements to 40 targets — 21 notebooks and **19 outside the notebook set**. Graph: 56
+  nodes, 12 components, largest **28**. Cross-element edges 0 → 99. All 41 distinct targets
+  resolve to a live platform element (41/41). Self-loops emitted: 0. Tests 1302 → 1330.
+
+**Surprised by** Three things, in ascending order of how wrong I was.
+
+  The two hosts do not mean the same thing. `platform.i-guide.io/<type>/<uuid>` is a link to a
+  page; `storage.i-guide.io/<type>/<uuid>/<file>` is a **download**. The second is a data
+  dependency, so it emits `USES` — and it is the first `USES` edge in this repo whose `dst` is a
+  real node. The existing one at `publication_extractor.py:401` sets `dst=str(ds)` from an
+  LLM-named dataset string, and there is no code anywhere that resolves such a name to an id.
+
+  My own characterising test was wrong, in the project's signature way. I asserted that citations
+  are "the only edges that leave the element", classifying by `not dst.startswith(element_id)`.
+  `HAS_WORKFLOW` fails that too — but its dst is a sha1 handle that is the doc_id of *nothing*
+  (141 such edges corpus-wide, 141 distinct dangling dsts). Two buckets hid a third, and the
+  test would have let a dangling edge count as cross-element structure. Now three buckets.
+
+  And a retraction. `docs/DEVLOG.md:2606-2609` says the Neo4j write-back was dropped partly
+  because "no consumer exists for multi-hop traversal". **That is false.**
+  `neo4j_explore_related_nodes_tool(element_id, depth=2, limit=50)` is registered at
+  `langchain_granular_tools.py:143-149,522-526`, named in `graph_state.py:50` and
+  `search_methods.py:31`, instructed in the persona at `prompts.py:50`, and backed by
+  `[:RELATED*1..{depth}]` at `neo4j_graph_tools.py:490-506`. The defensible claim is narrower:
+  *no consumer traverses the extraction edge types*. Dropping the write-back was still right —
+  Neo4j is community edition (`CREATE DATABASE` → `UnsupportedAdministrationCommand`, so there
+  is no spare database), and `USE_TEXT2CYPHER` defaults to `"true"` with `_sanitize_cypher`
+  (`agents.py:621-630`) carrying no label allowlist, so anything written to prod is immediately
+  reachable by LLM-authored Cypher against production. The conclusion held; one of its three
+  reasons did not.
+
+**Next** The citation layer is one signal. The graph the platform *already* curates is larger and
+  was never read: `GET /api/elements/{id}` returns `related-elements` (the listing endpoint hides
+  it) — 329 of 473 sampled elements carry one, giving 576 distinct undirected pairs, 774
+  reciprocal, hop-2 productive for 296 of 391 connected nodes, and already covering
+  dataset–notebook (142) and dataset–publication (100). Next is fusing that with entity and
+  relationship extraction over element content, so elements connect *through* shared entities
+  rather than only directly.
