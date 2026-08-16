@@ -62,6 +62,12 @@ pyogrio==0.12.1
 # in dev (which had it via anaconda). See M0.5 in docs/DEVLOG.md.
 pyarrow==24.0.0
 matplotlib==3.10.0
+# Same drift this file exists to stop, caught before anything depended on it: dev runs
+# 3.4.2 (arriving via torch), while a clean `pip install -r requirements.txt -c
+# constraints.txt` resolved networkx 3.6.1. Graph results measured here would have run on a
+# different implementation in CI. 3.4.2 is the version the community-detection work is
+# measured against; torch==2.10.0 requires only networkx>=2.5.1, so this does not fight it.
+networkx==3.4.2
 
 # --- embeddings / NLP ---------------------------------------------------------
 sentence-transformers==5.5.1

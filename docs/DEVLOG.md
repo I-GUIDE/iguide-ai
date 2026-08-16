@@ -2705,3 +2705,32 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   dataset–notebook (142) and dataset–publication (100). Next is fusing that with entity and
   relationship extraction over element content, so elements connect *through* shared entities
   rather than only directly.
+
+## 2026-08-16 · M8.2 · A dependency that arrives by accident
+
+**Change** `networkx` declared in `requirements.txt` and pinned `==3.4.2` in `constraints.txt`,
+  plus four contract tests: that it is declared, that it is pinned, that the *installed* version
+  matches the pin, and that `louvain_communities` exists at that version with `seed`, `weight`
+  and `resolution` parameters.
+
+**Why** It is imported directly by the community-detection work now starting, but it was
+  reachable here only as a transitive dependency of `torch` (`pip show networkx` → Required-by:
+  intake, mapclassify, osmnx, scikit-image, torch). That is the `pyarrow` failure from M0.5
+  exactly: present in dev via anaconda, absent from a clean build the moment the package that
+  dragged it in changes. A CPU-only torch variant would have removed it silently.
+
+**Measured** dev resolves **3.4.2**; a clean `pip install -r requirements.txt -c constraints.txt`
+  resolves **3.6.1**. So every partition measured on this host would have run on a different
+  implementation in CI. `pip install --dry-run --python-version 3.11 --only-binary=:all:
+  networkx==3.4.2` → exit 0, one `py3-none-any` wheel, zero runtime deps. Deployment-contract
+  tests 14 → 18.
+
+**Surprised by** The seed assertion earning its place immediately. Louvain without `seed=` is
+  nondeterministic, so community *ids* would change between two runs over an identical graph —
+  which silently invalidates any cached community summary and any id written back onto an
+  element document. The algorithm being present is not the property that matters; being
+  *seedable* is, and only one of those two is obvious from a version number.
+
+**Next** The two measurement workflows (metadata-only baseline, extraction-native treatment) are
+  mid-flight. The number they exist to produce is the marginal contribution of extraction over
+  what the public platform API already gives anyone.

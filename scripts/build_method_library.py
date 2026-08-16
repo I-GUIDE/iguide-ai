@@ -52,6 +52,57 @@ from extractors.sources import SourceError, resolve_and_fetch  # noqa: E402
 BACKEND = "https://backend.i-guide.io"
 
 
+def _get_with_backoff(url: str, params: Dict[str, Any], *, attempts: int = 6):
+    """GET with exponential backoff on 429.
+
+    The platform API rate-limits a listing sweep, and a bare `raise_for_status` turns that into
+    an aborted corpus build — the failure looks like "the element type has no elements" in the
+    summary, which is the wrong conclusion entirely. A 429 is the server asking for patience,
+    so wait rather than give up or hammer.
+    """
+    import time as _t
+
+    delay = 5.0
+    for attempt in range(attempts):
+        resp = requests.get(url, params=params, timeout=60)
+        if resp.status_code != 429:
+            return resp
+        wait = float(resp.headers.get("Retry-After") or delay)
+        if attempt + 1 < attempts:
+            print(f"  … rate-limited, waiting {wait:.0f}s "
+                  f"(attempt {attempt + 2} of {attempts})", flush=True)
+            _t.sleep(wait)
+            delay = min(delay * 2, 120.0)
+    return resp
+
+
+def _element_metadata(element_id: str, cache: Optional[Path] = None) -> Dict[str, Any]:
+    """One element's full record, cached on disk.
+
+    This was an uncached GET per element, so every corpus build issued one request per element —
+    750 for a full sweep — and the platform rate-limited it. The failure then arrived as
+    `metadata_error` on EVERY element, which reads as "the corpus is unreachable" rather than
+    "we asked too fast". The record does not change between two runs an hour apart, so caching
+    it removes the load entirely and makes a re-run nearly free.
+    """
+    path = (cache / "_meta" / f"{element_id}.json") if cache is not None else None
+    if path is not None and path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    resp = _get_with_backoff(f"{BACKEND}/api/elements/{element_id}", {})
+    resp.raise_for_status()
+    meta = resp.json()
+    if path is not None and isinstance(meta, dict) and meta:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(meta), encoding="utf-8")
+        except OSError:
+            pass
+    return meta
+
+
 def list_elements(element_type: str, limit: int, cache: Optional[Path] = None,
                   *, refresh: bool = False) -> List[Dict[str, Any]]:
     """The element listing, cached to disk.
@@ -80,10 +131,8 @@ def list_elements(element_type: str, limit: int, cache: Optional[Path] = None,
     complete = False
     try:
         while len(out) < limit:
-            r = requests.get(f"{BACKEND}/api/elements",
-                             params={"element-type": element_type, "from": page * 50,
-                                     "size": 50},
-                             timeout=60)
+            r = _get_with_backoff(f"{BACKEND}/api/elements",
+                                  {"element-type": element_type, "from": page * 50, "size": 50})
             r.raise_for_status()
             batch = (r.json() or {}).get("elements") or []
             if not batch:
@@ -106,11 +155,58 @@ def list_elements(element_type: str, limit: int, cache: Optional[Path] = None,
     return out[:limit]
 
 
+# --------------------------------------------------------------------------- #
+# Per-type extraction
+# --------------------------------------------------------------------------- #
+
+def _extractor_for(element_type: str):
+    """The extractor class for an element type, or None when the type has no route.
+
+    `ingest_submission` (the webhook path) has always dispatched on type; this driver called
+    `NotebookExtractor()` unconditionally at every one of its runs, which is the entire reason
+    the corpus library is notebook-only. `--type` was accepted, passed into the ExtractContext,
+    and then ignored by the one line that mattered.
+    """
+    if element_type == "notebook":
+        from extractors.notebook_extractor import NotebookExtractor
+        return NotebookExtractor
+    if element_type == "code":
+        from extractors.code_extractor import CodeExtractor
+        return CodeExtractor
+    if element_type == "dataset":
+        from extractors.data_extractor import DataExtractor
+        return DataExtractor
+    if element_type == "publication":
+        from extractors.publication_extractor import PublicationExtractor
+        return PublicationExtractor
+    return None
+
+
+def _files_for(element_type: str, local: Path) -> List[Path]:
+    """Which files to run the extractor over.
+
+    A notebook, dataset or publication element resolves to ONE file. A code element resolves to
+    a repository, so its unit supply is every module in it — which is why the code type is the
+    largest untapped source in the corpus and also why it needs a different shape here.
+    """
+    if local.is_dir():
+        from extractors.fileclass import classify_github
+
+        found = classify_github(str(local))
+        from extractors.base import KIND_CODE_BLOCK, KIND_NOTEBOOK_BLOCK
+
+        key = KIND_NOTEBOOK_BLOCK if element_type == "notebook" else KIND_CODE_BLOCK
+        return [Path(f) for f in (found.get(key) or [])]
+    return [local]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--type", default="notebook")
     ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--max-files", type=int, default=60,
+                    help="per element; a repo can hold hundreds of modules")
     ap.add_argument("--cache", default=".corpus_cache")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--refresh-listing", action="store_true",
@@ -138,10 +234,10 @@ def main() -> int:
         short = eid[:8]
         row: Dict[str, Any] = {"id": eid, "title": (el.get("title") or "")[:70]}
         try:
-            meta = requests.get(f"{BACKEND}/api/elements/{eid}", timeout=60).json()
+            meta = _element_metadata(eid, cache)
         except Exception as exc:
             stats["metadata_error"] += 1
-            row.update(stage="metadata", error=str(exc)[:100])
+            row.update(stage="metadata", error=f"{type(exc).__name__}: {exc}"[:100])
             per_element.append(row)
             continue
 
@@ -167,11 +263,43 @@ def main() -> int:
                              fields={"title": el.get("title") or short,
                                      "tags": meta.get("tags") or []},
                              targets=[EMIT_OPENSEARCH, EMIT_LIBRARY])
-        try:
-            result = NotebookExtractor().extract(str(local), ctx=ctx)
-        except Exception as exc:
+        extractor_cls = _extractor_for(args.type)
+        if extractor_cls is None:
+            stats[f"no_extractor:{args.type}"] += 1
+            row.update(stage="extract", error=f"no extractor for element type {args.type!r}")
+            per_element.append(row)
+            continue
+
+        targets = _files_for(args.type, local)
+        if not targets:
+            stats["no_extractable_files"] += 1
+            row.update(stage="extract", error="source resolved but held no extractable file")
+            per_element.append(row)
+            continue
+
+        # A repository yields many files; one bad module must cost that module, not the element.
+        from extractors.base import ExtractionResult
+
+        result = ExtractionResult(assets=[], edges=[], warnings=[])
+        errors = 0
+        for target in targets[: args.max_files]:
+            try:
+                one = extractor_cls().extract(str(target), ctx=ctx)
+            except Exception as exc:
+                errors += 1
+                if errors == 1:
+                    row["first_error"] = f"{type(exc).__name__}: {exc}"[:90]
+                continue
+            result.assets.extend(one.assets)
+            result.edges.extend(one.edges)
+            result.warnings.extend(one.warnings)
+        row["files"] = len(targets)
+        if errors:
+            row["file_errors"] = errors
+        if not result.assets:
             stats["unparseable"] += 1
-            row.update(stage="extract", error=f"{type(exc).__name__}: {exc}"[:110])
+            row.update(stage="extract",
+                       error=row.get("first_error") or "no assets produced")
             per_element.append(row)
             continue
 

@@ -147,3 +147,60 @@ def test_ci_installs_with_the_pinned_constraints():
     """Without -c constraints.txt the host resolves different versions than the image, and the
     suite proves something about an environment nobody deploys."""
     assert "-c constraints.txt" in _workflow()
+
+
+# ------------------------------------------------------------------ declared vs inherited deps
+
+def _requirements() -> str:
+    return open("requirements.txt", encoding="utf-8").read()
+
+
+def _constraints() -> str:
+    return open("constraints.txt", encoding="utf-8").read()
+
+
+def test_every_directly_imported_third_party_graph_dep_is_declared():
+    """A dependency that arrives transitively is a dependency you do not control.
+
+    networkx was importable here only because torch requires it (`pip show networkx` ->
+    Required-by: intake, mapclassify, osmnx, scikit-image, torch). That is the pyarrow failure
+    again: present in dev via anaconda, absent from a clean build the moment the package that
+    dragged it in changes. Community detection over the extracted corpus imports it directly,
+    so it must be declared directly.
+    """
+    assert "\nnetworkx" in _requirements(), "networkx is imported directly; declare it"
+
+
+def test_networkx_is_pinned_because_the_resolve_drifts():
+    """Measured: dev runs 3.4.2 while a clean `pip install -r requirements.txt -c
+    constraints.txt` resolves 3.6.1 — so a partition measured here would have run on a
+    different implementation in CI. That is exactly the drift constraints.txt exists to stop,
+    caught this time before anything depended on it rather than after."""
+    assert "networkx==" in _constraints(), "an unpinned graph library makes results unreplayable"
+
+
+def test_the_installed_networkx_matches_the_pin():
+    """The pin is only worth something if this environment honours it. A pin that disagrees with
+    what is imported means every number recorded here describes an environment nobody runs."""
+    import re
+
+    import networkx
+
+    m = re.search(r"^networkx==([\d.]+)", _constraints(), re.M)
+    assert m, "no networkx pin to check against"
+    assert networkx.__version__ == m.group(1), (
+        f"constraints.txt pins networkx=={m.group(1)} but this environment has "
+        f"{networkx.__version__}; measurements here do not describe the deployed stack")
+
+
+def test_the_partition_algorithm_this_work_depends_on_exists_and_is_seedable():
+    """Louvain without a seed is nondeterministic, and a knowledge graph whose communities
+    change between runs cannot carry stable ids or cached summaries. Assert both that the
+    algorithm is present at the pinned version and that it accepts the seed."""
+    import inspect
+
+    from networkx.algorithms import community
+
+    assert hasattr(community, "louvain_communities")
+    params = inspect.signature(community.louvain_communities).parameters
+    assert "seed" in params and "weight" in params and "resolution" in params

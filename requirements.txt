@@ -55,6 +55,14 @@ pandas
 matplotlib
 nbformat
 
+# Graph analysis over the extracted corpus (community detection, connectivity).
+# Declared rather than inherited: it is present today ONLY as a transitive dependency of
+# torch (`pip show networkx` -> Required-by: intake, mapclassify, osmnx, scikit-image,
+# torch). Depending on that is the same class of bug as the pyarrow note above — a CPU-only
+# torch variant, or dropping torch, would remove it from a clean build while dev keeps it
+# via anaconda. Pure Python, zero runtime deps, one py3-none-any wheel.
+networkx
+
 # Storage / cloud
 boto3
 
