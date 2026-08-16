@@ -210,6 +210,10 @@ def main() -> int:
                     help="per element; a repo can hold hundreds of modules")
     ap.add_argument("--cache", default=".corpus_cache")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--relevance-gate", action="store_true",
+                    help="skip elements whose README/description is off-domain (see "
+                         "extractors/relevance.py); recommended for --type code")
+    ap.add_argument("--relevance-threshold", type=float, default=3.0)
     ap.add_argument("--no-graph", action="store_true",
                     help="use the rate-limited REST API instead of the platform graph")
     ap.add_argument("--refresh-listing", action="store_true",
@@ -310,6 +314,25 @@ def main() -> int:
                              fields={"title": el.get("title") or short,
                                      "tags": meta.get("tags") or []},
                              targets=[EMIT_OPENSEARCH, EMIT_LIBRARY])
+        # Element-level relevance gate, BEFORE any extraction work. A repository is uniformly
+        # relevant or uniformly not, so rejecting one is a single decision rather than 200
+        # unit-level ones — and the README is the honest signal, written by a human before
+        # anyone thought about extraction. Skipping the raw sweep here is what keeps 1,695 units
+        # of ML plumbing out of the library.
+        if args.relevance_gate:
+            from extractors.relevance import score_element
+
+            verdict = score_element(meta)
+            if verdict["score"] < args.relevance_threshold and (
+                    verdict["has_readme"] or verdict["chars"] >= 120):
+                stats["skipped_off_domain"] += 1
+                row.update(stage="relevance", relevance=verdict["score"],
+                           off_domain=verdict["off_domain"],
+                           error=f"below relevance threshold {args.relevance_threshold}")
+                per_element.append(row)
+                continue
+            row["relevance"] = verdict["score"]
+
         extractor_cls = _extractor_for(args.type)
         if extractor_cls is None:
             stats[f"no_extractor:{args.type}"] += 1
