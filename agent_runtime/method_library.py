@@ -115,15 +115,60 @@ def _entry_text(key: str, entry: Dict[str, Any]) -> Dict[str, List[str]]:
 _FIELD_WEIGHTS = {"symbol": 4.0, "qualified": 2.0, "summary": 2.0, "element": 1.0, "signature": 0.5}
 
 
-def _score(query_tokens: List[str], fields: Dict[str, List[str]]) -> float:
+def _stem(token: str) -> str:
+    """Crude suffix stripping, enough to make a singular and a plural the same token.
+
+    Measured consequence of not having it: the query "buffer geometries by a distance" scored
+    ZERO against ``calculate_buffers``, because the symbol tokenises to ``buffers`` while the
+    query says ``buffer``. It still ranked first while the library was small — nothing else
+    matched either — and fell out of the top ten the moment a corpus containing a literal
+    ``MemoryBuffer`` was added. The ranking had been decided by absence of competition rather
+    than by relevance, and that is invisible until competition arrives.
+
+    Deliberately not a real stemmer: no new dependency, and over-stemming (``gis`` -> ``gi``)
+    would be worse here than under-stemming.
+    """
+    low = token.lower()
+    for suffix in ("ing", "ies", "es", "s"):
+        if len(low) > len(suffix) + 3 and low.endswith(suffix):
+            return low[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return low
+
+
+def _idf(registry: Dict[str, Any]) -> Dict[str, float]:
+    """Inverse document frequency over the registry's own symbols and summaries.
+
+    Without it every matched token is worth the same, so a unit matching "data" scores like one
+    matching "choropleth". At 227 units that was tolerable; at 1,900 the common tokens swamp the
+    discriminating ones.
+    """
+    import math
+
+    df: Dict[str, int] = {}
+    total = 0
+    for key, entry in registry.items():
+        if not isinstance(entry, dict) or entry.get("alias_for"):
+            continue
+        total += 1
+        for token in {_stem(t) for t in _tokens(f"{key} {entry.get('doc_summary') or ''}")}:
+            df[token] = df.get(token, 0) + 1
+    if not total:
+        return {}
+    return {t: math.log((total + 1) / (n + 1)) + 1.0 for t, n in df.items()}
+
+
+def _score(query_tokens: List[str], fields: Dict[str, List[str]],
+           idf: Optional[Dict[str, float]] = None) -> float:
     if not query_tokens:
         return 0.0
     total = 0.0
+    wanted = {_stem(t) for t in query_tokens}
     for field, weight in _FIELD_WEIGHTS.items():
-        present = set(fields.get(field) or ())
+        present = {_stem(t) for t in (fields.get(field) or ())}
         if not present:
             continue
-        total += weight * sum(1 for t in set(query_tokens) if t in present)
+        for token in wanted & present:
+            total += weight * ((idf or {}).get(token, 1.0))
     return total
 
 
@@ -142,6 +187,7 @@ def search_methods(query: str, *, limit: int = 8,
     qt = [t for t in _tokens(query) if t not in _QUERY_STOPWORDS]
     if not qt:
         return []
+    idf = _idf(reg)
     scored: List[tuple] = []
     for key, entry in reg.items():
         if not isinstance(entry, dict):
@@ -154,11 +200,11 @@ def search_methods(query: str, *, limit: int = 8,
         if entry.get("ambiguous"):
             score = _score(qt, {"symbol": _tokens(str(entry.get("library_symbol") or key)),
                                 "qualified": _tokens(key), "summary": [], "signature": [],
-                                "element": []})
+                                "element": []}, idf)
             if score > 0:
                 scored.append((score, key, entry))
             continue
-        score = _score(qt, _entry_text(key, entry))
+        score = _score(qt, _entry_text(key, entry), idf)
         if score > 0:
             scored.append((score, key, entry))
 

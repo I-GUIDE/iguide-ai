@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -209,6 +210,8 @@ def main() -> int:
                     help="per element; a repo can hold hundreds of modules")
     ap.add_argument("--cache", default=".corpus_cache")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-graph", action="store_true",
+                    help="use the rate-limited REST API instead of the platform graph")
     ap.add_argument("--refresh-listing", action="store_true",
                     help="re-fetch the element listing instead of using the cached copy")
     ap.add_argument("--index", action="store_true",
@@ -220,9 +223,26 @@ def main() -> int:
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
 
-    elements = list_elements(args.type, args.limit, cache,
-                             refresh=args.refresh_listing)
-    print(f"{args.type}: {len(elements)} elements\n")
+    # The GRAPH is preferred over the REST API: it is the store the API is a view of, it answers
+    # a whole label in one read-only query, and it does not rate-limit a corpus sweep. The API
+    # path issued one request per element — 750 for a full pass — and returned 429 partway,
+    # which surfaced as `metadata_error` on every element and read as "the corpus is
+    # unreachable". Private elements are excluded there, fail-closed.
+    from_graph = False
+    if not args.no_graph:
+        try:
+            from extractors import platform_graph
+
+            if platform_graph.is_enabled():
+                elements = platform_graph.elements(args.type, limit=args.limit)
+                from_graph = True
+                print(f"{args.type}: {len(elements)} public elements from the platform graph")
+        except Exception as exc:
+            print(f"  ! graph unavailable ({type(exc).__name__}: {exc}); using the REST API")
+    if not from_graph:
+        elements = list_elements(args.type, args.limit, cache, refresh=args.refresh_listing)
+        print(f"{args.type}: {len(elements)} elements")
+    print()
 
     manifest = UnifiedManifest(repo_id="iguide-corpus", source_url=BACKEND, cloned_at="now")
     stats: collections.Counter = collections.Counter()
@@ -234,29 +254,56 @@ def main() -> int:
         short = eid[:8]
         row: Dict[str, Any] = {"id": eid, "title": (el.get("title") or "")[:70]}
         try:
-            meta = _element_metadata(eid, cache)
+            # A graph record IS the full metadata; the API's per-element GET is only needed
+            # when falling back to it.
+            meta = el if from_graph else _element_metadata(eid, cache)
         except Exception as exc:
             stats["metadata_error"] += 1
             row.update(stage="metadata", error=f"{type(exc).__name__}: {exc}"[:100])
             per_element.append(row)
             continue
 
-        cached = sorted(cache.glob(f"{short}__*"))
-        try:
-            if cached:
-                local = cached[0]
-                row["cached"] = True
-            else:
-                src = resolve_and_fetch(meta, cache, element_id=eid,
-                                        filename=f"{short}__{Path(str(meta.get('notebook-file') or 'nb.ipynb')).name}")
-                local = Path(src.local_path)
-                row.update(sha256=src.sha256, bytes=src.bytes, ref=src.ref)
-            stats["fetched"] += 1
-        except SourceError as exc:
-            stats[f"unfetchable:{exc.kind}"] += 1
-            row.update(stage="fetch", error=str(exc)[:110])
-            per_element.append(row)
-            continue
+        # A CODE element is a repository, not a file: its unit supply is every module in it.
+        # `resolve_and_fetch` returns one file, so the code path clones instead.
+        if args.type == "code":
+            repo_url = str(meta.get("github-repo-link") or meta.get("github_url") or "").strip()
+            if not repo_url:
+                stats["unfetchable:unsupported"] += 1
+                row.update(stage="fetch", error="no github-repo-link")
+                per_element.append(row)
+                continue
+            clone_dir = cache / "_repos" / short
+            try:
+                if not clone_dir.exists():
+                    subprocess.run(["git", "clone", "--depth", "1", "--quiet",
+                                    repo_url, str(clone_dir)],
+                                   check=True, capture_output=True, timeout=600)
+                else:
+                    row["cached"] = True
+                local = clone_dir
+                stats["fetched"] += 1
+            except Exception as exc:
+                stats["unfetchable:clone"] += 1
+                row.update(stage="fetch", error=f"{type(exc).__name__}: {exc}"[:100])
+                per_element.append(row)
+                continue
+        else:
+            cached = sorted(cache.glob(f"{short}__*"))
+            try:
+                if cached:
+                    local = cached[0]
+                    row["cached"] = True
+                else:
+                    src = resolve_and_fetch(meta, cache, element_id=eid,
+                                            filename=f"{short}__{Path(str(meta.get('notebook-file') or 'nb.ipynb')).name}")
+                    local = Path(src.local_path)
+                    row.update(sha256=src.sha256, bytes=src.bytes, ref=src.ref)
+                stats["fetched"] += 1
+            except SourceError as exc:
+                stats[f"unfetchable:{exc.kind}"] += 1
+                row.update(stage="fetch", error=str(exc)[:110])
+                per_element.append(row)
+                continue
 
         ctx = ExtractContext(element_id=short, element_type=args.type,
                              source_url=str(meta.get("notebook-url") or ""),

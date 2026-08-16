@@ -104,8 +104,13 @@ def resolve_github_url(metadata: Dict[str, Any]) -> Optional[str]:
         if raw:
             return raw
 
+    # `github-repo-link` is what a CODE element carries — measured on the live corpus, 36 of 36
+    # of them have it and none has any of the other spellings. Its absence here made every code
+    # element resolve to "no source", which is the entire reason the library holds zero code
+    # units despite CodeExtractor working.
     repo = str(metadata.get("notebook-repo") or metadata.get("notebook_repo")
-               or metadata.get("github-repo") or metadata.get("github_url") or "").strip()
+               or metadata.get("github-repo") or metadata.get("github-repo-link")
+               or metadata.get("github_repo_link") or metadata.get("github_url") or "").strip()
     rel = str(metadata.get("notebook-file") or metadata.get("notebook_file")
               or metadata.get("file-path") or "").strip()
     if not repo:
