@@ -8,6 +8,12 @@
       "port": 8131
     },
     {
+      "name": "corpus-graph",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8137", "--directory", "outputs/corpus_graph"],
+      "port": 8137
+    },
+    {
       "name": "iguide-agent-api",
       "runtimeExecutable": "scripts/run_agent_api_dev.sh",
       "runtimeArgs": [],

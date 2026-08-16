@@ -48,7 +48,7 @@ from extractors.base import (EMIT_LIBRARY, EMIT_OPENSEARCH,  # noqa: E402
 from extractors.emitters import library_emitter  # noqa: E402
 from extractors.manifest import UnifiedManifest  # noqa: E402
 from extractors.notebook_extractor import NotebookExtractor  # noqa: E402
-from extractors.sources import SourceError, resolve_and_fetch  # noqa: E402
+from extractors.sources import SourceError, fetch_url, resolve_and_fetch  # noqa: E402
 
 BACKEND = "https://backend.i-guide.io"
 
@@ -291,6 +291,43 @@ def main() -> int:
                 row.update(stage="fetch", error=f"{type(exc).__name__}: {exc}"[:100])
                 per_element.append(row)
                 continue
+        elif args.type == "publication":
+            # `external_link` is a DOI or a publisher landing page for 198 of 200 publications,
+            # not a PDF — which is why this type contributed zero method specs. Unpaywall maps
+            # the DOI to the LEGALLY OPEN copy when one exists (94 of 176 resolvable DOIs, 73 of
+            # them CC-BY), so the corpus only ingests text the publisher or author put in the
+            # open. "Paywalled" is a fact about the world, recorded as its own outcome: a re-run
+            # will not change it.
+            from extractors.open_access import extract_doi, resolve
+
+            cached_pdf = sorted(cache.glob(f"{short}__*.pdf"))
+            if cached_pdf:
+                local, row["cached"] = cached_pdf[0], True
+                stats["fetched"] += 1
+            else:
+                doi = extract_doi(meta.get("external_link")) or extract_doi(meta.get("doi"))
+                if not doi:
+                    stats["unfetchable:no_doi"] += 1
+                    row.update(stage="fetch", error="no DOI in external_link")
+                    per_element.append(row)
+                    continue
+                oa = resolve(doi)
+                row["doi"], row["licence"] = doi, oa.licence
+                if not oa.pdf_url:
+                    stats[f"unfetchable:{'closed' if not oa.is_oa else 'oa_no_pdf'}"] += 1
+                    row.update(stage="fetch", error=oa.reason[:90])
+                    per_element.append(row)
+                    continue
+                try:
+                    src = fetch_url(oa.pdf_url, cache / f"{short}__oa.pdf", element_id=eid)
+                    local = Path(src.local_path)
+                    row.update(sha256=src.sha256, bytes=src.bytes)
+                    stats["fetched"] += 1
+                except Exception as exc:
+                    stats["unfetchable:pdf_get"] += 1
+                    row.update(stage="fetch", error=f"{type(exc).__name__}: {exc}"[:90])
+                    per_element.append(row)
+                    continue
         else:
             cached = sorted(cache.glob(f"{short}__*"))
             try:
@@ -298,8 +335,21 @@ def main() -> int:
                     local = cached[0]
                     row["cached"] = True
                 else:
+                    # The filename must come from the ELEMENT's own source, not from the
+                    # notebook field. Hardcoding `nb.ipynb` saved every dataset as
+                    # `<id>__nb.ipynb`, so DataExtractor routed a CSV or a zip by the wrong
+                    # extension and emitted no loader — 30 datasets fetched, 0 units, and
+                    # nothing anywhere said why.
+                    from urllib.parse import urlparse
+
+                    if args.type == "notebook":
+                        name = Path(str(meta.get("notebook-file") or "nb.ipynb")).name
+                    else:
+                        source = str(meta.get("direct-download-link")
+                                     or meta.get("external-link") or "")
+                        name = Path(urlparse(source).path).name or "data.bin"
                     src = resolve_and_fetch(meta, cache, element_id=eid,
-                                            filename=f"{short}__{Path(str(meta.get('notebook-file') or 'nb.ipynb')).name}")
+                                            filename=f"{short}__{name}")
                     local = Path(src.local_path)
                     row.update(sha256=src.sha256, bytes=src.bytes, ref=src.ref)
                 stats["fetched"] += 1
@@ -404,9 +454,13 @@ def main() -> int:
         root = Path(storage_root()) / "method_library"
         out = library_emitter.emit(manifest, root=root)
         print(f"\nlibrary: {root}")
-        print(f"  modules written {len(out['written'])}")
-        print(f"  registry size   {out['registry_size']}")
-        print(f"  skipped         {len(out['skipped'])}")
+        print(f"  modules written {len(out.get('written') or [])}")
+        # `.get`: the emitter returns early when a manifest carries no library units at all —
+        # true for dataset and publication sweeps, whose value is index docs, not importable
+        # code. A KeyError there reports a crash where the honest answer is "0 units, as
+        # expected for this type".
+        print(f"  registry size   {out.get('registry_size', 0)}")
+        print(f"  skipped         {len(out.get('skipped') or [])}")
         for s in out["skipped"][:5]:
             print(f"    - {s.get('unit')}: {s.get('reason')}")
 
