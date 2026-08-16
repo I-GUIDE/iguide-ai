@@ -195,8 +195,7 @@ def test_the_installed_networkx_matches_the_pin():
 
 def test_the_partition_algorithm_this_work_depends_on_exists_and_is_seedable():
     """Louvain without a seed is nondeterministic, and a knowledge graph whose communities
-    change between runs cannot carry stable ids or cached summaries. Assert both that the
-    algorithm is present at the pinned version and that it accepts the seed."""
+    change between runs cannot carry stable ids or cached summaries."""
     import inspect
 
     from networkx.algorithms import community
@@ -204,3 +203,73 @@ def test_the_partition_algorithm_this_work_depends_on_exists_and_is_seedable():
     assert hasattr(community, "louvain_communities")
     params = inspect.signature(community.louvain_communities).parameters
     assert "seed" in params and "weight" in params and "resolution" in params
+
+
+def test_a_seed_alone_does_NOT_make_the_partition_reproducible():
+    """The correction to the test above, which certified a property the system did not have.
+
+    `seed=` pins Louvain's own randomness but NOT the order it visits nodes — that follows the
+    graph's insertion order. Build the same graph from a `set` and CPython's string hashing
+    (PYTHONHASHSEED) reorders insertion, so an identical graph partitions differently. Measured
+    across three hash seeds on one fixed graph: set-insertion gave Q 0.235526 / 0.244236 /
+    0.234232 and 7 / 7 / 8 communities, while sorted-insertion gave 0.243509 and an identical
+    partition every time.
+
+    This is not academic. Community *ids* moving between two runs over an unchanged corpus
+    invalidates every cached community summary and every community_id written onto an element
+    document — the drift would look like the corpus changed when nothing had.
+
+    The requirement this pins: build the graph from a SORTED node and edge sequence. The
+    assertion is on the fix, not on the bug, so it stays true if networkx ever hardens this.
+    """
+    import random
+
+    import networkx as nx
+    from networkx.algorithms import community
+
+    # A seeded RANDOM graph, not a structured one. First attempt built edges by modular
+    # arithmetic, which is regular enough that Louvain resolves it identically from any order —
+    # so the test passed for the wrong reason and proved nothing. Measured over random graphs,
+    # 9 orderings give 9 distinct partitions at every size from 60 nodes up to 750 nodes /
+    # 9,112 edges, which are the real fused graph's dimensions.
+    _rng = random.Random(4)
+    nodes = [f"n{i:03d}" for i in range(120)]
+    _e: set = set()
+    while len(_e) < 700:
+        _a, _b = _rng.sample(nodes, 2)
+        _e.add(tuple(sorted((_a, _b))))
+    edges = sorted(_e)
+
+    def partition(node_order, edge_order, *, canonicalise):
+        """`canonicalise=True` is the discipline under test: sort before inserting."""
+        g = nx.Graph()
+        g.add_nodes_from(sorted(node_order) if canonicalise else node_order)
+        g.add_edges_from((a, b, {"weight": 1.0})
+                         for a, b in (sorted(edge_order) if canonicalise else edge_order))
+        return sorted(tuple(sorted(p))
+                      for p in community.louvain_communities(g, weight="weight", seed=17))
+
+    rng = random.Random(11)
+    orders = []
+    for _ in range(6):
+        n, e = list(nodes), list(edges)
+        rng.shuffle(n)
+        rng.shuffle(e)
+        orders.append((n, e))
+
+    # THE PROPERTY WE DEPEND ON: however a caller hands us the corpus, canonicalising the
+    # insertion order yields one partition. Without this, the seed is decoration.
+    canonical = {partition(n, e, canonicalise=True) == partition(nodes, edges, canonicalise=True)
+                 for n, e in orders}
+    assert canonical == {True}, (
+        "sorted insertion must make the partition independent of caller order")
+
+    # And the hazard is real at this version rather than hypothetical: at least one raw
+    # (unsorted) ordering of the SAME graph disagrees with the canonical partition. If networkx
+    # ever hardens this the assertion fails loudly and the comment above gets revisited —
+    # which is the correct outcome, not a silent pass.
+    reference = partition(nodes, edges, canonicalise=True)
+    raw = [partition(n, e, canonicalise=False) for n, e in orders]
+    assert any(p != reference for p in raw), (
+        "expected insertion order to change the partition at networkx "
+        f"{nx.__version__}; if it no longer does, the canonicalisation may be unnecessary")

@@ -2734,3 +2734,43 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The two measurement workflows (metadata-only baseline, extraction-native treatment) are
   mid-flight. The number they exist to produce is the marginal contribution of extraction over
   what the public platform API already gives anyone.
+
+## 2026-08-16 · M8.3 · The seed was not the thing that made it reproducible
+
+**Change** Corrects M8.2's own contract test. `test_the_partition_algorithm_...is_seedable` is
+  kept, but it no longer stands alone: a second test pins the property we actually depend on —
+  that canonicalising (sorting) node and edge insertion order makes the partition independent of
+  the order a caller supplies, and that insertion order genuinely perturbs the result at this
+  networkx version.
+
+**Why** M8.2 asserted `louvain_communities` accepts `seed=` and treated that as reproducibility.
+  It is not. `seed=` pins Louvain's own randomness but not the order it visits nodes, which
+  follows graph insertion order. Found by the fusion measurement, whose first two runs over one
+  identical graph disagreed at Q=0.6463 vs 0.6504 because `PYTHONHASHSEED` reordered a `set`.
+  A test that certifies a property the system does not have is worse than no test.
+
+**Measured** Independently reproduced across three `PYTHONHASHSEED` values on one fixed graph:
+  set-derived insertion gave Q **0.235526 / 0.244236 / 0.234232** and **7 / 7 / 8** communities;
+  sorted insertion gave **0.243509** and a byte-identical partition every time. Order-sensitivity
+  then measured across scales — 9 orderings produce **9 distinct partitions at every size
+  tested**: 60/200, 120/700, 200/1500, 400/4000, and **750 nodes / 9,112 edges**, the last being
+  the fused graph's real dimensions. Deployment-contract tests 18 → 19.
+
+**Surprised by** Writing the same defect twice inside one hour, in two different disguises.
+
+  First: `assert partition(forward) != partition(reverse) or True`. The `or True` makes it
+  unconditionally pass. That is the exact shape — a check that stops checking while reporting
+  success — that this log has recorded seven times.
+
+  Second, subtler and the one worth keeping: after removing the `or True`, the assertion FAILED,
+  and the reason was that I had built the fixture with modular arithmetic. That graph is regular
+  enough that Louvain resolves it identically from any insertion order. So the honest reading of
+  the failure was not "the hazard is not real" but "my fixture cannot see it" — a random graph
+  with the same node count is order-sensitive 9 times out of 9. A structured fixture would have
+  passed as soon as I weakened the assertion, and would have certified reproducibility on the
+  strength of a graph nobody has.
+
+**Next** Report the two measurement workflows. Headline, stated here because it is a result about
+  this project's central claim: against the strongest honest public-metadata baseline, all
+  extraction-native edge layers add **141 new element pairs on a 15,711-pair baseline (0.90%)**,
+  12 of 15 sampled read as spurious, and the 99 CITES/USES edges from M8.1 add **exactly zero**.
