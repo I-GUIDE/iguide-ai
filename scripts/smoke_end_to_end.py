@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -90,12 +91,33 @@ def check_library() -> None:
            f"{summary['units']} units from {summary['elements']} elements "
            f"({summary['kinds']})")
 
+    # The direction that matters is one-way. Slices are content-addressed, so re-extracting an
+    # edited function MINTS a new `v_<sha>.py` and leaves the old one importable — that is what
+    # makes "which version" in an artifact's provenance a resolvable question. So more modules
+    # than units is normal (measured: 617 modules for 551 units, 66 superseded versions, 129
+    # modules for 92 units in the most-re-extracted element).
+    #
+    # A registry unit whose module is MISSING is the real fault, and it is what the old wording
+    # described ("a stale entry advertises a contract for code that is gone") while the assertion
+    # tested equality — so it failed on healthy version history and would also have failed, with
+    # the same message, on the genuine problem.
     root = Path(summary["root"]) / "iguide_methods"
     modules = len(list(root.rglob("v_*.py")))
-    ok = modules == summary["units"]
-    record("registry matches disk", PASS if ok else FAIL,
-           f"{summary['units']} registry units vs {modules} modules"
-           + ("" if ok else " — a stale entry advertises a contract for code that is gone"))
+    missing = []
+    for key, entry in reg.items():
+        if not isinstance(entry, dict) or entry.get("alias_for") or entry.get("ambiguous"):
+            continue
+        module = str(entry.get("module") or "")
+        if not module:
+            continue
+        relative = module.split(".", 1)[-1].replace(".", "/") + ".py"
+        if not (root / relative).is_file():
+            missing.append(key)
+    record("every registry unit has its module on disk", PASS if not missing else FAIL,
+           f"{summary['units']} units, {modules} modules on disk "
+           f"({modules - summary['units']} superseded versions kept by design)"
+           if not missing else
+           f"{len(missing)} unit(s) advertise a module that is gone, e.g. {missing[:3]}")
 
     invariants = sum(1 for v in reg.values()
                      if isinstance(v, dict) and not v.get("alias_for") and v.get("invariants"))
@@ -197,6 +219,15 @@ print('total', round(out['area_km2'].sum(), 2))
 BAD = GOOD.replace("utm = pts.to_crs('EPSG:32616')", "utm = pts        # NOT reprojected")
 
 
+def _first_exception(stderr: str) -> str:
+    """The exception line from a traceback, or "" — what actually stopped the script."""
+    for line in reversed((stderr or "").strip().splitlines()):
+        stripped = line.strip()
+        if stripped and re.match(r"^[A-Za-z_][A-Za-z0-9_.]*(Error|Exception|Exit)\b", stripped):
+            return stripped[:120]
+    return ""
+
+
 def check_sandbox() -> None:
     section("4. sandbox, contract guard and invariant gate")
     os.environ.setdefault("AGENT_INVARIANT_GATE", "1")
@@ -230,6 +261,21 @@ def check_sandbox() -> None:
         verdict = report.get("verdict")
         if report.get("error"):
             record(label, FAIL, f"the gate itself errored: {report['error'][:60]}")
+            continue
+        # A run that never reached the gate is not a gate result. Reporting its
+        # `cannot_determine` as a gate failure sent me looking at sandbox_verify for what was
+        # really an unpinned image: AGENT_CODE_EXEC_IMAGE unset falls back to python:3.11-slim,
+        # which has no geopandas, so the script died on line 1 and the gate correctly said it
+        # could not determine anything. Two different problems, one message.
+        crashed = _first_exception(result.stderr or "")
+        if crashed and not (report.get("findings") or []):
+            record(label, FAIL,
+                   f"the run failed BEFORE the gate — {crashed}. The gate's "
+                   f"{verdict!r} is correct: nothing ran for it to inspect."
+                   + ("  Set AGENT_CODE_EXEC_IMAGE to an image with the geospatial stack "
+                      "(iguide-codeexec) — it is unset, so the fallback tag is in use."
+                      if "ModuleNotFoundError" in crashed and not os.getenv(
+                          "AGENT_CODE_EXEC_IMAGE") else ""))
             continue
         detail = f"verdict={verdict} in {time.time() - started:.0f}s"
         if verdict == want:

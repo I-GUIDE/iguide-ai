@@ -3331,3 +3331,46 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   document → agent payload is now closed and tested at each hop, so indexing to
   `iguide_agent_*` is the next step whenever that is wanted; the four live indices predate
   `index_mapping()` and `scripts/create_agent_indices.py` reports the drift.
+
+## 2026-08-17 · M8.12 · Two smoke failures that were the checker's fault, not the system's
+
+**Change** `scripts/smoke_end_to_end.py`: the library check now asserts that every registry unit's
+  module EXISTS rather than that the counts are equal, and the gate check names a run that died
+  before the gate instead of reporting the gate's verdict.
+
+**Why** A full smoke run reported 5 failures. Three were honest; two were the checker.
+
+  **"registry matches disk: 551 registry units vs 617 modules — a stale entry advertises a
+  contract for code that is gone."** The assertion was `modules == units`, and the 66 extra
+  modules are *superseded versions*: slices are content-addressed, so re-extracting an edited
+  function mints a new `v_<sha>.py` and leaves the old one importable, which is the whole reason
+  an artifact's recorded version is resolvable. The most-re-extracted element has 129 modules for
+  92 units. Worse, the message described the OPPOSITE fault — a registry entry whose module is
+  gone — which the equality test would have reported with the same words. So the check failed on
+  health and would have been unreadable on the real problem. It now walks each unit's advertised
+  module and asserts the file is there; 0 missing.
+
+  **"correct run verdicts pass: verdict=cannot_determine"** sent me into `sandbox_verify`. The run
+  never got there: `AGENT_CODE_EXEC_IMAGE` is unset, so the executor fell back to
+  `python:3.11-slim` and the script died on `import geopandas`. `cannot_determine` was the gate
+  being *right* — nothing had run for it to inspect. The check now reads stderr for the exception
+  that stopped the script and says so, including the specific remedy when the image is unpinned.
+
+**Measured** With `AGENT_CODE_EXEC_IMAGE=iguide-codeexec:latest` (the image is built and on this
+  host, 1.25 GB): the gate returns `pass` for the reprojected run and `fail` for the
+  degrees-buffer replay. Smoke totals **9 passed / 5 failed → 12 passed / 2 failed**, and the two
+  remaining failures are the honest ones — the agent KB is on the local backend with an empty
+  store while a cluster is configured, which is exactly the "not indexed yet" state that was asked
+  for. Tests unchanged at 1418.
+
+**Surprised by** The two gate runs print the *same number*: `total 5881.03` for both the correct
+  run and the degrees-buffer replay. I went looking for a reporting bug and there isn't one — the
+  buffer distance is numerically `25000` in both cases and the area is computed the same way, so
+  only the CRS decides whether the answer is 5,881 km² or 5,881 square degrees. That is the most
+  compelling argument for the invariant gate I have found: the two outputs are indistinguishable
+  to a human reading stdout, and the only thing that separates a correct result from a meaningless
+  one is the contract check.
+
+**Next** The smoke script's remaining two failures clear on indexing. `AGENT_CODE_EXEC_IMAGE`
+  wants pinning by digest rather than by the `:latest` tag before any artifact is treated as
+  reproducible — the check already reports the tag as unverified rather than passing it.
