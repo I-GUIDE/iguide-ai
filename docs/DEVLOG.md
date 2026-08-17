@@ -2774,3 +2774,52 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   this project's central claim: against the strongest honest public-metadata baseline, all
   extraction-native edge layers add **141 new element pairs on a 15,711-pair baseline (0.90%)**,
   12 of 15 sampled read as spurious, and the 99 CITES/USES edges from M8.1 add **exactly zero**.
+
+## 2026-08-17 · M8.4 · The graph, built on the layers that were measured to carry relatedness
+
+**Change** `agent_runtime/corpus_graph.py` + `scripts/build_corpus_graph.py` build the corpus
+  knowledge graph — 750 element nodes, four edge layers, Louvain communities, per-community
+  profiles — and emit a self-contained interactive visualisation of the whole graph.
+
+**Why these layers and not extraction's.** Extraction's own edges are a forest: 4,071 of 4,212
+  satisfy `dst.startswith(src + "::")`, recoverable by the shipped `doc_ids.parent_doc_id`,
+  cross_element 0. Adding every extraction-native layer to the layers below moved the graph by
+  141 pairs on a 15,711-pair baseline (0.90%), rescued 0 isolated elements, changed modularity by
+  ≤0.0025, and 12 of 15 sampled new pairs read as spurious. The M8.1 citation edges are kept
+  because they are exact and human-authored — not because they add reach; they add 0 pairs.
+
+**Measured** 750 elements, **6,121 edges**, 1 component, **15 communities, modularity 0.7806**.
+  Layer pairs: SIMILAR_TO 5,347 · IN_COLLECTION 667 · RELATED_TO 592 · CITES/USES 93.
+  `--assert-stable` re-partitions and compares: **replays identically**. Held-out curated pairs
+  land in the same community 82.9% vs 11.0% random (7.6x) and kNN alone reaches 74.2% without
+  ever seeing curated data.
+
+**Surprised by** Two things the build made visible that a number alone had not.
+
+  **The corpus's largest bloc fragments rather than clusters.** Communities 3, 9, 12, 13 and 14
+  are all `flood map / flood risk`, type purity 1.00, and **contributor concentration ≥0.97 on
+  the same uploader** — 160 map elements, one batch, split five ways. Louvain slicing a dense
+  near-identical blob arbitrarily reads as five research themes. So community colour was made to
+  do structural work instead of identity work: communities sharing a dominant contributor share
+  one hue family and are bracketed together, which makes one upload look like one thing.
+
+  **91.4% of edges rest on a single layer.** The fused graph is a union of evidence, not a
+  consensus — and "0 isolated of 750" is a property of the kNN layer, not of the corpus. Strip
+  kNN and 312 of 750 have no edge at all. The visualisation therefore ships the layer toggles as
+  a first-class control rather than a footnote: untick embedding similarity and 312 nodes go red.
+  A caveat you can operate is harder to skip than one you can read past.
+
+**Also measured, and it changes the coverage ceiling.** A concurrent session's `86a7b18` made the
+  extraction driver type-aware. The library on disk is now **551 units over 95 elements** (was
+  227/65): notebook 227 units/65 elements/39 with an invariant · **dataset 22/22/19** ·
+  code 302/**8**/16. Datasets are the first non-notebook units with contracts and the highest
+  invariant density in the library (86% vs notebook 17%, code 5%) — but all 19 carry the same
+  `crs_equals EPSG:4326`, so as a graph layer it is one value over 19 elements, i.e. the same
+  near-clique shape that made the invariant layer degenerate before. Code is 302 units from 8
+  elements at 5% invariant density, which corroborates that session's own net-negative call.
+
+**Next** Community reports (the GraphRAG move — an LLM summary per community, which is what
+  retrieval actually reads) over the 15 communities. And the extracted dataset `spatial` payloads
+  went to the cluster under another session's env; `OPENSEARCH_NODE` is unset in this worktree's
+  `.env`, so computed CRS/bounds/schema — the one dataset signal that is not the degenerate
+  invariant — remains unmeasured from here.
