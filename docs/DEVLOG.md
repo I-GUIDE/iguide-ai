@@ -2916,3 +2916,45 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** Wire the fetch to `extractors/platform_graph.py` (read-only Neo4j, one query per label)
   instead of 750 REST calls — that removes the 1,234s term and the rate-limit failure mode
   entirely, and is the only part of this job that is still slow.
+
+## 2026-08-17 · M8.7 · Three node counts for one graph, none of which reconcile
+
+**Change** `scripts/graph_census.py` — one read-only pass that reports total nodes, total
+  relationships, nodes per label, relationships per type, and element counts public-vs-all, and
+  reconciles them against the public REST API. Exits 2 with the exact `.env` keys to set when
+  Neo4j is not configured, rather than printing something.
+
+**Why** Asked for the graph's node and relationship totals and found I could not answer it, while
+  three different figures were in circulation and no two agree:
+
+  - `docs/DEVLOG.md:957-959` — 799 elements / 819 graph nodes. A later measurement pass reported
+    this does not reproduce.
+  - "3,205 nodes" — repeated in this session's notes, and I repeated it again in conversation. No
+    query is recorded anywhere next to it. **Retracted; it is unverified.**
+  - `extractors/platform_graph.py`'s docstring denominators (notebook 200, publication 200,
+    dataset 141, map 161, oer 44, code 38 = 784). These cannot all be label totals: publication
+    200 is *below* the 203 the public API returns, and the graph is the store the API is a view
+    of, so it cannot hold fewer.
+
+**Measured** Element counts, re-verified from the API just now and agreeing with its own
+  `total-count` field: **750 total, all `visibility: public`** — publication 203, notebook 180,
+  map 160, dataset 130, oer 41, code 36. 750 enumerated distinct ids, `total-count: 750`.
+
+  Neo4j nodes and relationships: **NOT ESTABLISHED.** This worktree's `.env` contains **zero**
+  `NEO4J_*` keys (checked by name, 0 of 6 present), so the census cannot run here. The 43 private
+  elements referenced in `86a7b18` are that session's measurement, not mine.
+
+**Surprised by** Having cited "3,205 nodes" in conversation earlier today as though it were
+  measured. It came from a prior session's summary, survived into this one as background, and I
+  repeated it without a query behind it — which is precisely the failure this log exists to
+  catch, committed by me in the same session in which I criticised a stale figure in someone
+  else's docstring. The census script is the fix: the number now has exactly one source.
+
+  Also worth recording: `platform_graph.py` already had the right tool at `:133` — a `counts()`
+  doing `MATCH (n:{label}) RETURN count(n)` rather than counting a sampled page. The gap was never
+  capability, only credentials.
+
+**Next** Set the six `NEO4J_*` keys in this worktree's `.env` and run
+  `python scripts/graph_census.py --compare-api`. The same credentials unblock the two other open
+  measurements: extracted dataset `spatial` payloads, and pointing `graph_daily.py`'s fetch at the
+  graph to remove its 1,234s REST term.
