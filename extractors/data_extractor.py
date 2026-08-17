@@ -486,6 +486,72 @@ def sniff_extension(path: str) -> str:
     return ""
 
 
+def extract_remote_dataset_metadata(url: str) -> Dict[str, Any]:
+    """Describe a dataset too large to download, from HTTP range requests alone.
+
+    11 of the 31 datasets the platform hosts itself exceed the fetch cap, and they are the
+    substantial ones — 8.5 GB of LiDAR point clouds, NAIP imagery, VIIRS nighttime lights and
+    national hydrogeology. Raising the cap would mean storing all of it to learn what is in it.
+
+    A ZIP's central directory lives at the END of the file, so the member list costs one ranged
+    read of the tail, and a shapefile's CRS costs one more for its `.prj`. Measured: a 724 MB
+    archive with 3,291 members described from 389 KB.
+
+    The result is deliberately WEAKER than a local read and says so: `described_remotely` is set,
+    and there is no feature count or bounds because the geometry was never opened. "We did not
+    look" and "we looked and it was fine" must not produce the same document.
+    """
+    from .remote_zip import fetch_member, inspect
+
+    probe = inspect(url)
+    meta: Dict[str, Any] = {
+        "described_remotely": True,
+        "size_bytes": probe.total_bytes or None,
+        "archive_note": probe.note,
+    }
+    if not probe.members:
+        meta["family"] = "container"
+        meta["format"] = "zip"
+        meta["note"] = f"too large to fetch; remote listing failed: {probe.note}"[:200]
+        return meta
+
+    meta.update({"family": "container", "format": "zip",
+                 "member_count": len(probe.members),
+                 "members": probe.member_names()[:50]})
+    families: Dict[str, int] = {}
+    for name in probe.member_names():
+        ext = Path(name).suffix.lower()
+        fam = family_for_ext(ext)
+        families[fam] = families.get(fam, 0) + 1
+    meta["member_families"] = families
+
+    from .archives import primary_member as _pick
+
+    picked = _pick([Path(n) for n in probe.member_names()])
+    if picked is not None:
+        meta["primary_member"] = str(picked)
+        meta["member_format"] = picked.suffix.lstrip(".").lower()
+
+    # A `.prj` is a few hundred bytes of WKT and gives the CRS without touching the geometry.
+    prj = next((m for m in probe.members if m["name"].lower().endswith(".prj")), None)
+    if prj is not None:
+        blob = fetch_member(url, prj, total_bytes=probe.total_bytes)
+        if blob:
+            wkt = blob.decode("utf-8", "replace").strip()
+            meta["crs_wkt"] = wkt[:400]
+            meta["crs"] = _crs_name_from_wkt(wkt)
+            meta["crs_from"] = "remote .prj read"
+    return meta
+
+
+def _crs_name_from_wkt(wkt: str) -> Optional[str]:
+    """The projection or geographic CS name out of a WKT string, for a readable `crs` field."""
+    import re as _re
+
+    match = _re.match(r'\s*(?:PROJCS|GEOGCS)\s*\[\s*"([^"]+)"', wkt or "")
+    return match.group(1) if match else None
+
+
 def extract_dataset_metadata(path: str) -> Dict[str, Any]:
     ext = Path(path).suffix.lower()
     sniffed = ""

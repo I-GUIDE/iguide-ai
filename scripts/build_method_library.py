@@ -354,6 +354,27 @@ def main() -> int:
                     row.update(sha256=src.sha256, bytes=src.bytes, ref=src.ref)
                 stats["fetched"] += 1
             except SourceError as exc:
+                # Too large to store is not the same as impossible to describe. A ZIP's central
+                # directory is at the end of the file, so its members and a shapefile's CRS come
+                # from a couple of ranged reads — 8.5 GB of the platform's own LiDAR, imagery and
+                # hydrogeology was being reported as simply unfetchable.
+                if exc.kind == "too_large" and args.type == "dataset":
+                    source = str(meta.get("direct-download-link")
+                                 or meta.get("external-link") or "")
+                    remote = None
+                    if source:
+                        from extractors.data_extractor import (
+                            extract_remote_dataset_metadata)
+
+                        remote = extract_remote_dataset_metadata(source)
+                    if remote and remote.get("member_count"):
+                        stats["described_remotely"] += 1
+                        row.update(stage="remote", described_remotely=True,
+                                   members=remote.get("member_count"),
+                                   crs=remote.get("crs"),
+                                   size_mb=round((remote.get("size_bytes") or 0) / 1e6, 1))
+                        per_element.append(row)
+                        continue
                 stats[f"unfetchable:{exc.kind}"] += 1
                 row.update(stage="fetch", error=str(exc)[:110])
                 per_element.append(row)
