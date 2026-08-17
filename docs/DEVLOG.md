@@ -3127,3 +3127,60 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   contribute 296 of 551 units. Those want a unit-level quality signal so a contract-bearing unit
   outranks a bare one — deranking, not deletion. The four live indices predate `index_mapping()`
   and `scripts/create_agent_indices.py` now reports the drift rather than silently keeping them.
+
+## 2026-08-17 · M8.9 · Built the ruler for method ranking, then used it to reject my own fix
+
+**Change** `scripts/eval_method_retrieval.py` — 12 natural-language questions paired with the
+  symbol(s) that should answer them, reporting R@1 / R@3 / R@8 / MRR over the built library, with
+  `--show-misses` printing what outranked the right answer. Plus
+  `rag_pipeline/tests/test_method_retrieval_eval.py` (6 tests) so the harness cannot flatter a
+  change: an empty library reports itself rather than scoring zero, a library of decoys scores
+  exactly zero, and each case's rank is recorded individually.
+
+**Why** "R@1 5 of 8" appears in this project's notes with no harness behind it. It was a
+  recollection, not a measurement, and two ranking changes had already been judged against it —
+  one of which (an IDF floor) had to be reverted. Before touching ranking again I needed a number
+  I could reproduce.
+
+  What the harness measures is **ranking among the units the library already holds**, not
+  coverage: I wrote the questions after reading the library, so I chose ones I knew were
+  answerable. That bias is stated in the module docstring, because a rising score here must never
+  be read as "the library covers more".
+
+**Measured** Baseline on the 551-unit library: **R@1 8/12, R@3 11/12, R@8 12/12, MRR 0.8021.**
+  So the honest replacement for the remembered "5 of 8" is 8 of 12 on a different, larger set.
+
+  Then the intended change. I had gone looking for a **contract-completeness** signal, expecting
+  the 38%-naked units to be crowding out the good ones. `--show-misses` refuted it in one run:
+  every unit outranking a correct answer is itself rich. `as_geodataframe` beats
+  `calculate_buffers`; `team_era5_daily` beats `deaccumulate`; and `catchment_ratios_area` — whose
+  summary is "Calculates the resource to population ratios for each catchment ..." — ranks
+  **first for three different questions**, pushing `camels_geology_attrs` to rank 8. All have
+  docstrings, annotations and parameters. The signal I was about to add would have moved nothing.
+
+  The real shape was a missing length normalisation: `_score` was a bare sum, so a long summary
+  accumulated common-token matches for free. I implemented BM25-style length normalisation
+  (b=0.75) — the textbook fix — and it made things **worse**: R@1 8 → 7, R@3 11 → 9, R@8 12 → 11,
+  MRR 0.8021 → 0.6925. Reverted, not tuned. The reason it hurts is visible in the data: the
+  correct answers here tend to have the *longer, more specific* summaries
+  (`camels_geology_attrs`: "Area-weighted log-permeability and porosity following CAMELS ..."), so
+  dividing by length penalises exactly the specificity that makes them right.
+
+**Surprised by** A third of the benchmark is reachable only because someone wrote a docstring.
+  Stripping every summary and leaving symbol names alone makes four of twelve cases unfindable:
+  three are acronym-named (`e2sfca`, `ebr_of`, and `camels_geology_attrs` for "permeability and
+  porosity"), and the fourth is a tokenizer gap — the query "de-accumulate" splits into `de` +
+  `accumulate` while the symbol `deaccumulate` stays one token, so they share nothing at all.
+  Given that **38% of units have no docstring**, for those units the symbol name IS the whole
+  index, and a unit named `e2sfca` with no summary is unreachable by anyone who does not already
+  know the acronym. Pinned as a characterization test with the set named, so it is visible if it
+  grows.
+
+  That reframes the earlier finding usefully: docstring completeness matters as *retrieval text*,
+  where it is decisive, and not as a *ranking* signal, where it measured nothing.
+
+**Not done, deliberately** No further ranking changes. Two attempts have now been reverted on
+  measurement (the IDF floor, and this length normalisation), and the third-order move — tuning b,
+  or weighting fields differently until 12/12 — would be fitting the ranker to twelve questions I
+  wrote myself. The next real improvement is semantic matching over `extracted.embed_text`, which
+  now carries the parameter types and declared units M8.7 added, and which needs the cluster.
