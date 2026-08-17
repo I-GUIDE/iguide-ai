@@ -311,7 +311,19 @@ def _handle_container(path: str) -> Dict[str, Any]:
     "could not read container". Listing without extracting also sidesteps zip-slip entirely:
     nothing is ever written to a path derived from an archive entry.
     """
+    # Detected from CONTENT, not from the path suffix. The caller may have identified this file
+    # by sniffing precisely because its name carries no extension, and re-deriving `ext` from
+    # the path here threw that away — a 3.7 MB shapefile archive downloaded from a URL ending
+    # `/application/zip` came back "not a recognised archive".
     ext = Path(path).suffix.lower()
+    if not ext or ext not in CONTAINER_EXT:
+        if zipfile.is_zipfile(path):
+            ext = ".zip"
+        else:
+            import tarfile as _tf
+
+            if _tf.is_tarfile(path):
+                ext = ".tar"
     members: List[str] = []
     fmt = "zip"
     try:
@@ -425,11 +437,69 @@ def _handler_for(family: str):
     return globals().get(name) if name else None
 
 
+# Leading bytes -> extension, for files whose NAME carries no type. A download URL ending
+# `/download/ueqs-5wr6/application/zip` yields a filename with no suffix, and routing on the
+# extension then reported `format: unknown` for a perfectly good 3.7 MB shapefile archive.
+_MAGIC = (
+    (b"PK\x03\x04", ".zip"),
+    (b"\x1f\x8b", ".gz"),
+    (b"BZh", ".bz2"),
+    (b"%PDF", ".pdf"),
+    (b"II*\x00", ".tif"),
+    (b"MM\x00*", ".tif"),
+    (b"\x89HDF", ".h5"),
+    (b"CDF", ".nc"),
+    (b"SQLite format 3", ".gpkg"),
+    (b"\x00\x00\x27\x0a", ".shp"),
+)
+
+
+def sniff_extension(path: str) -> str:
+    """The real extension for a file whose name does not carry one, or "".
+
+    Magic bytes first, then a text probe: JSON and CSV have no magic number, and a
+    ``direct-download-link`` that ends in an opaque id is common enough on this corpus that
+    guessing from the URL is not an option.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(2048)
+    except OSError:
+        return ""
+    for signature, ext in _MAGIC:
+        if head.startswith(signature):
+            return ext
+    stripped = head.lstrip()
+    if stripped[:1] in (b"{", b"["):
+        return ".json"
+    if stripped[:5].lower() == b"<?xml":
+        return ".xml"
+    try:
+        text = head.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    first = text.splitlines()[0] if text.splitlines() else ""
+    if first.count(",") >= 2:
+        return ".csv"
+    if first.count("\t") >= 2:
+        return ".tsv"
+    return ""
+
+
 def extract_dataset_metadata(path: str) -> Dict[str, Any]:
     ext = Path(path).suffix.lower()
+    sniffed = ""
+    if not ext or family_for_ext(ext) == "other":
+        sniffed = sniff_extension(path)
+        if sniffed:
+            ext = sniffed
     family = family_for_ext(ext)
     handler = _handler_for(family)
     meta: Dict[str, Any] = {"family": family, "ext": ext}
+    if sniffed:
+        # Recorded, because "we identified this by content" and "the name said so" are different
+        # levels of confidence and a reader should be able to tell them apart.
+        meta["ext_from"] = "content sniff"
     if handler:
         try:
             meta.update(handler(path))
