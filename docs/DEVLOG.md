@@ -2823,3 +2823,49 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   went to the cluster under another session's env; `OPENSEARCH_NODE` is unset in this worktree's
   `.env`, so computed CRS/bounds/schema — the one dataset signal that is not the degenerate
   invariant — remains unmeasured from here.
+
+## 2026-08-17 · M8.5 · Community reports, and a grounding check that rejected 93% of good output
+
+**Change** `scripts/summarize_communities.py` writes one grounded report per community (title,
+  summary, themes, caveat) via `call_llm` — 15 calls for this corpus. The visualisation now shows
+  them: clicking a community in the rail opens its report, and rail rows are labelled by report
+  title instead of by their top three tags.
+
+**Why** The partition was unreadable. Clicking a community *filtered the canvas and nothing else*,
+  so the only way to reach a community profile was to click one of its nodes and read the block at
+  the bottom of the element inspector. The summaries were the thing a person actually wants and
+  they were unreachable. This is also the half of the GraphRAG pattern that matters: global search
+  reads community reports, not the clustering.
+
+**Measured** 15/15 communities, 15 LLM calls (`claude-cli`/`sonnet`), 199s. Themes kept 59,
+  dropped as ungrounded 16 (21%). Reports are legible and specific — *"SIMPLE-G Model:
+  Agriculture, Water, and Trade"*, *"Telecoupling and Metacoupling for Global Sustainability"*,
+  *"R Spatial Analysis with IPUMS Vector Data"* — and 6 of 15 carry a required single-uploader
+  caveat.
+
+**Surprised by** My grounding check rejecting **93%** of the model's themes, and being wrong.
+
+  The first version required a theme to appear as a verbatim substring of the prompt. It threw out
+  `"flood risk mapping"` from a community whose tags are `flood risk` and `flood map`, and
+  `"county-level flood hazard"` from members titled *County-Level FEMA Flood Risk Maps*. Those are
+  paraphrases composed of grounded terms — which is what a summary phrase *is*. Same error as
+  comparing an import name to a distribution name in M7.2: the check was wrong and the model was
+  right. Token-level matching took it 93% → 33%; a three-line stemmer (so `mapping` matches `map`)
+  took it 33% → 21%.
+
+  And the 21% that remain are the real thing. Every flood community had the model adding FEMA-shaped
+  domain detail it was never shown — `100-year and 500-year flood scenarios`, `floodplain
+  assessment`, `watershed-level flood hazard`, `FEMA-style flood risk delineation`. For a corpus
+  where those maps may not be FEMA products at all, that is exactly the invention worth catching.
+  Rejected themes are rendered struck-through in the report rather than dropped silently, because
+  what a summariser wanted to say and could not support is information about the summariser.
+
+  Two process notes. Fixing the check without re-running the model needed a `--recheck` mode that
+  re-scores saved output at 0 LLM calls — otherwise "the fix improved the rate" would have been
+  confounded with new sampling. And when I added it, the summary line still printed
+  `15 LLM calls` on a run that made none; a reporting bug in the same commit as a fix to a
+  measurement bug.
+
+**Next** The extracted dataset `spatial` payloads (computed CRS/bounds/schema for 22 dataset
+  elements) remain unmeasured from this worktree — `OPENSEARCH_NODE` is unset in its `.env`. That
+  is the one candidate layer left with a plausible shot at non-degenerate cross-element edges.

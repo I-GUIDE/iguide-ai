@@ -532,15 +532,39 @@ def extract_remote_dataset_metadata(url: str) -> Dict[str, Any]:
         meta["primary_member"] = str(picked)
         meta["member_format"] = picked.suffix.lstrip(".").lower()
 
-    # A `.prj` is a few hundred bytes of WKT and gives the CRS without touching the geometry.
+    # Three more facts, each from a FILE HEADER at a fixed offset, each costing kilobytes:
+    #   .prj  -> the CRS as WKT
+    #   .shp  -> the bounding box, bytes 36..68 of a 100-byte header
+    #   .dbf  -> the record count and every column name, in the first kilobyte
+    # Together these are most of what a local read would give, which is why the fetch cap does
+    # not need lifting: downloading 3.9 GB would add validity checking, not discovery metadata.
+    from .remote_zip import dbf_header, shapefile_bounds
+
     prj = next((m for m in probe.members if m["name"].lower().endswith(".prj")), None)
     if prj is not None:
-        blob = fetch_member(url, prj, total_bytes=probe.total_bytes)
+        blob = fetch_member(url, prj, total_bytes=probe.total_bytes, max_bytes=4096)
         if blob:
             wkt = blob.decode("utf-8", "replace").strip()
             meta["crs_wkt"] = wkt[:400]
             meta["crs"] = _crs_name_from_wkt(wkt)
             meta["crs_from"] = "remote .prj read"
+
+    shp = next((m for m in probe.members if m["name"].lower().endswith(".shp")), None)
+    if shp is not None:
+        blob = fetch_member(url, shp, total_bytes=probe.total_bytes, max_bytes=256)
+        bounds = shapefile_bounds(blob or b"")
+        if bounds:
+            meta["bounds"] = bounds
+            meta["bounds_from"] = "remote .shp header"
+
+    dbf = next((m for m in probe.members if m["name"].lower().endswith(".dbf")), None)
+    if dbf is not None:
+        blob = fetch_member(url, dbf, total_bytes=probe.total_bytes, max_bytes=8192)
+        header = dbf_header(blob or b"")
+        if header.get("fields"):
+            meta["schema"] = header["fields"]
+            meta["row_count"] = header.get("record_count")
+            meta["schema_from"] = "remote .dbf header"
     return meta
 
 
