@@ -37,12 +37,35 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 
-def _load_env() -> None:
+def env_candidates(explicit: str = "") -> list[Path]:
+    """Where to look for credentials, in order.
+
+    A git worktree does not get the main checkout's untracked files, so `.env` is simply absent
+    here — and copying a credentials file into every worktree duplicates secrets for no benefit.
+    So the sibling checkout is a first-class fallback rather than something a developer has to
+    discover.
+    """
+    if explicit:
+        return [Path(explicit)]
+    out = [REPO / ".env"]
+    # /path/to/repo-branchname -> /path/to/repo  (the worktree naming convention here)
+    name = REPO.name
+    if "-" in name:
+        out.append(REPO.parent / name.rsplit("-", 1)[0] / ".env")
+    return out
+
+
+def _load_env(explicit: str = "") -> Path | None:
     try:
         from dotenv import load_dotenv
     except ImportError:
-        return
-    load_dotenv(REPO / ".env", override=False)
+        return None
+    for path in env_candidates(explicit):
+        if path.is_file():
+            # override=False so a real exported variable still wins over the file.
+            load_dotenv(path, override=False)
+            return path
+    return None
 
 
 def _api_counts() -> dict:
@@ -65,8 +88,13 @@ def _api_counts() -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--compare-api", action="store_true")
+    ap.add_argument("--env-file", default="",
+                    help="path to a .env holding NEO4J_*; defaults to this worktree's .env, "
+                         "then the sibling main checkout's")
     args = ap.parse_args()
-    _load_env()
+    loaded = _load_env(args.env_file)
+    print(f"credentials from {loaded}" if loaded
+          else "no .env found in " + " or ".join(str(p) for p in env_candidates(args.env_file)))
 
     from extractors import platform_graph
 

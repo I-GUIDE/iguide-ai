@@ -3184,3 +3184,60 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   or weighting fields differently until 12/12 — would be fitting the ranker to twelve questions I
   wrote myself. The next real improvement is semantic matching over `extracted.embed_text`, which
   now carries the parameter types and declared units M8.7 added, and which needs the cluster.
+
+## 2026-08-17 · M8.8 · The census, and the retracted number was right
+
+**Change** `scripts/graph_census.py` gained `--env-file` and a credential fallback: a git worktree
+  does not receive the main checkout's untracked files, so `.env` is simply **absent** here. It now
+  looks in this worktree, then in the sibling checkout, rather than requiring a developer to
+  duplicate a credentials file into every worktree.
+
+**Measured — the platform Neo4j graph, read-only:**
+
+  ```
+  TOTAL nodes 3205 · TOTAL relationships 2899
+
+  nodes by label     Alias 1195 · Contributor 1191 · Publication 206 · Notebook 203 · Map 161
+                     Dataset 141 · Oer 44 · Code 38 · Collection 19 · Documentation 6
+                     Notification 1
+  relationships      ALIAS_OF 1195 · CONTRIBUTED 812 · RELATED 605 · CAN_EDIT 114
+                     BOOKMARKED 87 · BELONGS_TO 71 · SUB_COLLECTION_OF 14 · HAS 1
+  elements           public 750 · all 793 · 43 private
+                     (notebook 23, dataset 11, publication 3, oer 3, code 2, map 1)
+  ```
+
+  Public per-type reconciles with the REST API **exactly on all six types** — publication 203,
+  notebook 180, map 160, dataset 130, oer 41, code 36.
+
+  And the curated layer reconciles completely: RELATED 605 = 594 both-endpoints-public + 11
+  touching a private element; reciprocal storage is **0**, so Neo4j holds each pair once while the
+  API presents it on both endpoints (1,184 directed entries ≈ 2 × 592). 594 − 2 self-loops (which
+  the API pass had already found and dropped) = **592**, exactly the curated pairs in the graph
+  this branch builds. Nothing public is being silently lost, and 11 curated relations correctly
+  stay out because they touch private elements.
+
+**Surprised by** Three things.
+
+  **The number I retracted was right.** "3,205 nodes" is exactly correct. Retracting it was still
+  the right call — I had asserted it with no query behind it, and being accidentally right is not
+  the same as knowing. But it is worth recording that the process cost nothing here and would have
+  saved something if the number had been stale, which is the whole bet.
+
+  **This is not mainly a knowledge graph.** Element nodes are **793 of 3,205 (24.7%)**; Alias
+  (1,195) plus Contributor (1,191) are **74.4%**. On the relationship side, only RELATED (605) +
+  BELONGS_TO (71) + SUB_COLLECTION_OF (14) = **690 of 2,899 (23.8%)** express structure between
+  knowledge elements at all. The rest is people, permissions and alias plumbing — ALIAS_OF alone
+  is 41% of all relationships. Any "write our edges into the platform graph" plan would have been
+  adding to a store whose dominant purpose is identity, not knowledge.
+
+  **`Documentation` has 6 nodes, all private.** An earlier pass reported the label as having "zero
+  elements behind it" because the public API returns none. It has six; every one is non-public.
+  Absent from the public view is not the same as absent.
+
+  Also: `platform_graph.py`'s docstring denominators were right for four types (dataset 141, map
+  161, oer 44, code 38 = the all-inclusive counts) and stale for two (notebook 200 vs 203,
+  publication 200 vs 206). Partly-correct recorded numbers are the hardest kind to catch.
+
+**Next** The same credentials unblock the two remaining measurements: the extracted dataset
+  `spatial` payloads on the cluster, and pointing `graph_daily.py`'s fetch at `platform_graph`
+  to remove its 1,234s REST term.
