@@ -3241,3 +3241,46 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The same credentials unblock the two remaining measurements: the extracted dataset
   `spatial` payloads on the cluster, and pointing `graph_daily.py`'s fetch at `platform_graph`
   to remove its 1,234s REST term.
+
+## 2026-08-17 · M8.10 · A CAPTCHA page counted as a downloaded open-access paper
+
+**Change** `extractors/publication_extractor.py`: `sniff_kind` routes on the file's first bytes
+  rather than its extension; `read_document` returns `(text, reason)` so an empty result explains
+  itself; `_TextFromHTML` (stdlib `html.parser`) reads a full-text HTML article; `_interstitial_kind`
+  names a bot-check / paywall / error / cookie page served instead of the document. `read_note` and
+  `source_kind` reach `extracted`, and the reason is prefixed into `contents`. 22 tests.
+
+**Why** The publication probe reported `status: no_text` on `03bc2865__oa.pdf` and pypdf said
+  `invalid pdf header: b'<head'`. The file is HTML named `.pdf`, and its content is **IOP
+  Publishing's bot-check page** — "please can you confirm you are a human by ticking the box
+  below", 356 characters that the DOI fetcher counted as a downloaded open-access PDF. So the
+  earlier "94 reachable OA PDFs" counts at least one CAPTCHA wall, and indexing it would have
+  filed a bot-check notice as a paper's methods section.
+
+  `_read_text` was `except Exception: return ""`, which collapsed three causes into one status:
+  the file is not a PDF, `pypdf` is not installed, or the PDF is a scan with no text layer. Each
+  needs a different response — refetch, install, OCR — and `no_text` names only the third.
+
+  A bot check is a refusal. It gets recorded, never satisfied: the detector exists so the count of
+  reachable publications means documents, and there is deliberately no attempt to get past it.
+
+**Measured** Over the 8 cached OA documents: 7 parse as PDFs (24k–73k characters each) and 1 is
+  the interstitial, now reported as `the server returned a bot-check page, not the document`
+  instead of `no_text`. Distinct explanations available for an empty read: **1 → 8** (empty file,
+  zip-under-pdf-name, missing pypdf, unparseable PDF, no text layer, HTML with no text,
+  interstitial, no reader). HTML articles are now read rather than discarded — a synthetic
+  full-text article yields its methods paragraph with `<script>`, `<style>` and `<nav>` stripped.
+  Tests **1376 → 1398**.
+
+**Surprised by** Two files in the corpus cache — `ee9ac06c__dataset.xhtml` and
+  `f2c58ce4__dataset.xhtml` — are **0 bytes**. A download that failed and was saved anyway. They
+  read as "this document contains nothing" rather than "the fetch produced nothing", which is a
+  different sentence with a different fix, so the empty-file case is now named explicitly.
+
+  Also notable: the interstitial check has to be length-gated. A real paper about web security can
+  legitimately contain "are you a robot", and a test pins that a long document mentioning the
+  phrase is still read — refusing it would be a worse bug than the one being fixed.
+
+**Next** The count of reachable open-access publications should be re-derived with this reader
+  before it is quoted again; the current figure was produced by a fetcher that trusted the URL.
+  That needs the network and the 94-DOI batch, not another local read.

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,23 +38,187 @@ _PROMPT = (
 )
 
 
-def _read_text(path: str) -> str:
+def sniff_kind(path: str) -> str:
+    """What the file's first bytes say it is — ``pdf`` / ``html`` / ``zip`` / ``text``.
+
+    The extension lies. ``03bc2865__oa.pdf`` in the corpus cache begins ``<head`` — an HTML page
+    saved with a .pdf name, because the DOI's "open access" link served a landing page and the
+    fetcher trusted the URL. pypdf answers ``invalid pdf header``, ``_read_text`` swallowed it, and
+    the element was reported as ``no_text``, which points a reader at OCR for a file that never
+    contained a page image.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(1024)
+    except OSError:
+        return "unreadable"
+    if head.startswith(b"%PDF"):
+        return "pdf"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    lowered = head.lstrip()[:400].lower()
+    if lowered.startswith((b"<!doctype html", b"<html", b"<head", b"<?xml")) or b"<body" in lowered:
+        return "html"
+    return "text"
+
+
+class _TextFromHTML(HTMLParser):
+    """Visible text from an HTML document, using only the standard library.
+
+    Worth having rather than relabelling: a substantial share of the corpus's open-access links
+    resolve to a full-text HTML article (PMC, MDPI, Copernicus), which carries the same methods
+    section the PDF would. Treating those as unreadable discards the content over a file
+    extension.
+    """
+
+    _SKIP = {"script", "style", "noscript", "svg", "head", "nav", "footer", "form"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._depth = 0
+        self._parts: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._depth:
+            self._depth -= 1
+        elif tag in ("p", "div", "br", "li", "h1", "h2", "h3", "h4", "tr"):
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._depth and data.strip():
+            self._parts.append(data.strip())
+
+    def text(self) -> str:
+        joined = " ".join(self._parts)
+        return re.sub(r"[ \t]*\n[ \t\n]*", "\n", re.sub(r"[ \t]{2,}", " ", joined)).strip()
+
+
+def _html_to_text(raw: str) -> str:
+    parser = _TextFromHTML()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        return ""
+    return parser.text()
+
+
+# Pages a publisher serves INSTEAD of the document. Matched only on short documents, because a
+# real paper about, say, web security could legitimately contain any of these phrases.
+_INTERSTITIALS = (
+    ("a bot-check page", ("confirm you are a human", "are you a robot", "verify you are human",
+                          "enable javascript and cookies", "checking your browser",
+                          "ticking the box below", "cf-browser-verification")),
+    ("a paywall or login page", ("purchase access", "institutional login", "sign in to continue",
+                                 "subscribe to view", "get access to this article",
+                                 "you do not have access")),
+    ("an error page", ("404 not found", "page not found", "403 forbidden",
+                       "service unavailable", "we apologize for the inconvenience")),
+    ("a cookie consent page", ("we use cookies", "accept all cookies", "cookie preferences")),
+)
+
+_INTERSTITIAL_MAX_CHARS = 4000
+
+
+def _interstitial_kind(text: str) -> str:
+    """Name the wall a publisher served instead of the paper, or "" if this looks like a document.
+
+    A bot check is a refusal, and the correct response to a refusal is to record it — never to
+    attempt to satisfy it. This function exists so the corpus does not silently acquire CAPTCHA
+    notices filed as methods sections, and so "N reachable open-access PDFs" means N documents.
+    """
+    if len(text) > _INTERSTITIAL_MAX_CHARS:
+        return ""
+    lowered = text.lower()
+    for label, needles in _INTERSTITIALS:
+        if any(needle in lowered for needle in needles):
+            return label
+    return ""
+
+
+def read_document(path: str) -> tuple:
+    """``(text, reason)`` — the document's text, and why it is empty when it is.
+
+    Returning a bare ``""`` for every failure was the defect: a file that is not a PDF, a missing
+    ``pypdf``, and a scanned PDF with no text layer produced identical output and one status
+    (``no_text``), while needing three different fixes. Routing on sniffed CONTENT rather than the
+    extension also means an HTML article reached by a ``.pdf`` URL is read instead of discarded.
+    """
     ext = Path(path).suffix.lower()
-    if ext in {".tex", ".txt", ".md", ".rst"}:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
-    if ext == ".pdf":
+    kind = sniff_kind(path)
+    if kind == "unreadable":
+        return "", "file could not be opened"
+    try:
+        if os.path.getsize(path) == 0:
+            # A zero-byte file is a download that failed and was saved anyway. Two of the corpus
+            # cache's fetched documents are exactly this, and without a reason here they read as
+            # "the document contains nothing" rather than "the fetch produced nothing".
+            return "", "the file is empty (0 bytes) — the fetch produced no content"
+    except OSError:
+        pass
+    if kind == "zip" and ext != ".docx":
+        return "", f"content is a zip archive, not a document (extension {ext or 'none'})"
+
+    if kind == "html":
+        try:
+            raw = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return "", f"could not read: {exc}"
+        text = _html_to_text(raw)
+        if not text:
+            return "", f"HTML carried no extractable text (extension {ext or 'none'})"
+        interstitial = _interstitial_kind(text)
+        if interstitial:
+            # NOT an article. `03bc2865__oa.pdf` is IOP Publishing's bot-check page — "please can
+            # you confirm you are a human by ticking the box below" — 356 characters that the
+            # fetcher counted as a downloaded PDF. Indexing it would put a CAPTCHA notice in the
+            # corpus as a paper's method. Reported so the count of reachable open-access PDFs is
+            # honest; deliberately never worked around.
+            return "", (f"the server returned {interstitial}, not the document "
+                        f"(extension {ext or 'none'}, {len(text)} chars of HTML)")
+        note = "" if ext in {".html", ".htm", ".xhtml"} else (
+            f"content is HTML although the file is named {ext or 'without an extension'}; "
+            f"read as HTML")
+        return text, note
+
+    if kind == "pdf" or ext == ".pdf":
         try:
             from pypdf import PdfReader  # type: ignore
-            return "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
-        except Exception:
-            return ""
+        except ImportError:
+            return "", "pypdf is not installed, so no PDF can be read"
+        try:
+            text = "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
+        except Exception as exc:
+            return "", f"pypdf could not parse the file: {type(exc).__name__}: {exc}"[:200]
+        if not text.strip():
+            return "", "PDF parsed but carried no text layer (likely scanned; needs OCR)"
+        return text, ""
+
     if ext in {".docx", ".doc"}:
         try:
             import docx  # type: ignore
-            return "\n".join(p.text for p in docx.Document(path).paragraphs)
-        except Exception:
-            return ""
-    return ""
+        except ImportError:
+            return "", "python-docx is not installed"
+        try:
+            return "\n".join(p.text for p in docx.Document(path).paragraphs), ""
+        except Exception as exc:
+            return "", f"python-docx could not parse the file: {type(exc).__name__}"
+
+    if ext in {".tex", ".txt", ".md", ".rst"} or kind == "text":
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="replace"), ""
+        except OSError as exc:
+            return "", f"could not read: {exc}"
+    return "", f"no reader for extension {ext or 'none'} (content sniffed as {kind})"
+
+
+def _read_text(path: str) -> str:
+    """Text only — kept for callers that do not want the reason."""
+    return read_document(path)[0]
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -331,8 +496,12 @@ class PublicationExtractor:
         f = ctx.fields or {}
         title = str(f.get("title") or fname)
 
-        text = _read_text(path)
+        text, read_note = read_document(path)
         method = extract_method(text)
+        if read_note:
+            # WHY the text is empty (or which reader was used) reaches the record. "no_text" alone
+            # sent a reader looking for a scanned page in a file that was HTML.
+            method = {**method, "read_note": read_note}
 
         doc_id = publication_methodspec_doc_id(anchor)
         steps = method.get("steps") or []
@@ -349,9 +518,10 @@ class PublicationExtractor:
             # Prefixed, not appended: the evidence view truncates, and a caveat that only
             # appears after 4000 characters is a caveat nobody reads. An empty `steps` list must
             # never be presentable as "this paper describes no method".
+            why_empty = f" Reason: {read_note}." if read_note and not text.strip() else ""
             contents = (f"[METHOD SPEC UNAVAILABLE: {status}] No method steps were extracted "
                         f"from this publication — this is an extraction failure, NOT evidence "
-                        f"that the paper describes no method.\n\n" + contents)
+                        f"that the paper describes no method.{why_empty}\n\n" + contents)
         elif status == STATUS_PARTIAL:
             # A qualified success, and the qualification is prefixed for the same reason. Steps
             # WERE extracted, so this is not a failure — but a spec built from part of a paper
@@ -392,6 +562,10 @@ class PublicationExtractor:
                        "chars_total": method.get("chars_total"),
                        "chunk_failures": method.get("chunk_failures") or [],
                        "error": method.get("error"),
+                       # Which reader ran, and why it produced nothing when it did. A queryable
+                       # answer to "how many of these are HTML pretending to be PDFs".
+                       "read_note": read_note or None,
+                       "source_kind": sniff_kind(path),
                        "parent_type": "Publication", "parent_title": title},
         )
         edges: List[ProvenanceEdge] = [
