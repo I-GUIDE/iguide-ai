@@ -3374,3 +3374,59 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The smoke script's remaining two failures clear on indexing. `AGENT_CODE_EXEC_IMAGE`
   wants pinning by digest rather than by the `:latest` tag before any artifact is treated as
   reproducible — the check already reports the tag as unverified rather than passing it.
+
+## 2026-08-17 · M8.9 · What the relationship types actually connect
+
+**Change** `graph_census.py` now reports, for every relationship type, the **endpoint labels** and
+  their counts — not just the type name and a total. A type's name is not its meaning; what it
+  joins is.
+
+**Measured — all 8 types in the production graph, grouped by what they do:**
+
+  *Element <-> element — knowledge structure. 690 of 2,899 (23.8%)*
+  ```
+  RELATED            605   Publication->Publication 125 · Notebook->Notebook 118
+                           Notebook->Dataset 54 · Dataset->Notebook 43 · Oer->Notebook 38
+                           Oer->Publication 36 · Dataset->Dataset 34 · Publication->Dataset 33
+                           Notebook->Publication 24 · Code->Publication 22
+                           Dataset->Publication 17 · Publication->Notebook 11
+  BELONGS_TO          71   Notebook/Dataset/Publication/Code/Oer -> Collection
+  SUB_COLLECTION_OF   14   Collection -> Collection
+  ```
+  *Person -> element — provenance and permissions. 1,013 (34.9%)*
+  ```
+  CONTRIBUTED        812   Contributor -> every element type, and Collection
+  CAN_EDIT           114   Contributor -> Dataset 78 · Notebook 30 · Code 5 · Oer 1
+  BOOKMARKED          87   Contributor -> Notebook 63 · Dataset 13 · Publication 5 · Oer 5 · Map 1
+  ```
+  *Identity plumbing. 1,196 (41.3%)*
+  ```
+  ALIAS_OF          1195   Alias -> Contributor
+  HAS                  1   Contributor -> Notification
+  ```
+
+**Surprised by** Three properties that only the endpoint labels reveal.
+
+  **`CONTRIBUTED` is exactly one per node, not an authorship relation.** Its endpoint counts are
+  206/203/161/141/44/38/19 — identical to the per-label node counts, summing to 812 = 793 elements
+  + 19 collections. So every element has exactly one `CONTRIBUTED` edge: it is an owner pointer.
+  There is no co-authorship structure in the graph to mine, which is why projecting "shared
+  contributor" through it yields a clean partition (contributor NMI 0.58 against the communities)
+  rather than a graph — it cannot produce overlapping groups.
+
+  **`RELATED`'s direction is an authoring artifact, not semantics.** Notebook->Dataset is 54 and
+  Dataset->Notebook is 43. With reciprocal storage measured at 0, each pair exists once, so the
+  arrow records who added the link rather than any asymmetry of meaning. Treating `RELATED` as
+  directed would invent 605 one-way relationships that nobody asserted.
+
+  **`Map` appears in zero `RELATED` edges.** 160 map elements — 21% of the public corpus — have no
+  curated relation to anything. Their only graph attachment is `CONTRIBUTED` (161) plus a single
+  `BOOKMARKED`. This is the same hole seen from the API side (0 of 160 maps connected) now
+  confirmed at the source: it is not an API projection artifact, the relations do not exist.
+  The five flood-map communities in this branch's graph are therefore held together *entirely* by
+  embedding similarity, with zero human-asserted edges among them.
+
+  Also: `HAS` has exactly one instance, Contributor -> Notification. A type that exists for one row.
+
+**Next** Unchanged: extracted dataset `spatial` payloads, and `graph_daily.py` fetching through
+  `platform_graph` instead of 750 REST calls.

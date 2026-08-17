@@ -136,13 +136,28 @@ def main() -> int:
                 out["nodes_by_label"][label] = n
                 print(f"  {label:<22} {n}")
 
-            print("\nrelationships by type:")
+            # A relationship type's NAME is not its meaning. What it connects is — so report the
+            # endpoint labels, which is what tells you whether a type carries knowledge structure
+            # between elements or joins a person to a thing.
+            print("\nrelationships by type, with what they actually connect:")
             out["rels_by_type"] = {}
+            out["rel_schema"] = {}
             for r in s.run("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t"):
                 t = r["t"]
                 n = s.run(f"MATCH ()-[x:`{t}`]->() RETURN count(x) AS c").single()["c"]
                 out["rels_by_type"][t] = n
-                print(f"  {t:<22} {n}")
+                shapes = s.run(
+                    f"MATCH (a)-[x:`{t}`]->(b) "
+                    "RETURN labels(a) AS sa, labels(b) AS sb, count(*) AS c "
+                    "ORDER BY c DESC LIMIT 12").data()
+                out["rel_schema"][t] = [
+                    {"from": sorted(x["sa"]), "to": sorted(x["sb"]), "count": x["c"]}
+                    for x in shapes]
+                print(f"  {t:<20} {n:>5}")
+                for x in shapes:
+                    fr = "|".join(sorted(x["sa"])) or "(no label)"
+                    to = "|".join(sorted(x["sb"])) or "(no label)"
+                    print(f"      {fr:>28} -> {to:<28} {x['c']:>5}")
 
             print("\nelement nodes by type, public vs all:")
             pub = platform_graph.counts(include_private=False)
