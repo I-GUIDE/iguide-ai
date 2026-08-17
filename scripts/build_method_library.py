@@ -358,6 +358,33 @@ def main() -> int:
                 # directory is at the end of the file, so its members and a shapefile's CRS come
                 # from a couple of ranged reads — 8.5 GB of the platform's own LiDAR, imagery and
                 # hydrogeology was being reported as simply unfetchable.
+                # A landing page is not a dead end. 36 of the 64 are a DEPOSIT behind a human
+                # page (figshare, Zenodo, HydroShare, Dataverse, Hugging Face, GitHub) whose
+                # files come from a documented API; 20 are a data PORTAL's front door, where the
+                # element is a pointer to a website and no file was ever there. Reporting both as
+                # "unfetchable" loses the first and misdescribes the second.
+                if exc.kind == "landing_page" and args.type == "dataset":
+                    from extractors.dataset_repositories import resolve_files
+
+                    source = str(meta.get("direct-download-link")
+                                 or meta.get("external-link") or "")
+                    found = resolve_files(source) if source else {"kind": "?", "files": []}
+                    row["link_kind"] = found.get("kind")
+                    if found.get("files"):
+                        biggest = max(found["files"], key=lambda f: f.get("bytes") or 0)
+                        row.update(stage="repository", files_listed=len(found["files"]),
+                                   primary=str(biggest.get("name"))[:60],
+                                   listed_bytes=sum(f.get("bytes") or 0
+                                                    for f in found["files"]))
+                        stats["resolved_from_repository"] += 1
+                        per_element.append(row)
+                        continue
+                    if found.get("kind") == "portal":
+                        stats["external_portal"] += 1
+                        row.update(stage="portal", error=None,
+                                   note=found.get("note", "")[:110])
+                        per_element.append(row)
+                        continue
                 if exc.kind == "too_large" and args.type == "dataset":
                     source = str(meta.get("direct-download-link")
                                  or meta.get("external-link") or "")

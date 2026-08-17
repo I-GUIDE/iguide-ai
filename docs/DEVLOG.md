@@ -2958,3 +2958,46 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   `python scripts/graph_census.py --compare-api`. The same credentials unblock the two other open
   measurements: extracted dataset `spatial` payloads, and pointing `graph_daily.py`'s fetch at the
   graph to remove its 1,234s REST term.
+
+## 2026-08-16 · M8.6 · Sixty-four datasets that were one number and are actually two problems
+
+**Change** `extractors/dataset_repositories.py` (new) + a `landing_page` branch in
+  `scripts/build_method_library.py:361`. `classify_link` sorts a URL into `deposit` / `portal` /
+  `opaque` / `direct`; six resolvers (figshare, Zenodo, HydroShare, Dataverse + the Illinois Data
+  Bank, Hugging Face, a GitHub tree) turn a deposit's landing page into `{name, url, bytes}` per
+  file by reading a documented listing endpoint. A `doi.org` link is followed exactly once first.
+
+**Why** 64 of the corpus's 130 datasets fetched HTML instead of data, and the driver reported all
+  64 identically as unfetchable. They are not one problem:
+
+  - **~36 are a deposit behind a human page.** The file is there and the host publishes an API for
+    it. Nothing was broken; nothing was asked.
+  - **20 are a data portal's front door** — `fao.org/faostat/en/#data`, `who.int/data/#data`,
+    `data.worldbank.org/indicator`. There is no file and there never was one. "Download failed"
+    sends the next person to hunt a bug that does not exist, *and* discards the true fact that
+    the element is a usable pointer to a data source.
+  - **8 are opaque** (Drive, Dropbox, SEDAC-behind-login): a file exists but cannot be enumerated
+    without a browser session. A third outcome again, and a third fix.
+
+  No resolver constructs a download URL from a pattern. A guessed link that 404s is
+  indistinguishable from a dataset that was withdrawn, and the corpus contains both.
+
+**Measured** Datasets described in some form: **41 → 65 of 130.** Of the 64 landing pages,
+  **24 resolved to file listings** and 20 were correctly named as portals rather than failures.
+  Content recovered that no previous run could see: 341 heat-stress rasters (20.3 GB), LocBench
+  (15.7 GB), U-Net training data (4.9 GB), and a US-boundary set of 23 zipped shapefiles
+  (468 MB). Tests 1302 → 1324.
+
+**Surprised by** A standalone probe over the same 64 reported 25 resolved where the driver
+  reported 24. I have not reproduced the difference and will not claim which is right — the
+  likeliest cause is a transient API response on a single element, but "likeliest" is not
+  measured, so the number above is the driver's, and the discrepancy stays recorded.
+
+  The more useful surprise: the fix for the largest group was not a fix at all. Twenty of these
+  elements were already correct, and the only defect was the extractor's *description* of them.
+  Two-thirds of the remaining recovery came from reading a documented API — no new capability,
+  just asking the right endpoint.
+
+**Next** 18 landing pages remain on hosts with no resolver, and 32 publications are open-access
+  but HTML-only. Per the standing instruction the schema revision comes before indexing, so
+  neither of these blocks the next step.
