@@ -3001,3 +3001,70 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** 18 landing pages remain on hosts with no resolver, and 32 publications are open-access
   but HTML-only. Per the standing instruction the schema revision comes before indexing, so
   neither of these blocks the next step.
+
+## 2026-08-17 · M8.7 · The index document knew a function existed and not how to call it
+
+**Change** `extractors/emitters/opensearch_emitter.py`: `_unit_payload` mirrors the contract into
+  `extracted.unit` and computes `import_line` from `library_module` + `library_symbol`; a `unit`
+  branch in `_embed_text`; platform form fields applied BEFORE the canonical keys with
+  `RESERVED_KEYS` refused and recorded; `extracted.parent_doc_id` defaulted from the doc_id rule;
+  `block`/`runnable`/`spatial` omitted when absent; the envelope written once. New
+  `index_mapping()` declares every term-queried path as `keyword`, and `mapping_drift()` +
+  `ensure_index` report a live index whose mapping contradicts it.
+
+**Why** Measured on the live cluster: `iguide_agent_method_units` holds **349 documents and not
+  one contract**. `extracted` carried `unit_name`, `callable`, three explicit nulls and a
+  duplicate of the title. Signature, parameter types, declared units, CRS expectations,
+  invariants, pip requirements, module and slice_sha — the entire reason a MethodUnit document
+  exists — were dropped by `_build_source`, which mirrors `block`/`runnable`/`spatial` and was
+  never taught about `unit`.
+
+  Nothing crashed, because there are **two stores and only one of them is lossy**.
+  `kb_method_search` reads the on-disk `_registry.json`, so it kept returning full contracts; the
+  loss only bites the *other* path, where a unit surfaced by `agent_kb_search` tells the agent a
+  function exists while withholding every fact needed to call it. The two stores also disagree on
+  size: registry **551 units / 95 elements**, index **349 docs / 73 parents**.
+
+  Verified against HEAD's emitter before changing it, rather than asserted: contract in the
+  document `False`; `embed_text` `'calculate_buffers def calculate_buffers(gdf, b)'` with no
+  units and no dependencies; a form field named `doc_id` yielding `doc_id: 'HIJACKED'`; a dataset
+  document's `parent_doc_id` `None`; `['block','runnable','spatial']` all present as nulls.
+
+**Measured** Fields an index hit gives the agent: **11 → 17**, of which the contract's 13 go from
+  0 to 13. `embed_text` for a unit now contains its inferred types, declared units, CRS
+  expectation and pip deps (0 → 4 kinds of term). Reserved-key clobbers possible: **6 → 0**.
+  Documents carrying `parent_doc_id`: 2 of 4 types → **4 of 4**. Explicit nulls per unit doc
+  3 → 0. Tests **1324 → 1359**; emitter tests specifically **0 → 35**.
+
+**Surprised by** Two things, both about my own method.
+
+  I predicted the reconciler was already broken — `existing_doc_ids` term-queries
+  `extracted.parent_doc_id`, which the live mapping makes `text`, and a term query against
+  analyzed text usually matches nothing. **Wrong: 73 of 73 parents match.** This corpus's element
+  ids are 8-character lowercase hex, which the standard analyzer emits as a single token. The bug
+  is real but *latent* — a full platform UUID would be split on its hyphens and silently match
+  nothing — and the difference between latent and active is exactly what I would have
+  misreported. Hence `index_mapping()` fixing it and this note refusing to claim a save.
+
+  Second: my first pass at "how much of this library is plumbing" used a keyword list, matched
+  `lat` inside `translate`, and classified a transformer decoder layer as a geospatial method
+  with 948 of 1062 units "domain-relevant". I deleted the classifier rather than tuning it —
+  usefulness is a retrieval question and retrieval measures it. A second probe then reported a
+  2× registry/summary disagreement that turned out to be my own wrong key (`alias_of` for
+  `alias_for`). Three probe bugs in one sitting, all of the same shape: a check that returns a
+  confident number while measuring something else.
+
+**Measured, not fixed** 38% of the 551 units are NAKED — no docstring, no annotation, no return
+  type — so their contract adds nothing beyond the symbol name; 14% take no parameters at all and
+  can only be called for a side effect; 13% carry an invariant, from only 3 distinct checks
+  (reject_all_nan 72, projected_crs 22, crs_equals 19). Concentration is severe: the top 5 of 95
+  elements contribute **296 of 551 units**, one element alone 92. The README gate is
+  element-level, so an on-domain repository still floods the library with its internals.
+
+**Next** Import names are injected into the platform `tags` field —
+  `notebook_extractor.py:209`, `code_extractor.py:207`. 338 of 349 indexed unit documents (97%)
+  carry at least one stdlib module name as a "tag"; 43 of 432 distinct tags are stdlib names; the
+  platform's own tags contain **zero** such names across all 180 notebook elements, so extraction
+  invents them. `agent_kb.py:33` queries `title`/`contents`/`extracted.embed_text` and NOT `tags`,
+  so this is a data-honesty defect and not the retrieval defect it looks like — worth stating
+  before someone measures a retrieval win that was never available.

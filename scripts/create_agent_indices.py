@@ -38,7 +38,8 @@ for candidate in (REPO / ".env", Path("/Users/yfkang/i-guide-platform-flask-serv
         load_dotenv(candidate)
         break
 
-from extractors.emitters.opensearch_emitter import _embed_dim, ensure_index  # noqa: E402
+from extractors.emitters.opensearch_emitter import (_embed_dim, ensure_index,  # noqa: E402
+                                                    mapping_drift)
 from extractors.indices import all_agent_indices, is_agent_index  # noqa: E402
 
 
@@ -100,6 +101,7 @@ def main() -> int:
     print(f"\n{'index':<40}{'before':<12}{'action'}")
     print("-" * 70)
     created = kept = 0
+    drifted: List = []
     for name in indices:
         exists = client.indices.exists(index=name)
         count = client.count(index=name)["count"] if exists else 0
@@ -115,6 +117,13 @@ def main() -> int:
         elif exists:
             action = "kept (idempotent)"
             kept += 1
+            # "kept" is only good news if the mapping it kept is the one the code expects. A
+            # term-queried field that is dynamically mapped as `text` returns zero hits, which is
+            # indistinguishable from "nothing matched" at every layer above it.
+            report = mapping_drift(client, name)
+            if report.get("drift"):
+                action += f"  ** MAPPING DRIFT on {len(report['drift'])} field(s)"
+                drifted.append((name, report["drift"]))
         elif args.dry_run:
             action = "would create"
         else:
@@ -124,6 +133,12 @@ def main() -> int:
         print(f"{name:<40}{before:<12}{action}")
 
     print(f"\ncreated {created}, kept {kept}")
+    if drifted:
+        print(f"\nMAPPING DRIFT — {len(drifted)} index(es) predate the current schema. OpenSearch\n"
+              "cannot retype a field in place, so these need --recreate plus a re-ingest:")
+        for name, drift in drifted:
+            for path, kinds in sorted(drift.items()):
+                print(f"  {name:<40}{path:<32}live={kinds['live']:<10}want={kinds['want']}")
     if not args.dry_run:
         ok = 0
         for name in indices:

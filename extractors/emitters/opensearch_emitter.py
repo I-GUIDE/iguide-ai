@@ -35,45 +35,130 @@ DocTuple = Tuple[str, str, Dict[str, Any]]  # (index, doc_id, _source)
 # --------------------------------------------------------------------------- #
 # Pure doc construction (testable without a cluster)
 # --------------------------------------------------------------------------- #
+def import_line_for(unit: Dict[str, Any]) -> str:
+    """``from <module> import <symbol>`` for a unit, or "" when it was not emitted to a library.
+
+    Duplicated deliberately from ``agent_runtime.method_library.import_line``: this module is the
+    extraction side and must not import the agent runtime. Keeping it as pure string assembly is
+    what lets an index hit be self-sufficient — see ``_unit_payload``.
+    """
+    module, symbol = unit.get("library_module"), unit.get("library_symbol")
+    return f"from {module} import {symbol}" if module and symbol else ""
+
+
+def _unit_payload(unit: Dict[str, Any]) -> Dict[str, Any]:
+    """The contract, mirrored into the document, minus the one unbounded field.
+
+    Measured before this existed: 349 indexed ``method_unit`` documents carried ``unit_name`` and
+    ``callable`` and nothing else. Signature, parameter types, declared units, CRS expectations,
+    invariants, pip requirements, module and slice_sha — the entire contract, which is the whole
+    reason these documents exist — were dropped here, because ``_build_source`` mirrored
+    ``block``/``runnable``/``spatial`` and never learned about ``unit``.
+
+    The consequence was not a crash. ``kb_method_search`` reads the on-disk registry, so it kept
+    working, and the defect only showed up on the OTHER path: a unit surfaced by
+    ``agent_kb_search`` told the agent that a function exists while withholding every fact needed
+    to call it. Two stores, one of them lossy, and the lossy one is what general retrieval reads.
+
+    ``docstring`` is the only field left out: it is unbounded, and ``doc_summary`` plus
+    ``contents`` already carry its first line. Per-parameter ``evidence`` IS kept — it is short,
+    and it is how a reader audits an inferred unit or CRS claim instead of taking it on faith.
+    """
+    payload = {k: v for k, v in unit.items() if k != "docstring"}
+    line = import_line_for(unit)
+    if line:
+        payload["import_line"] = line
+    return payload
+
+
 def _embed_text(asset: Dict[str, Any]) -> str:
     """Prose-first text to embed (avoid embedding raw code)."""
     block = asset.get("block") or {}
+    unit = asset.get("unit") or {}
     parts: List[str] = [asset.get("title") or ""]
     if block:
         parts.append(block.get("markdown_context") or "")
         parts.append(" ".join(block.get("resolved_tools") or []))
         parts.append(" ".join(block.get("imports") or []))
+    elif unit:
+        # A unit asset used to fall through to `contents` here, so the signature was embedded
+        # only by accident (it happens to be the first line of `contents`) and the parameter
+        # types, declared units and dependencies were embedded nowhere. "how do I buffer a
+        # GeoDataFrame in metres" should match a unit whose parameter is annotated
+        # `gpd.GeoDataFrame` and whose declared unit is metres, and that only works if those
+        # words are in the embedded text.
+        parts.append(unit.get("doc_summary") or "")
+        parts.append(unit.get("signature") or "")
+        parts.append(" ".join(str(p.get("inferred_type") or "") for p in (unit.get("params") or [])))
+        parts.append(" ".join(str(p.get("declared_unit") or "") for p in (unit.get("params") or [])))
+        parts.append(" ".join(str(p.get("crs_expectation") or "") for p in (unit.get("params") or [])))
+        parts.append(" ".join((unit.get("requirements") or {}).get("pip") or []))
     else:
         parts.append(asset.get("contents") or "")
     text = " ".join(p for p in parts if p).strip()
     return text or (asset.get("contents") or asset.get("title") or "")
 
 
+# Keys the agent's readers and the reconciler depend on. A platform form field with one of these
+# names must not be able to redefine it.
+RESERVED_KEYS = ("doc_id", "title", "contents", "resource-type", "element_type", "extracted",
+                 "contents-embedding")
+
+
+def _parent_of(doc_id: str) -> str:
+    """The element a derived doc_id hangs off — the doc_ids rule, restated in one place.
+
+    Dataset and publication assets carry no ``extracted.parent_doc_id``: their document IS the
+    element, so nothing set it. Reconciliation keys on that field, so those documents could never
+    be found by the diff that decides what to delete, and their orphans would have survived
+    forever while the run reported ``deleted_orphans: 0``.
+    """
+    return str(doc_id).split("::", 1)[0]
+
+
 def _build_source(asset: Dict[str, Any], edges: List[Dict[str, Any]]) -> Dict[str, Any]:
     doc_id = asset["doc_id"]
-    src: Dict[str, Any] = {
+    # Platform form fields FIRST, canonical keys second. The other order let a submission field
+    # named `contents` or `doc_id` overwrite the document's identity, and a doc_id that disagrees
+    # with its own _id is unreachable by every reader here.
+    src: Dict[str, Any] = {k: v for k, v in (asset.get("source_fields") or {}).items()
+                           if k not in RESERVED_KEYS}
+    dropped = sorted(set(asset.get("source_fields") or {}) & set(RESERVED_KEYS))
+    src.update({
         "doc_id": doc_id,
         "title": asset.get("title") or "",
         "contents": asset.get("contents") or "",
         "resource-type": asset.get("resource_type"),
         "element_type": asset.get("resource_type"),
-    }
-    # inherited platform form fields (tags/authors/contributor/abstract/...) at top level
-    src.update(asset.get("source_fields") or {})
+    })
     # spatial geo_shape, if present
     spatial = asset.get("spatial") or {}
     if spatial.get("spatial-bounding-box-geojson"):
         src["spatial-bounding-box-geojson"] = spatial["spatial-bounding-box-geojson"]
-    # agent-specific structured payload (stored, not the general schema)
-    src["extracted"] = {
+    # agent-specific structured payload (stored, not the general schema). Sub-payloads are
+    # omitted when absent rather than written as explicit nulls: every one of the 349 indexed
+    # unit docs carried `"block": null, "runnable": null, "spatial": null`, which costs bytes on
+    # every read and tells a reader nothing.
+    extracted: Dict[str, Any] = {
         **(asset.get("extracted") or {}),
         "kind": asset.get("kind"),
         "source_rel_path": asset.get("source_rel_path"),
-        "block": asset.get("block"),
-        "runnable": asset.get("runnable"),
-        "spatial": spatial or None,
         "embed_text": _embed_text(asset),
     }
+    extracted.setdefault("parent_doc_id", _parent_of(doc_id))
+    for name in ("block", "runnable"):
+        if asset.get(name):
+            extracted[name] = asset[name]
+    if spatial:
+        # The envelope is already at the top level as a geo_shape; repeating it inside `extracted`
+        # gave the same coordinates a second, dynamically-mapped home and no second reader.
+        extracted["spatial"] = {k: v for k, v in spatial.items()
+                                if k != "spatial-bounding-box-geojson"}
+    if asset.get("unit"):
+        extracted["unit"] = _unit_payload(asset["unit"])
+    if dropped:
+        extracted["source_fields_dropped"] = dropped
+    src["extracted"] = extracted
     related = [e for e in edges if e.get("src") == doc_id or e.get("dst") == doc_id]
     if related:
         src["extracted"]["provenance"] = related
@@ -120,11 +205,22 @@ def _embed_dim() -> int:
     return int(os.getenv("AGENT_KB_EMBED_DIM", "384"))  # all-MiniLM-L6-v2
 
 
-def ensure_index(client, index: str) -> None:
-    """Create the agent index with a kNN mapping for contents-embedding if missing."""
-    if client.indices.exists(index=index):
-        return
-    body = {
+def index_mapping() -> Dict[str, Any]:
+    """The mapping an agent index should have.
+
+    Everything the code TERM-queries or filters on is declared here as ``keyword``. Left to
+    dynamic mapping a string becomes ``text`` + ``.keyword``, and a term query against analyzed
+    text matches only when the value happens to survive the standard analyzer as a single token.
+    Measured on the live cluster: ``extracted.parent_doc_id`` is dynamically mapped as ``text``,
+    and the reconciler's term query finds 73 of 73 parents purely because this corpus's element
+    ids are 8-character lowercase hex. The same query against a full platform UUID
+    (``cca9b545-3b1e-…``) would be tokenized on the hyphens and match nothing — and the failure
+    mode is an empty orphan set reported as a clean index, not an error.
+
+    ``extracted`` stays dynamic below these paths: the contract grows new fields as the analyzer
+    improves, and a strict mapping would reject the document rather than store the new field.
+    """
+    return {
         "settings": {"index": {"knn": True}},
         "mappings": {"properties": {
             "doc_id": {"type": "keyword"},
@@ -132,12 +228,88 @@ def ensure_index(client, index: str) -> None:
             "element_type": {"type": "keyword"},
             "title": {"type": "text"},
             "contents": {"type": "text"},
+            "tags": {"type": "keyword"},
             "spatial-bounding-box-geojson": {"type": "geo_shape"},
-            "extracted": {"type": "object", "enabled": True},
             "contents-embedding": {"type": "knn_vector", "dimension": _embed_dim()},
+            "extracted": {"type": "object", "properties": {
+                "parent_doc_id": {"type": "keyword"},   # the reconciler's term query
+                "parent_type": {"type": "keyword"},
+                "kind": {"type": "keyword"},
+                "callable": {"type": "boolean"},        # kb_method_search's filter
+                "unit_name": {"type": "keyword"},
+                "status": {"type": "keyword"},          # publication degradation status
+                "degraded": {"type": "boolean"},
+                "embed_text": {"type": "text"},
+                "unit": {"type": "object", "properties": {
+                    "qualified_name": {"type": "keyword"},
+                    "library_symbol": {"type": "keyword"},
+                    "library_module": {"type": "keyword"},
+                    "slice_sha": {"type": "keyword"},
+                    "unit_kind": {"type": "keyword"},
+                    "signature": {"type": "text"},
+                    "doc_summary": {"type": "text"},
+                    "import_line": {"type": "keyword"},
+                }},
+            }},
         }},
     }
-    client.indices.create(index=index, body=body)
+
+
+def _flatten_mapping(props: Dict[str, Any], prefix: str = "") -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for name, spec in (props or {}).items():
+        path = f"{prefix}{name}"
+        if isinstance(spec, dict) and spec.get("properties"):
+            out[path] = spec.get("type") or "object"
+            out.update(_flatten_mapping(spec["properties"], path + "."))
+        elif isinstance(spec, dict):
+            out[path] = str(spec.get("type") or "?")
+    return out
+
+
+def mapping_drift(client, index: str) -> Dict[str, Any]:
+    """Fields whose LIVE mapping contradicts ``index_mapping()``.
+
+    An existing index cannot have a ``text`` field changed to ``keyword`` in place, so this
+    reports rather than repairs. It exists because ``ensure_index`` returns early when the index
+    is present: without this, a schema change lands in the code, silently fails to apply to the
+    four indices that already exist, and every subsequent measurement is taken against a mapping
+    nobody is looking at.
+    """
+    try:
+        if not client.indices.exists(index=index):
+            return {"index": index, "exists": False, "drift": {}}
+        live = _flatten_mapping(
+            (client.indices.get_mapping(index=index)[index]["mappings"].get("properties") or {}))
+    except Exception as exc:                                    # pragma: no cover - cluster only
+        return {"index": index, "error": str(exc)[:200], "drift": {}}
+    want = _flatten_mapping(index_mapping()["mappings"]["properties"])
+    drift = {path: {"want": kind, "live": live[path]}
+             for path, kind in want.items()
+             if path in live and live[path] != kind}
+    missing = sorted(p for p in want if p not in live)
+    return {"index": index, "exists": True, "drift": drift, "not_yet_present": missing}
+
+
+def ensure_index(client, index: str) -> None:
+    """Create the agent index with a kNN mapping for contents-embedding if missing.
+
+    When the index already exists its mapping is checked, not assumed. Drift is logged as a
+    warning naming the fields and the reindex it needs — a term-queried field that is silently
+    ``text`` returns zero hits, which reads exactly like "nothing to do".
+    """
+    if client.indices.exists(index=index):
+        report = mapping_drift(client, index)
+        if report.get("drift"):
+            logger.warning(
+                "index %s mapping drift on %d field(s): %s. These are term-queried; until the "
+                "index is recreated (scripts/create_agent_indices.py --recreate) those queries "
+                "can silently return nothing.",
+                index, len(report["drift"]),
+                ", ".join(f"{k}: live={v['live']} want={v['want']}"
+                          for k, v in sorted(report["drift"].items())[:6]))
+        return
+    client.indices.create(index=index, body=index_mapping())
 
 
 def _get_embedding(text: str) -> Optional[List[float]]:
@@ -363,4 +535,5 @@ def emit(manifest: UnifiedManifest, *, client=None, embed: bool = True,
             "deleted_orphans": deleted, "orphans_found": plan.get("orphan_count", 0)}
 
 
-__all__ = ["build_docs", "emit", "ensure_index"]
+__all__ = ["build_docs", "emit", "ensure_index", "index_mapping", "mapping_drift",
+           "import_line_for", "RESERVED_KEYS"]
