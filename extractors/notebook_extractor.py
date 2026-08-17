@@ -168,7 +168,6 @@ class NotebookExtractor:
                           or "").strip().lower()
         is_python_nb = nb_language in ("", "python")
         md_buffer: List[str] = []
-        tags: set[str] = set()
         # Element references the author wrote into the notebook. Collected across EVERY cell,
         # including markdown, which is why this sits above the two `continue`s below: a markdown
         # cell that is not followed by a code cell never becomes `md_context` and would
@@ -193,7 +192,6 @@ class NotebookExtractor:
                 # Per-function promotion assembles the module from cells that PARSE, so one
                 # bad cell costs that cell -- not every unit in the notebook.
                 parsed_cells.append((order, transformed))
-            tags.update(imports)
 
             doc_id = notebook_block_doc_id(nb_doc_id, order)
             contents = (f"{md_context}\n\n{source}" if md_context else source).strip()
@@ -206,7 +204,14 @@ class NotebookExtractor:
                 source_rel_path=rel_path,
                 title=f"{title} — cell {order}",
                 contents=contents,
-                source_fields={**source_fields, "tags": sorted(set(form_tags) | set(imports))},
+                # `tags` is the SUBMITTER's vocabulary and stays that way. Import names used to be
+                # merged in here, which put `os`, `time`, `copy`, `html` and `__future__` in a
+                # field whose only claim is "what this element is about". Measured: 338 of 349
+                # indexed unit documents carried at least one stdlib module name as a tag, 43 of
+                # 432 distinct tags were stdlib names, and the platform's own tags contain zero
+                # across all 180 notebook elements — so every one of them was invented here.
+                # The imports were already in `block.imports`; nothing was gained by the merge.
+                source_fields={**source_fields, "tags": list(form_tags)},
                 block={
                     "code": source,
                     "transformed": transformed,
@@ -252,7 +257,7 @@ class NotebookExtractor:
             unit_summary = self._promote_units(
                 assets, edges, parsed_cells, nb_doc_id=nb_doc_id, rel_path=rel_path,
                 title_base=title_base, title=title, ctx=ctx,
-                source_fields=source_fields, form_tags=form_tags, tags=tags,
+                source_fields=source_fields, form_tags=form_tags,
             )
 
         # whole-notebook runnable descriptor (promotion gate: every code cell parsed)
@@ -288,8 +293,9 @@ class NotebookExtractor:
                           f"{rel_path} ({mode} mode). Not directly callable; reuse the "
                           f"extracted functions."),
                 runnable=runnable,
-                source_fields={**source_fields, "tags": sorted(set(form_tags) | tags)},
-                extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook", "runnable_tool": runnable_tool},
+                source_fields={**source_fields, "tags": list(form_tags)},
+                extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook",
+                           "runnable_tool": runnable_tool},
             ))
             edges.append(ProvenanceEdge(src=wf_doc_id, rel="HAS_WORKFLOW", dst=wid,
                                         detail={"mcp_tool": runnable_tool, "mode": mode}))
@@ -301,7 +307,9 @@ class NotebookExtractor:
                 # that is gated off and not registered. A SKILL.md shipped in this repo
                 # advertised "mcp_run_nbwf_d01e717421c1b0ff" in allowed-tools.
                 allowed_tools=[],
-                tags=sorted(set(form_tags) | tags),
+                # A SKILL.md's front matter is read by humans deciding whether the skill applies.
+                # "os, time, copy, __future__" answers no question anyone asks of it.
+                tags=list(form_tags),
                 ordered_steps=ordered_steps,
             )
         else:
@@ -325,7 +333,7 @@ class NotebookExtractor:
     def _promote_units(self, assets: List[AssetRecord], edges: List[ProvenanceEdge],
                        parsed_cells: List[Tuple[int, str]], *, nb_doc_id: str, rel_path: str,
                        title_base: str, title: str, ctx: ExtractContext,
-                       source_fields: Dict[str, Any], form_tags: Any, tags: set) -> Dict[str, Any]:
+                       source_fields: Dict[str, Any], form_tags: Any) -> Dict[str, Any]:
         """Emit one MethodUnit asset per top-level function, with its contract.
 
         Only ``callable`` units are given EMIT_LIBRARY: a ``needs_globals`` unit is still
@@ -418,7 +426,7 @@ class NotebookExtractor:
                 contents=contents,
                 unit=dataclasses.asdict(contract),
                 slice_source=slice_src if is_callable else "",
-                source_fields={**source_fields, "tags": sorted(set(form_tags) | tags)},
+                source_fields={**source_fields, "tags": list(form_tags)},
                 extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook",
                            "callable": is_callable, "unit_name": qualname},
             ))

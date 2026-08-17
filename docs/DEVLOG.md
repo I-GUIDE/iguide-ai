@@ -3068,3 +3068,62 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   invents them. `agent_kb.py:33` queries `title`/`contents`/`extracted.embed_text` and NOT `tags`,
   so this is a data-honesty defect and not the retrieval defect it looks like — worth stating
   before someone measures a retrieval win that was never available.
+
+## 2026-08-17 · M8.8 · The index advertised an import line the library had not assigned yet
+
+**Change** `extractors/ingest.py` `_fan_out` now runs **library → mcp → opensearch**;
+  `notebook_extractor` stops merging import names into the platform `tags` field (3 asset sites
+  plus the SkillSpec front matter) and the now-dead `tags` accumulator is removed;
+  `kb_store.store_dir` honours `AGENT_KB_STORE_DIR`; `conftest` isolates the local KB store as
+  well as the method library.
+
+**Why** Three findings, each uncovered by the previous one.
+
+  1. **The fan-out order was backwards.** `library_emitter` is what assigns a unit its
+     `library_module` (`library_emitter.py:304`, mutating the live unit dict via `__dict__`), and
+     the index document advertises that module as the import line. OpenSearch emitted *first*, so
+     every unit document was built before its module path existed. This was unfindable until
+     M8.7 gave the document a field to hold the module: with no field, there was nothing to
+     notice was empty. A defect and its detector in consecutive commits.
+
+  2. **`tags` was not tags.** 338 of 349 indexed unit documents carried at least one stdlib module
+     name as a topical tag; 43 of 432 distinct tags were stdlib names (`os`, `time`, `copy`,
+     `html`, `gc`, `getpass`, `__future__`). The platform's own tags contain **zero** across all
+     180 notebook elements, so extraction invented every one. The imports were already in
+     `block.imports` and the unit's `requirements`, so the merge added nothing reachable — I
+     dropped my first attempt at a replacement `extracted.imports` field for the same reason.
+     Note what this is NOT: `agent_kb.py:33` queries `title`/`contents`/`extracted.embed_text` and
+     not `tags`, so no retrieval win was available here. A data-honesty fix, stated as one.
+
+  3. **The suite was scheduled to break on success.** Two probes of mine wrote into the real
+     method library and the real local KB store, and three tests that fake every other retrieval
+     arm failed: `test_sweep_adds_implied_methods`, `test_direct_search_sweep_drops_unlisted`,
+     `test_the_every_turn_sweep_still_never_touches_the_web`. They were asserting "and nothing has
+     been ingested on this machine". `conftest` already isolated the *library* half after this
+     exact failure hit two tests once before — the KB half was left uncovered, and indexing the
+     corpus is precisely what the extraction work is for.
+
+**Measured** Unit documents carrying an importable, version-pinned line: **0 of 130 → 12 of 12**
+  on the element re-run end to end, and the advertised dotted path resolves to a file on disk (a
+  test asserts that, rather than trusting the string). Documents with a stdlib-name tag over 60
+  corpus notebooks / 1,533 documents: **338 of 349 → 0**; distinct stdlib-name tags **43 → 0**;
+  the 181 surviving tags are the submitters' (`A2SFCA`, `AmeriFlux`, `Census Shapefile`, `CyberGIS`).
+  Suite with 9 documents in the developer's real KB store: **3 failed → 0 failed**. Tests
+  **1359 → 1370**.
+
+**Surprised by** Both of the day's remaining bugs were found by my own carelessness rather than by
+  design. `order_effect.py` set `AGENT_STORAGE_ROOT`, which is not a variable this codebase reads —
+  the real one is `AGENT_FILE_STORAGE_ROOT` — so it wrote 12 duplicate units into the real library
+  under a second element package (`ke_b1fa548b_spastc` beside
+  `ke_b1fa548b_spastc_a_spatial_partitioning_algorithm_for_scal`), taking the registry 1079 → 1091
+  rows and 17 → 29 ambiguous names, and 45 documents into the real KB store. Both are restored and
+  verified back to byte-equivalent counts (551 units / 95 elements / class 49 / function 502;
+  store empty). I briefly wrote this up as a hazard in the library emitter before checking the
+  variable name — it was my typo, and the override works. The test-isolation gap it exposed is
+  real, and is the part worth keeping.
+
+**Next** The remaining content questions are measured and unfixed: 38% of units are naked (no
+  docstring, no annotation, no return type), 14% take no parameters, and the top 5 of 95 elements
+  contribute 296 of 551 units. Those want a unit-level quality signal so a contract-bearing unit
+  outranks a bare one — deranking, not deletion. The four live indices predate `index_mapping()`
+  and `scripts/create_agent_indices.py` now reports the drift rather than silently keeping them.

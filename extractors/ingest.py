@@ -190,28 +190,19 @@ def ingest_submission(submission) -> UnifiedManifest:
 
 
 def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
-    """Route the manifest to emitters. Only the OpenSearch emitter is live; mcp/skill
-    emitters are still stubs (design-doc §10 step 2 continues). Failures are recorded
-    as warnings, never raised — extraction already succeeded."""
-    if "opensearch" in targets:
-        try:
-            from .emitters import opensearch_emitter
-            summary = opensearch_emitter.emit(manifest)
-            manifest.warnings.append(
-                f"[kb:{summary.get('backend')}] indexed {summary.get('indexed')} docs "
-                f"into {list(summary.get('indices', {}))}")
-        except Exception as exc:
-            manifest.warnings.append(f"[kb] emit failed: {type(exc).__name__}: {exc}")
+    """Route the manifest to emitters. Failures are recorded as warnings, never raised —
+    extraction already succeeded.
 
-    if "mcp" in targets:
-        try:
-            from .emitters import mcp_emitter
-            summary = mcp_emitter.emit(manifest)
-            if summary.get("written"):
-                manifest.warnings.append(f"[mcp] wrote workflow manifests: {summary['written']}")
-        except Exception as exc:
-            manifest.warnings.append(f"[mcp] emit failed: {type(exc).__name__}: {exc}")
+    **The order is load-bearing, and it used to be wrong.** ``library_emitter`` is what assigns
+    each unit its ``library_module`` (``library_emitter.py:304``, mutating the live unit dict),
+    and the OpenSearch document advertises that module as the unit's import line. With OpenSearch
+    emitting first, every indexed unit was built before its module path existed, so no document
+    could ever carry an importable line — measured 0 of 130 on the corpus.
 
+    That was invisible until the document started carrying the contract at all: before then it
+    held neither the module nor anything else, so there was no field to notice was empty. Library
+    first, then the index that describes it.
+    """
     if "library" in targets:
         try:
             from .emitters import library_emitter
@@ -224,6 +215,27 @@ def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
                 manifest.warnings.append(f"[library] skipped {len(summary['skipped'])} unit(s)")
         except Exception as exc:
             manifest.warnings.append(f"[library] emit failed: {type(exc).__name__}: {exc}")
+
+    if "mcp" in targets:
+        try:
+            from .emitters import mcp_emitter
+            summary = mcp_emitter.emit(manifest)
+            if summary.get("written"):
+                manifest.warnings.append(f"[mcp] wrote workflow manifests: {summary['written']}")
+        except Exception as exc:
+            manifest.warnings.append(f"[mcp] emit failed: {type(exc).__name__}: {exc}")
+
+    # Last, because it mirrors what the emitters above produced — including the library module
+    # path each unit's import line is built from.
+    if "opensearch" in targets:
+        try:
+            from .emitters import opensearch_emitter
+            summary = opensearch_emitter.emit(manifest)
+            manifest.warnings.append(
+                f"[kb:{summary.get('backend')}] indexed {summary.get('indexed')} docs "
+                f"into {list(summary.get('indices', {}))}")
+        except Exception as exc:
+            manifest.warnings.append(f"[kb] emit failed: {type(exc).__name__}: {exc}")
 
     if "skill" in targets:
         try:

@@ -219,3 +219,69 @@ def test_real_corpus_promotes_the_expected_number_of_units():
     assert total >= 40, f"unit count regressed to {total}"
     assert callable_ >= 16, f"callable count regressed to {callable_}"
     assert methods >= 20, "expected the corpus to still contain class-based notebooks"
+
+
+# --------------------------------------------------------------- tags are the submitter's
+
+def _tags_of(asset):
+    return (asset.source_fields or {}).get("tags")
+
+
+def test_import_names_never_become_platform_tags(tmp_path):
+    """`tags` is the submitter's answer to "what is this element about". Import names used to be
+    merged into it, so `os`, `time`, `copy`, `html` and `__future__` arrived as topics.
+
+    Measured on the live index before the fix: 338 of 349 method-unit documents carried at least
+    one stdlib module name as a tag, and 43 of 432 distinct tags were stdlib names — while the
+    platform's own tags contain ZERO across all 180 notebook elements, so extraction invented
+    every one of them. The import lists were already in `block.imports` and the unit's
+    `requirements`, so the merge added no reachable information.
+    """
+    path = _write(tmp_path, [
+        ("code", "import os\nimport time\nimport copy\nimport geopandas as gpd"),
+        ("code", "def area_km2(gdf):\n    return gdf.to_crs(3435).area.sum() / 1e6\n")])
+    ctx = ExtractContext(element_id="e1", element_type="notebook", targets=VALID_TARGETS,
+                         fields={"title": "Illinois areas", "tags": ["Illinois", "hydrology"]})
+    result = NotebookExtractor().extract(str(path), ctx=ctx)
+
+    tagged = [a for a in result.assets if _tags_of(a) is not None]
+    assert tagged, "no asset carried tags; the assertion below would be vacuous"
+    for asset in tagged:
+        extra = sorted(set(_tags_of(asset)) - {"Illinois", "hydrology"})
+        assert not extra, f"{asset.doc_id} tags polluted with {extra}"
+
+
+def test_the_imports_are_still_recorded_where_imports_belong(tmp_path):
+    """Removing them from `tags` must not lose them. A block already records what its cell
+    imports; that is the field a reader would look in."""
+    path = _write(tmp_path, [("code", "import geopandas as gpd\nimport os\n")])
+    blocks = [a for a in _extract(path).assets if a.block]
+    assert blocks
+    imports = set()
+    for b in blocks:
+        imports.update(b.block.get("imports") or [])
+    assert {"geopandas", "os"} <= imports
+
+
+def test_a_units_dependencies_are_its_own_not_the_notebooks(tmp_path):
+    """The notebook imports matplotlib; this function does not. A unit's requirements come from
+    its slice's transitive closure, which is what keeps the pip install inside the sandbox
+    minimal rather than the notebook's whole environment."""
+    path = _write(tmp_path, [
+        ("code", "import geopandas as gpd\nimport matplotlib.pyplot as plt\nimport requests"),
+        ("code", "def area_km2(gdf):\n    return gdf.to_crs(3435).area.sum() / 1e6\n")])
+    units = _units(_extract(path))
+    assert units
+    pip = set((units[0].unit.get("requirements") or {}).get("pip") or [])
+    assert "matplotlib" not in pip and "requests" not in pip
+
+
+def test_the_skill_front_matter_carries_topics_not_module_names(tmp_path):
+    """SKILL.md front matter is read by a human deciding whether the skill applies."""
+    path = _write(tmp_path, [
+        ("code", "import os\nimport geopandas as gpd"),
+        ("code", "def run_workflow(gdf):\n    return gdf.to_crs(3435)\n")])
+    ctx = ExtractContext(element_id="e2", element_type="notebook", targets=VALID_TARGETS,
+                         fields={"title": "T", "tags": ["flooding"]})
+    skill = NotebookExtractor().extract(str(path), ctx=ctx).skill
+    assert skill is not None and skill.tags == ["flooding"]

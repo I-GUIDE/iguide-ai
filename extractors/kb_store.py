@@ -30,8 +30,22 @@ def using_real_db() -> bool:
 
 
 def store_dir() -> Path:
-    from agent_runtime.file_store import storage_root
-    p = Path(storage_root()) / "agent_kb"
+    """Where the local store lives — overridable, for the same reason the method library is.
+
+    ``AGENT_KB_STORE_DIR`` exists so a test suite can point the store somewhere empty. Without it
+    the suite reads whatever the developer last ingested: three tests that fake every other
+    retrieval arm (``test_sweep_adds_implied_methods``, ``test_direct_search_sweep_drops_unlisted``,
+    ``test_the_every_turn_sweep_still_never_touches_the_web``) pass on a clean checkout and fail
+    the moment the corpus is indexed, because the sweep unions the agent KB deterministically.
+    Same code, same commit, different machine state — which is the failure mode
+    ``AGENT_METHOD_LIBRARY_DIR`` was already added to prevent for the library half.
+    """
+    configured = os.getenv("AGENT_KB_STORE_DIR")
+    if configured:
+        p = Path(configured).expanduser()
+    else:
+        from agent_runtime.file_store import storage_root
+        p = Path(storage_root()) / "agent_kb"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
