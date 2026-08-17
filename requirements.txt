@@ -41,6 +41,9 @@ spacy
 geopandas
 shapely
 fiona
+# GeoPandas 1.x reads vectors through pyogrio by default; fiona alone left every
+# shapefile reporting "vector reader unavailable" in an environment that had one.
+pyogrio
 rasterio
 # pyarrow is REQUIRED, not optional — same failure mode as the bs4/lxml note above.
 # langchain_geo_tools.py:436 (vector_reproject) and :476 (vector_spatial_join) write

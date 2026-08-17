@@ -20,8 +20,22 @@ WORKDIR /app
 COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
-# Copy application code
+# Copy application code.
+#
+# `extractors/` is NOT optional: minio_webhook.py's only real work is
+# `from extractors.ingest import ingest_submission`, so without it every request fails with
+# ModuleNotFoundError. The healthcheck hits /health, which imports none of this — so the
+# container reported HEALTHY while being entirely non-functional. A liveness probe that cannot
+# fail for the reason the service exists is not a probe.
+#
+# rag_pipeline is here for llm_utils (the publication extractor) and search.geo_shapes (dataset
+# bbox reprojection); agent_runtime for file_store and element_resolver. Both are dependencies
+# of `extractors` today — see the note in docs/DEPLOYMENT.md about which direction that should
+# eventually point.
 COPY metadata-extraction-server/ ./metadata-extraction-server/
+COPY extractors/ ./extractors/
+COPY rag_pipeline/ ./rag_pipeline/
+COPY agent_runtime/ ./agent_runtime/
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

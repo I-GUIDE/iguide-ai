@@ -273,3 +273,58 @@ def test_a_seed_alone_does_NOT_make_the_partition_reproducible():
     assert any(p != reference for p in raw), (
         "expected insertion order to change the partition at networkx "
         f"{nx.__version__}; if it no longer does, the canonicalisation may be unnecessary")
+
+
+# ------------------------------------------------------------------ the extraction service
+
+def _extraction_dockerfile() -> str:
+    from pathlib import Path
+
+    return Path("metadata-extraction-server/Dockerfile").read_text(encoding="utf-8")
+
+
+def test_the_extraction_image_copies_every_package_its_entrypoint_imports():
+    """The service's only real work is `from extractors.ingest import ingest_submission`, and
+    the image copied only `metadata-extraction-server/`. Every request would have died with
+    ModuleNotFoundError — while the container reported HEALTHY, because /health imports none of
+    it. A liveness probe that cannot fail for the reason the service exists is not a probe.
+    """
+    text = _extraction_dockerfile()
+    for package in ("extractors/", "rag_pipeline/", "agent_runtime/"):
+        assert f"COPY {package}" in text, f"{package} is not in the extraction image"
+
+
+def test_the_vector_reader_geopandas_actually_uses_is_pinned():
+    """GeoPandas 1.x reads vectors through pyogrio; pinning only fiona left every shapefile in
+    the corpus reporting "vector reader unavailable" in an environment that had a working
+    reader installed."""
+    from pathlib import Path
+
+    requirements = Path("requirements.txt").read_text(encoding="utf-8").lower()
+    assert "pyogrio" in requirements
+
+
+def test_extraction_runs_without_importing_the_agent_graph():
+    """Extraction is triggered by the PLATFORM, not by the agent, so it has to work when the
+    agent is down. Importing the ingest entrypoint must not drag in langgraph or the supervisor.
+
+    This is the property that decides where the tools live: if it holds, extraction can be its
+    own image; if it breaks, the two are one deployment whether or not that was intended.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys; import extractors.ingest;"
+        "bad = sorted(m for m in sys.modules"
+        "             if m.startswith(('langgraph', 'langchain_openai'))"
+        "             or m.startswith('agent_runtime.supervisor'));"
+        "print(','.join(bad))"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                            timeout=180)
+    assert result.returncode == 0, result.stderr[-400:]
+    leaked = [m for m in result.stdout.strip().split(",") if m]
+    assert not leaked, (
+        f"importing extractors.ingest pulled in the agent stack: {leaked[:5]} — extraction "
+        f"cannot then be deployed or scaled separately from the agent")
