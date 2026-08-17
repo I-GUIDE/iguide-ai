@@ -3284,3 +3284,50 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The count of reachable open-access publications should be re-derived with this reader
   before it is quoted again; the current figure was produced by a fetcher that trusted the URL.
   That needs the network and the 94-DOI batch, not another local read.
+
+## 2026-08-17 · M8.11 · The contract had to survive four transfers and was dropped at three
+
+**Change** `rag_pipeline/search/agent_kb.py`: `_method_payload` projects a unit's contract into
+  the normalized hit `normalize_hit` returns — symbol, signature, doc_summary, params (name,
+  annotation, inferred type, declared unit, CRS expectation), returns, invariant checks, pip
+  requirements, the version-pinned import line, slice_sha, and a three-valued callability. Plus
+  `rag_pipeline/tests/test_agent_kb_search.py`, which had been **committed empty** in `de8c0e4`.
+
+**Why** I ran the agent's own retrieval path against a freshly-emitted element to confirm M8.7 and
+  M8.8 had landed, and the hits came back with no contract. `normalize_hit` — the function that
+  builds what the agent actually reads — carried `title`, `contents`, `resolved_tools`,
+  `runnable_tool` and nothing about the unit.
+
+  So the chain a contract must survive is four transfers, and it was broken at three:
+  the emitter did not mirror `unit` (M8.7), the fan-out ran before `library_module` existed
+  (M8.8), and the search normalizer discarded it (here). Any one left intact makes the other two
+  worthless, and **none of them raises**: the agent simply sees a function it cannot call and
+  re-implements it. That failure appears in no log — only as a worse answer.
+
+**Measured** Queried through `agent_kb_search` against an isolated store, for
+  "buffer geometries by a distance in metres": `calculate_buffers` now returns its signature, the
+  line `from iguide_methods.ke_b1fa548b_spastc_a_spatial_partitioning_algorithm.v_c43f0727bb2a
+  import calculate_buffers`, `gdf` annotated `gpd.GeoDataFrame` with `declared_unit: metres` and
+  `crs_expectation: projected`, invariants `['projected_crs', 'reject_all_nan']` and
+  `pip: ['geopandas']`. Contract fields reaching the agent: **0 → 11**. Notebook blocks carry no
+  `method` key at all, so nothing is paid on hits that have no contract. Tests **1398 → 1418**.
+
+**Surprised by** Two of my own tests failed and both were right about intent and wrong in the
+  assertion, which turned out to be the useful part. `test_a_not_independently_callable_unit_says_so`
+  asserted that `callable` was ABSENT — the name says "says so" and the assertion said "says
+  nothing". And a contract with no `callability` block at all was being reported `callable: False`,
+  because I had flattened a three-valued verdict to a bool. Absent verdict means nothing analyzed
+  it; `needs_globals` means it cannot be imported as-is and the reason ("reads the module-level
+  global PARAMS") is exactly what tells the agent to pass it as an argument instead. Now: absent
+  emits nothing, negative emits `callable: False` plus `not_callable` and `not_callable_reason`.
+  The same fail-versus-cannot-determine distinction the invariant gate already makes, which I had
+  just re-broken one layer away.
+
+  Also: `test_agent_kb_search.py` was a tracked, committed, zero-byte file — from a commit of mine
+  titled "the trace said no results for ten real hits". An empty test file is worse than a missing
+  one, because it reads as coverage.
+
+**Next** Nothing further on the schema. The chain extractor → contract → library module → index
+  document → agent payload is now closed and tested at each hop, so indexing to
+  `iguide_agent_*` is the next step whenever that is wanted; the four live indices predate
+  `index_mapping()` and `scripts/create_agent_indices.py` reports the drift.

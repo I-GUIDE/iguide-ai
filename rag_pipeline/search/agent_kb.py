@@ -45,12 +45,66 @@ def _parent_of(doc_id: str, source: Dict[str, Any]) -> str:
     return doc_id.split("::", 1)[0] if "::" in doc_id else doc_id
 
 
+def _method_payload(extracted: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The part of a unit's contract that changes what the agent DOES, or None.
+
+    This is the last hop of a chain that was broken at every link. The extractor computed the
+    contract; the emitter dropped it (fixed); the fan-out ran before the module path existed
+    (fixed); and this function — which builds the payload the agent actually reads — carried
+    ``title``, ``contents`` and ``runnable_tool`` and nothing about the unit. So a method surfaced
+    by ``agent_kb_search`` still arrived as a name with no signature, no dependencies and no import
+    line, and the agent's only options were to guess or to fall back to re-implementing it.
+
+    Deliberately a projection, not the whole contract: this payload goes into a token-limited
+    evidence view, so it carries what is needed to CALL the unit and leaves the per-parameter
+    inference evidence to ``get_method_contract``.
+    """
+    unit = extracted.get("unit") if isinstance(extracted, dict) else None
+    if not isinstance(unit, dict) or not unit:
+        return None
+    params = [{k: p.get(k) for k in ("name", "annotation", "inferred_type", "declared_unit",
+                                     "crs_expectation", "required") if p.get(k) not in (None, "")}
+              for p in (unit.get("params") or []) if isinstance(p, dict)]
+    payload = {
+        "symbol": unit.get("library_symbol") or unit.get("qualified_name"),
+        "signature": unit.get("signature"),
+        "doc_summary": unit.get("doc_summary"),
+        "params": params,
+        "returns": unit.get("returns"),
+        "invariants": [i.get("check") for i in (unit.get("invariants") or [])
+                       if isinstance(i, dict) and i.get("check")],
+        "requirements": (unit.get("requirements") or {}).get("pip") or [],
+        "import_line": unit.get("import_line"),
+        "slice_sha": unit.get("slice_sha"),
+    }
+    payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
+
+    # Callability is three-valued, and flattening it to a bool was wrong in both directions. An
+    # ABSENT verdict is not "not callable" — it means nothing analyzed it — and reporting False
+    # there invites the agent to skip a usable unit; while a `needs_globals` verdict reported as a
+    # bare False loses the one thing that makes it actionable, which is WHY. The same
+    # fail/cannot-determine distinction the invariant gate makes.
+    verdict = (unit.get("callability") or {}).get("verdict")
+    if verdict:
+        payload["callable"] = verdict == "callable"
+        if verdict != "callable":
+            payload["not_callable"] = verdict
+            reason = (unit.get("callability") or {}).get("reason")
+            if reason:
+                # "reads the module-level global PARAMS" tells the agent to pass it as an
+                # argument. Without it the unit just looks broken.
+                payload["not_callable_reason"] = str(reason)[:200]
+    return payload
+
+
 def normalize_hit(hit: Dict[str, Any], matched: str) -> Dict[str, Any]:
     source = hit.get("_source") or {}
     doc_id = str(source.get("doc_id") or hit.get("_id") or "")
     extracted = source.get("extracted") or {}
     runnable = (extracted.get("runnable") or {}) if isinstance(extracted, dict) else {}
+    method = _method_payload(extracted)
     return {
+        **({"method": method} if method else {}),
         "doc_id": doc_id,
         "source_index": hit.get("_index"),
         "parent_doc_id": _parent_of(doc_id, source),
