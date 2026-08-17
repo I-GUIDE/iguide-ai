@@ -141,10 +141,17 @@ def read_tiff_header(head: bytes, *, ifd_bytes: Optional[bytes] = None,
         head = body                                  # tag values are read from the same buffer
         out: Dict[str, Any] = {"format": "BigTIFF" if big else "GeoTIFF/TIFF"}
         found: Dict[str, Any] = {}
+        read_tags = 0
         for i in range(min(count, 256)):
             entry = entry_start + i * entry_size
             if entry + entry_size > len(head):
+                # Say so. Returning `{"format": "BigTIFF"}` and nothing else is a partial answer
+                # wearing the shape of a complete one — a reader cannot tell "this raster has no
+                # dimensions" from "we ran out of bytes before the dimension tag".
+                out["note"] = (f"tag table truncated: read {read_tags} of {count} tags from "
+                               f"{len(head)} bytes")
                 break
+            read_tags += 1
             if big:
                 tag, ftype = struct.unpack(endian + "HH", head[entry:entry + 4])
                 n = int(struct.unpack(endian + "Q", head[entry + 4:entry + 12])[0])
@@ -168,15 +175,19 @@ def read_tiff_header(head: bytes, *, ifd_bytes: Optional[bytes] = None,
                 if offset < 0 or offset + size > len(head):
                     continue                          # points past what we hold
                 raw = head[offset:offset + size]
-            if ftype in (3, 4) and len(raw) >= (2 if ftype == 3 else 4):
+            # The GeoKey directory is an ARRAY of SHORTs and must be matched before the generic
+            # single-SHORT branch — otherwise it was stored as one int and `_epsg_from_geokeys`
+            # called len() on it, which is the TypeError that made a valid BigTIFF read as "not
+            # a TIFF".
+            if name == "geo_key_directory" and ftype == 3 and len(raw) >= 8:
+                found[name] = list(struct.unpack(endian + f"{len(raw) // 2}H", raw))
+            elif ftype in (3, 4) and len(raw) >= (2 if ftype == 3 else 4):
                 fmt = "H" if ftype == 3 else "I"
                 found[name] = struct.unpack(endian + fmt, raw[:2 if ftype == 3 else 4])[0]
             elif ftype == 12 and len(raw) >= 8:
                 found[name] = list(struct.unpack(endian + f"{len(raw) // 8}d", raw))
             elif ftype == 2:
                 found[name] = raw.split(b"\x00")[0].decode("latin-1", "replace")
-            elif name == "geo_key_directory" and ftype == 3:
-                found[name] = list(struct.unpack(endian + f"{len(raw) // 2}H", raw))
         if "width" in found:
             out["width"] = found["width"]
         if "height" in found:
@@ -194,8 +205,12 @@ def read_tiff_header(head: bytes, *, ifd_bytes: Optional[bytes] = None,
             out["row_count"] = int(out["width"]) * int(out["height"])
             out["geometry_type"] = "Raster"
         return out
-    except Exception:
-        return {}
+    except Exception as exc:
+        # The REASON, not an empty dict. A silent {} here read as "not a TIFF" for a file whose
+        # header was demonstrably valid — BigTIFF, 17 tags, first tag width — and cost several
+        # probes to distinguish from a format mismatch. An unexplained empty result is the exact
+        # failure shape this project keeps producing.
+        return {"format": "TIFF", "note": f"tag parse failed: {type(exc).__name__}: {exc}"[:160]}
 
 
 # GeoKey 3072 is ProjectedCSTypeGeoKey, 2048 is GeographicTypeGeoKey. Both carry an EPSG code
