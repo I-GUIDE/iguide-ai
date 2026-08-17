@@ -2869,3 +2869,50 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** The extracted dataset `spatial` payloads (computed CRS/bounds/schema for 22 dataset
   elements) remain unmeasured from this worktree — `OPENSEARCH_NODE` is unset in its `.env`. That
   is the one candidate layer left with a plausible shot at non-degenerate cross-element edges.
+
+## 2026-08-17 · M8.6 · A daily rebuild, because the partition costs 41 ms
+
+**Change** `corpus_graph.corpus_fingerprint` (content hash of the corpus) and
+  `corpus_graph.reconcile_communities` (Jaccard-matched community ids across runs), plus
+  `scripts/graph_daily.py` — an idempotent scheduled refresh that no-ops on an unchanged corpus,
+  carries community ids, re-summarises only communities that moved, and fails on shrinkage.
+
+**Why a daily rebuild and NOT online incremental.** Profiled the whole pipeline:
+
+  | step | wall |
+  |---|---|
+  | louvain partition | **41 ms** |
+  | whole rebuild compute | 2,628 ms |
+  | embed 750 element texts | 2,003 ms (76% of compute) |
+  | fetch 750 records over REST | **1,234,000 ms** |
+  | 15 community reports | 199,000 ms |
+
+  Incremental community detection would optimise **41 ms of a 2.6 second job**. Fetching is 470x
+  the entire compute and the LLM reports are 76x it, so the things worth making incremental are
+  the fetch and the summaries — never the clustering. Rebuilding is also strictly more correct: an
+  incrementally-maintained partition drifts from the one a rebuild would produce and nothing tells
+  you.
+
+**Measured, over four runs.** Cold: 750 elements, 6,121 edges, 15 communities, 9.0s. Unchanged
+  corpus: fingerprint match, **nothing rebuilt, 0 LLM calls**. Truncated corpus (200 of 750):
+  **exit 1**, refused. Day-2 simulation (6 elements retagged, 1 added): fingerprint moved,
+  751 elements / 6,126 edges / 16 communities, **15 of 15 ids carried**, 1 new, and only **6 of 16
+  communities changed membership** — so 6 summaries to regenerate and 10 carried forward.
+
+**Surprised by** How little it takes to move the partition, which is the whole argument for
+  reconciliation rather than re-enumeration.
+
+  The 29 citation-only pairs — **0.5% of the edges** — change this corpus from 15 communities to
+  16. And in the day-2 run, retagging 6 elements out of 750 and adding one produced a **28-element
+  new community** and shifted C1 by +9/−32 members (jaccard 0.696). A nightly job that renumbered
+  from Louvain's output would rename most communities most nights, invalidating every cached
+  report and churning every `community_id` on an element document, while the corpus had barely
+  changed.
+
+  Also caught myself reading a guard's exit code off `tail`: `python … | tail -4; echo $?`
+  printed `exit=0` for a run that correctly returned 1. The guard worked; my verification of it
+  did not. Re-checked without the pipe.
+
+**Next** Wire the fetch to `extractors/platform_graph.py` (read-only Neo4j, one query per label)
+  instead of 750 REST calls — that removes the 1,234s term and the rate-limit failure mode
+  entirely, and is the only part of this job that is still slow.
