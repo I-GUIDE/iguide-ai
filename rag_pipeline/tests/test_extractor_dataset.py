@@ -365,12 +365,35 @@ def test_the_loader_unit_declares_its_crs_invariant(tmp_path):
         {"check": "crs_equals", "target": "return", "args": {"crs": "EPSG:4326"}}]
 
 
-def test_a_container_dataset_emits_no_loader(tmp_path):
+def test_a_container_dataset_now_emits_a_loader_for_its_primary_member(tmp_path):
+    """This asserted the opposite until archives could be unpacked safely.
+
+    Refusing to describe an archive was the right call while extraction meant writing to a path
+    that came out of one — but 18 of the corpus's 30 fetchable datasets are ZIPs, so it left the
+    majority of the type as an unreadable blob. With the guards in extractors/archives.py the
+    primary member can be described, and the loader points at it.
+    """
     archive = tmp_path / "bundle.zip"
     with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("a.shp", "x")
+        zf.writestr("sites.csv", "name,latitude,longitude\na,41.9,-87.6\n")
+        zf.writestr("readme.txt", "notes")
     result = _extract(archive, title="Bundle")
+
+    units = [a for a in result.assets if getattr(a, "unit", None)]
+    assert units, "a zipped dataset should now yield a loader"
+    doc = result.assets[0].extracted
+    assert doc["format"] == "zip", "the archive's own format is still recorded"
+    assert doc["primary_member"] == "sites.csv"
+
+
+def test_an_archive_whose_members_are_all_refused_emits_no_loader(tmp_path):
+    """Nothing safe to describe means nothing to load — and the reason is recorded."""
+    archive = tmp_path / "hostile.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../escape.txt", "x")
+    result = _extract(archive, title="Hostile")
     assert [a for a in result.assets if getattr(a, "unit", None)] == []
+    assert "archive_note" in result.assets[0].extracted
 
 
 def test_the_loader_is_content_addressed(tmp_path):

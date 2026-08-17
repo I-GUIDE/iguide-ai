@@ -202,6 +202,29 @@ def _handle_vector(path: str) -> Dict[str, Any]:
                     "feature_count": int(len(gdf))}
         except Exception:
             return _handle_tabular(path)
+    # Two readers, tried in order. GeoPandas 1.x uses PYOGRIO by default and fiona is no longer
+    # installed alongside it — so hardcoding fiona reported "vector reader unavailable" for every
+    # shapefile in the corpus while a working reader sat in the same environment. The note now
+    # names both attempts, because "no reader" and "the file is broken" need different fixes.
+    errors = []
+    try:
+        import pyogrio  # type: ignore
+
+        info = pyogrio.read_info(path)
+        # `fields` and `total_bounds` come back as NUMPY ARRAYS. `x or []` on one raises
+        # "truth value of an array with more than one element is ambiguous", which surfaced as
+        # "vector reader unavailable" — the reader worked perfectly and the adapter did not.
+        fields = info.get("fields")
+        bounds = info.get("total_bounds")
+        crs = info.get("crs") or info.get("crs_wkt")
+        return {"format": str(info.get("driver") or ext.lstrip(".")),
+                "crs": str(crs) if crs is not None else None,
+                "bounds": [float(b) for b in bounds] if bounds is not None else None,
+                "geometry_type": str(info.get("geometry_type") or "") or None,
+                "schema": [str(f) for f in fields] if fields is not None else [],
+                "feature_count": int(info.get("features") or 0)}
+    except Exception as exc:
+        errors.append(f"pyogrio: {type(exc).__name__}: {exc}"[:90])
     try:
         import fiona  # type: ignore
         layers = fiona.listlayers(path)
@@ -211,7 +234,9 @@ def _handle_vector(path: str) -> Dict[str, Any]:
                     "schema": list((src.schema.get("properties") or {}).keys()),
                     "feature_count": len(src), "layers": layers}
     except Exception as exc:
-        return {"format": ext.lstrip("."), "note": f"vector reader unavailable/failed: {type(exc).__name__}: {exc}"}
+        errors.append(f"fiona: {type(exc).__name__}: {exc}"[:90])
+    return {"format": ext.lstrip("."),
+            "note": "vector reader unavailable/failed: " + "; ".join(errors)}
 
 
 
@@ -314,8 +339,60 @@ def _handle_container(path: str) -> Dict[str, Any]:
     for m in members:
         fam = family_for_ext(Path(m).suffix.lower())
         fams[fam] = fams.get(fam, 0) + 1
-    return {"format": fmt, "member_count": len(members), "member_families": fams,
-            "members": members[:50]}
+    summary: Dict[str, Any] = {"format": fmt, "member_count": len(members),
+                               "member_families": fams, "members": members[:50]}
+
+    # UNPACK and describe the real dataset inside. Listing alone made a zipped shapefile
+    # indistinguishable from an unreadable blob -- no schema, no geometry, no CRS, no bbox and
+    # no loader -- and 18 of the corpus's 30 fetchable datasets are ZIPs.
+    #
+    # Safe because extractors/archives.py treats every member name as hostile: paths that escape
+    # the destination, absolute paths, symlinks, bombs and floods are each refused by name. A
+    # hostile member is skipped and recorded rather than aborting the archive, so one bad entry
+    # does not cost the other forty legitimate files.
+    inner = _describe_archive_contents(path)
+    if inner:
+        summary.update(inner)
+    return summary
+
+
+def _describe_archive_contents(path: str) -> Dict[str, Any]:
+    """Unpack to a temp dir, describe the primary member, and clean up."""
+    import shutil
+    import tempfile
+
+    from .archives import UnsafeArchive, primary_member, unpack
+
+    workdir = tempfile.mkdtemp(prefix="iguide_archive_")
+    try:
+        try:
+            unpacked = unpack(path, workdir)
+        except UnsafeArchive as exc:
+            return {"archive_note": str(exc)[:160]}
+        if not unpacked.members:
+            return {"archive_note": f"nothing extractable; {unpacked.note()}"}
+
+        target = primary_member(unpacked.members)
+        if target is None:
+            return {"archive_note": f"no primary member; {unpacked.note()}"}
+
+        described = extract_dataset_metadata(str(target))
+        # Namespaced so the archive's own facts (format, member_count) are not overwritten by
+        # the member's, and a reader can always tell which level a field describes.
+        out: Dict[str, Any] = {
+            "archive_note": unpacked.note(),
+            "primary_member": str(Path(target).relative_to(unpacked.root)),
+        }
+        if unpacked.skipped:
+            out["unpacked_refused"] = [f"{n}: {why}" for n, why in unpacked.skipped[:8]]
+        for key, value in (described or {}).items():
+            if key in ("format", "member_count", "member_families", "members"):
+                out[f"member_{key}"] = value
+            else:
+                out.setdefault(key, value)
+        return out
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def family_for_ext(ext: str) -> str:
@@ -509,11 +586,31 @@ class DataExtractor:
             doc_id=doc_id, emit_targets=[EMIT_OPENSEARCH], source_rel_path=fname,
             title=title, contents=contents.strip(),
             spatial=(spatial or None), source_fields=source_fields,
+            # The handlers compute schema, row_count, crs, bounds and geometry_from; this dict
+            # used to carry eight hardcoded fields and drop the rest, so a dataset doc said only
+            # "GeoJSON, vector, 566 bytes". The agent cannot search on a column name that never
+            # reached the index, and "which datasets have a population field" is exactly the
+            # question this type exists to answer. Copied through explicitly rather than by
+            # `**meta`, so an emitter change is a deliberate act and reserved keys stay reserved.
             extracted={"format": meta.get("format"), "family": meta.get("family"),
                        "size_bytes": meta.get("size_bytes"), "note": meta.get("note"),
                        "member_families": meta.get("member_families"),
                        "bbox_note": bbox_note or None,
                        "bbox_from": meta.get("bbox_from"),
+                       "schema": meta.get("schema"),
+                       "row_count": meta.get("row_count"),
+                       "crs": meta.get("crs"),
+                       "bounds": meta.get("bounds"),
+                       "geometry_type": meta.get("geometry_type"),
+                       "geometry_from": meta.get("geometry_from"),
+                       "coordinate_rows": meta.get("coordinate_rows"),
+                       # Archive provenance: which member inside the zip this describes, and
+                       # what the unpacker refused. A doc built from one member of forty must
+                       # say so.
+                       "primary_member": meta.get("primary_member"),
+                       "archive_note": meta.get("archive_note"),
+                       "unpacked_refused": meta.get("unpacked_refused"),
+                       "member_format": meta.get("member_format"),
                        "parent_type": "Dataset", "parent_title": title},
         )
         # A generated loader, emitted as a MethodUnit so it reaches iguide_methods through the
