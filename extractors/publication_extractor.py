@@ -267,6 +267,21 @@ def _empty_spec(status: str, summary: str = "", **extra: Any) -> Dict[str, Any]:
 
 STATUS_PARTIAL = "llm_partial"
 
+# The document was read and understood, and it describes NO computational method. Editorials,
+# opinion pieces, conceptual papers and publisher cover pages are all legitimately this.
+#
+# Measured on the 7 readable open-access documents in the corpus cache: THREE are this --
+# `d78ceebb` is a PDXScholar citation/cover page, `f94c3e60` an editorial on pharmaceutical waste,
+# `fd728b4e` an argumentative paper on AI ethics. All three were being emitted with
+# `status: llm_extracted`, `degraded: False` and `is_method_spec: True` on an EMPTY `steps` list,
+# because `is_method_spec` was defined as `not degraded` -- which conflates "the extractor
+# succeeded" with "there is a method here". Nearly half the type was indexed as a method spec
+# describing no method.
+#
+# Not degraded: nothing failed. The distinction from `no_text` is the whole point -- one is a
+# fetch or parse failure to retry, the other is a fact about the document.
+STATUS_NO_METHOD = "no_method_described"
+
 # Not in DEGRADED_STATUSES: a partial extraction produced real steps and is a usable method spec.
 # It is a *qualified* success, and conflating it with "the LLM was unreachable" would throw away
 # the steps that were extracted.
@@ -421,7 +436,13 @@ def extract_method(text: str, *, max_chars: int = 12000,
 
     merged = _merge_specs(parsed_specs)
     complete = len(parsed_specs) == len(all_chunks) and not failures
-    merged["status"] = STATUS_EXTRACTED if complete else STATUS_PARTIAL
+    if not (merged.get("steps") or []):
+        # Read, parsed, and there is no method to record. Distinguishing this from a failure is
+        # what keeps "publications with no extractable method" a countable quality metric instead
+        # of a silent third of the type.
+        merged["status"] = STATUS_NO_METHOD if complete else STATUS_PARTIAL
+    else:
+        merged["status"] = STATUS_EXTRACTED if complete else STATUS_PARTIAL
     # `chars_seen` is the text the spec is actually BASED ON, so a chunk that crashed does not
     # count towards it. It read `sum(len(c) for c in chunks)` — every chunk launched — which
     # reported full coverage for a run where half of them died.
@@ -522,6 +543,13 @@ class PublicationExtractor:
             contents = (f"[METHOD SPEC UNAVAILABLE: {status}] No method steps were extracted "
                         f"from this publication — this is an extraction failure, NOT evidence "
                         f"that the paper describes no method.{why_empty}\n\n" + contents)
+        elif status == STATUS_NO_METHOD:
+            # Prefixed for the same reason the other qualifications are: the evidence view is
+            # truncated, and this sentence is the difference between "the extractor is broken" and
+            # "this paper is an editorial".
+            contents = (f"[NO COMPUTATIONAL METHOD] This publication was read in full and "
+                        f"describes no computational method or workflow — it is not an extraction "
+                        f"failure. The summary below says what the document is.\n\n" + contents)
         elif status == STATUS_PARTIAL:
             # A qualified success, and the qualification is prefixed for the same reason. Steps
             # WERE extracted, so this is not a failure — but a spec built from part of a paper
@@ -553,7 +581,9 @@ class PublicationExtractor:
                        "params": method.get("params") or {},
                        "status": status,
                        "degraded": degraded,
-                       "is_method_spec": not degraded,
+                       # It IS a method spec only if it holds steps. Defined as `not degraded`,
+                       # this was True for every editorial and cover page in the corpus.
+                       "is_method_spec": bool(steps) and not degraded,
                        # Coverage is queryable, not just prose: "which specs were built from a
                        # truncated read" is a corpus-quality question someone will need to ask.
                        "chunks_total": total, "chunks_attempted": attempted,
@@ -599,4 +629,5 @@ _: Extractor = PublicationExtractor()  # type: ignore[assignment]
 
 __all__ = ["PublicationExtractor", "extract_method", "paragraph_chunks", "STATUS_EXTRACTED",
            "STATUS_PARTIAL", "STATUS_UNPARSEABLE", "STATUS_UNAVAILABLE", "STATUS_NO_TEXT",
+           "STATUS_NO_METHOD",
            "DEGRADED_STATUSES"]

@@ -3430,3 +3430,54 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 
 **Next** Unchanged: extracted dataset `spatial` payloads, and `graph_daily.py` fetching through
   `platform_graph` instead of 750 REST calls.
+
+## 2026-08-17 · M8.13 · Writing the extraction report found two more silent drops
+
+**Change** `extractors/data_extractor.py`: `_describable` replaces the `extracted` field
+  **whitelist** with a denylist, so a handler's whole measurement reaches the document and a
+  reserved key is refused loudly (`extracted.handler_keys_refused`).
+  `extractors/publication_extractor.py`: new `STATUS_NO_METHOD` (`no_method_described`), and
+  `is_method_spec` now means "this holds steps" rather than "nothing went wrong". 8 tests.
+
+**Why** Both were found by assembling a per-type report from real artifacts rather than from notes.
+
+  **A whitelist that lost the same information twice.** The dataset asset's `extracted` payload
+  originally carried eight hardcoded fields — a document said only "GeoJSON, vector, 566 bytes".
+  That was fixed by writing a nineteen-field list, which still dropped everything the list's author
+  had not personally needed: a GeoTIFF's `resolution`, `bands` and `dtypes`, and a NetCDF's
+  `variables` and `dims`. The corpus's groundwater-policy dataset computes
+  `variables: ['crs', 'WAT4_QWATGRD'], dims: {latitude: 288, longitude: 690}` and was indexing
+  `{format: nc, family: raster, size_bytes: 803380}`. **For a NetCDF the variable list IS the
+  schema**, so that whole format indexed no schema at all. A whitelist fails silently and in the
+  same direction every time a handler learns something new; a denylist fails loudly.
+
+  **Three of seven publications were method specs describing no method.** `is_method_spec` was
+  defined as `not degraded`, which conflates "the extractor succeeded" with "there is a method
+  here". Of the 7 readable open-access documents, three legitimately describe no computational
+  method — `d78ceebb` is a PDXScholar citation cover page, `f94c3e60` an editorial on
+  pharmaceutical waste, `fd728b4e` an argumentative paper on AI ethics. The LLM read all three
+  correctly and returned `steps: []`; the extractor then stamped them
+  `llm_extracted / degraded: False / is_method_spec: True`. Now `no_method_described`, not
+  degraded — nothing failed — with the distinction from `no_text` (refetch or OCR) kept explicit
+  and stated in `contents` so a hit does not read as a broken spec.
+
+**Measured** NetCDF fields indexed: **3 → 5** (gains `variables`, `dims`). GeoTIFF: **4 → 7**
+  (gains `resolution`, `bands`, `dtypes`). Publications correctly classified as carrying no method:
+  **0 of 3 → 3 of 3**. Publication extraction over the 8 cached OA documents via
+  `LLM_PROVIDER=claude-cli` (`CLAUDE_CLI_MODEL=sonnet`, $0 API spend): 1 bot-check wall,
+  3 no-method, 3 `llm_extracted` with 12–16 steps, 1 `llm_partial` at 3 of 4 sections. Tests
+  **1418 → 1426**.
+
+**Surprised by** How much the report itself was worth. Both defects had been present through every
+  green suite and every smoke run, and neither was findable by looking at code — only by putting
+  the four types' real output side by side and asking what a reader would learn from each. The
+  NetCDF one had also survived a commit whose message says it fixed exactly this class of bug.
+
+  One more thing the report surfaced without needing a fix: `835ca51a`'s coverage accounting works
+  end to end — `chunks parsed 3 of 3 attempted / 4 total`, `chars 55437 of 63177`, with
+  `PUB_MAX_CHUNKS` named as the cap in `contents`. A spec built from three quarters of a paper says
+  so in the text the agent reads.
+
+**Next** Nothing outstanding on extraction content. The whitelist→denylist change means a new
+  handler field reaches the index without an emitter edit, which removes the step that was being
+  forgotten.

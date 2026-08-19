@@ -405,3 +405,83 @@ def test_the_loader_is_content_addressed(tmp_path):
     a = [x for x in _extract(path, title="X").assets if getattr(x, "unit", None)][0]
     b = [x for x in _extract(path, title="X").assets if getattr(x, "unit", None)][0]
     assert a.unit["slice_sha"] == b.unit["slice_sha"] and len(a.unit["slice_sha"]) == 12
+
+
+# ------------------------------------------------------------- everything a handler measured
+
+def test_every_field_a_handler_measures_reaches_the_document():
+    """The asset's `extracted` payload used a WHITELIST, and it lost the same information twice.
+
+    Version one carried eight hardcoded fields, so a dataset document said only
+    "GeoJSON, vector, 566 bytes". That was replaced by a nineteen-field list — which still dropped
+    every field the list's author had not personally needed. Measured:
+
+      * a GeoTIFF's ``resolution``, ``bands`` and ``dtypes`` were computed by ``_handle_raster``
+        and discarded, so "what resolution is this raster" was unanswerable from the index;
+      * a NetCDF's ``variables`` and ``dims`` likewise. The corpus's groundwater-policy dataset
+        computed ``variables: ['crs', 'WAT4_QWATGRD'], dims: {latitude: 288, longitude: 690}`` and
+        indexed ``{format: nc, family: raster, size_bytes: 803380}``. For a NetCDF the variable
+        list IS the schema, so that type indexed no schema at all.
+
+    A whitelist fails silently and in the same direction every time a handler learns something new.
+    """
+    from extractors.data_extractor import _describable
+
+    measured = {"format": "GeoTIFF", "crs": "EPSG:32616", "bounds": [0, 0, 1, 1],
+                "resolution": [30.0, 30.0], "bands": 3, "dtypes": ["uint16"],
+                "variables": ["WAT4_QWATGRD"], "dims": {"latitude": 288},
+                "some_future_field_nobody_has_written_yet": 42}
+    out = _describable(measured)
+    for key, value in measured.items():
+        assert out[key] == value, f"{key} was dropped"
+
+
+def test_a_handler_cannot_redefine_the_documents_identity():
+    """The denylist keeps the property the whitelist was protecting: a handler that produced a key
+    like `doc_id` or `contents` would silently overwrite the record."""
+    from extractors.data_extractor import _describable
+
+    out = _describable({"format": "CSV", "doc_id": "HIJACKED", "contents": "HIJACKED",
+                        "parent_doc_id": "HIJACKED", "unit": {"x": 1}})
+    assert out["format"] == "CSV"
+    for reserved in ("doc_id", "contents", "parent_doc_id", "unit"):
+        assert reserved not in out
+
+
+def test_a_refused_key_is_named_rather_than_silently_dropped():
+    """The failure mode being replaced was silence. A denylist that also went quiet would only
+    move the problem."""
+    from extractors.data_extractor import _describable
+
+    out = _describable({"format": "CSV", "doc_id": "x", "spatial": {}})
+    assert out["handler_keys_refused"] == ["doc_id", "spatial"]
+
+
+def test_a_clean_handler_result_records_nothing_refused():
+    from extractors.data_extractor import _describable
+
+    assert "handler_keys_refused" not in _describable({"format": "CSV", "row_count": 3})
+
+
+def test_a_real_geotiff_carries_its_resolution_bands_and_dtypes(tmp_path):
+    rasterio = pytest.importorskip("rasterio")
+    numpy = pytest.importorskip("numpy")
+    from rasterio.transform import from_origin
+
+    from extractors.base import EMIT_OPENSEARCH, ExtractContext
+    from extractors.data_extractor import DataExtractor
+
+    path = tmp_path / "probe.tif"
+    with rasterio.open(path, "w", driver="GTiff", height=20, width=30, count=3, dtype="uint16",
+                       crs="EPSG:32616", transform=from_origin(400000, 4600000, 30, 30)) as dst:
+        for band in range(1, 4):
+            dst.write(numpy.full((20, 30), band, dtype="uint16"), band)
+
+    ctx = ExtractContext(element_id="tif1", element_type="dataset",
+                         fields={"title": "probe raster"}, targets=[EMIT_OPENSEARCH])
+    asset = [a for a in DataExtractor().extract(str(path), ctx=ctx).assets
+             if a.kind == "dataset"][0]
+    assert asset.extracted["resolution"] == [30.0, 30.0]
+    assert asset.extracted["bands"] == 3
+    assert asset.extracted["dtypes"] == ["uint16", "uint16", "uint16"]
+    assert asset.extracted["crs"] == "EPSG:32616"

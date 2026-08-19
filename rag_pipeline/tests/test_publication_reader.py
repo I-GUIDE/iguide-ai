@@ -177,3 +177,73 @@ def test_a_readable_document_records_no_reason(tmp_path):
     asset = PublicationExtractor().extract(path, ctx=ctx).assets[0]
     assert asset.extracted["read_note"] is None
     assert asset.extracted["source_kind"] == "text"
+
+
+# ------------------------------------------------------------------ read fine, no method in it
+
+def test_a_paper_with_no_method_is_not_a_method_spec(tmp_path, monkeypatch):
+    """`is_method_spec` was defined as `not degraded`, conflating "the extractor succeeded" with
+    "there is a method here".
+
+    Measured on the 7 readable open-access documents in the corpus cache: THREE describe no
+    computational method — a PDXScholar citation cover page, an editorial on pharmaceutical waste,
+    and an argumentative paper on AI ethics. All three were emitted as `llm_extracted`,
+    `degraded: False`, `is_method_spec: True` with an EMPTY steps list. Nearly half the type was
+    indexed as a method spec describing no method.
+    """
+    import json as _json
+
+    from extractors.base import ExtractContext
+    from extractors.publication_extractor import STATUS_NO_METHOD, PublicationExtractor
+    import rag_pipeline.llm_utils as llm
+
+    monkeypatch.setattr(llm, "call_llm", lambda *a, **k: _json.dumps({
+        "summary": "An editorial arguing that AI ethics cannot be isolated from governance.",
+        "steps": [], "datasets_referenced": [], "tools_referenced": [], "params": {}}))
+
+    path = _write(tmp_path, "oa.md", "# Opinion\n" + ("This is an argument, not a method. " * 60))
+    ctx = ExtractContext(element_id="p9", element_type="publication", fields={"title": "T"})
+    asset = PublicationExtractor().extract(path, ctx=ctx).assets[0]
+
+    assert asset.extracted["status"] == STATUS_NO_METHOD
+    assert asset.extracted["is_method_spec"] is False
+    assert asset.extracted["degraded"] is False, "nothing failed — a fact about the paper"
+    assert "NO COMPUTATIONAL METHOD" in asset.contents
+    assert "not an extraction failure" in asset.contents
+    assert "editorial" in asset.contents
+
+
+def test_no_method_is_distinct_from_a_failure_to_read(tmp_path):
+    """`no_text` means refetch or OCR; `no_method_described` means the paper is an essay. Merging
+    them makes "publications with no extractable method" uncountable."""
+    from extractors.base import ExtractContext
+    from extractors.publication_extractor import (STATUS_NO_METHOD, STATUS_NO_TEXT,
+                                                  PublicationExtractor)
+
+    path = _write(tmp_path, "oa.pdf", b"", binary=True)
+    ctx = ExtractContext(element_id="p10", element_type="publication", fields={"title": "T"})
+    asset = PublicationExtractor().extract(path, ctx=ctx).assets[0]
+    assert asset.extracted["status"] == STATUS_NO_TEXT != STATUS_NO_METHOD
+    assert asset.extracted["degraded"] is True, "a failed read IS degraded"
+
+
+def test_a_paper_with_steps_is_still_a_method_spec(tmp_path, monkeypatch):
+    import json as _json
+
+    from extractors.base import ExtractContext
+    from extractors.publication_extractor import STATUS_EXTRACTED, PublicationExtractor
+    import rag_pipeline.llm_utils as llm
+
+    monkeypatch.setattr(llm, "call_llm", lambda *a, **k: _json.dumps({
+        "summary": "Buffers gauges and computes zonal statistics.",
+        "steps": ["Reproject to EPSG:32616", "Buffer each gauge by 25 km"],
+        "datasets_referenced": ["NHDPlus"], "tools_referenced": ["geopandas"],
+        "params": {"buffer_m": 25000}}))
+
+    path = _write(tmp_path, "oa.md", "# Methods\n" + ("We buffered the gauges. " * 60))
+    ctx = ExtractContext(element_id="p11", element_type="publication", fields={"title": "T"})
+    asset = PublicationExtractor().extract(path, ctx=ctx).assets[0]
+    assert asset.extracted["status"] == STATUS_EXTRACTED
+    assert asset.extracted["is_method_spec"] is True
+    assert len(asset.extracted["steps"]) == 2
+    assert "NO COMPUTATIONAL METHOD" not in asset.contents

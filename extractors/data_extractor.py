@@ -166,6 +166,42 @@ def _handle_tabular(path: str) -> Dict[str, Any]:
             "note": "pandas unavailable; header parsed with the stdlib csv reader"}
 
 
+# Keys that belong to the emitter or the record, not to a handler's description of the file. A
+# handler that produced one of these would silently redefine the document's identity.
+_RESERVED_META = frozenset({
+    "doc_id", "title", "contents", "resource-type", "element_type", "extracted",
+    "parent_doc_id", "parent_type", "parent_title", "kind", "source_rel_path",
+    "block", "runnable", "spatial", "unit", "embed_text", "provenance",
+    "bbox_note", "spatial-bounding-box-geojson",   # computed by the caller, not the handler
+})
+
+
+def _describable(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Everything a handler measured about the file, minus keys that are not its to set.
+
+    A DENYLIST, deliberately, after a whitelist lost the same information twice. The first version
+    carried eight hardcoded fields, so a dataset document said only "GeoJSON, vector, 566 bytes".
+    That was replaced by a nineteen-field list -- which still dropped every field the list's author
+    had not personally needed:
+
+      * GeoTIFF: ``resolution``, ``bands``, ``dtypes``. Measured by ``_handle_raster`` and
+        discarded, so "what resolution is this raster" was unanswerable from the index.
+      * NetCDF / HDF / GRIB: ``variables`` and ``dims``. The groundwater-policy dataset computed
+        ``variables: ['crs', 'WAT4_QWATGRD'], dims: {latitude: 288, longitude: 690}`` and indexed
+        ``{format: nc, family: raster, size_bytes: 803380}``. For a NetCDF the variable list IS the
+        schema, so that type indexed no schema at all.
+
+    A whitelist fails silently, and in the same direction every time a handler learns something
+    new. A denylist fails loudly: a handler that tries to set a reserved key is dropped and named
+    in ``extracted.handler_keys_refused``.
+    """
+    refused = sorted(k for k in meta if k in _RESERVED_META)
+    out = {k: v for k, v in meta.items() if k not in _RESERVED_META}
+    if refused:
+        out["handler_keys_refused"] = refused
+    return out
+
+
 def _handle_raster(path: str) -> Dict[str, Any]:
     ext = Path(path).suffix.lower()
     try:
@@ -752,25 +788,7 @@ class DataExtractor:
             # reached the index, and "which datasets have a population field" is exactly the
             # question this type exists to answer. Copied through explicitly rather than by
             # `**meta`, so an emitter change is a deliberate act and reserved keys stay reserved.
-            extracted={"format": meta.get("format"), "family": meta.get("family"),
-                       "size_bytes": meta.get("size_bytes"), "note": meta.get("note"),
-                       "member_families": meta.get("member_families"),
-                       "bbox_note": bbox_note or None,
-                       "bbox_from": meta.get("bbox_from"),
-                       "schema": meta.get("schema"),
-                       "row_count": meta.get("row_count"),
-                       "crs": meta.get("crs"),
-                       "bounds": meta.get("bounds"),
-                       "geometry_type": meta.get("geometry_type"),
-                       "geometry_from": meta.get("geometry_from"),
-                       "coordinate_rows": meta.get("coordinate_rows"),
-                       # Archive provenance: which member inside the zip this describes, and
-                       # what the unpacker refused. A doc built from one member of forty must
-                       # say so.
-                       "primary_member": meta.get("primary_member"),
-                       "archive_note": meta.get("archive_note"),
-                       "unpacked_refused": meta.get("unpacked_refused"),
-                       "member_format": meta.get("member_format"),
+            extracted={**_describable(meta), "bbox_note": bbox_note or None,
                        "parent_type": "Dataset", "parent_title": title},
         )
         # A generated loader, emitted as a MethodUnit so it reaches iguide_methods through the
