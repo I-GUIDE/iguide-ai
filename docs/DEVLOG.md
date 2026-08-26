@@ -3641,3 +3641,48 @@ substitution.
 
 **Next** Nothing blocking. Whoever rebuilds the report should take the numbers from this entry
 rather than from the previous one.
+
+## 2026-08-26 · M8.23 · One field name blanked the page, and 25 tests said it was fine
+
+**Change** `build_extraction_browser.py` renames a publication's declared parameters to
+  `declared_params`; the template's search-index pass is defensive; new
+  `rag_pipeline/tests/test_extraction_browser_runs.py` executes the page's JavaScript under node.
+  Plus `export_publication_specs.py` run over all 73 readable documents.
+
+**Why** The user opened the browser and nothing rendered. In M8.22 I gave a publication's declared
+  parameters the key `params` — the same key a unit uses for its parameter **list**. The page
+  builds its search index in one pass *before* rendering anything and calls `.map()` on every
+  record's `params`. An object has no `.map`, so the first publication with parameters threw, the
+  IIFE died, and not one row was built.
+
+  Every test passed. They check the data contract — each record has an id, a kind, a renderable
+  name — and each record *was* individually valid. The failure was in what the page DID with them.
+  The docstring in that file claimed it covered "a page that comes up blank". It did not.
+
+**Measured** Diagnosed by extracting the script and running it under node, not by reading it:
+  `TypeError: (r.params || []).map is not a function`. After the fix the same harness reports
+  `1224 of 1224 record(s)` and a populated tally.
+
+  The new tests were verified against the *broken* page rather than assumed: stash the fix,
+  regenerate, and **6 of 6 fail**; restore, and 6 of 6 pass.
+
+  Publication specs over all 73 readable documents (claude-cli / sonnet, 22 min, $0 API spend):
+  53 `llm_extracted`, 10 `llm_partial`, 8 `no_method_described`, 1 `no_text`, 1 `llm_unavailable`.
+  **63 carry a method spec: 951 steps, median 13 per paper, 414 distinct datasets and 394 distinct
+  tools named, 60 with declared parameters.** The richest is HISDAC-US at 34 steps / 22 datasets /
+  24 parameters. Tests **1504 → 1510**.
+
+**Surprised by** Nothing about the bug — it is an ordinary name collision. What matters is the
+  pattern: this is the third time this session a check reported success while the thing it was
+  meant to establish was false, and the first time I shipped it rather than catching it. All three
+  had the same shape — asserting the artifact's *description* rather than its *behaviour*. The
+  emitter tests checked that documents were built, not that they carried a contract. The layout
+  tests checked that CSS rules were present, not that panes scrolled. These checked that records
+  were well-formed, not that the page rendered.
+
+  The remedy that generalises is the one added here: run the real thing and look at what comes
+  out. A stub DOM and 20 lines of node were enough, and would have caught it before it shipped.
+
+**Next** Nothing outstanding on the browser. `--max-files` still defaults to 60, which silently
+  truncated two code elements before this session raised it; the driver now records
+  `truncated_by_max_files`, but the default itself is worth revisiting against build time.
