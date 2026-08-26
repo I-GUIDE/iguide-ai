@@ -98,7 +98,7 @@ def _element_url(doc: Any) -> str:
 EXTRACTED_MAX_CHARS = 900
 
 
-def _render_extracted(extracted: Any) -> str:
+def _render_extracted(extracted: Any, element_hint: str = "<element id>") -> str:
     """What extraction produced from this element, as REFERENCES and ACTIONABLE items.
 
     The distinction is the point. A block or a method spec is a reference — it tells the model what
@@ -126,6 +126,16 @@ def _render_extracted(extracted: Any) -> str:
                 lines.append(f"      requires: {', '.join(map(str, unit['requirements']))}")
             if unit.get("invariants"):
                 lines.append(f"      enforced: {', '.join(map(str, unit['invariants']))}")
+            # A loader advertises `load_x(staged_path)` and nothing said where a staged_path comes
+            # from. Measured on a live turn: the agent read this signature, called the loader
+            # without staging, got "block not found", and fell back to a different tool over a
+            # different subset of the data (49,789 geocoded incidents instead of 128,886 records)
+            # -- reporting THEFT as 9,993 where the file says 27,824. The parameter has to carry
+            # its own instructions, at the point of use, because a generic prompt rule did not
+            # survive the moment of choice.
+            if "staged_path" in str(unit.get("signature") or ""):
+                lines.append(f"      FIRST call stage_element(\"{element_hint}\") to obtain "
+                             f"staged_path — this file is not in the sandbox until you do.")
         parts.append("\n".join(lines))
 
     named_only = [u for u in units if not u.get("import_line")]
@@ -177,7 +187,8 @@ def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
     # Everything extraction produced for this element, joined on by id in _direct_search_sweep.
     # Without this the join enriched a document the model never saw the enrichment of.
     extracted = doc.get("extracted") if isinstance(doc, dict) else None
-    rendered = _render_extracted(extracted)
+    rendered = _render_extracted(
+        extracted, str((doc.get("doc_id") if isinstance(doc, dict) else "") or "<element id>"))
     return f"{body}\n{rendered}" if rendered else body
 
 

@@ -327,3 +327,36 @@ def test_a_malformed_extracted_payload_renders_nothing_rather_than_raising(value
     from agent_runtime.supervisor.evidence_subgraph import _render_extracted
 
     assert _render_extracted(value) == ""
+
+
+def test_a_loader_says_where_its_staged_path_comes_from():
+    """A loader advertises `load_x(staged_path)` and nothing said where a staged_path comes from.
+
+    Measured on a live turn: the agent read this signature, called the loader without staging, got
+    "block not found", and fell back to a different tool over a different subset -- reporting THEFT
+    as 9,993 records where the file says 27,824. `stage_element` was available and appeared zero
+    times in the whole run state. A generic prompt rule did not survive the moment of choice, so
+    the parameter carries its own instruction at the point of use.
+    """
+    from agent_runtime.supervisor.evidence_subgraph import _render_extracted
+
+    text = _render_extracted(
+        {"units": [{"symbol": "load_chicago_crime_data_2026",
+                    "signature": "def load_chicago_crime_data_2026(staged_path)",
+                    "import_line": "from iguide_methods.ke__265e6957.v_abc import load_x"}]},
+        "265e6957")
+    assert "stage_element" in text
+    assert "265e6957" in text
+    assert "not in the sandbox until you do" in text
+
+
+def test_a_unit_that_takes_no_staged_path_gets_no_staging_instruction():
+    """Noise on every other unit would train the model to skim past it."""
+    from agent_runtime.supervisor.evidence_subgraph import _render_extracted
+
+    text = _render_extracted(
+        {"units": [{"symbol": "calculate_buffers",
+                    "signature": "def calculate_buffers(gdf, buffer)",
+                    "import_line": "from iguide_methods.x.v_a import calculate_buffers"}]},
+        "b1fa548b")
+    assert "stage_element" not in text

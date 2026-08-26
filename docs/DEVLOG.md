@@ -3730,3 +3730,54 @@ rather than from the previous one.
   code peer now HAS the tools, and the measured lesson of this project is that a capability the
   model must elect is a capability you do not have. Whether it reaches for `stage_element` unprompted
   needs a live run to answer.
+
+## 2026-08-26 · M8.27–28 · Four live turns on one dataset question
+
+**Change** Completed the `claude-cli` tool denylist and added `native_tools_visible()`; a loader
+  whose signature takes `staged_path` now carries its own staging instruction in the evidence view.
+
+**Why / Measured** Four runs of: *"Using the Chicago crime dataset on the I-GUIDE platform, what
+  are the five most common primary crime types, and how many records does each have? Compute the
+  counts from the actual data file."*
+
+  **Run 1 — the provider, not the agent.** Answer: "every tool returned *No such tool available*;
+  the only tool that responds here is `ListAgents`." `ListAgents` belongs to the CLI *subprocess*.
+  `_AGENT_TOOLS`, the `--disallowed-tools` list that stops `claude -p` behaving like an agent, was
+  missing `Agent` and `ListAgents`, so the model had a real tool channel with one working tool and
+  preferred it over the prompt-described JSON envelope the shim depends on. **The turn measured
+  the denylist's hole, not the agent.** `--allowed-tools` is not the fix — it governs permission
+  prompts, not availability, and a name matching nothing still leaves all 13 tools present
+  (verified). List completed; `native_tools_visible()` now asks the running CLI and reports NONE.
+
+  **Run 2 — staging elected.** `kb_method_search`, `get_method_contract`, `agent_kb_search`,
+  `get_kb_block`, **`stage_element`** — and it staged the real file: **37,079,384 bytes, sha256
+  `b8436072a7…`**, matching the end-to-end probe exactly. Then Docker was down, so no compute.
+
+  **Run 3 — the right answer.** Docker restarted. THEFT 27,824 · BATTERY 23,885 · CRIMINAL DAMAGE
+  14,047 · ASSAULT 11,575 · MOTOR VEHICLE THEFT 10,221, from 128,886 records. **Independently
+  verified against the file: every number matches.** Staging was not re-elected because the
+  workspace persisted from run 2 — correct behaviour, but it means run 3 does not demonstrate
+  election.
+
+  **Run 4 — fresh workspace, and the honest failure.** `stage_element` appears **zero** times in
+  the entire run state. The agent read the loader's advertised signature
+  `load_chicago_crime_data_2026(staged_path)`, called it without staging, got "block not found",
+  and fell back to `mcp_count_crimes_per_community` — a different tool over a different population.
+  It reported THEFT as **9,993** against the file's **27,824**, and said so: "only incidents
+  successfully spatially joined … may not be included."
+
+**Surprised by** How exactly run 4 reproduced this project's central lesson. The evidence view
+  advertised a parameter and never said where it comes from. So the loader now carries
+  `FIRST call stage_element("<id>") to obtain staged_path — this file is not in the sandbox until
+  you do`, attached to the specific unit rather than stated as a general rule, because a general
+  rule is what run 4 already had and skipped.
+
+  Worth recording separately: the agent's *judgement* was good in all four runs. It refused to
+  fabricate twice, diagnosed the Docker outage precisely, and volunteered the population caveat
+  that made run 4's wrong number detectable. The failures were in what it was told and what it
+  could reach, not in what it decided to do about them.
+
+**Next** The invariant gate returned `cannot_determine` with all-zero counts and "findings were
+  not retained" on the successful run, and reported `unrecognised unit 'records'`. So the number
+  is right and the system cannot yet say so — the same gap this whole thread has been closing, one
+  layer further in.
