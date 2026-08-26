@@ -200,7 +200,12 @@ def _publications(reach: dict, outcomes: dict, specs: dict = None) -> list:
             "steps": spec.get("steps") or [],
             "datasets_referenced": spec.get("datasets_referenced") or [],
             "tools_referenced": spec.get("tools_referenced") or [],
-            "params": spec.get("params") or {},
+            # NOT `params`. A unit's `params` is a LIST of parameter objects and the page's search
+            # index calls .map() on it; a publication's declared parameters are an OBJECT. Naming
+            # both `params` put two shapes under one key, `{}.map is not a function` threw while
+            # building the index, and the whole script died before rendering a single row -- a
+            # blank page from one field name.
+            "declared_params": spec.get("params") or {},
             "chunks_parsed": spec.get("chunks_parsed"),
             "chunks_total": spec.get("chunks_total"),
             "chars_seen": spec.get("chars_seen"),

@@ -382,7 +382,11 @@ def test_a_publication_carries_the_spec_extracted_from_its_pdf(gen):
     row = gen._publications({"rows": []}, outcomes, specs)[0]
     assert row["steps"] == ["Acquire EISPC raster data", "Derive two cost surfaces"]
     assert row["datasets_referenced"] == ["NLCD2016"]
-    assert row["params"]["cell_size"] == "250 meters"
+    # `declared_params`, not `params`: a unit's `params` is a LIST and the page's search index
+    # maps over it, so an object under that key blanked the whole page. See
+    # test_extraction_browser_runs.py.
+    assert row["declared_params"]["cell_size"] == "250 meters"
+    assert "params" not in row
     assert "has-method-spec" in row["flags"]
 
 

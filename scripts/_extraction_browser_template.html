@@ -288,15 +288,31 @@
   const tagClass = (f) => GOOD.has(f) ? "tag good" : (WARN.has(f) ? "tag warn" : "tag");
 
   // One haystack per record, built once. Everything the search box should reach.
+  //
+  // Defensive on purpose. This loop runs before anything renders, so ONE record of an unexpected
+  // shape takes the entire page down to blank — which is exactly what happened when a
+  // publication's declared parameters (an object) landed on the same `params` key a unit uses for
+  // its parameter list (an array), and `.map` threw. The shape bug is fixed at its source; this
+  // makes the blast radius of the next one a missing search term rather than an empty page.
+  const list_ = (v) => (Array.isArray(v) ? v : []);
+  const joinText = (v) => list_(v).map((x) =>
+    (x && typeof x === "object") ? Object.values(x).filter(
+      (y) => typeof y === "string" || typeof y === "number").join(" ") : String(x)).join(" ");
   RECORDS.forEach((r) => {
-    r._hay = [r.name, r.title, r.id, r.element, r.source, r.signature, r.summary, r.import,
-              r.doi, r.reason, r.outcome, r.stage, r.format, r.crs, r.error, r.note,
-              r.primary_member, r.geometry_type, r.unit_kind, r.extractor,
-              (r.schema || []).join(" "), (r.variables || []).join(" "),
-              (r.requires || []).join(" "), (r.flags || []).join(" "),
-              (r.invariants || []).map((i) => i.check).join(" "),
-              (r.params || []).map((p) => p.name + " " + p.annotation + " " + p.type).join(" ")
-             ].filter(Boolean).join(" ").toLowerCase();
+    try {
+      r._hay = [r.name, r.title, r.id, r.element, r.source, r.signature, r.summary, r.import,
+                r.doi, r.reason, r.outcome, r.stage, r.format, r.crs, r.error, r.note,
+                r.spec_status, r.primary_member, r.geometry_type, r.unit_kind, r.extractor,
+                joinText(r.schema), joinText(r.variables), joinText(r.requires),
+                joinText(r.flags), joinText(r.steps), joinText(r.datasets_referenced),
+                joinText(r.tools_referenced),
+                list_(r.invariants).map((i) => (i && i.check) || "").join(" "),
+                joinText(r.params),
+                Object.keys(r.declared_params || {}).join(" "),
+               ].filter(Boolean).join(" ").toLowerCase();
+    } catch (err) {
+      r._hay = String(r.name || r.id || "").toLowerCase();
+    }
   });
 
   const state = { kind: "all", facets: new Set(), q: "", selected: null };
@@ -501,7 +517,7 @@
   function specSection(r) {
     const steps = r.steps || [];
     const hasAny = steps.length || (r.datasets_referenced || []).length
-      || (r.tools_referenced || []).length || Object.keys(r.params || {}).length;
+      || (r.tools_referenced || []).length || Object.keys(r.declared_params || {}).length;
     if (!hasAny) {
       if (r.spec_status === "no_method_described") {
         return `<p class="note">Read in full, and it describes no computational method — an
@@ -525,7 +541,7 @@
       h += `<p class="sub">Tools the paper names</p><ul class="plain">`
         + r.tools_referenced.map((x) => `<li>${esc(x)}</li>`).join("") + `</ul>`;
     }
-    const params = r.params || {};
+    const params = r.declared_params || {};
     if (Object.keys(params).length) {
       h += `<p class="sub">Declared parameters</p><div class="scroller"><table><tbody>`
         + Object.keys(params).map((k) =>
