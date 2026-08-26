@@ -319,3 +319,115 @@ def test_the_mobile_view_offers_a_way_back_to_the_list():
     js = _script()
     assert 'id="back"' in js
     assert 'main.classList.remove("showing-detail")' in js
+
+
+# ------------------------------------------------------------------ drilling into an element
+
+def test_an_element_lists_the_units_extraction_produced_from_it(gen):
+    """"units 6, callable 5" is a count with nothing behind it. The question a reader has is
+    *which five*, and the answer was one join away the whole time."""
+    units = [
+        {"kind": "unit", "id": "pkg.plot_domain", "name": "plot_domain", "element": "9d483118",
+         "signature": "def plot_domain(run_directory, variable, timestep=0)",
+         "summary": "", "unit_kind": "function", "source": "plots.py", "flags": []},
+        {"kind": "unit", "id": "pkg.other", "name": "other", "element": "ffffffff",
+         "signature": "def other()", "summary": "", "unit_kind": "function",
+         "source": "x.py", "flags": []},
+    ]
+    element = {"kind": "code", "id": "9d483118", "name": "9d483118", "title": "Parflow",
+               "callable": 5, "flags": []}
+    gen._link_units_to_elements([element] + units, units)
+    listed = element["units_in_library"]
+    assert [u["name"] for u in listed] == ["plot_domain"], "another element's unit leaked in"
+    assert listed[0]["signature"].startswith("def plot_domain")
+    assert "has-units" in element["flags"]
+
+
+def test_units_are_listed_in_a_stable_order(gen):
+    units = [{"kind": "unit", "id": f"pkg.{n}", "name": n, "element": "e1",
+              "signature": f"def {n}()", "summary": "", "unit_kind": "function",
+              "source": "a.py", "flags": []} for n in ("zeta", "Alpha", "mid")]
+    element = {"kind": "code", "id": "e1", "name": "e1", "title": "T", "flags": []}
+    gen._link_units_to_elements([element] + units, units)
+    assert [u["name"] for u in element["units_in_library"]] == ["Alpha", "mid", "zeta"]
+
+
+def test_a_unit_record_is_never_given_its_own_unit_list(gen):
+    units = [{"kind": "unit", "id": "pkg.f", "name": "f", "element": "e1",
+              "signature": "def f()", "summary": "", "unit_kind": "function",
+              "source": "a.py", "flags": []}]
+    gen._link_units_to_elements(units, units)
+    assert "units_in_library" not in units[0]
+
+
+def test_an_element_with_no_units_gets_no_empty_section(gen):
+    element = {"kind": "code", "id": "e9", "name": "e9", "title": "T", "flags": []}
+    gen._link_units_to_elements([element], [])
+    assert "units_in_library" not in element
+    assert "has-units" not in element["flags"]
+
+
+# ------------------------------------------------------------------ what came out of a PDF
+
+def test_a_publication_carries_the_spec_extracted_from_its_pdf(gen):
+    """Reach says whether the bytes were readable. This is the different question: what did we
+    actually get out of it."""
+    specs = {"rows": [{"element": "31fd4fc6", "status": "llm_extracted",
+                       "summary": "Compares raster network connectivity for corridor analysis.",
+                       "steps": ["Acquire EISPC raster data", "Derive two cost surfaces"],
+                       "datasets_referenced": ["NLCD2016"], "tools_referenced": ["pNISE"],
+                       "params": {"cell_size": "250 meters"},
+                       "chunks_parsed": 1, "chunks_total": 1}]}
+    outcomes = {"elements": [{"id": "31fd4fc6-x", "title": "Corridors", "doi": "10.1/x"}]}
+    row = gen._publications({"rows": []}, outcomes, specs)[0]
+    assert row["steps"] == ["Acquire EISPC raster data", "Derive two cost surfaces"]
+    assert row["datasets_referenced"] == ["NLCD2016"]
+    assert row["params"]["cell_size"] == "250 meters"
+    assert "has-method-spec" in row["flags"]
+
+
+def test_a_paper_with_no_method_is_flagged_as_such_not_as_a_failure(gen):
+    specs = {"rows": [{"element": "fd728b4e", "status": "no_method_described", "steps": [],
+                       "summary": "An argumentative paper on AI ethics."}]}
+    outcomes = {"elements": [{"id": "fd728b4e-x", "title": "AI ethics", "doi": "10.1/y"}]}
+    row = gen._publications({"rows": []}, outcomes, specs)[0]
+    assert "no-method" in row["flags"]
+    assert "has-method-spec" not in row["flags"]
+    assert row["steps"] == []
+
+
+def test_publications_still_work_when_no_specs_have_been_extracted(gen):
+    """The spec export is a separate, slow pass. Its absence must leave the page usable."""
+    outcomes = {"elements": [{"id": "abc12345-x", "title": "A paper", "doi": "10.1/z"}]}
+    row = gen._publications({"rows": []}, outcomes, None)[0]
+    assert row["steps"] == [] and row["spec_status"] == ""
+    assert "has-method-spec" not in row["flags"]
+
+
+# ------------------------------------------------------------------ navigating between records
+
+def test_the_detail_pane_can_open_a_linked_record():
+    js = _script()
+    assert "const BY_ID = new Map(RECORDS.map" in js
+    assert 'detail.querySelectorAll("[data-goto]")' in js
+
+
+def test_following_a_link_does_not_disturb_the_list_or_its_filters():
+    """Silently clearing someone's filter to reveal the target is a worse surprise than a detail
+    pane showing a record the list is not currently listing."""
+    js = _script()
+    after = js.split('detail.querySelectorAll("[data-goto]")', 1)[1]
+    # Bound the slice at the end of THIS handler. A fixed character count ran past it into the
+    # search handler, which mentions `state.q` for its own good reasons — the test was reading
+    # someone else's code and calling it a violation.
+    goto = after.split("\n    });", 1)[0]
+    assert "state.facets" not in goto, goto
+    assert "state.q" not in goto, goto
+    assert "const keep = list.scrollTop;" in goto and "list.scrollTop = keep;" in goto
+
+
+def test_a_gap_between_callable_and_listed_units_is_shown_not_smoothed_over():
+    """This is exactly the defect that produced 58 unreachable units. If it recurs, the page has
+    to say so rather than quietly listing fewer."""
+    js = _script()
+    assert "That gap is a defect, not a filter." in js

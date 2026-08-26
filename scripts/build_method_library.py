@@ -509,7 +509,15 @@ def main() -> int:
             result.assets.extend(one.assets)
             result.edges.extend(one.edges)
             result.warnings.extend(one.warnings)
+        # BOTH numbers, because they differ and the difference is invisible otherwise. `files`
+        # said 158 for an element whose first 60 were the only ones read, so its unit count looked
+        # like the repository's output when it was the cap's. Element 65b8297c went from 6
+        # callable units to 193 purely by raising --max-files.
         row["files"] = len(targets)
+        row["files_read"] = min(len(targets), args.max_files)
+        if len(targets) > args.max_files:
+            row["truncated_by_max_files"] = args.max_files
+            stats["truncated_by_max_files"] += 1
         if errors:
             row["file_errors"] = errors
         if not result.assets:

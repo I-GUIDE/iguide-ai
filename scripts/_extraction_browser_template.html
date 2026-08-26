@@ -199,6 +199,31 @@
   td.mono, th.mono { font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; }
   .ev { color:var(--muted); font-size:11.5px; }
   .chiprow { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .unitlist { display:flex; flex-direction:column; margin-top:6px; }
+  button.unitrow {
+    display:grid; grid-template-columns:auto auto 1fr; gap:2px 10px; align-items:baseline;
+    width:100%; text-align:left; cursor:pointer; font:inherit; color:var(--ink);
+    background:none; border:0; border-top:1px solid var(--rule-soft); padding:9px 0;
+  }
+  button.unitrow:hover { background:var(--panel-alt); }
+  .unitrow .unit-src {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); text-align:right;
+  }
+  .unitrow .unit-sig, .unitrow .unit-doc {
+    grid-column:1 / -1; font-size:12px; overflow-wrap:anywhere;
+  }
+  .unitrow .unit-sig {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; color:var(--ink-soft);
+  }
+  .unitrow .unit-doc { color:var(--muted); }
+  button.link {
+    font:inherit; font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:12.5px; padding:0; border:0; background:none; cursor:pointer;
+    color:var(--survey); text-decoration:underline; text-underline-offset:2px;
+  }
+  #detail ol.steps li { margin-bottom:7px; }
+  #detail p { margin:8px 0 0; font-size:13px; }
   .scroller { overflow-x:auto; }
   .note {
     margin-top:16px; padding:11px 14px; border-left:3px solid var(--contour);
@@ -448,6 +473,76 @@
   const chips = (arr) => `<div class="chiprow">${(arr || []).map(
     (x) => `<span class="${tagClass(x)}">${esc(x)}</span>`).join("")}</div>`;
 
+  const BY_ID = new Map(RECORDS.map((r) => [r.id, r]));
+
+  function unitsSection(r) {
+    const units = r.units_in_library || [];
+    if (!units.length) return "";
+    // The library holds only units that shipped, so these ARE the reachable ones. Where the run's
+    // `callable` count is higher, the difference is a real gap and saying so beats hiding it.
+    const claimed = typeof r.callable === "number" ? r.callable : null;
+    const gap = claimed === null ? 0 : claimed - units.length;
+    let h = `<p class="sub">Callable units from this element — ${units.length}</p>`;
+    h += `<div class="unitlist">` + units.map((u) =>
+      `<button type="button" class="unitrow" data-goto="${esc(u.id)}">`
+      + `<span class="row-name">${esc(u.name)}</span>`
+      + (u.unit_kind ? `<span class="kind">${esc(u.unit_kind)}</span>` : "")
+      + `<span class="unit-src">${esc(u.source)}</span>`
+      + `<span class="unit-sig">${esc(u.signature)}</span>`
+      + (u.summary ? `<span class="unit-doc">${esc(u.summary)}</span>` : "")
+      + `</button>`).join("") + `</div>`;
+    if (gap > 0) {
+      h += `<p class="note">${gap} more unit(s) were verdicted callable by the extraction run but
+        are not in the library. That gap is a defect, not a filter.</p>`;
+    }
+    return h;
+  }
+
+  function specSection(r) {
+    const steps = r.steps || [];
+    const hasAny = steps.length || (r.datasets_referenced || []).length
+      || (r.tools_referenced || []).length || Object.keys(r.params || {}).length;
+    if (!hasAny) {
+      if (r.spec_status === "no_method_described") {
+        return `<p class="note">Read in full, and it describes no computational method — an
+          editorial, an opinion piece or a publisher cover page. Not an extraction failure.</p>`;
+      }
+      return r.spec_status
+        ? `<p class="note">No method spec: <span class="mono">${esc(r.spec_status)}</span></p>`
+        : "";
+    }
+    let h = "";
+    if (r.spec_summary) h += `<p class="sub">What the paper does</p><p>${esc(r.spec_summary)}</p>`;
+    if (steps.length) {
+      h += `<p class="sub">Method — ${steps.length} step(s)</p><ol class="steps">`
+        + steps.map((x) => `<li>${esc(x)}</li>`).join("") + `</ol>`;
+    }
+    if ((r.datasets_referenced || []).length) {
+      h += `<p class="sub">Datasets the paper names</p><ul class="plain">`
+        + r.datasets_referenced.map((x) => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+    }
+    if ((r.tools_referenced || []).length) {
+      h += `<p class="sub">Tools the paper names</p><ul class="plain">`
+        + r.tools_referenced.map((x) => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+    }
+    const params = r.params || {};
+    if (Object.keys(params).length) {
+      h += `<p class="sub">Declared parameters</p><div class="scroller"><table><tbody>`
+        + Object.keys(params).map((k) =>
+            `<tr><td class="mono">${esc(k)}</td><td class="mono">`
+            + esc(typeof params[k] === "object"
+                  ? JSON.stringify(params[k]) : String(params[k])) + `</td></tr>`).join("")
+        + `</tbody></table></div>`;
+    }
+    if (r.chunks_parsed && r.chunks_total && r.chunks_parsed < r.chunks_total) {
+      h += `<p class="note">Built from ${r.chunks_parsed} of ${r.chunks_total} sections`
+        + (r.chars_seen && r.chars_total
+            ? ` (${num(r.chars_seen)} of ${num(r.chars_total)} characters)` : "")
+        + `, so steps described elsewhere in the paper may be missing.</p>`;
+    }
+    return h;
+  }
+
   function unitDetail(r) {
     let h = "";
     if (r.signature) h += `<p class="sub">Signature</p>${code(r.signature)}`;
@@ -457,7 +552,12 @@
       ["summary", esc(r.summary)],
       ["returns", `<span class="mono">${esc(r.returns)}</span>`],
       ["requires", chips(r.requires)],
-      ["element", `<span class="mono">${esc(r.element)}</span>`],
+      ["element", r.element
+        ? (BY_ID.has(r.element)
+            ? `<button type="button" class="link" data-goto="${esc(r.element)}">`
+              + `${esc(r.element)}</button>`
+            : `<span class="mono">${esc(r.element)}</span>`)
+        : ""],
       ["source", `<span class="mono">${esc(r.source)}</span>`],
       ["slice_sha", `<span class="mono">${esc(r.slice_sha)}</span>`],
     ]);
@@ -542,7 +642,7 @@
     }
     if (r.note) h += `<p class="note">${esc(r.note)}</p>`;
     if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
-    return h;
+    return h + unitsSection(r);
   }
 
   function publicationDetail(r) {
@@ -564,7 +664,7 @@
         around — an institutional proxy or a publisher bulk-access programme is the legitimate
         route.</p>`;
     }
-    return h;
+    return h + specSection(r);
   }
 
   function codeDetail(r) {
@@ -581,7 +681,7 @@
         + chips(r.off_domain);
     }
     if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
-    return h;
+    return h + unitsSection(r);
   }
 
   function show(r) {
@@ -602,6 +702,20 @@
         window.scrollTo({ top: 0 });
       };
     }
+    // Navigating between linked records leaves the list and its filters exactly as they were —
+    // silently clearing someone's filter to reveal the target would be a worse surprise than a
+    // detail pane showing a record the list is not currently listing.
+    detail.querySelectorAll("[data-goto]").forEach((el) => {
+      el.onclick = () => {
+        const target = BY_ID.get(el.getAttribute("data-goto"));
+        if (!target) return;
+        state.selected = target;
+        const keep = list.scrollTop;
+        render();
+        list.scrollTop = keep;
+        show(target);
+      };
+    });
   }
 
   // ---------- search ----------

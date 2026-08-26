@@ -165,8 +165,9 @@ def _datasets(details: dict, outcomes: dict) -> list:
     return out
 
 
-def _publications(reach: dict, outcomes: dict) -> list:
+def _publications(reach: dict, outcomes: dict, specs: dict = None) -> list:
     read_by = {r.get("element"): r for r in ((reach or {}).get("rows") or [])}
+    spec_by = {r.get("element"): r for r in ((specs or {}).get("rows") or [])}
     out = []
     for row in ((outcomes or {}).get("elements") or []):
         short = str(row.get("id"))[:8]
@@ -183,11 +184,27 @@ def _publications(reach: dict, outcomes: dict) -> list:
             flags.append(f"pdf-from-{row['pdf_from']}")
         if row.get("source_kind"):
             flags.append(str(row["source_kind"]))
+        spec = spec_by.get(short) or {}
+        if spec.get("steps"):
+            flags.append("has-method-spec")
+        if spec.get("status") == "no_method_described":
+            flags.append("no-method")
         out.append({
             "kind": "publication",
             "id": short,
             "name": short,
             "title": row.get("title") or short,
+            # What extraction actually got OUT of the PDF, not just whether it opened.
+            "spec_status": spec.get("status") or "",
+            "spec_summary": (spec.get("summary") or "").strip(),
+            "steps": spec.get("steps") or [],
+            "datasets_referenced": spec.get("datasets_referenced") or [],
+            "tools_referenced": spec.get("tools_referenced") or [],
+            "params": spec.get("params") or {},
+            "chunks_parsed": spec.get("chunks_parsed"),
+            "chunks_total": spec.get("chunks_total"),
+            "chars_seen": spec.get("chars_seen"),
+            "chars_total": spec.get("chars_total"),
             "doi": row.get("doi") or "",
             "licence": row.get("licence") or "",
             "outcome": outcome,
@@ -227,6 +244,35 @@ def _code(outcomes: dict) -> list:
     return out
 
 
+def _link_units_to_elements(records: list, units: list) -> None:
+    """Give every element record the units extraction produced FROM it.
+
+    "units 6, callable 5" is a count with nothing behind it: the question a reader actually has is
+    *which five*. The library holds only units that shipped, so the ones listed here ARE the
+    reachable ones — and where an element's `callable` count exceeds what is listed, that gap is
+    itself worth seeing rather than smoothing over.
+    """
+    by_element: Dict[str, list] = {}
+    for unit in units:
+        element = str(unit.get("element") or "")
+        if element:
+            by_element.setdefault(element, []).append(unit)
+
+    for record in records:
+        if record.get("kind") == "unit":
+            continue
+        found = by_element.get(str(record.get("id") or ""))
+        if not found:
+            continue
+        record["units_in_library"] = [
+            {"id": u["id"], "name": u["name"], "signature": u.get("signature") or "",
+             "summary": u.get("summary") or "", "unit_kind": u.get("unit_kind") or "",
+             "source": u.get("source") or "", "flags": u.get("flags") or []}
+            for u in sorted(found, key=lambda x: x["name"].lower())]
+        if "has-units" not in record.setdefault("flags", []):
+            record["flags"].append("has-units")
+
+
 def collect(repo: Path) -> dict:
     outputs = repo / "outputs"
     registry_path = (repo / "agent_chat_files" / "method_library" / "iguide_methods"
@@ -256,8 +302,15 @@ def collect(repo: Path) -> dict:
         missing.append("outputs/extract_publication_*.json")
     code_out = take("code_outcomes", outputs / "extract_code_gated.json")
 
-    records = (_units(registry or {}) + _datasets(details or {}, ds_out or {})
-               + _publications(reach or {}, pub_out or {}) + _code(code_out or {}))
+    specs = _load(outputs / "publication_specs.json")
+    if specs is None:
+        missing.append("outputs/publication_specs.json")
+
+    unit_records = _units(registry or {})
+    records = (unit_records + _datasets(details or {}, ds_out or {})
+               + _publications(reach or {}, pub_out or {}, specs or {})
+               + _code(code_out or {}))
+    _link_units_to_elements(records, unit_records)
     counts = {}
     for r in records:
         counts[r["kind"]] = counts.get(r["kind"], 0) + 1
