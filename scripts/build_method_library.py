@@ -48,7 +48,8 @@ from extractors.base import (EMIT_LIBRARY, EMIT_OPENSEARCH,  # noqa: E402
 from extractors.emitters import library_emitter  # noqa: E402
 from extractors.manifest import UnifiedManifest  # noqa: E402
 from extractors.notebook_extractor import NotebookExtractor  # noqa: E402
-from extractors.sources import SourceError, fetch_url, resolve_and_fetch  # noqa: E402
+from extractors.sources import (SourceError, fetch_url,  # noqa: E402
+                                resolve_and_fetch, source_link, source_link_or_doi)
 
 BACKEND = "https://backend.i-guide.io"
 
@@ -305,7 +306,11 @@ def main() -> int:
                 local, row["cached"] = cached_pdf[0], True
                 stats["fetched"] += 1
             else:
-                doi = extract_doi(meta.get("external_link")) or extract_doi(meta.get("doi"))
+                # Both vocabularies, via the shared lookup. Reading only `external_link` found
+                # a DOI on 8 of 203 publications -- and those 8 were the ones with a cached PDF,
+                # so the REST path had resolved exactly zero. The API names this field
+                # `external-link-publication`.
+                doi = extract_doi(source_link_or_doi(meta))
                 if not doi:
                     stats["unfetchable:no_doi"] += 1
                     row.update(stage="fetch", error="no DOI in external_link")

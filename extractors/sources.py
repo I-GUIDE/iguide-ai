@@ -278,6 +278,73 @@ def fetch_url(url: str, dest: Path, *, element_id: str = "",
 # Entry point
 # --------------------------------------------------------------------------- #
 
+# Every spelling the platform uses for "where this element's bytes are". TWO vocabularies exist
+# and they do not overlap: the Neo4j node properties are snake_case and generic
+# (``external_link``), while the REST API returns kebab-case and TYPE-SUFFIXED names
+# (``external-link-publication``). Code that knew only one of them silently found nothing on the
+# other path.
+#
+# Measured on 386 cached full records from ``/api/elements/{id}``: publications carry
+# ``external-link-publication`` (201 of 203) and NOTHING named ``external_link`` or
+# ``external-link``. The library driver read ``external_link`` and reported
+# ``unfetchable:no_doi`` for 195 of 203 publications — every one of which has a DOI. The type
+# that motivated the whole open-access resolver had never resolved one element through the REST
+# path.
+#
+# Ordered most-specific first so a type-suffixed field wins over a generic one.
+SOURCE_LINK_FIELDS = (
+    "direct-download-link", "direct_download_link",
+    "external-link-publication", "external_link_publication",
+    "external-link-oer", "external_link_oer",
+    "external-iframe-link", "external_iframe_link",
+    "oer-elink-urls", "oer_elink_urls",
+    "github-repo-link", "github_repo_link",
+    "external-link", "external_link",
+    "notebook-url", "notebook_url",
+    "url", "doi",
+)
+
+
+def source_link(metadata: Dict[str, Any]) -> str:
+    """The first http(s) URL this element records for its own source, or "".
+
+    A list-valued field (``oer_elink_urls``) yields its first URL. Non-URL values are skipped
+    rather than returned, because a DOI string and a link are handled differently upstream.
+    """
+    for key in SOURCE_LINK_FIELDS:
+        value = metadata.get(key)
+        if isinstance(value, (list, tuple)):
+            value = next((v for v in value if str(v).strip().startswith("http")), None)
+        text = str(value or "").strip()
+        if text.startswith(("http://", "https://")):
+            return text
+    return ""
+
+
+_BARE_DOI_RE = re.compile(r"10\.\d{4,9}/\S+")
+
+
+def source_link_or_doi(metadata: Dict[str, Any]) -> str:
+    """``source_link``, or the raw field value when it is a bare DOI rather than a URL.
+
+    The same field holds both shapes. Of the corpus's 203 publications, 183 record an http URL in
+    ``external-link-publication`` and **19 record a bare DOI** — ``10.1126/science.1144004``,
+    ``DOI 10.1007/s13280-010-0098-0``. Requiring a URL scheme discards those 19, and there is no
+    separate ``doi`` field to fall back on: the API's ``doi-status`` is a flag, not a value.
+    """
+    link = source_link(metadata)
+    if link:
+        return link
+    for key in SOURCE_LINK_FIELDS:
+        value = metadata.get(key)
+        if isinstance(value, (list, tuple)):
+            value = next((v for v in value if _BARE_DOI_RE.search(str(v or ""))), None)
+        text = str(value or "").strip()
+        if text and text.lower() not in ("false", "true", "none") and _BARE_DOI_RE.search(text):
+            return text
+    return ""
+
+
 def resolve_and_fetch(metadata: Dict[str, Any], dest_dir: Path, *,
                       element_id: str = "", filename: str = "") -> ResolvedSource:
     """Fetch an element's source into *dest_dir* and return its provenance.
@@ -293,13 +360,7 @@ def resolve_and_fetch(metadata: Dict[str, Any], dest_dir: Path, *,
     if bucket and key:
         return fetch_object(bucket, key, dest_dir / (filename or Path(key).name), element_id=eid)
 
-    url = resolve_github_url(metadata)
-    if not url:
-        for k in ("direct-download-link", "direct_download_link", "external-link", "url"):
-            candidate = str(metadata.get(k) or "").strip()
-            if candidate.startswith(("http://", "https://")):
-                url = candidate
-                break
+    url = resolve_github_url(metadata) or source_link(metadata)
     if not url:
         raise SourceError("element carries no resolvable source "
                           "(no bucket/key, no notebook-repo/url, no direct link)",
@@ -329,4 +390,5 @@ def _finish(dest: Path, *, origin_url: str = "", bucket: str = "", key: str = ""
 
 
 __all__ = ["ResolvedSource", "SourceError", "resolve_and_fetch", "resolve_github_url",
+           "source_link", "source_link_or_doi", "SOURCE_LINK_FIELDS",
            "raw_url_from_blob", "fetch_url", "fetch_object"]
