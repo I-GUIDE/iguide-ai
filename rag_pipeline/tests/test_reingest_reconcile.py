@@ -86,6 +86,17 @@ def bulk_spy(monkeypatch):
         actions = list(actions)
         for a in actions:
             seen[a["_op_type"]].append(a.get("_id"))
+            # APPLY the action, not just record it. A fake that reports a write and leaves the
+            # store unchanged cannot exercise anything that reads back what it wrote — the
+            # skip-if-unchanged presence check read an empty index after a successful emit and
+            # correctly decided to rewrite, which looked like a bug in the code under test.
+            docs = getattr(client, "docs", None)
+            if docs is None:
+                continue
+            if a["_op_type"] == "index":
+                docs.add(str(a.get("_id")))
+            elif a["_op_type"] == "delete":
+                docs.discard(str(a.get("_id")))
         return len(actions), []
 
     import opensearchpy.helpers as helpers
@@ -203,3 +214,144 @@ def test_the_fingerprint_carries_the_schema_version():
 
 def test_no_previous_run_is_none_not_an_error():
     assert em.previous_run(FakeClient(), "nb1") is None
+
+
+# ------------------------------------------------------------------ skip-if-unchanged
+
+class RunRecordingClient(FakeClient):
+    """FakeClient plus the ``iguide_agent_ingest_runs`` document that `record_run` writes."""
+
+    def __init__(self, existing=()):
+        super().__init__(existing=existing)
+        self.runs: dict = {}
+        self.created_indices: list = []
+        outer = self
+
+        class _Indices:
+            def exists(self, index):
+                return index != em.INGEST_RUNS_INDEX or bool(outer.runs)
+
+            def create(self, index, body=None):
+                outer.created_indices.append(index)
+
+            def refresh(self, index):
+                pass
+
+            def get_mapping(self, index):
+                return {index: {"mappings": {"properties": {}}}}
+
+        self.indices = _Indices()
+
+    def index(self, index, id=None, body=None):
+        if index == em.INGEST_RUNS_INDEX:
+            self.runs[str(id)] = dict(body or {})
+        else:
+            self.docs.add(str(id))
+
+    def get(self, index, id):
+        if index == em.INGEST_RUNS_INDEX and str(id) in self.runs:
+            return {"_source": self.runs[str(id)]}
+        raise KeyError(id)
+
+
+def _element_manifest(n: int, element_id: str = "nb1") -> UnifiedManifest:
+    """Like `manifest_with`, but carrying the element_id the skip keys on."""
+    m = manifest_with(n, parent=element_id)
+    m.element_id = element_id
+    return m
+
+
+def test_a_first_ingest_is_never_skipped(bulk_spy):
+    client = RunRecordingClient()
+    summary = em.emit(_element_manifest(3), client=client, embed=False)
+    assert summary["skipped"] is False
+    assert summary["indexed"] == 3
+
+
+def test_the_run_is_recorded_so_the_next_one_can_skip(bulk_spy):
+    client = RunRecordingClient()
+    summary = em.emit(_element_manifest(3), client=client, embed=False)
+    assert client.runs["nb1"]["fingerprint"] == summary["fingerprint"]
+    assert client.runs["nb1"]["schema_version"] == em.SCHEMA_VERSION
+    assert client.runs["nb1"]["doc_count"] == 3
+
+
+def test_re_ingesting_an_unchanged_element_writes_nothing(bulk_spy):
+    """The whole point. `run_fingerprint`, `previous_run` and `record_run` were written, tested,
+    and called from nowhere but the tests, so every re-index rewrote the corpus and
+    `iguide_agent_ingest_runs` did not exist on the cluster at all."""
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    bulk_spy["index"].clear()
+
+    again = em.emit(_element_manifest(3), client=client, embed=False)
+    assert again["skipped"] is True
+    assert again["indexed"] == 0
+    assert bulk_spy["index"] == [], "an unchanged element still wrote documents"
+
+
+def test_a_changed_element_is_not_skipped(bulk_spy):
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    bulk_spy["index"].clear()
+
+    grown = em.emit(_element_manifest(5), client=client, embed=False)
+    assert grown["skipped"] is False
+    assert len(bulk_spy["index"]) == 5
+
+
+def test_a_schema_version_bump_forces_a_rewrite(bulk_spy, monkeypatch):
+    """The fingerprint is prefixed with the schema version, so a bump changes it — but the
+    recorded `schema_version` is checked independently, because a future fingerprint scheme might
+    not carry the prefix."""
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    client.runs["nb1"]["schema_version"] = em.SCHEMA_VERSION - 1
+    bulk_spy["index"].clear()
+
+    assert em.emit(_element_manifest(3), client=client, embed=False)["skipped"] is False
+    assert len(bulk_spy["index"]) == 3
+
+
+def test_a_wiped_index_is_rewritten_despite_a_matching_fingerprint(bulk_spy):
+    """A matching fingerprint means "this run would write the same documents", NOT "those
+    documents are in the index". Trusting it alone would leave a recreated index empty forever,
+    with every re-ingest reporting a clean skip — the exact silent-success shape this codebase
+    keeps producing."""
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    client.docs.clear()                      # the index was recreated; the run record survives
+    bulk_spy["index"].clear()
+
+    summary = em.emit(_element_manifest(3), client=client, embed=False)
+    assert summary["skipped"] is False
+    assert len(bulk_spy["index"]) == 3
+
+
+def test_a_partially_present_element_is_rewritten(bulk_spy):
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    client.docs.discard("nb1::block::1")     # one document lost
+    bulk_spy["index"].clear()
+
+    assert em.emit(_element_manifest(3), client=client, embed=False)["skipped"] is False
+
+
+def test_skip_can_be_turned_off(bulk_spy):
+    client = RunRecordingClient()
+    em.emit(_element_manifest(3), client=client, embed=False)
+    bulk_spy["index"].clear()
+
+    forced = em.emit(_element_manifest(3), client=client, embed=False, skip_unchanged=False)
+    assert forced["skipped"] is False
+    assert len(bulk_spy["index"]) == 3
+
+
+def test_an_element_with_no_id_is_never_skipped(bulk_spy):
+    """A manifest anchored on `repo_id` rather than a platform element has nothing to key on.
+    Skipping on an empty key would collide every such element into one record."""
+    client = RunRecordingClient()
+    em.emit(manifest_with(3), client=client, embed=False)
+    bulk_spy["index"].clear()
+    assert em.emit(manifest_with(3), client=client, embed=False)["skipped"] is False
+    assert client.runs == {}, "an empty element_id must not become a run-record key"

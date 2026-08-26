@@ -40,6 +40,9 @@ class OpenAccessResult:
     version: Optional[str] = None
     host_type: Optional[str] = None
     reason: str = ""
+    # Which of Unpaywall's locations the pdf_url came from: "best" or "alternate". A repository
+    # copy is a different artifact from the published version and provenance should say so.
+    pdf_from: str = ""
 
 
 def extract_doi(text: Any) -> Optional[str]:
@@ -102,10 +105,36 @@ def resolve(doi: str, *, timeout: int = 30, session: Any = None) -> OpenAccessRe
     result.licence = best.get("license")
     result.version = best.get("version")
     result.host_type = best.get("host_type")
-    if not result.pdf_url:
-        # OA, but only as a landing page. Recorded distinctly: it is not a fetch failure, and a
-        # future HTML-aware reader could still use it.
-        result.reason = "open access, but no direct PDF url"
+    if result.pdf_url:
+        result.pdf_from = "best"
+        return result
+
+    # `best_oa_location` is Unpaywall's own ranking, which prefers the PUBLISHED version -- and a
+    # published version behind a landing page often has no direct PDF while a repository deposit
+    # of the same paper does. `oa_locations` holds them all, so look before giving up.
+    #
+    # Measured over the corpus's 177 DOIs: 39 came back "open access, but no direct PDF url" from
+    # `best_oa_location` alone. This is the cheapest recovery available on the type, because it
+    # costs no extra request -- the alternates are in the response already.
+    for location in (data.get("oa_locations") or []):
+        if not isinstance(location, dict):
+            continue
+        candidate = location.get("url_for_pdf")
+        if candidate:
+            result.pdf_url = candidate
+            result.pdf_from = "alternate"
+            result.licence = location.get("license") or result.licence
+            result.version = location.get("version") or result.version
+            result.host_type = location.get("host_type") or result.host_type
+            result.landing_url = (location.get("url_for_landing_page")
+                                  or result.landing_url)
+            return result
+
+    # Still nothing directly downloadable. The landing URL remains, and the reader added in M8.10
+    # routes on content rather than extension, so a full-text HTML article is now readable. Not a
+    # fetch failure -- a different shape of the same open copy.
+    result.reason = ("open access as a landing page only; no PDF at any of "
+                     f"{len(data.get('oa_locations') or [])} open location(s)")
     return result
 
 

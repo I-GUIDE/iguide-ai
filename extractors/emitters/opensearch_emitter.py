@@ -490,10 +490,18 @@ def record_run(client, element_id: str, fingerprint: str, summary: Dict[str, Any
 
 
 def emit(manifest: UnifiedManifest, *, client=None, embed: bool = True,
-         dry_run: bool = False, reconcile: bool = True) -> Dict[str, Any]:
+         dry_run: bool = False, reconcile: bool = True,
+         skip_unchanged: bool = True) -> Dict[str, Any]:
     """Index extracted assets into the agent KB. Backend defaults to LOCAL
     (file-backed) — nothing reaches the real OpenSearch unless AGENT_KB_BACKEND=
-    opensearch (or a client is injected). Returns a summary."""
+    opensearch (or a client is injected). Returns a summary.
+
+    ``skip_unchanged`` re-checks the element's last run and does nothing when this run would write
+    byte-identical documents. ``run_fingerprint`` / ``previous_run`` / ``record_run`` were written
+    and tested for exactly this and then never called from anywhere but the tests, so every
+    re-index rewrote the whole corpus and ``iguide_agent_ingest_runs`` did not exist on the
+    cluster at all. Pass ``skip_unchanged=False`` to force a rewrite.
+    """
     from .. import kb_store
 
     docs = build_docs(manifest)
@@ -517,6 +525,31 @@ def emit(manifest: UnifiedManifest, *, client=None, embed: bool = True,
     client = client or _os_client()
     _assert_agent_indices(by_index)
 
+    element_id = str(getattr(manifest, "element_id", "") or "")
+    fingerprint = run_fingerprint(manifest)
+    if skip_unchanged and element_id and docs:
+        prior = previous_run(client, element_id)
+        if (prior and prior.get("fingerprint") == fingerprint
+                and int(prior.get("schema_version") or -1) == SCHEMA_VERSION):
+            # A matching fingerprint means "this run would write the same documents", NOT "those
+            # documents are in the index". An index that was recreated or wiped would otherwise
+            # stay empty forever, with every re-ingest reporting a clean skip. So confirm the
+            # documents are actually there before trusting the record — one search per index.
+            present = set()
+            for index in by_index:
+                for parent in {str((src.get("extracted") or {}).get("parent_doc_id")
+                                   or src.get("doc_id") or doc_id)
+                               for i, doc_id, src in docs if i == index}:
+                    present |= existing_doc_ids(client, index, parent)
+            expected = {doc_id for _i, doc_id, _s in docs}
+            if expected <= present:
+                return {"dry_run": False, "backend": "opensearch", "skipped": True,
+                        "reason": "unchanged since the last run", "doc_count": len(docs),
+                        "indices": by_index, "indexed": 0, "embedded": 0,
+                        "fingerprint": fingerprint}
+            logger.info("fingerprint matches for %s but %d of %d documents are missing from the "
+                        "index — rewriting", element_id, len(expected - present), len(expected))
+
     # Diff BEFORE writing: the orphan set is (what is indexed now) - (what we are about to
     # write), so it has to be read while the old state is still there.
     plan = reconcile_plan(client, docs) if reconcile else {"orphans": {}, "orphan_count": 0}
@@ -530,9 +563,16 @@ def emit(manifest: UnifiedManifest, *, client=None, embed: bool = True,
     # 3) delete what this element no longer produces
     deleted = _delete_orphans(client, plan.get("orphans") or {}) if reconcile else 0
 
-    return {"dry_run": False, "backend": "opensearch", "doc_count": len(docs),
-            "indices": by_index, "indexed": indexed, "embedded": embedded,
-            "deleted_orphans": deleted, "orphans_found": plan.get("orphan_count", 0)}
+    if element_id:
+        # Written AFTER the docs land, so a crashed run does not record a success that would make
+        # the next run skip it.
+        record_run(client, element_id, fingerprint,
+                   {"doc_count": len(docs), "indices": by_index})
+
+    return {"dry_run": False, "backend": "opensearch", "skipped": False,
+            "doc_count": len(docs), "indices": by_index, "indexed": indexed,
+            "embedded": embedded, "deleted_orphans": deleted,
+            "orphans_found": plan.get("orphan_count", 0), "fingerprint": fingerprint}
 
 
 __all__ = ["build_docs", "emit", "ensure_index", "index_mapping", "mapping_drift",

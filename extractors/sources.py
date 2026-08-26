@@ -222,7 +222,17 @@ def _looks_like_html(content_type: str, path: Path) -> bool:
 
 
 def fetch_url(url: str, dest: Path, *, element_id: str = "",
-              timeout: int = DEFAULT_TIMEOUT) -> ResolvedSource:
+              timeout: int = DEFAULT_TIMEOUT, allow_html: bool = False) -> ResolvedSource:
+    """Fetch *url* into *dest*.
+
+    ``allow_html`` says HTML is the payload the CALLER asked for. Without it, HTML is refused as a
+    landing page — correct for a dataset, where an HTML response means the link points at a web
+    page instead of at data. It is wrong when a landing page is exactly what was requested:
+    ``_wants_html`` only recognises a URL whose path ends in ``.html``, and a publisher article URL
+    (``mdpi.com/2073-4441/12/1/123``) does not, so the publication resolver's landing-page fallback
+    was refused **30 times** by the guard protecting it. The caller's intent is the fact here, not
+    the URL's suffix.
+    """
     import requests
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +265,7 @@ def fetch_url(url: str, dest: Path, *, element_id: str = "",
             # the extractor then reported a schema for a web page. Detected from the DECLARED
             # content type and confirmed against the leading bytes, because a server that lies
             # about Content-Type is common and the magic bytes are not negotiable.
-            if _looks_like_html(content_type, dest) and not _wants_html(url):
+            if _looks_like_html(content_type, dest) and not (allow_html or _wants_html(url)):
                 dest.unlink(missing_ok=True)
                 raise SourceError(
                     f"source returned an HTML page, not data ({content_type or 'no type'}): "

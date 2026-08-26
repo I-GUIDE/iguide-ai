@@ -4,13 +4,25 @@
     {
       "name": "iguide-chat-preview",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8131", "--directory", "examples"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8131",
+        "--directory",
+        "examples"
+      ],
       "port": 8131
     },
     {
       "name": "corpus-graph",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8137", "--directory", "outputs/corpus_graph"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8137",
+        "--directory",
+        "outputs/corpus_graph"
+      ],
       "port": 8137
     },
     {
@@ -18,6 +30,18 @@
       "runtimeExecutable": "scripts/run_agent_api_dev.sh",
       "runtimeArgs": [],
       "port": 5002
+    },
+    {
+      "name": "extraction-browser",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8141",
+        "--directory",
+        "outputs"
+      ],
+      "port": 8141
     }
   ]
 }

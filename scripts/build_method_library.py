@@ -300,6 +300,7 @@ def main() -> int:
             # open. "Paywalled" is a fact about the world, recorded as its own outcome: a re-run
             # will not change it.
             from extractors.open_access import extract_doi, resolve
+            from extractors.publication_extractor import read_document
 
             cached_pdf = sorted(cache.glob(f"{short}__*.pdf"))
             if cached_pdf:
@@ -323,19 +324,56 @@ def main() -> int:
                     continue
                 oa = resolve(doi)
                 row["doi"], row["licence"] = doi, oa.licence
-                if not oa.pdf_url:
+                if oa.pdf_from:
+                    row["pdf_from"] = oa.pdf_from
+                if not oa.pdf_url and not (oa.is_oa and oa.landing_url):
                     stats[f"unfetchable:{'closed' if not oa.is_oa else 'oa_no_pdf'}"] += 1
-                    row.update(stage="fetch", error=oa.reason[:90])
+                    row.update(stage="fetch", error=oa.reason[:110])
                     per_element.append(row)
                     continue
-                try:
-                    src = fetch_url(oa.pdf_url, cache / f"{short}__oa.pdf", element_id=eid)
-                    local = Path(src.local_path)
-                    row.update(sha256=src.sha256, bytes=src.bytes)
+
+                # Two shapes of the same open copy, tried in order. The reader added in M8.10
+                # routes on the file's first bytes rather than its extension, so a full-text HTML
+                # article is now as readable as a PDF -- which turns "open access, but no direct
+                # PDF url" from a dead end into a second attempt. 39 of the corpus's 177 DOIs
+                # landed in exactly that bucket.
+                attempts = []
+                if oa.pdf_url:
+                    attempts.append((oa.pdf_url, f"{short}__oa.pdf", "pdf_get"))
+                if oa.landing_url and oa.landing_url != oa.pdf_url:
+                    attempts.append((oa.landing_url, f"{short}__oa.html", "landing_get"))
+
+                last_error = ""
+                for url, name, failure_kind in attempts:
+                    try:
+                        # HTML is the payload for a landing page, not a redirect to refuse.
+                        src = fetch_url(url, cache / name, element_id=eid,
+                                        allow_html=name.endswith(".html"))
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"[:100]
+                        continue
+                    candidate = Path(src.local_path)
+                    # A 200 is not a document. Ask the reader BEFORE counting this a success, so
+                    # a bot check or a paywall interstitial falls through to the next attempt
+                    # instead of being recorded as a fetched paper.
+                    text, read_note = read_document(str(candidate))
+                    if not text.strip():
+                        last_error = read_note or "fetched, but no readable text"
+                        try:
+                            candidate.unlink()
+                        except OSError:
+                            pass
+                        continue
+                    local = candidate
+                    row.update(sha256=src.sha256, bytes=src.bytes, chars=len(text),
+                               source_kind=("html" if name.endswith(".html") else "pdf"))
+                    if read_note:
+                        row["read_note"] = read_note[:100]
                     stats["fetched"] += 1
-                except Exception as exc:
-                    stats["unfetchable:pdf_get"] += 1
-                    row.update(stage="fetch", error=f"{type(exc).__name__}: {exc}"[:90])
+                    break
+                else:
+                    stats[f"unfetchable:{attempts[-1][2] if attempts else 'pdf_get'}"] += 1
+                    row.update(stage="fetch", error=last_error[:110] or "no attempt succeeded")
                     per_element.append(row)
                     continue
         else:
