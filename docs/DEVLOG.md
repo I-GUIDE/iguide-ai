@@ -3536,3 +3536,57 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
   cheapest remaining recovery — Unpaywall records a landing URL for many of them, and the M8.10
   HTML reader can read a full-text article — which would test the reader against real publisher
   HTML rather than the synthetic fixtures it has now.
+
+## 2026-08-26 · M8.17 · The HTML guard was refusing the landing pages the resolver asked for
+
+**Change** `open_access.resolve` scans `oa_locations` for a PDF, not only `best_oa_location`, and
+  records which location it used; the driver falls back to the landing URL and verifies
+  readability BEFORE counting a fetch; `sources.fetch_url` takes `allow_html`;
+  `opensearch_emitter.emit` finally calls its own skip-if-unchanged machinery. Plus
+  `scripts/export_dataset_details.py` and `scripts/build_extraction_browser.py`.
+
+**Why** Both were named as gaps in the previous report.
+
+  **Skip-if-unchanged was written, tested, and unwired.** `run_fingerprint`, `previous_run` and
+  `record_run` had no caller outside the tests, so every re-index rewrote the corpus and
+  `iguide_agent_ingest_runs` did not exist on the cluster. Now wired — with a presence check,
+  because a matching fingerprint means "this run would write the same documents", not "those
+  documents are in the index". Without it, a recreated index stays empty forever while every
+  re-ingest reports a clean skip.
+
+  **The landing-page recovery was blocked by its own guard.** `fetch_url` refuses HTML as a
+  landing page, which is right for a dataset. `_wants_html` only recognises a URL whose *path*
+  ends in `.html`, and a publisher article URL (`mdpi.com/2073-4441/12/1/123`) does not — so the
+  new fallback was refused **30 times** by the check protecting it. The caller's intent is the
+  fact, not the URL's suffix.
+
+**Measured** Publication reach, over three runs of the same 203 elements:
+
+  | | fetched | readable | reach |
+  |---|---|---|---|
+  | before (M8.16) | 54 | 53 | 26.1% |
+  | + alternate OA locations & landing fallback | 58 | 57 | 28.1% |
+  | + `allow_html` | **73** | **72** | **35.5%** |
+
+  So 53 → 72 readable documents, and "open access, but no direct PDF url" is gone as a category.
+  What remains: 44 with no open copy, 36 publisher 403s, 26 with no DOI, 10 landing pages whose
+  HTML carried no extractable text, 5 not in Crossref, 5 more bot-check pages. Tests
+  **1455 → 1478**.
+
+**Surprised by** The 403s went 30 → 36 while everything else improved. The extra six are landing
+  URLs on hosts that also refuse an automated GET — the same publishers, refusing the second
+  attempt too. Worth stating plainly: this run made no progress against bot protection and was
+  never going to. It is now the single largest recoverable category and needs an institutional
+  proxy, not code.
+
+  Also five *new* bot-check pages surfaced, which is the fallback working as intended: they are
+  landing pages that fetched with a 200 and were then rejected by the reader instead of being
+  counted as papers. The driver checks readability before crediting a fetch for exactly this.
+
+**A destructive mistake of mine** I overwrote `.claude/launch.json` — tracked, and holding three
+  existing server configurations — by writing the file instead of appending to it. Restored from
+  HEAD with my config appended. I should have read it first; the tool even told me the file already
+  existed and I did not stop to check what was in it.
+
+**Next** Nothing outstanding from the report. The browser page regenerates from
+  `outputs/` in one command, so it stays current without hand-editing.
