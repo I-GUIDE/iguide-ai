@@ -3590,3 +3590,54 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 
 **Next** Nothing outstanding from the report. The browser page regenerates from
   `outputs/` in one command, so it stays current without hand-editing.
+
+## 2026-08-26 · M8.23 · The unit count I reported was 551; the registry now holds 840
+
+**Not my change.** A concurrent session committed `M8.21` (registry key collisions) and `M8.22`
+(browser cross-links + publication specs) while I was finishing the publication run. This entry
+exists because those commits invalidate numbers **I** published, and the correction belongs next to
+the original claim rather than only in their commit message.
+
+**What they found** The registry key was `{element_package}.{symbol}`, which is not unique when one
+element spans several files — and a code element IS a whole repository (`2641203f` has 35 source
+files). Two files defining `load` collide on one key; both modules get written, because they are
+content-addressed with differing shas, and the second registry write drops the first. The module
+stays on disk with nothing pointing at it. Their measurement: 58 of 362 callable code units, 16%,
+unreachable. Proven directly — two same-named functions in two files produced 2 modules and 1
+registry entry holding the second file's code. The cross-element form of this same bug had been
+fixed once before, and the fix was to introduce this very key; the remedy is the same one level
+down.
+
+**Corrected figures, measured just now against the settled registry** (no extraction running,
+written 12:55:45):
+
+  | | reported | now |
+  |---|---|---|
+  | library units | 551 | **840** |
+  | from the code extractor | 302 | **591** |
+  | from notebooks / datasets | 227 / 22 | 227 / 22 (unchanged) |
+  | naked (no docstring, annotation or return) | 38% | **44%** (373) |
+  | zero-arg | 14% | **17%** (151) |
+  | carrying an invariant | 13% | **10%** (84) |
+  | top 5 of 95 elements | 296 of 551 (54%) | **573 of 840 (68%)** |
+  | largest single element | 92 | **193** |
+
+  The entire increase is in code units, which is consistent with a collision that only bites
+  elements spanning many files. I have NOT reproduced the arithmetic from 302 to 591 — their fix
+  accounts for 58, and the remainder is presumably the per-file keys now counting units that
+  previously collapsed onto one key. Recording the gap rather than inventing a reconciliation.
+
+**Why this matters beyond bookkeeping** Recovering the lost units made the library **bigger and
+thinner at the same time**: naked 38% → 44%, invariants 13% → 10%, and the top five elements now
+hold two-thirds of everything. That is the report's own "volume is the wrong objective" point,
+sharpened — 289 more units bought no more documentation and no more enforceable contracts.
+
+**Stale published artifact** `I-GUIDE Extraction Results`
+(54f2b535-0571-41fc-9085-195bdbf76d5e) states 551 units, 302 code units, 38% naked, 296-of-551
+concentration, and "8 cached documents, not 203" for publications. All six are now wrong. The
+Extraction Browser (25250db2) is current — it regenerates from `outputs/` and reads 840. The report
+needs a rebuild; its source HTML was not kept on disk, so that is a re-authoring job rather than a
+substitution.
+
+**Next** Nothing blocking. Whoever rebuilds the report should take the numbers from this entry
+rather than from the previous one.
