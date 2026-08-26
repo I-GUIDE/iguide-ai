@@ -2137,6 +2137,18 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_langchain_geocode_tools())
         except Exception:
             pass
+        # Staging, for the same reason and with the same boundary: the fetch happens HERE, where
+        # the MinIO and cluster credentials live, and only the bytes cross into the container.
+        # This is the peer that calls a generated `load_*` method, and those take a staged path.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_staging_tools
+            # The SAME workspace key the execution tools use below. Staging into a different
+            # one would put the bytes in a directory the sandbox never mounts, and the failure
+            # would surface inside a container with no network as "file not found".
+            tools.extend(make_langchain_staging_tools(
+                session_id=child_thread_id(state.get("thread_id"), "code_exec")))
+        except Exception:
+            pass
         # QGIS tools run in the AGENT environment (where QGIS is installed) — the code sandbox
         # image has no `qgis` package, so without these the peer could only attempt an
         # `import qgis` that always fails. Registered only when a backend is actually present.

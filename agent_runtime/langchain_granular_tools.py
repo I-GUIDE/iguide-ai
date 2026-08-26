@@ -329,6 +329,112 @@ def make_langchain_geocode_tools() -> List[Any]:
     ]
 
 
+
+# --------------------------------------------------------------------------- #
+# Staging — putting a platform dataset's bytes where the sandbox can read them
+# --------------------------------------------------------------------------- #
+
+def _staging_result(fn, *args, **kwargs) -> str:
+    """Run one staging call and return JSON, turning a refusal into a readable answer.
+
+    A raised exception reaches the model as a stack trace it cannot act on. A refusal with a
+    ``kind`` and a sentence explaining it is something the model can respond to — by staging a
+    different element, or by telling the user the dataset is a portal pointer with no file.
+    """
+    from agent_runtime.staging import StagingError
+
+    try:
+        return json.dumps({"ok": True, **fn(*args, **kwargs)}, ensure_ascii=True, default=str)
+    except StagingError as exc:
+        return json.dumps({"ok": False, "kind": exc.kind, "error": str(exc)},
+                          ensure_ascii=True, default=str)
+    except Exception as exc:                                # pragma: no cover - defensive
+        return json.dumps({"ok": False, "kind": "error",
+                           "error": f"{type(exc).__name__}: {exc}"[:300]}, ensure_ascii=True)
+
+
+def stage_element_tool(element_id: str, session_id: str = "", filename: str = "") -> str:
+    """Stage a platform element's file into the sandbox workspace by element id."""
+    from agent_runtime.staging import stage_element
+
+    return _staging_result(stage_element, element_id, session_id or "default", filename=filename)
+
+
+def stage_url_tool(url: str, session_id: str = "", filename: str = "") -> str:
+    """Stage a public http(s) file into the sandbox workspace."""
+    from agent_runtime.staging import stage_url
+
+    return _staging_result(stage_url, url, session_id or "default", filename=filename)
+
+
+def list_staged_inputs_tool(session_id: str = "") -> str:
+    """Everything staged into this session so far, with provenance."""
+    from agent_runtime.staging import staged_inputs
+
+    rows = staged_inputs(session_id or "default")
+    return json.dumps({"count": len(rows), "inputs": rows}, ensure_ascii=True, default=str)
+
+
+def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[Any]:
+    """Staging tools for the peers that RUN code.
+
+    Agent-side by design: the sandbox runs ``--network none`` and holds no credentials, so the
+    fetch happens here and only the bytes cross the boundary. That is why a dataset the agent
+    found can be opened at all — the 44 generated loaders take a ``staged_path`` and, before this,
+    nothing could produce one.
+    """
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception:  # pragma: no cover - optional dependency
+        return []
+
+    session = session_id or "default"
+
+    def _stage_element(element_id: str, filename: str = "") -> str:
+        return stage_element_tool(element_id, session, filename)
+
+    def _stage_url(url: str, filename: str = "") -> str:
+        return stage_url_tool(url, session, filename)
+
+    def _list_inputs() -> str:
+        return list_staged_inputs_tool(session)
+
+    return [
+        StructuredTool.from_function(
+            func=_stage_element, name="stage_element",
+            description=(
+                "Download a PLATFORM ELEMENT's data file into the sandbox workspace so code can "
+                "open it. Input: the element id from a search result. Returns `staged_path` — the "
+                "path INSIDE execute_code (e.g. /work/inputs/export.csv) — plus sha256, size and "
+                "origin. USE THIS before calling a generated `load_*` method: those take exactly "
+                "this path. Sandboxed code has NO network and cannot download anything itself. "
+                "If the element is a portal pointer rather than a deposited file, this says so."
+            ),
+            metadata={"category": "data"},
+        ),
+        StructuredTool.from_function(
+            func=_stage_url, name="stage_url",
+            description=(
+                "Download a public http(s) data file into the sandbox workspace. Returns "
+                "`staged_path` for use inside execute_code, with sha256 and size recorded for "
+                "reproducibility. Prefer stage_element when the data belongs to a platform "
+                "element, so the run stays attributable. Private, loopback and cloud-metadata "
+                "addresses are refused."
+            ),
+            metadata={"category": "data"},
+        ),
+        StructuredTool.from_function(
+            func=_list_inputs, name="list_staged_inputs",
+            description=(
+                "List the files already staged into this session, with their paths and origins. "
+                "Check here before staging again — the workspace persists across execute_code "
+                "calls within a session."
+            ),
+            metadata={"category": "data"},
+        ),
+    ]
+
+
 def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
     # QGIS is not installed in the default agent image (only GDAL, for the geopandas-backed
     # geo tools). Expose each QGIS tool only when its backend is actually present, so the agent

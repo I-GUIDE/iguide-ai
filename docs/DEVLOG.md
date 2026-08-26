@@ -3686,3 +3686,47 @@ rather than from the previous one.
 **Next** Nothing outstanding on the browser. `--max-files` still defaults to 60, which silently
   truncated two code elements before this session raised it; the driver now records
   `truncated_by_max_files`, but the default itself is worth revisiting against build time.
+
+## 2026-08-26 · M8.26 · Staging: the 44 dataset loaders finally have something to load
+
+**Change** `agent_runtime/staging.py` — `stage_url`, `stage_object`, `stage_element`,
+  `staged_inputs`; three LangChain tools in `langchain_granular_tools.py`; the names added to
+  `graph_state.RAG_COMPONENT_TOOL_NAMES` and the tools given to the code peer. 41 tests.
+
+**Why** Extraction generates 44 loaders shaped `def load_x(staged_path)` and nothing could produce
+  a `staged_path`: the only staging that existed resolved a user-uploaded `file_id`. An entire
+  element type was **readable and not runnable** — the agent could describe a dataset's schema and
+  could not open the file.
+
+  The fetch runs agent-side, and that is the security property rather than a convenience. The
+  sandbox runs `--network none`; MinIO keys, the OpenSearch credentials and a route into the
+  platform's private subnet all live in the agent process. Fetching inside the container would mean
+  putting credentials inside it. So only bytes cross the boundary, and the container learns nothing
+  about where they came from.
+
+**Measured** End to end against a real corpus dataset served over HTTP: staged **37,079,384 bytes**
+  with sha256 `b8436072a7df645f…` to `/work/inputs/export.csv`, provenance appended to
+  `inputs.jsonl`, and then `load_chicago_crime_data_2026(staged_path)` — the generated loader,
+  imported from the real library — returned a **DataFrame of 128,886 rows and 22 columns**. That is
+  the first time a platform dataset has gone from a search result to an open frame. Tests
+  **1537 → 1578**.
+
+**The load-bearing part is the SSRF guard.** The URL is chosen by a language model and this process
+  can reach `169.254.169.254` (instance credentials), `127.0.0.1` (its own API) and
+  `10.0.147.52:7687` (the platform's Neo4j). Every resolved address must pass, not just the first,
+  because a host that resolves public once and private next is the whole DNS-rebinding trick. The
+  refusal names the address, explains why, and names `AGENT_STAGING_ALLOW_PRIVATE` — a rejection a
+  reader cannot act on gets worked around by disabling the check wholesale.
+
+**Surprised by** How close the workspace key came to being silently wrong. I first wired the tools
+  with a `session_id` variable that was not the one the execution tools use — they key on
+  `child_thread_id(thread_id, "code_exec")`. Staging into a different key would have put the bytes
+  in a directory the sandbox never mounts, and the failure would have surfaced inside a container
+  with no network as "file not found". A test now reads `graph.py` and asserts the two calls agree,
+  because nothing else in the system would notice.
+
+**Next** `stage_element` resolves through `sources.source_link`, so a portal pointer is reported as
+  having no file rather than as a broken download. What is still missing is the prompt work: the
+  code peer now HAS the tools, and the measured lesson of this project is that a capability the
+  model must elect is a capability you do not have. Whether it reaches for `stage_element` unprompted
+  needs a live run to answer.
