@@ -188,14 +188,29 @@ _DEFAULT_SYSTEM = ("You are a language model answering a single request. Answer 
 # allowed at the time — followed by a refusal to run code because `execute_code` was
 # "not available in this environment", while it was bound and working. Leaving the CLI with
 # ZERO tools of its own removes the competing list.
+# Every tool the CLI can offer its own subprocess. This is a DENYLIST and it fails OPEN, which
+# is not a theoretical concern: `Agent` and `ListAgents` were missing, and a live agent turn under
+# this provider reported "every tool returned No such tool available; the only tool that responds
+# here is ListAgents". The model had a REAL tool channel with one working tool in it, preferred it
+# over the prompt-described JSON envelope this shim relies on, concluded no tools were reachable,
+# and answered that it could not proceed. The turn measured the denylist's hole, not the agent.
+#
+# `--allowed-tools` is not the fix: it governs permission prompts, not availability, and passing a
+# name that matches nothing still leaves all 13 tools present (verified).
+#
+# So this list must stay complete. `_assert_no_native_tools()` checks it against the running CLI
+# rather than trusting that it is, because the CLI gains tools on its own release schedule and
+# this file cannot know when.
 _AGENT_TOOLS = (
-    "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
+    "Agent,ListAgents,Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
     "TodoWrite,SlashCommand,KillShell,BashOutput,"
     "AskUserQuestion,ScheduleWakeup,ShareOnboardingGuide,Skill,ToolSearch,Artifact,Monitor,"
     "ReportFindings,SendUserFile,Workflow,CronCreate,CronList,CronDelete,"
     "TaskCreate,TaskUpdate,TaskList,TaskGet,TaskOutput,TaskStop,SendMessage,"
     "EnterPlanMode,ExitPlanMode,LSP,PushNotification,RemoteTrigger,DesignSync,"
-    "EnterWorktree,ExitWorktree"
+    "EnterWorktree,ExitWorktree,"
+    "ListSkills,SearchSkills,ListPlugins,SearchPlugins,SuggestPluginInstall,"
+    "mcp__*"
 )
 
 
@@ -244,6 +259,40 @@ def _build_argv(exe: str, prompt: str, mdl: str, system: Optional[str] = None) -
         argv += ["--max-budget-usd", budget]
     return argv
 
+
+
+_TOOL_PROBE = ("Output ONLY a comma-separated list of every tool name you can call. "
+               "If you can call none, output exactly: NONE")
+
+
+def native_tools_visible(*, timeout: int = 120) -> list:
+    """Tool names the isolated CLI subprocess can still call. Empty is the goal.
+
+    ``_AGENT_TOOLS`` is a denylist, and a denylist fails OPEN: the CLI gains tools on its own
+    release schedule and this file cannot know when. ``Agent`` and ``ListAgents`` were missing,
+    and the cost was not abstract — an agent turn under this provider reported that every tool
+    returned "No such tool available" except ``ListAgents``, because the model preferred the one
+    real tool channel it could see over the prompt-described JSON envelope this shim depends on.
+    The turn measured this hole rather than the agent.
+
+    So: ask the running CLI directly. Cheap, one call, and it turns "the list is probably still
+    complete" into an answer.
+    """
+    exe = shutil.which("claude")
+    if not exe:
+        raise ClaudeCliUnavailable("claude executable not found")
+    _load_token_from_env_file()
+    try:
+        proc = subprocess.run(_build_argv(exe, _TOOL_PROBE, model()), capture_output=True,
+                              text=True, timeout=timeout, cwd=_neutral_cwd())
+        payload = json.loads(proc.stdout or "{}")
+    except Exception as exc:                                # pragma: no cover - environment
+        raise ClaudeCliUnavailable(f"tool probe failed: {type(exc).__name__}: {exc}") from exc
+    reply = str(payload.get("result") or "")
+    if "NONE" in reply.upper():
+        return []
+    names = {n.strip() for n in reply.replace("\n", ",").split(",")}
+    return sorted(n for n in names if n and " " not in n and n.isidentifier())
 
 def call(prompt: str, *, system: Optional[str] = None) -> str:
     """Run one `claude -p` turn, retrying only a SIGNAL death.
