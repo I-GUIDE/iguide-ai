@@ -92,6 +92,79 @@ def _element_url(doc: Any) -> str:
     return f"{base}/{plural}/{doc_id}"
 
 
+# How much extracted detail one element may add to the evidence view. Bounded because this rides
+# on TOP of the document's own contents, and an element with 200 blocks would otherwise crowd out
+# every other result.
+EXTRACTED_MAX_CHARS = 900
+
+
+def _render_extracted(extracted: Any) -> str:
+    """What extraction produced from this element, as REFERENCES and ACTIONABLE items.
+
+    The distinction is the point. A block or a method spec is a reference — it tells the model what
+    the element contains and lets it answer accurately. An import line is actionable: the method
+    library is mounted read-only inside ``execute_code``, so that exact line runs there without an
+    install, a download or a network hop. Rendering both as undifferentiated prose was how the
+    agent kept saying "adapt this notebook" while an importable function sat one field away.
+    """
+    if not isinstance(extracted, dict) or not extracted:
+        return ""
+    parts: List[str] = []
+
+    units = [u for u in (extracted.get("units") or []) if isinstance(u, dict)]
+    runnable = [u for u in units if u.get("import_line")]
+    if runnable:
+        lines = ["RUNNABLE METHODS extracted from this element — the import line works verbatim "
+                 "inside execute_code (the library is mounted read-only); prefer it over "
+                 "re-implementing:"]
+        for unit in runnable:
+            lines.append(f"  - {unit.get('signature') or unit.get('symbol')}")
+            if unit.get("doc_summary"):
+                lines.append(f"      {unit['doc_summary']}")
+            lines.append(f"      import: {unit['import_line']}")
+            if unit.get("requirements"):
+                lines.append(f"      requires: {', '.join(map(str, unit['requirements']))}")
+            if unit.get("invariants"):
+                lines.append(f"      enforced: {', '.join(map(str, unit['invariants']))}")
+        parts.append("\n".join(lines))
+
+    named_only = [u for u in units if not u.get("import_line")]
+    if named_only:
+        parts.append("METHODS PRESENT but not importable (reference only): "
+                     + ", ".join(str(u.get("symbol")) for u in named_only if u.get("symbol")))
+    if extracted.get("unit_count") and len(units) < int(extracted["unit_count"]):
+        parts.append(f"({extracted['unit_count']} methods in total; "
+                     f"{len(units)} shown — call kb_method_search for the rest)")
+
+    dataset = extracted.get("dataset")
+    if isinstance(dataset, dict) and dataset:
+        bits = []
+        for key in ("format", "family", "row_count", "crs", "geometry_type"):
+            if dataset.get(key):
+                bits.append(f"{key}={dataset[key]}")
+        if dataset.get("schema"):
+            bits.append("fields=" + ", ".join(map(str, dataset["schema"][:14])))
+        if dataset.get("variables"):
+            bits.append("variables=" + ", ".join(map(str, dataset["variables"][:14])))
+        if bits:
+            parts.append("DATASET STRUCTURE (extracted from the file itself): " + "; ".join(bits))
+
+    publication = extracted.get("publication")
+    if isinstance(publication, dict) and publication.get("steps"):
+        steps = "\n".join(f"  {i}. {s}" for i, s in enumerate(publication["steps"][:8], 1))
+        parts.append("METHOD THIS PAPER DESCRIBES (extracted from its full text):\n" + steps)
+
+    blocks = [b for b in (extracted.get("blocks") or []) if isinstance(b, dict)]
+    if blocks:
+        summary = "; ".join(str(b.get("context") or "").replace("\n", " ")[:70]
+                            for b in blocks if b.get("context"))
+        if summary:
+            parts.append(f"NOTEBOOK SECTIONS ({extracted.get('block_count', len(blocks))} cells): "
+                         + summary)
+
+    return ("\n".join(parts))[:EXTRACTED_MAX_CHARS]
+
+
 def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
     # One evidence item as title + url + contents. We deliberately do NOT lead with the raw
     # [doc_id]: showing it trained the synthesizer to cite "[<uuid>]" instead of the hyperlink
@@ -100,7 +173,12 @@ def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
     contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
     url = _element_url(doc)
     head = f"title: {title}" + (f"\nurl: {url}" if url else "")
-    return f"{head}\n{contents[:max_chars]}"
+    body = f"{head}\n{contents[:max_chars]}"
+    # Everything extraction produced for this element, joined on by id in _direct_search_sweep.
+    # Without this the join enriched a document the model never saw the enrichment of.
+    extracted = doc.get("extracted") if isinstance(doc, dict) else None
+    rendered = _render_extracted(extracted)
+    return f"{body}\n{rendered}" if rendered else body
 
 
 def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) -> str:

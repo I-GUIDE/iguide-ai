@@ -384,7 +384,199 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
         return {"doc_id": doc_id, "found": False, "note": f"{type(exc).__name__}: {exc}"}
 
 
+
+# --------------------------------------------------------------------------- #
+# Joining the agent KB to search results BY ELEMENT ID
+#
+# The KB was only ever reachable by TEXT: `agent_kb_search` matches a query against
+# `title`/`contents`/`extracted.embed_text`. That leaves a hole with a sharp edge — a hit found by
+# SPATIAL search (a bounding box), by GRAPH search (a relation), or by a keyword that appears in
+# the platform record but nowhere in the extracted sub-documents, can never surface its own
+# extracted content. The element and its blocks, units, schema and method spec sit in the same
+# corpus, keyed by the same id, and nothing joined them.
+#
+# So: look the KB up by id, attach it to the element it belongs to, and fold away the standalone
+# rows that would otherwise compete with their own parent for an evidence slot.
+# --------------------------------------------------------------------------- #
+
+# How much extracted detail rides along with one element. A 200-cell notebook must not consume the
+# whole evidence budget just because its element matched.
+MAX_BLOCKS_PER_ELEMENT = 4
+MAX_UNITS_PER_ELEMENT = 6
+MAX_STEPS_PER_ELEMENT = 12
+
+
+def _kb_indices() -> List[str]:
+    from extractors.indices import all_agent_indices
+
+    return list(all_agent_indices())
+
+
+def _summarize_for_element(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """One element's extracted content, compacted into what a reader or the model can use."""
+    blocks: List[Dict[str, Any]] = []
+    units: List[Dict[str, Any]] = []
+    dataset: Dict[str, Any] = {}
+    spec: Dict[str, Any] = {}
+
+    for source in sources:
+        extracted = source.get("extracted") or {}
+        if not isinstance(extracted, dict):
+            continue
+        kind = str(extracted.get("kind") or "")
+        doc_id = str(source.get("doc_id") or "")
+        if kind == "method_unit" or extracted.get("unit"):
+            method = _method_payload(extracted)
+            if method:
+                units.append({**method, "doc_id": doc_id})
+        elif kind == "notebook_block" or extracted.get("block"):
+            block = extracted.get("block") or {}
+            blocks.append({
+                "doc_id": doc_id,
+                "order": extracted.get("order"),
+                "context": (block.get("markdown_context") or "")[:280],
+                "tools": block.get("resolved_tools") or [],
+                "imports": block.get("imports") or [],
+            })
+        elif kind == "dataset":
+            dataset = {k: extracted.get(k) for k in
+                       ("format", "family", "row_count", "crs", "bounds", "geometry_type",
+                        "schema", "variables", "dims", "primary_member")
+                       if extracted.get(k) not in (None, "", [], {})}
+        elif kind == "publication":
+            spec = {k: extracted.get(k) for k in
+                    ("status", "steps", "datasets_referenced", "tools_referenced",
+                     "is_method_spec")
+                    if extracted.get(k) not in (None, "", [], {})}
+            if spec.get("steps"):
+                spec["steps"] = spec["steps"][:MAX_STEPS_PER_ELEMENT]
+
+    blocks.sort(key=lambda b: b.get("order") if isinstance(b.get("order"), int) else 9999)
+    # Contract-bearing units first: an importable one is worth more evidence budget than a bare
+    # name, and the cap means the ordering decides what survives it.
+    units.sort(key=lambda u: (0 if u.get("import_line") else 1, str(u.get("symbol") or "")))
+
+    out: Dict[str, Any] = {}
+    if units:
+        out["units"] = units[:MAX_UNITS_PER_ELEMENT]
+        out["unit_count"] = len(units)
+    if blocks:
+        out["blocks"] = blocks[:MAX_BLOCKS_PER_ELEMENT]
+        out["block_count"] = len(blocks)
+    if dataset:
+        out["dataset"] = dataset
+    if spec:
+        out["publication"] = spec
+    return out
+
+
+def kb_for_elements(element_ids, *, client=None) -> Dict[str, Dict[str, Any]]:
+    """``{element_id: extracted summary}`` for the elements that have any, keyed BY ID.
+
+    Works on either backend, because the caller should not have to know which one is configured:
+    the local file store is scanned, the cluster is queried with one terms lookup per index.
+    An element with nothing extracted is simply absent from the result — never a stub, so a caller
+    can test membership.
+    """
+    wanted = [str(e).strip() for e in (element_ids or []) if str(e or "").strip()]
+    if not wanted:
+        return {}
+    wanted_set = set(wanted)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+
+    from extractors import kb_store
+
+    if client is None and kb_store.kb_backend() != "opensearch":
+        for element in wanted_set:
+            for _doc_id, source in kb_store.local_blocks_for_parent(element, _kb_indices()):
+                grouped.setdefault(element, []).append(source)
+            # A dataset or publication element IS its own document, so it never appears in
+            # `local_blocks_for_parent`, which excludes the element id itself.
+            _index, direct = kb_store.local_get(element, _kb_indices())
+            if direct:
+                grouped.setdefault(element, []).append(direct)
+    else:
+        client = client or _os_client()
+        for index in _kb_indices():
+            try:
+                if not client.indices.exists(index=index):
+                    continue
+                resp = client.search(index=index, body={
+                    "size": 500,
+                    "query": {"bool": {"should": [
+                        {"terms": {"extracted.parent_doc_id": wanted}},
+                        {"terms": {"doc_id": wanted}},
+                    ], "minimum_should_match": 1}}})
+            except Exception:                              # pragma: no cover
+                # An index that is absent or unreachable costs its own contribution, never the
+                # whole join: a search turn must not fail because enrichment could not run.
+                continue
+            for hit in (resp.get("hits", {}).get("hits") or []):
+                source = hit.get("_source") or {}
+                parent = _parent_of(str(source.get("doc_id") or hit.get("_id") or ""), source)
+                if parent in wanted_set:
+                    grouped.setdefault(parent, []).append(source)
+
+    return {element: summary for element, sources in grouped.items()
+            if (summary := _summarize_for_element(sources))}
+
+
+def attach_kb_to_documents(documents, *, client=None) -> Dict[str, Any]:
+    """Attach each element's extracted content to its own search result, and fold the duplicates.
+
+    Two things happen, and the second is as important as the first:
+
+    * every platform document gains ``extracted`` — the units, blocks, schema or method spec that
+      belong to that element — so a spatial or graph hit carries its contract even though no text
+      matched;
+    * standalone KB rows whose parent is already in the result set are REMOVED, because they were
+      competing with their own element for an evidence slot. Deduplicating by parent was an
+      explicit exit criterion that the text-only union could not meet.
+
+    Returns ``{documents, attached, folded, actionable}``. ``actionable`` is the flat list of
+    import lines across everything attached — the things the agent can actually run, as opposed to
+    read.
+    """
+    docs = [d for d in (documents or []) if isinstance(d, dict)]
+    if not docs:
+        return {"documents": [], "attached": 0, "folded": 0, "actionable": []}
+
+    platform_ids, kb_rows = [], []
+    for doc in docs:
+        if str(doc.get("source") or "") in ("agent_kb", "method_library"):
+            kb_rows.append(doc)
+        elif doc.get("doc_id"):
+            platform_ids.append(str(doc["doc_id"]))
+
+    summaries = kb_for_elements(platform_ids, client=client) if platform_ids else {}
+
+    out, folded = [], 0
+    for doc in docs:
+        source = str(doc.get("source") or "")
+        if source in ("agent_kb", "method_library"):
+            parent = str(doc.get("parent_doc_id") or "")
+            if parent and parent in summaries:
+                folded += 1        # its content now rides on the element itself
+                continue
+            out.append(doc)
+            continue
+        summary = summaries.get(str(doc.get("doc_id") or ""))
+        out.append({**doc, "extracted": summary} if summary else doc)
+
+    actionable = []
+    for element, summary in summaries.items():
+        for unit in summary.get("units") or []:
+            if unit.get("import_line"):
+                actionable.append({"element": element, "symbol": unit.get("symbol"),
+                                   "signature": unit.get("signature"),
+                                   "import_line": unit["import_line"],
+                                   "requirements": unit.get("requirements") or []})
+    return {"documents": out, "attached": len(summaries), "folded": folded,
+            "actionable": actionable}
+
+
 __all__ = [
     "agent_kb_search", "get_kb_block", "build_keyword_query", "build_knn_query", "normalize_hit",
     "normalize_hits", "group_by_parent", "resolve_parent_elements", "resolve_parent_elements_local",
+    "kb_for_elements", "attach_kb_to_documents",
 ]

@@ -1560,7 +1560,28 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
     # put every single turn on the internet. It stays LLM-elected (and budget-capped) — plus the
     # last-resort fallback in _web_fallback_evidence, which fires only when the platform found
     # NOTHING.
-    return [d for d in docs if isinstance(d, dict)]
+    docs = [d for d in docs if isinstance(d, dict)]
+
+    # Join the agent KB to what the other arms found, BY ELEMENT ID. The KB arm above matches on
+    # text, which leaves a hole: a hit found by SPATIAL search (a bounding box) or by GRAPH search
+    # (a relation) can never text-match its own extracted content, so its units, schema and method
+    # spec stayed invisible however good they were. The id is right there on both sides.
+    #
+    # It also folds away KB rows whose parent element is already in the result set — they were
+    # competing with their own element for an evidence slot.
+    try:
+        from rag_pipeline.search.agent_kb import attach_kb_to_documents
+
+        joined = attach_kb_to_documents(docs)
+        docs = joined["documents"]
+        if joined.get("attached") or joined.get("folded"):
+            logger.info("agent KB join: enriched %d element(s), folded %d duplicate row(s), "
+                        "%d actionable import line(s)", joined["attached"], joined["folded"],
+                        len(joined.get("actionable") or []))
+    except Exception:
+        # Enrichment is additive. A turn must still answer from the documents it already has.
+        pass
+    return docs
 
 
 # Sources that are NOT the platform: external catalogs and the open web. Everything else counts as
