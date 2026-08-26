@@ -752,3 +752,119 @@ def test_a_genuinely_unknown_unit_is_still_flagged():
     """Widening the vocabulary must not turn it into "accept anything"."""
     findings = check_declared_units({"x": {"value": 1, "unit": "bananas"}})
     assert any(f["status"] == UNKNOWN for f in findings)
+
+
+# ------------------------------------------------------------- counts are checkable numbers
+
+@pytest.mark.parametrize("unit", ["records", "record", "rows", "count", "counts", "n",
+                                  "observations", "features", "incidents", "events", "items"])
+def test_the_words_people_actually_use_for_a_count_are_recognised(unit):
+    """`count` was in the known set and `records` was not, so a live run declaring
+    {'value': 27824, 'unit': 'records'} — the natural word for what it was counting — came back
+    "unrecognised unit 'records'; not checked", and that single unknown downgraded a correct
+    answer to unverified."""
+    from agent_runtime.sandbox_verify import check_declared_units
+
+    findings = check_declared_units({"n_rows": {"value": 27824, "unit": unit}})
+    statuses = {f["status"] for f in findings if f["check"] == "declared_units"}
+    assert statuses == {"pass"}, (unit, findings)
+
+
+def test_recognising_a_count_is_not_the_same_as_checking_it():
+    """A negative or fractional count is wrong whatever produced it. Recognising the unit and then
+    passing is how 'unit count' would score a pass for a value of -3."""
+    from agent_runtime.sandbox_verify import check_declared_units
+
+    negative = check_declared_units({"n": {"value": -3, "unit": "records"}})
+    assert any(f["check"] == "declared_units" and f["status"] == "fail" for f in negative)
+
+    fractional = check_declared_units({"n": {"value": 12.5, "unit": "count"}})
+    assert any(f["check"] == "declared_units" and f["status"] == "fail" for f in fractional)
+
+    whole = check_declared_units({"n": {"value": 27824, "unit": "records"}})
+    assert any(f["check"] == "declared_units" and f["status"] == "pass" for f in whole)
+
+
+def test_a_whole_float_count_is_accepted():
+    """`int(len(df))` is the common form, but `df.shape[0] * 1.0` reaches here as 27824.0."""
+    from agent_runtime.sandbox_verify import check_declared_units
+
+    findings = check_declared_units({"n": {"value": 27824.0, "unit": "records"}})
+    assert any(f["check"] == "declared_units" and f["status"] == "pass" for f in findings)
+
+
+# ------------------------------------------------------------- which population was counted
+
+def test_a_count_larger_than_every_frame_in_the_run_fails():
+    """The case that is impossible on any reading. Motivated by a live run that answered a
+    question about 128,886 records with counts from a 49,789-row spatially-joined subset."""
+    pd = pytest.importorskip("pandas")
+
+    from agent_runtime.sandbox_verify import check_count_population
+
+    namespace = {"df": pd.DataFrame({"a": range(40000)})}
+    findings = check_count_population({"total": {"value": 128886, "unit": "records"}}, namespace)
+    assert [f["status"] for f in findings] == ["fail"]
+    assert "exceeds every frame" in findings[0]["message"]
+
+
+def test_a_plausible_count_reports_the_population_it_came_from():
+    """This does not guess which frame is 'the' population — that would generate false positives.
+    It records the sizes present, which is what lets a reader see 9,993-of-49,789 and ask the
+    right question."""
+    pd = pytest.importorskip("pandas")
+
+    from agent_runtime.sandbox_verify import check_count_population
+
+    namespace = {"df": pd.DataFrame({"a": range(128886)})}
+    findings = check_count_population({"theft": {"value": 27824, "unit": "records"}}, namespace)
+    assert findings[0]["status"] == "pass"
+    assert "df=128886" in findings[0]["message"]
+    assert findings[0]["frames"] == {"df": 128886}
+
+
+def test_a_non_count_output_is_not_population_checked():
+    """A buffer radius in metres has no population, and comparing it to a row count would be
+    nonsense that fires on every geospatial run."""
+    pd = pytest.importorskip("pandas")
+
+    from agent_runtime.sandbox_verify import check_count_population
+
+    namespace = {"df": pd.DataFrame({"a": range(10)})}
+    assert check_count_population({"radius": {"value": 25000, "unit": "metres"}}, namespace) == []
+
+
+def test_population_checking_needs_a_frame_to_compare_against():
+    from agent_runtime.sandbox_verify import check_count_population
+
+    assert check_count_population({"n": {"value": 5, "unit": "count"}}, {}) == []
+
+
+# ------------------------------------------------------------- nothing to check is not a failure
+
+def test_a_run_that_checked_nothing_says_so_explicitly():
+    """An empty report reached the reader as "cannot_determine (counts all zero) but its findings
+    were not retained" — which reads as evidence lost in transit. There was never anything to
+    retain, and the two need different responses."""
+    from agent_runtime.sandbox_verify import run_checks
+
+    report = run_checks({"x": 1, "y": "text"})
+    assert report["verdict"] == "cannot_determine"
+    assert [f["check"] for f in report["findings"]] == ["not_applicable"]
+    assert "nothing in this run was checkable" in report["findings"][0]["message"]
+    assert any(report["counts"].values()), "an all-zero count is what made this unreadable"
+
+
+def test_the_synthesised_message_distinguishes_nothing_checked_from_evidence_lost():
+    from agent_runtime.supervisor.graph import _gate_issues_from
+
+    nothing = _gate_issues_from({"verdict": "cannot_determine",
+                                 "counts": {"pass": 0, "fail": 0, "cannot_determine": 0},
+                                 "findings": []})
+    assert "checked nothing in this run" in nothing[0]["message"]
+    assert "not retained" not in nothing[0]["message"]
+
+    truncated = _gate_issues_from({"verdict": "cannot_determine",
+                                   "counts": {"pass": 2, "fail": 0, "cannot_determine": 1},
+                                   "findings": []})
+    assert "not retained" in truncated[0]["message"]

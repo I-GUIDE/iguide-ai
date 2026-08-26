@@ -3781,3 +3781,51 @@ rather than from the previous one.
   not retained" on the successful run, and reported `unrecognised unit 'records'`. So the number
   is right and the system cannot yet say so — the same gap this whole thread has been closing, one
   layer further in.
+
+## 2026-08-26 · M8.29 · The gate can now verify a counting run
+
+**Change** `agent_runtime/sandbox_verify.py`: count-unit aliases; `_count_finding` actually checks
+  a declared count; new `check_count_population`; an explicit `not_applicable` finding when a run
+  had nothing to check. `graph.py`'s synthesised message distinguishes "checked nothing" from
+  "findings lost". 9 tests.
+
+**Why** The live run that produced the right answer — THEFT 27,824 of 128,886 records — could not
+  be verified, for three separate reasons:
+
+  1. **`records` was not a unit.** `count` was in `_KNOWN_UNITS`; `records` was not, and nothing
+     aliased it. The model wrote the natural word for what it was counting and got "unrecognised
+     unit 'records'; not checked". One UNKNOWN downgrades the whole verdict, so a correct answer
+     was reported unverified. Same shape as the `km²` case already recorded above it.
+  2. **Recognising a unit is not checking it.** Even spelled `count`, the value was never
+     inspected — `unit count` would have passed for `-3`. A count is the one unit whose value the
+     gate can judge alone.
+  3. **"Nothing to check" was reported as evidence lost.** A helper `execute_code` call with no
+     frames and no declared outputs produced zero findings, and the reader got
+     `cannot_determine (counts all zero) but its findings were not retained` — which sends someone
+     looking for missing evidence that never existed.
+
+**Measured** Run 3's actual code, re-run in the real sandbox against the real 37 MB file:
+
+  | | before | after |
+  |---|---|---|
+  | verdict | `cannot_determine` | **`pass`** |
+  | counts | `{pass 0, fail 0, unknown 0}` | **`{pass 10, fail 0, unknown 0}`** |
+  | inspected | — | `['df']` |
+
+  And the new population check on the failure run 4 actually made: a count of 128,886 declared
+  from a frame of 40,000 now **fails** with *"declared count 128886 exceeds every frame in this
+  run (df=40000), so it cannot have been counted from any of them"*. Tests **1580 → 1599**.
+
+**Surprised by** The structural binding test caught my own change. `_count_finding` and
+  `check_count_population` are referenced by the gate but the gate is INLINED into the sandbox
+  script by an explicit function list, and I forgot to add them —
+  `test_no_name_in_the_inlined_gate_is_unbound` named both, immediately. That test was written for
+  exactly this after seven NameErrors were swallowed as `cannot_determine`, and it is the first
+  time it has caught a fresh one rather than documenting an old one.
+
+**Deliberately not done** `check_count_population` does not guess which frame is "the" population.
+  Run 4's real error — counting from a 49,789-row spatial join while answering a question about
+  128,886 records — is not detectable from inside the sandbox, because both numbers are legitimate
+  counts of the frames present. What the check does is RECORD the population, so the discrepancy is
+  visible to a reader rather than invisible. Judging it would need the question, which the gate
+  deliberately cannot see.

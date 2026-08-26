@@ -670,6 +670,15 @@ def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     # A verdict with no surviving finding is still a verdict: `_read_checks` truncates, so the
     # evidence can be gone while the judgement stands. Synthesise rather than fall silent.
     counts = report.get("counts") or {}
+    if not any(counts.values()):
+        # All-zero counts mean the gate produced NO findings, so nothing was lost in transit —
+        # there was nothing to lose. Saying "findings were not retained" sent a reader looking for
+        # missing evidence when the honest report is that this run made no checkable claim.
+        return [{"check": "invariant_gate", "status": verdict, "target": "this run",
+                 "message": ("the invariant gate checked nothing in this run — no frame-like "
+                             "binding and no declared outputs — so its numbers are unverified "
+                             "rather than verified-and-failed. Publish IGUIDE_OUTPUTS to have "
+                             "quoted numbers checked.")}]
     return [{"check": "invariant_gate", "status": verdict, "target": "this run",
              "message": (f"the invariant gate returned {verdict!r} "
                          f"(counts {counts}) but its findings were not retained; "

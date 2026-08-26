@@ -109,6 +109,16 @@ _UNIT_ALIASES = {
     "square kilometre": "square_kilometres", "square kilometer": "square_kilometres",
     "square kilometres": "square_kilometres", "square kilometers": "square_kilometres",
     "square_kilometres": "square_kilometres", "square_kilometers": "square_kilometres",
+    # COUNTS. `count` was in the known set and `records` was not, so a live run declaring
+    # {"value": 27824, "unit": "records"} — the natural word for what it was counting — came back
+    # "unrecognised unit 'records'; not checked", and that single UNKNOWN downgraded a correct
+    # answer to unverified. The vocabulary has to cover how the number is actually described, not
+    # only the token we would have chosen.
+    "record": "count", "records": "count", "row": "count", "rows": "count",
+    "counts": "count", "n": "count", "number": "count", "observation": "count",
+    "observations": "count", "feature": "count", "features": "count",
+    "item": "count", "items": "count", "event": "count", "events": "count",
+    "incident": "count", "incidents": "count", "occurrence": "count", "occurrences": "count",
     "hectare": "hectares", "hectares": "hectares", "ha": "hectares",
     "acre": "acres", "acres": "acres",
     "degree": "degrees", "degrees": "degrees", "deg": "degrees", "°": "degrees",
@@ -321,6 +331,82 @@ _KNOWN_UNITS = {"metres", "meters", "m", "kilometres", "kilometers", "km", "feet
                 "index", "none", "dimensionless"}
 
 
+
+def _count_finding(target: str, value: Any, unit: Any) -> Dict[str, Any]:
+    """A declared count must be a non-negative whole number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _finding("declared_units", UNKNOWN, target,
+                        f"unit {unit} but the value is {type(value).__name__}, not a number",
+                        unit=str(unit))
+    try:
+        if isinstance(value, float) and not float(value).is_integer():
+            return _finding("declared_units", FAIL, target,
+                            f"declared as a count but the value is fractional ({value})",
+                            unit=str(unit))
+        if value < 0:
+            return _finding("declared_units", FAIL, target,
+                            f"declared as a count but the value is negative ({value})",
+                            unit=str(unit))
+    except Exception:                                       # pragma: no cover - defensive
+        return _finding("declared_units", UNKNOWN, target, f"unit {unit}; value not comparable",
+                        unit=str(unit))
+    return _finding("declared_units", PASS, target,
+                    f"unit {unit}: a non-negative whole count ({int(value)})", unit=str(unit))
+
+
+def check_count_population(outputs: Any, namespace: Dict[str, Any],
+                           *, max_frames: int = 12) -> List[Dict[str, Any]]:
+    """Report the population each declared count could have come from, and fail an impossible one.
+
+    Motivated by a live run that answered a question about a 128,886-record dataset with counts
+    computed from a 49,789-row spatially-joined subset — reporting THEFT as 9,993 where the file
+    says 27,824. Every individual number was real; the POPULATION was different from the one the
+    question named, and nothing in the report made that visible.
+
+    This does not guess which frame is "the" population — that would be a false-positive
+    generator. It records the frame sizes present, which is what lets a reader see 9,993-of-49,789
+    and ask the right question, and it FAILS only the case that is impossible on any reading: a
+    count larger than every frame in the run.
+    """
+    if not isinstance(outputs, dict) or not outputs:
+        return []
+    sizes: Dict[str, int] = {}
+    for name, obj in list(namespace.items()):
+        if name.startswith("_") or len(sizes) >= max_frames:
+            continue
+        try:
+            if _looks_like_frame(obj):
+                sizes[name] = int(len(obj))
+        except Exception:
+            continue
+    if not sizes:
+        return []
+
+    largest = max(sizes.values())
+    findings: List[Dict[str, Any]] = []
+    for key, spec in list(outputs.items())[:24]:
+        if not isinstance(spec, dict):
+            continue
+        unit = str(spec.get("unit") or "").strip().lower()
+        if unit != "count" and _UNIT_ALIASES.get(unit) != "count":
+            continue
+        value = spec.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        summary = ", ".join(f"{n}={c}" for n, c in sorted(sizes.items())[:6])
+        if value > largest:
+            findings.append(_finding(
+                "count_population", FAIL, str(key),
+                f"declared count {int(value)} exceeds every frame in this run ({summary}), so it "
+                f"cannot have been counted from any of them", frames=sizes))
+        else:
+            findings.append(_finding(
+                "count_population", PASS, str(key),
+                f"count {int(value)} is within the run's frames ({summary}) — confirm this is the "
+                f"population the question asked about", frames=sizes))
+    return findings
+
+
 def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
     """Every numeric output the run declares must carry a unit and be in a plausible range.
 
@@ -365,6 +451,12 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
             # unit came back "unrecognised; not checked" and downgraded the whole run.
             findings.append(_finding("declared_units", UNKNOWN, target,
                                      f"unrecognised unit {unit!r}; not checked", unit=str(unit)))
+        elif _UNIT_ALIASES.get(str(unit).strip().lower()) == "count" or \
+                str(unit).strip().lower() == "count":
+            # A count is the one unit whose VALUE the gate can judge on its own: a negative or
+            # fractional count is wrong whatever produced it. Recognising the unit and then not
+            # checking it is how "unit count" passed for a value of -3.
+            findings.append(_count_finding(target, value, unit))
         else:
             findings.append(_finding("declared_units", PASS, target, f"unit {unit}",
                                      unit=str(unit)))
@@ -754,11 +846,17 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
 
     # Declared numeric outputs, if the run published any. Checked outside the frame loop
     # because they are scalars the ANSWER will quote, not frames.
+    declared = None
     try:
         declared = namespace.get(DECLARED_OUTPUTS)
         findings.extend(check_declared_units(declared))
     except Exception as exc:
         findings.append(_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
+                                 f"check errored: {exc}"))
+    try:
+        findings.extend(check_count_population(declared, namespace, max_frames=max_frames))
+    except Exception as exc:
+        findings.append(_finding("count_population", UNKNOWN, DECLARED_OUTPUTS,
                                  f"check errored: {exc}"))
 
     if skipped:
@@ -767,6 +865,19 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                                  f"{len(skipped)} frame-like binding(s) exceeded the inspection "
                                  f"budget of {max_frames} and were NOT checked",
                                  skipped=skipped[:24]))
+
+    if not findings:
+        # A run with no frames, no geospatial import and no declared outputs checked NOTHING, and
+        # an empty report reached the reader as "cannot_determine (counts all zero) but its
+        # findings were not retained" — which reads as evidence lost in transit. There was never
+        # anything to retain. Saying so is the difference between "we tried and could not tell"
+        # and "this run made no numeric claim to check", and in a multi-step turn the second is
+        # usually a helper call that should not drag the answer to unverified.
+        findings.append(_finding(
+            "not_applicable", UNKNOWN, "this run",
+            "nothing in this run was checkable: no frame-like binding, no geospatial import and "
+            "no declared outputs. This is not a failed verification — publish IGUIDE_OUTPUTS to "
+            "have the numbers you quote checked."))
 
     counts = {PASS: 0, FAIL: 0, UNKNOWN: 0}
     for f in findings:
@@ -875,7 +986,7 @@ def _inlined_helpers() -> str:
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
                 check_not_all_nan, _looks_like_join_result, _has_metric_column,
                 check_join_cardinality,
-                check_finite, check_declared_units,
+                check_finite, _count_finding, check_declared_units, check_count_population,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
                 _looks_like_frame, _has_geometry, install_contract_guards, run_checks):
         src = inspect.getsource(obj)
