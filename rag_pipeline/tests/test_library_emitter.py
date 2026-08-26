@@ -406,3 +406,134 @@ def test_unit_kind_reaches_the_registry(lib):
     asset.unit["signature"] = "Thing(a, b)  # class"
     library_emitter.emit(_manifest(asset), root=lib)
     assert _reg(lib)[_q("elem1", "Thing")]["unit_kind"] == "class"
+
+
+# ------------------------------------------------------- two files, one symbol name
+
+def _two_file_element(tmp_path, name_a="readers.py", name_b="writers.py", symbol="load"):
+    """One element whose repository defines the same symbol in two files."""
+    from extractors.base import EMIT_LIBRARY, EMIT_OPENSEARCH, ExtractContext
+    from extractors.code_extractor import CodeExtractor
+    from extractors.manifest import UnifiedManifest
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / name_a).write_text(
+        f'def {symbol}(path):\n    """Read the gauge table."""\n    return open(path).read()\n')
+    (repo / name_b).write_text(
+        f'def {symbol}(path):\n    """Read the basin polygons."""\n    return open(path).read(2)\n')
+
+    man = UnifiedManifest(element_id="elem0001", element_type="code")
+    for fname in (name_a, name_b):
+        ctx = ExtractContext(element_id="elem0001", element_type="code",
+                             fields={"title": "Two files"},
+                             targets=[EMIT_OPENSEARCH, EMIT_LIBRARY],
+                             extra={"repo_dir": str(repo)})
+        result = CodeExtractor().extract(str(repo / fname), ctx=ctx)
+        man.assets.extend(result.assets)
+        man.provenance_edges.extend(result.edges)
+    return man
+
+
+def _real_units(registry):
+    return {k: v for k, v in registry.items()
+            if isinstance(v, dict) and v.get("signature")
+            and not v.get("alias_for") and not v.get("ambiguous")}
+
+
+def test_two_files_defining_one_symbol_both_survive(tmp_path, monkeypatch):
+    """The registry key was ``{element_package}.{symbol}``, which is not unique when one element
+    spans several files — and an element IS a whole repository.
+
+    Both modules were written (they are content-addressed, so their shas differ) and the second
+    registry write dropped the first, leaving a live module on disk that nothing pointed at.
+    Measured on the corpus before this fix: 2641203f had 129 callable units and 92 registry
+    entries across 35 source files; 76485230 had 85 and 70; 187ec685 had 7 and 3. **58 of 362
+    callable code units, 16%, were written and then made unreachable.**
+
+    The cross-element form of this bug was fixed once before, by introducing the very key that
+    leaves this case open.
+    """
+    root = tmp_path / "lib"
+    man = _two_file_element(tmp_path)
+    summary = library_emitter.emit(man, root=root)
+    registry = json.loads(
+        (root / "iguide_methods" / "_registry.json").read_text(encoding="utf-8"))
+
+    units = _real_units(registry)
+    assert len(units) == 2, f"a unit was overwritten: {sorted(units)}"
+    assert len(summary["written"]) == 2
+
+    by_source = {(v.get("provenance") or {}).get("source_rel_path"): k for k, v in units.items()}
+    assert set(by_source) == {"readers.py", "writers.py"}
+    # Each key must resolve to the module holding THAT file's code, not the other's.
+    assert "Read the gauge table." == units[by_source["readers.py"]]["doc_summary"]
+    assert "Read the basin polygons." == units[by_source["writers.py"]]["doc_summary"]
+    assert (units[by_source["readers.py"]]["module"]
+            != units[by_source["writers.py"]]["module"])
+
+
+def test_the_colliding_short_name_becomes_an_ambiguity_not_a_winner(tmp_path):
+    """Picking one silently is what the old code did by accident. An explicit ambiguity is the
+    same answer the cross-element case already gives."""
+    root = tmp_path / "lib"
+    library_emitter.emit(_two_file_element(tmp_path), root=root)
+    registry = json.loads(
+        (root / "iguide_methods" / "_registry.json").read_text(encoding="utf-8"))
+
+    short = "ke_elem0001_readers_py.load"
+    assert registry[short]["ambiguous"] is True
+    assert len(registry[short]["candidates"]) == 2
+    for candidate in registry[short]["candidates"]:
+        assert candidate in registry
+
+
+def test_every_advertised_module_exists_on_disk(tmp_path):
+    """The failure mode was a module written and never pointed at. Its mirror — a registry entry
+    pointing at a module that is not there — must not be introduced by the fix."""
+    root = tmp_path / "lib"
+    library_emitter.emit(_two_file_element(tmp_path), root=root)
+    registry = json.loads(
+        (root / "iguide_methods" / "_registry.json").read_text(encoding="utf-8"))
+    pkg = root / "iguide_methods"
+    for key, value in _real_units(registry).items():
+        relative = str(value["module"]).split(".", 1)[1].replace(".", "/") + ".py"
+        assert (pkg / relative).is_file(), f"{key} advertises a missing module"
+
+
+def test_re_emitting_the_same_file_overwrites_rather_than_duplicating(tmp_path):
+    """Only a DIFFERENT source is a second unit. An edit to the same file is a new version and
+    must replace, or every re-ingest would grow the registry."""
+    root = tmp_path / "lib"
+    library_emitter.emit(_two_file_element(tmp_path), root=root)
+    library_emitter.emit(_two_file_element(tmp_path), root=root)
+    registry = json.loads(
+        (root / "iguide_methods" / "_registry.json").read_text(encoding="utf-8"))
+    assert len(_real_units(registry)) == 2
+
+
+def test_an_element_with_no_collision_keeps_the_plain_key(tmp_path):
+    """The disambiguated key is uglier and appears in the import line, so it must only appear
+    where it is actually needed."""
+    from extractors.base import EMIT_LIBRARY, EMIT_OPENSEARCH, ExtractContext
+    from extractors.code_extractor import CodeExtractor
+    from extractors.manifest import UnifiedManifest
+
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    (repo / "only.py").write_text(
+        'def load_gauges(path):\n    """Read the gauge table."""\n    return open(path).read()\n')
+    man = UnifiedManifest(element_id="elem0002", element_type="code")
+    ctx = ExtractContext(element_id="elem0002", element_type="code",
+                         fields={"title": "One file"},
+                         targets=[EMIT_OPENSEARCH, EMIT_LIBRARY],
+                         extra={"repo_dir": str(repo)})
+    result = CodeExtractor().extract(str(repo / "only.py"), ctx=ctx)
+    man.assets.extend(result.assets)
+
+    root = tmp_path / "lib"
+    library_emitter.emit(man, root=root)
+    registry = json.loads(
+        (root / "iguide_methods" / "_registry.json").read_text(encoding="utf-8"))
+    keys = sorted(_real_units(registry))
+    assert keys == ["ke_elem0002_only_py.load_gauges"], keys

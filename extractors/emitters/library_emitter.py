@@ -271,6 +271,8 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
         subpkg = pkg / subpkg_name
         exports: List[tuple] = []          # (symbol, module_name)
 
+        claims: Dict[str, str] = {}          # registry key -> the source file that owns it
+        collided: Dict[str, set] = {}        # short key -> the source stems fighting over it
         for a in element_units:
             unit = a.get("unit") or {}
             sha = str(unit.get("slice_sha") or "")
@@ -327,11 +329,60 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
             # defined by two different notebooks, and the later ingest overwrote the earlier.
             # A resolver that returns "whichever element was ingested last" is worse than one
             # that admits the ambiguity.
-            qualified = f"{subpkg_name}.{symbol}"
+            #
+            # `{package}.{symbol}` fixed that ACROSS elements and left the same bug WITHIN one.
+            # An element is a whole repository: 2641203f spans 35 source files, and two files
+            # defining `load` collide on one key. Both modules get written -- they are
+            # content-addressed, so the shas differ -- and the second registry write drops the
+            # first, leaving a live module on disk that nothing points at.
+            #
+            # Measured on the corpus: 129 callable units in 2641203f, 92 registry entries; 85 and
+            # 70 in 76485230; 7 and 3 in 187ec685. **58 of 362 callable code units, 16%, were
+            # written and then made unreachable.** It also means part of the "617 modules for 551
+            # units" gap I previously attributed entirely to superseded versions is this instead.
+            #
+            # Same remedy as the cross-element case, one level down: the source file disambiguates,
+            # and the colliding short key becomes an explicit ambiguity rather than a winner.
+            source_stem = _ident(Path(str((unit.get("provenance") or {}).get(
+                "source_rel_path") or "")).stem, fallback="src")
+            short = f"{subpkg_name}.{symbol}"
+            qualified = short
+            holder = claims.get(short)
+            if holder is not None and holder != source_stem:
+                # Re-registering the SAME source is an edit and must overwrite. A DIFFERENT source
+                # is a genuine second unit, so both move to file-qualified keys -- including the
+                # one that got here first, which is currently sitting on the short key and would
+                # otherwise be destroyed when that key becomes the ambiguity stub.
+                if short in registry:
+                    moved = f"{subpkg_name}.{holder}.{symbol}"
+                    registry[moved] = registry.pop(short)
+                    emitted.discard(short)
+                    emitted.add(moved)
+                    claims[moved] = holder
+                qualified = f"{subpkg_name}.{source_stem}.{symbol}"
+                collided.setdefault(short, set()).update({holder, source_stem})
+            claims[qualified] = source_stem
+            claims.setdefault(short, source_stem)
             registry[qualified] = entry
             emitted.add(qualified)
             touched.add(subpkg_name)
             summary["written"].append(f"{subpkg_name}/{module_name}.py::{symbol}")
+
+        for short_key, stems in collided.items():
+            # The element package cannot re-export a name two of its files define. Saying so beats
+            # picking one, which is what the old code did by accident.
+            symbol_name = short_key.rsplit(".", 1)[-1]
+            candidates = sorted(f"{subpkg_name}.{stem}.{symbol_name}" for stem in stems)
+            registry[short_key] = {
+                "ambiguous": True, "library_symbol": symbol_name,
+                "candidates": candidates, "element_package": subpkg_name,
+                "doc_summary": f"{symbol_name!r} is defined by {len(stems)} files of this "
+                               f"element; import it by its qualified name."}
+            emitted.add(short_key)
+        ambiguous_symbols = {k.rsplit(".", 1)[-1] for k in collided}
+        exports = [(sym, mod) for sym, mod in exports if sym not in ambiguous_symbols]
+        if collided:
+            summary.setdefault("ambiguous_within_element", []).extend(sorted(collided))
 
         if exports and not dry_run:
             (subpkg / "__init__.py").write_text(
