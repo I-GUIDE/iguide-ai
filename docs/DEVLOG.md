@@ -3481,3 +3481,58 @@ whole point of pinning. Suite **1005 passed**, 0 failed.
 **Next** Nothing outstanding on extraction content. The whitelist→denylist change means a new
   handler field reaches the index without an emitter edit, which removes the step that was being
   forgotten.
+
+## 2026-08-26 · M8.16 · Re-derived the publication reach: 53 of 203, and the old 94 was real
+
+**Change** Ran the fixed resolver over all 203 publications and audited the result with
+  `scripts/audit_publication_reach.py`. Also corrected a stale error string that still named
+  `external_link` — the wrong field, and the one that caused the branch to fire 195 times.
+
+**Why** "94 reachable open-access PDFs" was quoted in this log and in `open_access.py`'s docstring
+  and was produced by a fetcher that trusted the URL. The M8.10 reader changed what "reachable"
+  can mean, so the figure needed re-deriving rather than re-quoting.
+
+**Measured** The pipeline, stage by stage, over 203 publication elements:
+
+  | stage | n |
+  |---|---|
+  | DOI extracted from a recorded source link | **177** (169 resolved + 8 already cached) |
+  | no DOI anywhere | 26 |
+  | DOI, but no open copy exists | 49 (44 closed + 5 not a registered Crossref DOI) |
+  | open access, but Unpaywall names no direct PDF | 39 |
+  | **Unpaywall named an open PDF** | **89** |
+  | download failed | 35 |
+  | file on disk | 54 |
+  | **readable document** | **53** |
+  | publisher wall | 1 |
+
+  **Reach: 53 of 203 (26.1%).** Licences on what we hold: 39 cc-by, 3 cc-by-nc-nd, 4 unstated.
+
+  The reconciliation is exact: **89 offered − 35 download failures − 1 wall = 53 readable.**
+
+**Surprised by** The old number was not wrong, it was *mislabelled*. 89 is this run's count of DOIs
+  for which Unpaywall names an open PDF, against the docstring's "94 of 176 resolvable DOIs" — the
+  same quantity, reproduced within five. What it never meant was "we hold 94 readable papers". The
+  36-document gap is entirely the two stages downstream of Unpaywall, and quoting the resolver's
+  answer as the corpus's content skipped both.
+
+  The dominant loss is publisher bot protection, and it is concentrated:
+  **30 of the 35 download failures are HTTP 403** — MDPI 13, Wiley 6, Taylor & Francis 4, ACM 2,
+  ScienceDirect 2, plus PNAS, JBC and a KCL repository. Unpaywall correctly reports these as
+  legally open; the server simply refuses an automated GET. That is a refusal, recorded and not
+  worked around — the same stance as the bot-check page in M8.10, and it is now the single largest
+  recoverable category in the type. An institutional proxy or a publisher's own bulk-access
+  programme would be the legitimate route, and neither is a code change.
+
+**Two process failures of my own, both the shape this log exists to catch.** I set a monitor to
+  wait for the batch and keyed it on "the output JSON has ≥200 elements" — which the **stale** file
+  from the pre-fix run already satisfied, so it fired instantly and reported "DRIVER FINISHED"
+  while the driver had barely started. And an interim audit reported a document as
+  "unparseable by the reader" when it was simply half-downloaded; pypdf's "EOF marker not found" on
+  a partial file is indistinguishable from corruption. Fixed in M8.15 by flagging any file written
+  in the last 30 seconds. Both were checks that produced a confident number about the wrong thing.
+
+**Next** Nothing outstanding on the count. The 39 "open access, no direct PDF" cases are the
+  cheapest remaining recovery — Unpaywall records a landing URL for many of them, and the M8.10
+  HTML reader can read a full-text article — which would test the reader against real publisher
+  HTML rather than the synthetic fixtures it has now.

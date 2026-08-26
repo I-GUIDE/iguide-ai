@@ -313,7 +313,12 @@ def main() -> int:
                 doi = extract_doi(source_link_or_doi(meta))
                 if not doi:
                     stats["unfetchable:no_doi"] += 1
-                    row.update(stage="fetch", error="no DOI in external_link")
+                    # Name the fields actually searched. Saying "external_link" was doubly
+                    # misleading: it is not the field the API uses, and it was the wrong name that
+                    # caused this branch to fire 195 times in the first place.
+                    row.update(stage="fetch",
+                               error="no DOI in any recorded source link "
+                                     "(external-link-publication / doi / direct-download-link)")
                     per_element.append(row)
                     continue
                 oa = resolve(doi)
