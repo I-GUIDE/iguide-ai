@@ -63,23 +63,44 @@ def classify(reason: str, chars: int) -> str:
     return READABLE if chars > 0 else WRONG_TYPE
 
 
+# A file written within this many seconds may still be downloading.
+IN_FLIGHT_SECONDS = 30
+
+
 def audit(cache: Path) -> dict:
+    """Classify every fetched document, and flag any that may still be downloading.
+
+    The flag exists because its absence fooled me: auditing mid-fetch reported one document as
+    "unparseable by the reader" -- pypdf's "EOF marker not found" on a PDF that was half written.
+    Two minutes later the same file read cleanly. A partially-written download is indistinguishable
+    from a corrupt one at read time, so the only honest options are to wait, or to say which files
+    were in flight when the count was taken.
+    """
+    import time
+
     from extractors.publication_extractor import read_document, sniff_kind
 
-    rows = []
+    now = time.time()
+    rows, in_flight = [], []
     for path in sorted(cache.glob("*oa.pdf")) + sorted(cache.glob("*oa.html")):
+        stat = path.stat()
         text, reason = read_document(str(path))
         chars = len(text)
+        fresh = (now - stat.st_mtime) < IN_FLIGHT_SECONDS
+        if fresh:
+            in_flight.append(path.name)
         rows.append({
             "element": path.name.split("__", 1)[0],
             "file": path.name,
-            "bytes": path.stat().st_size,
+            "bytes": stat.st_size,
             "sniffed": sniff_kind(str(path)),
             "chars": chars,
             "reason": reason,
             "outcome": classify(reason, chars),
+            "possibly_in_flight": fresh,
         })
-    return {"cache": str(cache), "documents": len(rows), "rows": rows}
+    return {"cache": str(cache), "documents": len(rows), "rows": rows,
+            "in_flight": in_flight}
 
 
 def main() -> int:
@@ -102,7 +123,14 @@ def main() -> int:
         return 2
 
     counts = collections.Counter(r["outcome"] for r in rows)
-    print(f"fetched documents on disk: {len(rows)}\n")
+    print(f"fetched documents on disk: {len(rows)}")
+    if result.get("in_flight"):
+        names = result["in_flight"]
+        print(f"\n!! {len(names)} file(s) were written in the last {IN_FLIGHT_SECONDS}s and may "
+              f"still be downloading: {', '.join(names[:4])}"
+              f"{' ...' if len(names) > 4 else ''}\n"
+              f"   A half-written PDF reads as truncated. Re-run once the fetch has finished.")
+    print()
     print(f"{'outcome':<50}{'n':>5}   share of fetched")
     print("-" * 76)
     for bucket in _BUCKETS:
