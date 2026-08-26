@@ -40,6 +40,11 @@
      scrolls again. */
   html, body { height:100%; }
   body {
+    /* `100dvh` first, `100%` as the fallback for browsers without dynamic viewport units.
+       Viewport-relative on purpose: an Artifact renders inside a frame whose host RESIZES it to
+       fit the content, so a height that resolves against the parent is circular — the frame sizes
+       to the content while the content sizes to the frame. A viewport unit breaks that loop. */
+    height:100%; height:100dvh;
     margin:0; background:var(--paper); color:var(--ink);
     font:14px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Roboto, sans-serif;
     -webkit-font-smoothing:antialiased;

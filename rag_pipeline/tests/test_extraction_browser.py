@@ -239,6 +239,10 @@ def test_the_shell_is_viewport_height_so_the_panes_can_be_bounded():
     joined = " ".join(r["decls"] for r in body)
     assert "display:flex" in joined and "flex-direction:column" in joined
     assert "overflow:hidden" in joined
+    # Viewport-relative, not parent-relative. An Artifact renders in a frame whose host resizes
+    # it to fit the content, so a height resolving against the parent is circular: the frame
+    # sizes to the content while the content sizes to the frame.
+    assert "height:100dvh" in joined, "the shell height is not viewport-relative"
 
 
 @pytest.mark.parametrize("selector", ["#list", "#detail"])
