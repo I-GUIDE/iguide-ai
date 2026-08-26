@@ -6,8 +6,15 @@ what breaks. So these tests exercise the generator's data contract — the paylo
 placeholder was substituted, every record has an id/kind/name the list needs, and a record cannot
 smuggle a ``</script>`` that would end the block early.
 
-They do NOT assert on layout. A page that looks wrong is visible; a page that is silently empty is
-not.
+The second half asserts the LAYOUT CONTRACT, added after the first version shipped with the whole
+page scrolling as one document: reading down the list pushed the detail pane off screen. That is a
+cascade bug with a specific signature — `overflow-y:auto` on a grid child does nothing unless
+`min-height:0` lets it shrink below its content — so it is worth pinning even though the tests
+cannot see pixels. What they check is that the rules which MAKE a pane scrollable are present and
+unconditional, and that the mobile fallback releases them again.
+
+Neither half replaces looking at the page. They cover the two failures that are invisible until
+someone scrolls or the data goes missing.
 """
 
 from __future__ import annotations
@@ -188,3 +195,123 @@ def test_a_record_cannot_end_the_script_block_early(gen):
     assert "</script" not in body
     assert json.loads(body.replace("<\\/script", "</script"))["records"][0]["title"].startswith(
         "evil")
+
+
+# ------------------------------------------------------------------ the two-pane layout
+
+def _rules(css_text, selector):
+    """Every declaration block for an exact selector, in source order, with its media context."""
+    import re
+
+    out = []
+    for match in re.finditer(re.escape(selector) + r"\s*\{([^}]*)\}", css_text):
+        before = css_text[:match.start()]
+        depth = before.count("@media")
+        # Crude but sufficient: a rule is inside a media block if an unclosed @media precedes it.
+        opened = 0
+        in_media = False
+        for m in re.finditer(r"@media[^{]*\{|\{|\}", before):
+            tok = m.group(0)
+            if tok.startswith("@media"):
+                opened = 1
+                in_media = True
+            elif tok == "{" and in_media:
+                opened += 1
+            elif tok == "}" and in_media:
+                opened -= 1
+                if opened <= 0:
+                    in_media = False
+        out.append({"decls": match.group(1), "in_media": in_media, "depth": depth})
+    return out
+
+
+def _css():
+    text = TEMPLATE.read_text(encoding="utf-8")
+    return text.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
+def test_the_shell_is_viewport_height_so_the_panes_can_be_bounded():
+    """A pane can only scroll on its own if something above it stops growing with content."""
+    css = _css()
+    assert "html, body { height:100%; }" in css
+    body = [r for r in _rules(css, "body") if not r["in_media"]]
+    assert body, "no unconditional body rule"
+    joined = " ".join(r["decls"] for r in body)
+    assert "display:flex" in joined and "flex-direction:column" in joined
+    assert "overflow:hidden" in joined
+
+
+@pytest.mark.parametrize("selector", ["#list", "#detail"])
+def test_each_pane_scrolls_independently(selector):
+    """`overflow-y:auto` alone is not enough. A grid/flex child defaults to `min-height:auto`, so
+    it sizes to its content and pushes the container instead of scrolling — which is exactly the
+    bug this fixes: reading down the list scrolled the detail off screen."""
+    css = _css()
+    unconditional = [r for r in _rules(css, selector) if not r["in_media"]]
+    assert unconditional, f"no unconditional rule for {selector}"
+    joined = " ".join(r["decls"] for r in unconditional)
+    assert "overflow-y:auto" in joined, f"{selector} does not scroll"
+    assert "min-height:0" in joined, f"{selector} lacks min-height:0 and will not shrink"
+
+
+def test_the_scroll_container_between_them_is_bounded():
+    css = _css()
+    main = [r for r in _rules(css, "main") if not r["in_media"]]
+    joined = " ".join(r["decls"] for r in main)
+    assert "min-height:0" in joined and "overflow:hidden" in joined
+
+
+def test_narrow_screens_fall_back_to_one_scrolling_page():
+    """Two bounded panes side by side do not fit on a phone. There the shell relaxes, so the page
+    scrolls normally and the detail replaces the list."""
+    css = _css()
+    in_media = [r for r in _rules(css, "body") if r["in_media"]]
+    assert any("height:auto" in r["decls"] and "overflow:visible" in r["decls"]
+               for r in in_media), "the mobile fallback does not release the fixed shell"
+    assert "main.showing-detail #list { display:none; }" in css
+
+
+def test_the_count_line_stays_visible_while_the_list_scrolls():
+    css = _css()
+    count = " ".join(r["decls"] for r in _rules(css, ".count-line"))
+    assert "position:sticky" in count and "top:0" in count
+    # A sticky element over scrolling content needs its own background or the rows show through.
+    assert "background:var(--paper)" in count
+
+
+def test_the_controls_are_no_longer_sticky():
+    """They sit in the fixed shell now. Leaving `position:sticky` on them would create a second
+    sticky context inside a non-scrolling parent — inert, and misleading to the next reader."""
+    controls = " ".join(r["decls"] for r in _rules(_css(), ".controls"))
+    assert "position:sticky" not in controls
+
+
+# ------------------------------------------------------------------ scroll position
+
+def _script():
+    text = TEMPLATE.read_text(encoding="utf-8")
+    return text.rsplit("<script>", 1)[1]
+
+
+def test_picking_a_record_preserves_where_you_were_in_the_list():
+    """`render()` replaces every row, which resets the container's scrollTop. Without restoring
+    it, clicking a record forty rows down throws the reader back to the top — the same complaint
+    in a different place."""
+    js = _script()
+    assert "const keep = list.scrollTop;" in js
+    assert "list.scrollTop = keep;" in js
+
+
+def test_a_new_search_starts_at_the_top_of_its_results():
+    """The opposite case: a different result set has no remembered position worth keeping."""
+    assert "list.scrollTop = 0;" in _script()
+
+
+def test_a_new_record_starts_at_the_top_of_the_detail_pane():
+    assert "detail.scrollTop = 0;" in _script()
+
+
+def test_the_mobile_view_offers_a_way_back_to_the_list():
+    js = _script()
+    assert 'id="back"' in js
+    assert 'main.classList.remove("showing-detail")' in js

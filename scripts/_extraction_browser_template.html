@@ -34,11 +34,18 @@
   }
 
   * { box-sizing:border-box; }
+  /* An app shell, not a document: the two panes scroll independently so reading down the list
+     never pushes the detail off screen. `min-height:0` on the flex/grid children is what actually
+     allows them to shrink and scroll — without it they size to their content and the whole page
+     scrolls again. */
+  html, body { height:100%; }
   body {
     margin:0; background:var(--paper); color:var(--ink);
     font:14px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Roboto, sans-serif;
     -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column; overflow:hidden;
   }
+  header, .controls, .missing { flex:0 0 auto; }
   .mono { font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; }
 
   /* ---------- masthead ---------- */
@@ -59,7 +66,6 @@
   .controls {
     padding:14px 24px; border-bottom:1px solid var(--rule); background:var(--rail);
     display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center;
-    position:sticky; top:0; z-index:5;
   }
   input[type=search] {
     flex:1 1 260px; min-width:200px; padding:8px 11px;
@@ -86,15 +92,27 @@
   .sep { width:1px; align-self:stretch; background:var(--rule); }
 
   /* ---------- layout ---------- */
-  main { display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr); }
-  @media (max-width:900px) { main { grid-template-columns:1fr; } #detail { display:none; } }
-  main.showing-detail #detail { display:block; }
-
-  #list { border-right:1px solid var(--rule); }
+  main {
+    flex:1 1 auto; min-height:0; overflow:hidden;
+    display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);
+  }
+  #list { border-right:1px solid var(--rule); min-height:0; overflow-y:auto; }
+  #detail { min-height:0; overflow-y:auto; }
   .count-line {
     padding:9px 24px; font-size:11.5px; color:var(--muted);
     font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
     border-bottom:1px solid var(--rule-soft);
+    position:sticky; top:0; z-index:2; background:var(--paper);
+  }
+  /* Narrow screens cannot show both panes, so the shell relaxes back into a scrolling page and
+     the detail replaces the list once a record is picked. */
+  @media (max-width:900px) {
+    body { height:auto; overflow:visible; }
+    main { grid-template-columns:1fr; overflow:visible; }
+    #list, #detail { overflow:visible; }
+    #detail { display:none; }
+    main.showing-detail #list { display:none; }
+    main.showing-detail #detail { display:block; }
   }
   .row {
     display:block; width:100%; text-align:left; background:none; border:0;
@@ -129,6 +147,14 @@
 
   /* ---------- detail ---------- */
   #detail { padding:22px 26px 60px; min-width:0; }
+  #back { display:none; }
+  @media (max-width:900px) {
+    #back {
+      display:inline-block; margin:0 0 14px; padding:6px 12px; cursor:pointer;
+      font:inherit; font-size:12px; border:1px solid var(--rule); border-radius:4px;
+      background:var(--panel); color:var(--ink);
+    }
+  }
   #detail .empty { color:var(--muted); font-size:13.5px; max-width:44ch; }
   #detail h2 {
     margin:0 0 2px; font-size:19px; font-weight:640; letter-spacing:-.012em;
@@ -334,6 +360,7 @@
   const countLine = document.getElementById("countline");
   const detail = document.getElementById("detail");
   const main = document.getElementById("main");
+  const list = document.getElementById("list");
 
   function rowMeta(r) {
     if (r.kind === "unit") return esc(r.extractor || "");
@@ -380,7 +407,15 @@
             ? `<span class="row-flags">${r.flags.map(
                 (f) => `<span class="${tagClass(f)}">${esc(f)}</span>`).join("")}</span>`
             : "");
-      b.onclick = () => { state.selected = r; render(); show(r); };
+      b.onclick = () => {
+        // Re-rendering the list replaces its rows, which resets scrollTop. Restoring it is what
+        // keeps the reader where they were after picking a record forty rows down.
+        const keep = list.scrollTop;
+        state.selected = r;
+        render();
+        list.scrollTop = keep;
+        show(r);
+      };
       frag.appendChild(b);
     });
     rowsBox.appendChild(frag);
@@ -549,11 +584,18 @@
     const body = r.kind === "unit" ? unitDetail(r)
       : r.kind === "dataset" ? datasetDetail(r)
       : r.kind === "publication" ? publicationDetail(r) : codeDetail(r);
-    detail.innerHTML = `<h2>${esc(r.title || r.name)}</h2>`
+    detail.innerHTML = `<button type="button" id="back">&larr; All records</button>`
+      + `<h2>${esc(r.title || r.name)}</h2>`
       + `<p class="crumb">${esc(KIND_LABEL[r.kind] || r.kind)} · ${esc(r.id)}</p>` + body;
+    // The detail pane scrolls on its own, so a new record starts at ITS top rather than leaving
+    // the reader wherever the previous record happened to end.
     detail.scrollTop = 0;
-    if (window.matchMedia("(max-width:900px)").matches) {
-      detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    const back = document.getElementById("back");
+    if (back) {
+      back.onclick = () => {
+        main.classList.remove("showing-detail");
+        window.scrollTo({ top: 0 });
+      };
     }
   }
 
@@ -562,7 +604,7 @@
   document.getElementById("q").addEventListener("input", (e) => {
     clearTimeout(timer);
     const v = e.target.value.trim().toLowerCase();
-    timer = setTimeout(() => { state.q = v; render(); }, 110);
+    timer = setTimeout(() => { state.q = v; render(); list.scrollTop = 0; }, 110);
   });
 
   render();
