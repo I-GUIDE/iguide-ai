@@ -91,6 +91,34 @@ def collect_capability_inventory(
         tools += _tool_entries(make_langchain_geo_tools, default_input_file_ids=None)
     except Exception:
         pass
+    # Overlay / aggregation / temporal analysis registries. Probed unfiltered like the
+    # rest: the analyze and code peers only load these once files are attached, but
+    # "can you clip a layer?" is true of the deployment regardless of what is attached
+    # right now, so the inventory must report them.
+    try:
+        from agent_runtime.analysis_overlay_tools import make_overlay_tools
+
+        tools += _tool_entries(make_overlay_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+
+        tools += _tool_entries(make_aggregate_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.analysis_temporal_tools import make_temporal_tools
+
+        tools += _tool_entries(make_temporal_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+
+        tools += _tool_entries(make_spatial_stats_tools, default_input_file_ids=None)
+    except Exception:
+        pass
     try:
         from extractors.geo_handles import make_geo_analysis_tools
 

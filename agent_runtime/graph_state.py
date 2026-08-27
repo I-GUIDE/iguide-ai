@@ -33,12 +33,16 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     "qgis_processing_run",
     "qgis_metric_buffer",
     "pyqgis_layer_summary",
-    "pyqgis_render_map",
+    "qgis_map_image",
 }
 
 DISCOVERY_TOOL_NAMES: set[str] = {
     "rag_tool",
-    "mcp_search_geospatial_resources",
+    # NOTE: mcp_web_search_geo_links (formerly mcp_search_geospatial_resources) is deliberately
+    # absent. It is a plain DuckDuckGo web search — links only, no geometry — whose old name
+    # out-competed the real geo tools for anything "geospatial". web_search/web_fetch + opengeodata_search cover discovery;
+    # overpass_search covers real-world features. Leaving it out of every policy set keeps the
+    # smart-routing path from selecting it.
     "mcp_search_publications",
 }
 
@@ -50,6 +54,7 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "neo4j_explore_related_nodes",
     "spatial_search",
     "opengeodata_search",
+    "overpass_search",
     # Open-web tools. Omitting them here does not merely skip a nicety: tool_policy filters the
     # agent's toolset against these sets, so a name absent from here is stripped for EVERY intent
     # on the smart-routing path — the tool would be registered, documented and unreachable.

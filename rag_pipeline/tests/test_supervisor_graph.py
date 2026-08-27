@@ -687,7 +687,7 @@ def test_collect_image_artifacts_walks_json_tool_results():
     import json as _json
     from agent_runtime.supervisor_graph import _collect_image_artifacts
     analysis = {"tool_results": [
-        {"name": "plot_vector", "content": _json.dumps(
+        {"name": "render_map_image", "content": _json.dumps(
             {"ok": True, "file_id": "f1", "filename": "vector_plot.png",
              "download_url": "/agent/files/f1/download"})},
         {"name": "inspect_vector", "content": _json.dumps({"ok": True, "feature_count": 3})},
@@ -1204,7 +1204,7 @@ def test_code_peer_has_qgis_tools(monkeypatch):
 
     monkeypatch.setattr(gt, "make_langchain_qgis_tools",
                         lambda **k: [SimpleNamespace(name="qgis_metric_buffer"),
-                                     SimpleNamespace(name="pyqgis_render_map")])
+                                     SimpleNamespace(name="qgis_map_image")])
     captured = {}
 
     def fake_build(**kwargs):
@@ -1215,11 +1215,17 @@ def test_code_peer_has_qgis_tools(monkeypatch):
 
     sg.default_code_fn()("buffer these points with qgis", [], {"thread_id": None})
     assert "qgis_metric_buffer" in captured["tools"]
-    assert "pyqgis_render_map" in captured["tools"]
+    assert "qgis_map_image" in captured["tools"]
 
 
-def test_decider_prompt_prefers_analyze_before_code():
-    """The supervisor must try the tool-owning analyze peer before writing fresh code."""
+def test_decider_prompt_distinguishes_analyze_from_code():
+    """The decider must be able to tell the tool-owning peer from the code peer.
+
+    This was previously enforced by an "ANALYZE BEFORE CODE" mandate. The ordering now
+    follows from what each capability IS — analyze owns existing purpose-built tools,
+    code writes new code for work no tool covers — so the decider can reason about it
+    instead of obeying a prohibition it cannot weigh.
+    """
     captured = {}
 
     def llm(prompt):
@@ -1230,9 +1236,33 @@ def test_decider_prompt_prefers_analyze_before_code():
     nxt = default_decide_fn(llm=llm)({"query": "buffer these cities"}, {"has_evidence": True})
     assert nxt == "analyze"
     p = captured["prompt"]
-    assert "ANALYZE BEFORE CODE" in p
     assert "existing purpose-built tools" in p.lower()
-    assert "only when analyze has already run" in p.lower()
+    assert "new code for work no existing tool covers" in p.lower()
+    # States what may be chosen now, rather than listing everything and forbidding some.
+    assert "actions available this step" in p.lower()
+    assert "ANALYZE BEFORE CODE" not in p
+
+
+def test_decider_is_offered_only_the_legal_actions():
+    """Exhausted search / a just-run peer are withheld from the menu, not forbidden in prose."""
+    from agent_runtime.supervisor.graph import _available_actions, _distill, default_decide_fn
+
+    state = {"query": "q", "evidence": [], "actions": ["analyze"], "analysis_results": {"a": 1},
+             "search_attempts": 2, "search_empty_streak": 0}
+    assert _available_actions(state) == ["code", "done"]          # no search, no analyze repeat
+    assert _distill(state)["available_actions"] == ["code", "done"]
+
+    captured = {}
+
+    def llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"next": "done", "reason": "covered"})
+
+    assert default_decide_fn(llm=llm)(state, _distill(state)) == "done"
+    assert "Actions available this step: code, done" in captured["prompt"]
+    # A fresh turn still offers everything.
+    assert _available_actions({"query": "q", "actions": [], "search_attempts": 0}) == [
+        "search", "analyze", "code", "done"]
 
 
 # --- general questions are answered, not refused --------------------------------
@@ -1288,3 +1318,294 @@ def test_retrieval_request_with_no_evidence_still_refuses_honestly():
     )
     assert "couldn't find" in state["final_answer"].lower()
     assert "GENERAL" not in state["final_answer"]
+
+
+# --- the code peer VERIFIES execution instead of being told not to skip it ---------
+
+def _stub_code_peer(monkeypatch, responses):
+    """Run default_code_fn with a scripted executor; returns the recorded prompts."""
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_code_fn
+
+    seen = []
+
+    def fake_invoke(executor, query=None, chat_history=None, config=None, **kw):
+        seen.append(query)
+        return responses[min(len(seen) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **kw: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", fake_invoke)
+    monkeypatch.setattr("agent_runtime.code_execution.is_code_exec_enabled", lambda: True)
+    out = default_code_fn(code_exec=True)("write a script", [], {"thread_id": "t"})
+    return out, seen
+
+
+def _resp(answer, tool_names=()):
+    """Shape extract_search_artifacts/extract_final_answer read: a messages payload."""
+    from langchain_core.messages import AIMessage
+    calls = [{"name": n, "args": {}, "id": f"c{i}"} for i, n in enumerate(tool_names)]
+    msgs = [AIMessage(content="", tool_calls=calls)] if calls else []
+    msgs.append(AIMessage(content=answer))
+    return {"messages": msgs}
+
+
+def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
+    """Unrun code triggers ONE retry carrying the observation — not a prompt threat."""
+    first = _resp("Here you go:\n```python\nprint(1)\n```")          # no execute_code
+    second = _resp("Ran it; output was 42.", tool_names=["execute_code"])
+    out, seen = _stub_code_peer(monkeypatch, [first, second])
+
+    assert len(seen) == 2, "should re-invoke exactly once"
+    assert "no execute_code record" in seen[1]
+    assert out["executed"] is True
+    assert out["answer"] == "Ran it; output was 42."
+
+
+def test_code_peer_does_not_retry_when_it_already_ran(monkeypatch):
+    out, seen = _stub_code_peer(
+        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"])])
+    assert len(seen) == 1
+    assert out["executed"] is True
+
+
+def test_code_peer_reports_unexecuted_when_retry_also_skips(monkeypatch):
+    """The fact travels downstream instead of being asserted as success."""
+    unrun = _resp("Here is the code:\n```python\nprint(1)\n```")
+    out, seen = _stub_code_peer(monkeypatch, [unrun, unrun])
+    assert len(seen) == 2
+    assert out["executed"] is False
+
+
+# --- the analyze peer VERIFIES the map got a layer instead of claiming it did -------
+# Observed live: "heat map of these incidents on the map" produced execute_code (GeoJSON) +
+# heatmap_image (PNG) and an answer saying it was "visualized as a heat layer" on the
+# interactive map. add_map_layer was never called, so the map received nothing.
+
+def _stub_analyze_peer(monkeypatch, responses, query="show a heat map of these on the map"):
+    """Run default_analyze_fn with a scripted executor; returns the recorded prompts."""
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_analyze_fn
+
+    seen = []
+
+    def fake_invoke(executor, query=None, chat_history=None, config=None, **kw):
+        seen.append(query)
+        return responses[min(len(seen) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **kw: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", fake_invoke)
+    fn = default_analyze_fn(include_mcp_tools=False, code_exec=False,
+                            input_file_ids=["file_abc"])
+    return fn(query, [], {"thread_id": "t"}), seen
+
+
+def test_analyze_peer_retries_once_when_the_map_got_nothing(monkeypatch):
+    png_only = _resp("You can view the heat map on the interactive map beside this chat.",
+                     tool_names=["execute_code", "heatmap_image"])
+    delivered = _resp("Added the incident density layer to your map.",
+                      tool_names=["add_map_layer"])
+    out, seen = _stub_analyze_peer(monkeypatch, [png_only, delivered])
+
+    assert len(seen) == 2, "should re-invoke exactly once"
+    assert "no add_map_layer record" in seen[1]
+    assert out["on_map"] is True
+    assert out["summary"] == "Added the incident density layer to your map."
+
+
+def test_analyze_peer_does_not_retry_when_the_layer_was_delivered(monkeypatch):
+    out, seen = _stub_analyze_peer(
+        monkeypatch, [_resp("Layer is on your map.", tool_names=["add_map_layer"])])
+    assert len(seen) == 1
+    assert out["on_map"] is True
+
+
+def test_analyze_peer_reports_no_map_when_retry_also_skips(monkeypatch):
+    """The fact travels downstream rather than being asserted as success."""
+    png_only = _resp("Here is a heat map image.", tool_names=["heatmap_image"])
+    out, seen = _stub_analyze_peer(monkeypatch, [png_only, png_only])
+    assert len(seen) == 2
+    assert out["on_map"] is False
+
+
+def test_analyze_peer_leaves_non_map_requests_alone(monkeypatch):
+    """A question with no map in it (and no map claim) must not trigger a retry."""
+    out, seen = _stub_analyze_peer(
+        monkeypatch, [_resp("The mean is 4.2.", tool_names=["summary_statistics"])],
+        query="what is the mean incident count per area?")
+    assert len(seen) == 1
+    assert out["on_map"] is False
+
+
+def test_a_map_claim_alone_triggers_the_check(monkeypatch):
+    """Even when the ASK did not mention a map, claiming one must be backed by a layer."""
+    out, seen = _stub_analyze_peer(
+        monkeypatch, [_resp("I put the results on the map for you.", tool_names=["execute_code"]),
+                      _resp("Corrected: added the layer.", tool_names=["add_map_layer"])],
+        query="summarise these incidents")
+    assert len(seen) == 2
+    assert out["on_map"] is True
+
+
+# --- a TRUE map claim must not be warned about ------------------------------------
+# The auditor compares against retrieved documents, and no document says "a layer is on the
+# user's map", so it stamped a run that really delivered a 31,977-point density layer plus a
+# 708-cell grid choropleth as a high-severity hallucination about the interactive map.
+
+_MAP_AUDIT = {
+    "hallucination_detected": True, "severity": "high",
+    "issues": [{"claim": "The heat map is now displayed on your interactive map; you can "
+                         "explore it by panning, zooming and clicking on the map.",
+                "reason": "No retrieved evidence supports claims about an interactive map."}],
+    "summary": "The answer contains unsupported claims about the interactive map.",
+}
+
+
+def test_a_delivered_map_layer_clears_the_map_hallucination_flag():
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    ar = {"summary": "done", "on_map": True, "tool_calls": [{"name": "add_map_layer"}]}
+    out = _reconcile_audit_with_artifacts(
+        _MAP_AUDIT, [{"filename": "grid.geojson"}], {"analysis_results": ar})
+
+    assert out["severity"] == "none"
+    assert out["hallucination_detected"] is False
+
+
+def test_a_map_claim_with_no_layer_is_still_flagged():
+    """The honest failure — a PNG described as a layer on the map — must survive."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    ar = {"summary": "done", "on_map": False, "tool_calls": [{"name": "heatmap_image"}]}
+    out = _reconcile_audit_with_artifacts(
+        _MAP_AUDIT, [{"filename": "heatmap.png"}], {"analysis_results": ar})
+
+    assert out["severity"] == "high"
+    assert len(out["issues"]) == 1
+
+
+def test_map_delivery_is_detected_from_a_nested_tool_record():
+    """on_map can sit anywhere in the execution context (peer result, tool output, nested)."""
+    from agent_runtime.supervisor.graph import _map_layer_was_delivered
+
+    assert _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
+    assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
+    assert not _map_layer_was_delivered({"analysis_results": {"tool_calls": [{"name": "heatmap_image"}]}})
+
+
+def test_map_delivery_is_seen_inside_a_json_string_tool_result():
+    """Tool results arrive as JSON STRINGS. A real 2 km buffer_layer delivery was missed by a
+    dict-only walk, so nine artifacts and four map layers still drew a 'hallucinated claims
+    about buffering and map display' caveat."""
+    import json as _json
+    from agent_runtime.supervisor.graph import _map_layer_was_delivered
+
+    payload = _json.dumps({"ok": True, "on_map": True, "buffer_km": 2.0,
+                           "map_layer": {"url": "/agent/files/x/download", "render": "shapes"}})
+    ctx = {"analysis_results": {"summary": "buffered", "tool_results": [
+        {"name": "buffer_layer", "content": payload}]}}
+    assert _map_layer_was_delivered(ctx)
+
+    # A PNG-only turn must still read as undelivered.
+    png = {"analysis_results": {"tool_results": [
+        {"name": "heatmap_image", "content": _json.dumps({"ok": True, "file_id": "f"})}]}}
+    assert not _map_layer_was_delivered(png)
+
+
+def test_toolkit_layers_count_as_delivery_for_the_analyze_peer(monkeypatch):
+    """buffer_layer/aggregate_to_grid deliver layers without being named add_map_layer."""
+    import json as _json
+    from langchain_core.messages import AIMessage
+
+    from langchain_core.messages import ToolMessage
+
+    payload = _json.dumps({"ok": True, "on_map": True, "map_layer": {"render": "shapes"}})
+    resp = {"messages": [
+        AIMessage(content="", tool_calls=[{"name": "buffer_layer", "args": {}, "id": "c0"}]),
+        ToolMessage(content=payload, tool_call_id="c0", name="buffer_layer"),
+        AIMessage(content="Buffered and shown on your map."),
+    ]}
+
+    out, seen = _stub_analyze_peer(monkeypatch, [resp],
+                                   query="buffer the hotspot by 2 km and show it on the map")
+    assert len(seen) == 1, "a delivered toolkit layer must not trigger the retry"
+    assert out["on_map"] is True
+
+
+def test_decider_knows_embedding_is_analyze_not_search():
+    """Naming a foundation model sent the turn to search, which hunted the KB for a dataset
+    called "gse model embedding" and blew the 128k context window."""
+    from agent_runtime.supervisor.graph import default_decide_fn
+
+    seen = {}
+
+    def llm(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return '{"next": "analyze", "reason": "embedding work"}'
+
+    state = {"query": "Embed this drawn region with the gse model", "actions": [],
+             "search_attempts": 0}
+    out = default_decide_fn(llm=llm)(state, {"available_actions": ["search", "analyze", "code", "done"]})
+    assert out == "analyze"
+    p = seen["prompt"]
+    assert "remote-sensing foundation-model embeddings" in p
+    assert "ARGUMENTS to those" in p and "not datasets to retrieve" in p
+
+
+def test_analysis_hints_cover_embedding_vocabulary():
+    from agent_runtime.intent_classifier import ANALYSIS_HINTS
+
+    for word in ("embed", "embedding", "satellite", "remote sensing", "segment"):
+        assert word in ANALYSIS_HINTS
+
+
+# --- a repeatedly failing tool gets routed around, not stopped on ------------------
+# Observed: regionalize(maxp) failed twice with a raw AttributeError, and the peer ENDED the
+# turn asking "I recommend switching to a manual implementation ... Let me know if you'd like
+# me to proceed." A different run answered as though the tool had succeeded.
+
+def _failing(tool, error, times=2, answer="I recommend a manual implementation. Shall I?"):
+    """A response where `tool` returned ok=false `times` over."""
+    from langchain_core.messages import AIMessage, ToolMessage
+    msgs = []
+    for i in range(times):
+        msgs.append(AIMessage(content="", tool_calls=[{"name": tool, "args": {}, "id": f"c{i}"}]))
+        msgs.append(ToolMessage(content=json.dumps({"ok": False, "error": error}),
+                                name=tool, tool_call_id=f"c{i}"))
+    msgs.append(AIMessage(content=answer))
+    return {"messages": msgs}
+
+
+def test_repeatedly_failed_tools_are_detected():
+    from agent_runtime.supervisor.graph import _repeatedly_failed_tools
+    from agent_runtime.runtime_utils import extract_search_artifacts
+
+    arts = extract_search_artifacts(_failing("regionalize", "AttributeError: no attribute 'to_list'"))
+    assert _repeatedly_failed_tools(arts) == {
+        "regionalize": "AttributeError: no attribute 'to_list'"}
+
+    once = extract_search_artifacts(_failing("regionalize", "boom", times=1))
+    assert _repeatedly_failed_tools(once) == {}, "a single failure is not a dead end"
+
+
+def test_the_observation_tells_the_peer_to_proceed_and_to_say_so():
+    from agent_runtime.supervisor.graph import _tool_stuck_observation
+
+    text = _tool_stuck_observation({"regionalize": "AttributeError: no attribute 'to_list'"})
+    assert "execute_code" in text                      # the alternative route
+    assert "add_map_layer" in text                     # still has to be delivered
+    assert "do not ask whether to" in text.lower()     # the stop-and-ask is the failure mode
+    assert "failed" in text.lower() and "quote its error" in text.lower()
+
+
+def test_analyze_peer_routes_around_a_dead_end_tool(monkeypatch):
+    stuck = _failing("regionalize", "AttributeError: no attribute 'to_list'")
+    recovered = _resp("regionalize failed with an AttributeError, so I computed the regions "
+                      "with execute_code and mapped them.",
+                      tool_names=["execute_code", "add_map_layer"])
+    out, seen = _stub_analyze_peer(monkeypatch, [stuck, recovered],
+                                   query="partition these tracts into regions")
+
+    assert len(seen) == 2, "should hand back the observation exactly once"
+    assert "failed repeatedly" in seen[1]
+    assert out["tool_failures"] == {"regionalize": "AttributeError: no attribute 'to_list'"}
+    assert "execute_code" in out["summary"]

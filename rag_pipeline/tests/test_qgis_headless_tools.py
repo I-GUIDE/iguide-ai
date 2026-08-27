@@ -307,7 +307,7 @@ def test_qgis_cli_probe_uses_path(monkeypatch):
 
 def test_qgis_tools_gated_out_when_unavailable(monkeypatch):
     """When neither backend is present, the QGIS tool set is empty so the agent falls
-    back to the geopandas geo tools (plot_vector) instead of failing on QGIS."""
+    back to the geopandas geo tools (render_map_image) instead of failing on QGIS."""
     import agent_runtime.langchain_granular_tools as g
     # patch the probes as bound in the granular-tools module (where make_* reads them)
     monkeypatch.setattr(g, "qgis_process_available", lambda: False)
@@ -325,12 +325,12 @@ def test_qgis_tools_split_by_backend(monkeypatch):
     monkeypatch.setattr(g, "pyqgis_available", lambda: False)
     names = {t.name for t in g.make_langchain_qgis_tools()}
     assert names == {"qgis_processing_help", "qgis_processing_run", "qgis_metric_buffer"}
-    assert "pyqgis_render_map" not in names  # plotting needs PyQGIS, which is absent
+    assert "qgis_map_image" not in names  # plotting needs PyQGIS, which is absent
 
     monkeypatch.setattr(g, "qgis_process_available", lambda: False)
     monkeypatch.setattr(g, "pyqgis_available", lambda: True)
     names = {t.name for t in g.make_langchain_qgis_tools()}
-    assert names == {"pyqgis_layer_summary", "pyqgis_render_map"}
+    assert names == {"pyqgis_layer_summary", "qgis_map_image"}
 
 
 # --- uploaded shapefile resolution (stage extracted siblings / vsizip) ------

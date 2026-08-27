@@ -156,6 +156,32 @@ def _extract_function_source(code: str, fname: str) -> Optional[str]:
     return None
 
 
+
+def _nearest_blocks(*terms: str, limit: int = 5) -> dict:
+    """Real KB blocks resembling a doc_id that does not exist.
+
+    A bare "block not found" is a dead end: the model had guessed a plausible-sounding id
+    (observed: load_chicago_crime_data, in 3 of 3 runs) and, told only that it was wrong,
+    burned a turn before falling back to writing code. Naming the nearest REAL blocks turns
+    the failure into a next step.
+    """
+    try:
+        from rag_pipeline.search.agent_kb import agent_kb_search
+
+        query = " ".join(t for t in terms if t)
+        res = agent_kb_search(query, size=limit) or {}
+        cands = [{"doc_id": d.get("doc_id"), "title": d.get("title")}
+                 for d in (res.get("documents") or [])[:limit] if d.get("doc_id")]
+        if not cands:
+            return {"hint": "No similar KB block exists. Search first with agent_kb_search, "
+                            "or do the work with execute_code instead of guessing an id."}
+        return {"candidates": cands,
+                "hint": "These real blocks are the closest matches — pass one of THEIR doc_ids, "
+                        "or use execute_code if none fit."}
+    except Exception:
+        return {"hint": "Search agent_kb_search for a real block id; do not guess one."}
+
+
 def kb_run_geofunction(doc_id: str, function_name: str, args_json: str = "{}") -> str:
     """Execute an extracted spatial function from a KB block via file handles.
 
@@ -167,11 +193,16 @@ def kb_run_geofunction(doc_id: str, function_name: str, args_json: str = "{}") -
     from rag_pipeline.search.agent_kb import get_kb_block
     blk = get_kb_block(doc_id)
     if not blk.get("found"):
-        return json.dumps({"error": f"block not found: {doc_id}"})
+        return json.dumps({"error": f"block not found: {doc_id}",
+                            **_nearest_blocks(doc_id, function_name)})
     code = ((blk.get("source") or {}).get("extracted") or {}).get("block", {}).get("code", "")
     func_src = _extract_function_source(code, function_name)
     if not func_src:
-        return json.dumps({"error": f"{function_name} not defined in {doc_id}"})
+        # Say what the block DOES define, so the caller can pick instead of guessing again.
+        import re as _re
+        defined = _re.findall(r"^\s*def\s+([A-Za-z_]\w*)", code or "", _re.M)
+        return json.dumps({"error": f"{function_name} not defined in {doc_id}",
+                            "functions_in_block": defined[:20]})
     ns: dict = {}
     try:
         exec(_GEO_PRELUDE + func_src, ns)
@@ -201,36 +232,78 @@ def kb_select_rows(df_file_id: str, column: str, values_csv: str) -> str:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def kb_point_heatmap(points_file_id: str, title: str = "Density heat map") -> str:
-    """Render a hexbin point-density HEAT MAP from a points (Geo)DataFrame file.
-    Returns JSON with the PNG file_id."""
+
+def _save_figure(fig, filename: str) -> dict:
+    """Persist a matplotlib figure to the agent file store and return its record."""
+    import tempfile, os
+    from agent_runtime.file_store import create_output_file_from_path
+
+    fd, path = tempfile.mkstemp(prefix="img_", suffix=".png")
+    os.close(fd)
+    try:
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        rec = create_output_file_from_path(path, filename=filename)
+        return {"file_id": rec["file_id"], "filename": rec.get("filename"),
+                "download_url": rec.get("download_url"), "size_bytes": rec.get("size_bytes")}
+    finally:
+        try: os.remove(path)
+        except OSError: pass
+
+
+def _read_any_vector(ref: str):
+    """Load a points/polygons file for the image tools.
+
+    These handles went through a parquet-only reader, so a .geojson the agent had just
+    produced failed with "Parquet magic bytes not found" — observed when an on-the-map
+    request tried the image tool first. Read whatever the file actually is.
+    """
+    from agent_runtime.langchain_geo_tools import _resolve, read_vector
+
+    path, _rec = _resolve(str(ref))
+    return read_vector(str(path))
+
+
+def heatmap_image(points_file_id: str, title: str = "Density heat map",
+                  name: str = "heatmap") -> str:
+    """Draw a hexbin point-density heat map as a STATIC PNG PICTURE from a points file.
+
+    An image to download or print — it cannot be panned, zoomed or clicked. To put a heat
+    map on the user's interactive map instead, use add_map_layer(render="heatmap").
+    Reads GeoJSON / shapefile / GeoPackage / GeoParquet / CSV-with-coordinates.
+    Returns JSON with the PNG file_id.
+    """
     import json
 
-    def _heat(gdf, title):
-        import matplotlib.pyplot as plt
-        import pandas as pd
-        try:                                  # GeoDataFrame with a geometry accessor
-            xs, ys = gdf.geometry.x, gdf.geometry.y
-        except Exception:                     # plain DataFrame with lon/lat columns
-            xs = pd.to_numeric(gdf["longitude"], errors="coerce")
-            ys = pd.to_numeric(gdf["latitude"], errors="coerce")
-        fig, ax = plt.subplots(figsize=(9, 9))
-        hb = ax.hexbin(xs, ys, gridsize=30, cmap="inferno", mincnt=1)
-        fig.colorbar(hb, ax=ax, label="count"); ax.set_title(title)
-        ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
-    _heat.__annotations__ = {"gdf": "GeoDataFrame", "title": str, "return": type(None)}
-    _heat.__name__ = "point_heatmap"
     try:
-        return json.dumps(make_file_handle_tool(_heat)(gdf=points_file_id, title=title), default=str)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        gdf = _read_any_vector(points_file_id)
+        pts = gdf[gdf.geometry.geom_type.isin(["Point", "MultiPoint"])] if hasattr(gdf, "geometry") else gdf
+        if hasattr(pts, "geometry") and len(pts):
+            xs, ys = pts.geometry.x, pts.geometry.y
+        else:
+            return json.dumps({"error": "no point geometry to build a density map from"})
+        fig, ax = plt.subplots(figsize=(9, 9))
+        hb = ax.hexbin(xs, ys, gridsize=40, cmap="inferno", mincnt=1)
+        fig.colorbar(hb, ax=ax, label="incidents per cell")
+        ax.set_title(f"{title} (n={len(pts):,})")
+        ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
+        rec = _save_figure(fig, f"{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_').lower() or 'heatmap'}.png")
+        plt.close(fig)
+        return json.dumps({"ok": True, "features": int(len(pts)), **rec}, default=str)
     except Exception as exc:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def kb_choropleth_map(gdf_file_id: str, column: str, title: str = "Choropleth map",
+def choropleth_image(gdf_file_id: str, column: str, title: str = "Choropleth map",
                       scheme: str = "") -> str:
-    """Render a CHOROPLETH from a polygon (Geo)DataFrame file_id, colored by `column`
+    """Draw a choropleth as a STATIC PNG PICTURE from a polygon file_id, colored by `column`
     (e.g. a count produced by spatial_join_and_count). Robust to library versions —
-    use this instead of an extracted plot function that may target an old matplotlib.
+    use this instead of an extracted plot function that may target an old matplotlib. This is
+    an image to download or print; for a choropleth the user can explore on their interactive
+    map, use add_map_layer(render="choropleth", column=...) instead.
     Optional `scheme` (e.g. 'NaturalBreaks'=Jenks, 'Quantile') needs mapclassify; it
     silently falls back to a continuous ramp if unavailable. Returns a PNG file_id."""
     import json
@@ -275,12 +348,12 @@ def make_geo_analysis_tools() -> list:
                          "comma-separated value set, e.g. violent crime types. Returns a new file_id."),
             metadata={"category": "computation"}),
         StructuredTool.from_function(
-            func=kb_point_heatmap, name="kb_point_heatmap",
+            func=heatmap_image, name="heatmap_image",
             description=("Render a hexbin point-density HEAT MAP from a points (Geo)DataFrame file_id. "
                          "Returns a PNG file_id. Use this for 'heat map' requests (not a choropleth)."),
             metadata={"category": "generation"}),
         StructuredTool.from_function(
-            func=kb_choropleth_map, name="kb_choropleth_map",
+            func=choropleth_image, name="choropleth_image",
             description=("Render a CHOROPLETH (shaded polygons) from a polygon (Geo)DataFrame file_id "
                          "colored by `column` (e.g. the count from spatial_join_and_count). Robust "
                          "renderer — prefer this over an extracted plot function that may fail on the "
@@ -291,5 +364,5 @@ def make_geo_analysis_tools() -> list:
 
 
 __all__ = ["write_geodata", "read_geodata", "capture_current_fig", "make_file_handle_tool",
-           "kb_run_geofunction", "kb_select_rows", "kb_point_heatmap", "kb_choropleth_map",
+           "kb_run_geofunction", "kb_select_rows", "heatmap_image", "choropleth_image",
            "make_geo_analysis_tools"]

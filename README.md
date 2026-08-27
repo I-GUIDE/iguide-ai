@@ -223,7 +223,7 @@ Granular LangChain agent mode includes optional headless QGIS tools:
 - `qgis_processing_run` runs one Processing algorithm through `qgis_process`.
 - `qgis_metric_buffer` reprojects, buffers by meters, and reprojects output for safer metric buffers.
 - `pyqgis_layer_summary` inspects one layer in a standalone PyQGIS subprocess.
-- `pyqgis_render_map` renders layers to a PNG in a standalone PyQGIS subprocess.
+- `qgis_map_image` renders layers to a PNG in a standalone PyQGIS subprocess.
 
 Each call writes artifacts under `AGENT_FILE_STORAGE_ROOT/qgis_jobs/<session>/<job_id>` by default. The session id is derived from the agent thread id when the tool is called through the orchestrated LangChain runtime, so different conversations do not share QGIS project state. These tools require QGIS to be installed on the host or in the container.
 

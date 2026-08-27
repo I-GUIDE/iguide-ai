@@ -312,6 +312,8 @@ def _distill(state: SupervisorState) -> Dict[str, Any]:
         "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
         "search_attempts": state.get("search_attempts", 0),
         "search_exhausted": _search_exhausted(state),
+        # What the decider may actually choose this step (see _available_actions).
+        "available_actions": _available_actions(state),
     }
 
 
@@ -469,6 +471,24 @@ def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
     joined = pretty[0] if len(pretty) == 1 else ", ".join(pretty[:-1]) + f" and {pretty[-1]}"
     return (f"⚠️ Partial answer: {joined} failed during this turn, so this reply is based on "
             f"what completed before the failure. Re-running may produce a fuller answer.")
+
+def _available_actions(state: SupervisorState) -> List[str]:
+    """The actions that are legal RIGHT NOW, in decider-menu order.
+
+    The supervisor already vetoes an exhausted ``search`` and a back-to-back peer
+    repeat *after* the decider answers. Computing the same set here lets the decider
+    be shown what it may actually pick, instead of the full menu plus prose telling
+    it which entries are forbidden — the veto stays as a backstop rather than being
+    the mechanism.
+    """
+    actions: List[str] = []
+    if not _search_exhausted(state):
+        actions.append("search")
+    for cap in ("analyze", "code"):
+        if not _is_unproductive_repeat(cap, state):
+            actions.append(cap)
+    actions.append("done")
+    return actions
 
 
 def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
@@ -684,6 +704,51 @@ def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                          f"(counts {counts}) but its findings were not retained; "
                          f"treat the numbers from this run as unverified")}]
 
+# The auditor compares an answer against retrieved DOCUMENTS, and no document ever says
+# "a layer is on the user's map" — so a correct map claim looks unsupported to it. Observed:
+# a run that really did deliver a 31,977-point density layer plus a 708-cell grid choropleth
+# was stamped "high-severity hallucination ... unsupported claims about the interactive map".
+# The tool record settles it, so reconcile against that instead of warning the user off a
+# true statement. (A claim made with NO layer delivered still gets flagged — that is the
+# failure the analyze peer's own map check exists to catch.)
+_MAP_CLAIM_MARKERS = (
+    "interactive map", "on the map", "on your map", "map beside", "map layer",
+    "heat layer", "density layer", "displayed on", "shown on the map", "panning", "zooming",
+)
+
+
+# A tool result usually arrives as a JSON STRING, not a parsed dict, so a structural walk
+# alone misses the delivery: the spatial toolkit (buffer_layer, aggregate_to_grid,
+# cluster_points, …) reports on_map/map_layer inside that string and is not named
+# add_map_layer, which is how a genuinely-delivered 2 km buffer still drew a
+# "hallucinated claims about buffering and map display" caveat over nine real artifacts.
+# Match the payload itself rather than enumerating tool names, so new layer-emitting tools
+# are covered the day they are added.
+_MAP_DELIVERY_RE = re.compile(r'"map_layer"\s*:\s*\{|"on_map"\s*:\s*true', re.I)
+
+
+def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> bool:
+    """Whether this turn actually put a layer on the user's map."""
+    def walk(obj: Any) -> bool:
+        if isinstance(obj, dict):
+            if obj.get("on_map") is True or isinstance(obj.get("map_layer"), dict):
+                return True
+            if str(obj.get("name") or obj.get("tool_name") or "") in _MAP_LAYER_TOOLS:
+                return True
+            return any(walk(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return any(walk(v) for v in obj)
+        return False
+
+    if walk(execution_context):
+        return True
+    try:
+        blob = json.dumps(execution_context, default=str)
+    except Exception:
+        blob = str(execution_context)
+    # Un-escape so a payload nested as a JSON string matches the same pattern.
+    return bool(_MAP_DELIVERY_RE.search(blob.replace('\\"', '"')))
+
 
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
@@ -692,8 +757,10 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     (1) merely disputes artifact generation/availability and an artifact WAS produced,
     (2) disputes a numeric value that actually appears in the execution record, or
     (3) carries a reason that itself concedes the claim is grounded/correct (and no genuine
-    contradiction marker). The verdict is cleared if no substantive issues remain. Genuine
-    unsupported claims (a wrong statistic, an invented finding) are preserved."""
+    contradiction marker), or (4) disputes a claim about the interactive map when a layer was
+    actually delivered to it. The verdict is cleared if no substantive issues remain. Genuine
+    unsupported claims (a wrong statistic, an invented finding, a map that never got a layer)
+    are preserved."""
     # The invariant gate is DETERMINISTIC and therefore authoritative here. Two consequences,
     # and the second is the one the plan asks for: an unverified number must not be presented
     # as verified.
@@ -718,6 +785,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         except Exception:
             blob = str(execution_context)
         blob = blob.replace(",", "")
+    map_delivered = _map_layer_was_delivered(execution_context)
     kept = []
     for it in issues:
         if isinstance(it, dict):
@@ -729,6 +797,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             claim, reason = str(it or "").lower(), ""
         if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
             continue  # (1) artifact dispute, but an artifact was produced
+        if map_delivered and any(m in claim for m in _MAP_CLAIM_MARKERS):
+            continue  # (4) a map claim, and a layer really did reach the map
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             continue  # (3) the auditor's own reason concedes grounding
         nums = _claim_numbers(claim)
@@ -757,7 +827,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
 
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],
-                "summary": "Grounded: flagged claims are supported by the produced artifact(s) and the execution record."}
+                "summary": "Grounded: flagged claims are supported by the produced artifact(s), the "
+                           "delivered map layer(s) and the execution record."}
     return {**(audit or {}), "issues": kept}
 
 
@@ -968,39 +1039,36 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
         history = _format_chat_history(state.get("chat_history"))
+        available = distilled.get("available_actions") or list(ALLOWED_ACTIONS)
         prompt = (
             "You are the orchestration supervisor for a geospatial research agent.\n"
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
             "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
-            "(QGIS/PyQGIS, spatial ops, statistics, vector inspect/plot/reproject) over the "
-            "evidence or uploaded files\n"
+            "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
+            "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
+            "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
+            "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
+            "it changed across years, comparing two areas, and running pretrained heads. "
+            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS to those "
+            "tools, not datasets to retrieve — a request naming one is analyze work, not search.\n"
             "- code: produce and run NEW code for work no existing tool covers\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
-            "ANALYZE BEFORE CODE: for any analysis/GIS/mapping task, pick 'analyze' FIRST — it "
-            "owns the purpose-built tools and is more reliable than writing fresh code. Choose "
-            "'code' only when analyze has already run and could not do it (has_analysis is true "
-            "but the task is unmet, or analyze reported a missing capability), or when the user "
-            "explicitly asks for code/a script. Do not start with 'code' for a task an existing "
-            "tool plausibly covers.\n"
-            "Use the conversation so far for context. If the request refers to something "
-            "ALREADY produced earlier in the conversation (e.g. 'show me the code', 'explain "
-            "that', 'what did you find'), do NOT search again — choose 'done' so the answer is "
-            "composed from the conversation, unless genuinely new external information is needed.\n"
-            "Each peer ITERATES INTERNALLY (the code peer runs AND debugs its own code; search "
-            "issues multiple queries in one pass). So once a peer has produced its result "
-            "(see has_code / has_analysis / has_evidence and action_counts in Progress), do NOT "
-            "pick it again to 'retry' or 'improve' — that just repeats work. Choose 'done' once "
-            "the request is covered; the final answer is composed automatically. Only pick a peer "
-            "again if you genuinely need NEW work it has not done yet.\n"
-            "If 'search_exhausted' is true in Progress, the knowledge base returned nothing new — "
-            "do NOT choose 'search' again. Proceed with analyze/code (which can work on uploaded "
-            "files and prior results) or choose 'done'.\n"
+            f"Actions available this step: {', '.join(available)}. "
+            "Anything else has been ruled out already — a search whose sources are exhausted, or "
+            "a peer that just ran and would only repeat itself.\n"
+            "Each peer iterates internally: the code peer runs and debugs its own code, search "
+            "issues several queries in one pass, and analyze chains its tools. A peer's result "
+            "therefore already reflects the work it could do with the inputs it had.\n"
+            "Use the conversation so far for context: when the request refers to something "
+            "already produced earlier (e.g. 'show me the code', 'explain that', 'what did you "
+            "find'), the answer is composed from that conversation, so 'done' is enough unless "
+            "genuinely new external information is needed.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
             "requests are fulfilled automatically before you are consulted again.\n\n"
-            "Respond ONLY with JSON: {\"next\": \"search|analyze|code|done\", \"reason\": \"...\"}\n\n"
+            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
             + f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
@@ -1951,7 +2019,7 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
             width=1100, height=1200, basemap="osm", session_id=session))
     except Exception as exc:
         return {"summary": f"QGIS render failed: {exc}", "steps": steps, "qgis_workflow": True}
-    steps.append({"step": "pyqgis_render_map", "result": render})
+    steps.append({"step": "qgis_map_image", "result": render})
 
     basemap = str(render.get("basemap") or "")
     parts = []
@@ -1965,6 +2033,94 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
     return {"summary": ". ".join(parts) + ".", "steps": steps, "qgis_workflow": True,
             "basemap": basemap or None}
 
+
+# --- did the interactive map actually get a layer? -----------------------------
+# Observed: asked for "a heat map of these incidents on the map", the peer ran execute_code
+# to build a GeoJSON, then heatmap_image to draw a PNG, and answered "you can view the heat
+# map directly on the interactive map ... visualized as a heat layer". add_map_layer was
+# never called, so the map got nothing; the grounding audit even logged "minor hallucination
+# about an interactive map" and the claim shipped anyway. A static PNG cannot be panned,
+# zoomed or clicked, so this is not a wording quibble — the deliverable was missing. Verified
+# structurally (like the unrun-code check) rather than demanded in the prompt.
+_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
+                    "embed_region", "segment_region", "embed_zones",
+                    "fit_zone_model")
+_WANTS_MAP_RE = re.compile(
+    r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
+    r"|\binteractive\s+map\b|\bmap\s+view\b|\bheat\s?map\b|\bchoropleth\b"
+    r"|\bmap\s+(?:of|showing)\b",
+    re.I,
+)
+_CLAIMS_MAP_RE = re.compile(
+    r"\binteractive\s+map\b|\bon\s+the\s+map\b|\bmap\s+beside\b|\bheat\s+layer\b|\bmap\s+layer\b",
+    re.I,
+)
+_MAP_NOT_DELIVERED_OBSERVATION = (
+    "This turn has no add_map_layer record, so the user's interactive map received nothing. "
+    "A PNG from heatmap_image / choropleth_image / render_map_image is a static picture: it "
+    "cannot be panned, zoomed or clicked, and it is not what 'on the map' means — describing "
+    "an image as a layer on their map would be false. Put the data on the map with "
+    "add_map_layer(file_id=<the geodata file you produced>, render='heatmap'|'choropleth'|"
+    "'points'|'shapes', column=<numeric column, for choropleth>, name=<short purpose name>), "
+    "then say what is on it. Keep the PNG too if it is worth having."
+)
+
+
+def _called_tool(artifacts: Dict[str, Any], names) -> bool:
+    """Whether this peer run called any of *names*."""
+    wanted = {names} if isinstance(names, str) else set(names)
+    for key in ("tool_calls", "tool_results"):
+        for item in artifacts.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or item.get("tool_name") or "") in wanted:
+                return True
+    return False
+
+
+# --- a tool that keeps failing is a dead end, not a reason to stop --------------
+# Observed: regionalize(method='maxp') crashed with "'DataFrame' object has no attribute
+# 'to_list'" — a raw exception naming nothing relevant. The peer retried the identical call,
+# got the identical error, and then STOPPED to ask: "I recommend switching to a manual
+# implementation ... Let me know if you'd like me to proceed." A whole turn spent, no result,
+# and on an earlier run the same situation ended in an answer claiming the tool had succeeded.
+# The peer already has everything needed to route around a broken tool; what it lacked was
+# permission to, and the instruction to say so.
+_TOOL_FAIL_REPEATS = 2
+
+
+def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
+    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
+    counts: Dict[str, int] = {}
+    errors: Dict[str, str] = {}
+    for item in artifacts.get("tool_results") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        body = str(item.get("content") or "")
+        if not name or '"ok"' not in body:
+            continue
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("ok") is False:
+            counts[name] = counts.get(name, 0) + 1
+            errors.setdefault(name, str(parsed.get("error") or "")[:300])
+    return {n: errors.get(n, "") for n, c in counts.items() if c >= _TOOL_FAIL_REPEATS}
+
+
+def _tool_stuck_observation(failures: Dict[str, str]) -> str:
+    listed = "; ".join(f"{n}: {e or 'repeated failure'}" for n, e in failures.items())
+    return (
+        f"These tools failed repeatedly this turn with the same error — {listed}. Calling them "
+        "again will not help: the fault is inside the tool, not in your arguments. Do the work "
+        "another way instead of stopping. execute_code has geopandas, shapely, libpysal, esda, "
+        "spreg and pygeoda available, so the computation is reachable directly; write it, then "
+        "deliver the result with add_map_layer as usual. In your answer, state plainly which "
+        "tool failed, quote its error, and say you computed the result in code instead — do not "
+        "describe a failed tool as having worked. Proceed now; do not ask whether to."
+    )
 
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
@@ -2053,6 +2209,49 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+            # Overlay / aggregation / temporal analysis tools. Same guard and the same
+            # "files are attached" condition as the vector tools above: each factory is
+            # imported separately so one missing optional dependency costs only its own
+            # module instead of the whole analysis toolset.
+            try:
+                from agent_runtime.analysis_overlay_tools import make_overlay_tools
+                tools.extend(make_overlay_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+                tools.extend(make_aggregate_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_temporal_tools import make_temporal_tools
+                tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            # Spatial statistics (libpysal/esda/spreg/pygeoda): weights, Moran/Geary, LISA,
+            # Getis-Ord Gi*, spatial regression, GeoDa regionalization. Guarded like the rest —
+            # a deployment without the PySAL stack loses these tools and nothing else.
+            try:
+                from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+                tools.extend(make_spatial_stats_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+        # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on
+        # attached files: the region can come from the map's Region tool or a place name,
+        # with nothing uploaded at all.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_tools
+            tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
+        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
+        # so it is gated on attached files unlike the region tools above.
+        if input_file_ids:
+            try:
+                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -2061,6 +2260,10 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             # session_id makes the sandbox workspace persist across calls WITHIN this turn,
             # so a multi-step analysis can build state. Keyed on the conversation thread so
             # two conversations never share a workspace.
+            #
+            # The suffix is load-bearing: `make_langchain_staging_tools` above keys on this exact
+            # string, so changing it here silently separates staged files from the sandbox that
+            # is supposed to read them.
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "code_exec"),
@@ -2087,11 +2290,91 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "tool_results": artifacts.get("tool_results") or [],
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # A tool that failed twice the same way is a dead end. Give the peer that fact and
+        # explicit licence to route around it — once — rather than letting the turn end in
+        # "shall I implement it by hand?" or, worse, a claim that the tool worked.
+        stuck = _repeatedly_failed_tools(artifacts)
+        if stuck and not caps:
+            emit_trace_event(
+                "tool_dead_end",
+                {"stage": "analyze", "tools": sorted(stuck),
+                 "message": f"{', '.join(sorted(stuck))} failed repeatedly; "
+                            "handing the peer the observation and an alternative route"},
+                node="analyze",
+            )
+            resp_alt = invoke_agent_with_payload_fallback(
+                executor, query=_tool_stuck_observation(stuck), chat_history=None,
+                config=agent_config(child_thread_id(thread_id, "analysis")),
+            )
+            alt = extract_search_artifacts(resp_alt)
+            result["summary"] = extract_final_answer(resp_alt) or result["summary"]
+            result["tool_calls"] = [*result["tool_calls"], *(alt.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(alt.get("tool_results") or [])]
+            artifacts = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
+        # Carried downstream so synthesis cannot describe a failed tool as a success.
+        if stuck:
+            result["tool_failures"] = stuck
+
+        # The map is a deliverable, not a figure of speech: if the user asked to see this on
+        # the map (or the answer says it is there) and no layer-emitting tool ran, hand the
+        # peer that observation once. A peer that asked for another capability is stopping
+        # legitimately, so it is left alone. Only meaningful when geo tools were loaded.
+        # Any tool that reports a map_layer/on_map counts — not just add_map_layer, or the
+        # spatial toolkit's own layers (buffer_layer, aggregate_to_grid, …) would look undelivered.
+        on_map = _called_tool(artifacts, _MAP_LAYER_TOOLS) or _map_layer_was_delivered(artifacts)
+        wants_map = bool(_WANTS_MAP_RE.search(query or "")
+                         or _CLAIMS_MAP_RE.search(result["summary"] or ""))
+        if input_file_ids and wants_map and not on_map and not caps:
+            emit_trace_event(
+                "map_layer_not_delivered",
+                {"stage": "analyze",
+                 "message": "map requested but no add_map_layer record; retrying once"},
+                node="analyze",
+            )
+            resp_retry = invoke_agent_with_payload_fallback(
+                executor, query=_MAP_NOT_DELIVERED_OBSERVATION, chat_history=None,
+                config=agent_config(child_thread_id(thread_id, "analysis")),
+            )
+            retry_artifacts = extract_search_artifacts(resp_retry)
+            on_map = (_called_tool(retry_artifacts, _MAP_LAYER_TOOLS)
+                      or _map_layer_was_delivered(retry_artifacts))
+            result["summary"] = extract_final_answer(resp_retry) or result["summary"]
+            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+        # Carried downstream so synthesis can describe the map honestly either way.
+        result["on_map"] = bool(on_map)
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result
 
     return fn
+
+
+_CODE_FENCE_RE = re.compile(r"^```[\w+-]*\s*$", re.M)
+
+
+def _has_execution_record(artifacts: Dict[str, Any]) -> bool:
+    """Whether this peer run actually called ``execute_code``."""
+    return _called_tool(artifacts, "execute_code")
+
+
+def _ships_unrun_code(answer: str) -> bool:
+    """Whether an answer hands back a code block as its result."""
+    return bool(_CODE_FENCE_RE.search(str(answer or "")))
+
+
+# The prompt used to carry this as a threat ("an answer that only pastes code … is a
+# FAILURE") with nothing checking it, which is the shape most likely to backfire: a model
+# told that not running code is a failure will claim it ran when the sandbox dies. Verify
+# instead, and hand the peer the observation so it can act on it.
+_CODE_NOT_RUN_OBSERVATION = (
+    "Your previous reply returned code, but this turn has no execute_code record — so the "
+    "code was never run, its output is unverified, and any files it would have written do "
+    "not exist for the user. Run it with execute_code, read stdout/stderr, fix what the "
+    "sandbox reports and re-run until it works; then report the result. If it genuinely "
+    "cannot be run here, say so and why."
+)
 
 
 def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
@@ -2176,6 +2459,48 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+            # Overlay / aggregation / temporal tools, same as the analysis peer: the code
+            # peer should reach for a ready-made clip/buffer/time-series tool before
+            # writing the same thing by hand in the sandbox. Independently guarded.
+            try:
+                from agent_runtime.analysis_overlay_tools import make_overlay_tools
+                tools.extend(make_overlay_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+                tools.extend(make_aggregate_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_temporal_tools import make_temporal_tools
+                tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            # Spatial statistics (libpysal/esda/spreg/pygeoda): weights, Moran/Geary, LISA,
+            # Getis-Ord Gi*, spatial regression, GeoDa regionalization. Guarded like the rest —
+            # a deployment without the PySAL stack loses these tools and nothing else.
+            try:
+                from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+                tools.extend(make_spatial_stats_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+        # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on
+        # attached files: the region can come from the map's Region tool or a place name,
+        # with nothing uploaded at all.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_tools
+            tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
+        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
+        # so it is gated on attached files unlike the region tools above.
+        if input_file_ids:
+            try:
+                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -2184,6 +2509,10 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             # session_id makes the sandbox workspace persist across calls WITHIN this turn,
             # so a multi-step analysis can build state. Keyed on the conversation thread so
             # two conversations never share a workspace.
+            #
+            # The suffix is load-bearing: `make_langchain_staging_tools` above keys on this exact
+            # string, so changing it here silently separates staged files from the sandbox that
+            # is supposed to read them.
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "code_exec"),
@@ -2199,6 +2528,19 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             parts.append(
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
             )
+        # What earlier runs in this conversation left on disk. Without this the peer
+        # rebuilds work it already has — especially after the user steers ("now a heatmap
+        # of that"), where "that" is a file the previous step wrote.
+        try:
+            from agent_runtime.code_execution import session_workspace_listing
+            existing = session_workspace_listing(child_thread_id(state.get("thread_id"), "codeexec"))
+            if existing:
+                parts.append(
+                    "Already in this conversation's working directory (open them directly in "
+                    "execute_code; no need to rebuild):\n"
+                    + "\n".join(f"- {f['name']} ({f['size_bytes']} bytes)" for f in existing))
+        except Exception:
+            pass
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
         resp = invoke_agent_with_payload_fallback(
@@ -2215,6 +2557,30 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             "tool_results": artifacts.get("tool_results") or [],
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # Verify the peer actually ran what it wrote. A peer that asked for another
+        # capability is stopping legitimately, so it is left alone; otherwise give it one
+        # chance to run the code, with the observation that it did not.
+        exec_available = code_exec if code_exec is not None else is_code_exec_enabled()
+        executed = _has_execution_record(artifacts)
+        if exec_available and not executed and not caps and _ships_unrun_code(result["answer"]):
+            emit_trace_event(
+                "code_not_executed",
+                {"stage": "code", "message": "code returned without an execute_code record; retrying once"},
+                node="code",
+            )
+            resp_retry = invoke_agent_with_payload_fallback(
+                executor, query=_CODE_NOT_RUN_OBSERVATION, chat_history=None,
+                config=agent_config(child_thread_id(state.get("thread_id"), "code")),
+            )
+            retry_artifacts = extract_search_artifacts(resp_retry)
+            executed = _has_execution_record(retry_artifacts)
+            result["answer"] = extract_final_answer(resp_retry) or result["answer"]
+            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            caps = list(dict.fromkeys(r["capability"] for r in requests))
+        # Carry the fact downstream so synthesis can describe the code honestly.
+        result["executed"] = bool(executed)
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result

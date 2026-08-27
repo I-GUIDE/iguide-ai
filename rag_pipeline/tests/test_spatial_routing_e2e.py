@@ -85,16 +85,26 @@ def test_spatial_routing_to_generation_e2e(monkeypatch):
     # Monkeypatch keyword and semantic to return empty results
     # This isolates the spatial path without changing production code
     
-    def empty_keyword(state):
-        print("   [Test] Suppressing keyword search to isolate spatial path")
-        return []
-    
-    def empty_semantic(state):
-        print("   [Test] Suppressing semantic search to isolate spatial path")
-        return []
-    
-    monkeypatch.setattr("rag_pipeline.search.keyword.retrieve_keyword", empty_keyword)
-    monkeypatch.setattr("rag_pipeline.search.semantic.retrieve_semantic", empty_semantic)
+    # Patch where the functions are USED, not where they are defined: core.py does
+    # `from .keyword import retrieve_keyword`, which binds the function into core's own
+    # namespace at import time. Patching the attribute on the defining module afterwards
+    # leaves that binding pointing at the real implementation, so keyword hits kept flowing
+    # through and this test asserted "all docs are spatial" against a mixed result set.
+    # Every NON-spatial source has to be suppressed, not just the two that existed when this
+    # test was written: core.py now also runs neo4j and opengeodata, and either one leaking a
+    # hit breaks the "all docs are spatial" assertion.
+    for symbol in ("retrieve_keyword", "retrieve_semantic", "retrieve_neo4j",
+                   "retrieve_opengeodata"):
+        monkeypatch.setattr(f"rag_pipeline.search.core.{symbol}",
+                            lambda state, _s=symbol: (
+                                print(f"   [Test] Suppressing {_s} to isolate spatial path") or []))
+    # The graph tier that actually runs is get_neo4j_agent_results (core.py:160);
+    # retrieve_neo4j above is only the keyword fallback beneath it, and is never reached when
+    # the agent is available. It takes (query, limit=...), not (state).
+    monkeypatch.setattr("rag_pipeline.search.core.get_neo4j_agent_results",
+                        lambda *a, **k: (
+                            print("   [Test] Suppressing neo4j agent to isolate spatial path")
+                            or []))
     
     # === RUN PIPELINE WITH LIVE APIS ===
     # - Spatial search will use real Google Maps API for geocoding

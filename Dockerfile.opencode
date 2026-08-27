@@ -28,4 +28,5 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Common scientific stack preinstalled so most runs need no per-run installs.
 # Extend here (e.g. geopandas, rasterio) if your workloads need more.
-RUN pip install --no-cache-dir numpy pandas matplotlib requests
+RUN pip install --no-cache-dir numpy pandas matplotlib requests \
+      libpysal esda spreg pygeoda

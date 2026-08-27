@@ -91,5 +91,5 @@ def test_geo_tools_end_to_end_on_a_dms_csv(tmp_path, monkeypatch):
     gj = json.loads(tools["vector_to_geojson"].invoke({"file_id": fid, "output_filename": "o.geojson"}))
     assert gj["ok"] and gj.get("feature_count") == 3 and gj.get("download_url")
 
-    png = json.loads(tools["plot_vector"].invoke({"file_id": fid, "title": "qPCR"}))
+    png = json.loads(tools["render_map_image"].invoke({"file_id": fid, "title": "qPCR"}))
     assert png["ok"] and str(png.get("filename", "")).endswith(".png")

@@ -53,6 +53,16 @@ rasterio
 # it via anaconda.
 pyarrow
 
+# Spatial statistics (agent_runtime/analysis_spatial_stats_tools.py).
+# libpysal = spatial weights, esda = Moran/Geary/LISA/Getis-Ord, spreg = spatial regression.
+# pygeoda is GeoDa's own C++ core (libgeoda) and powers the regionalization tool; GeoDa
+# itself is a desktop GUI with no scripting interface, so this binding is the scriptable path.
+# All four ship wheels, so none of them needs a compiler in the image.
+libpysal
+esda
+spreg
+pygeoda
+
 # Data / notebooks
 pandas
 matplotlib

@@ -217,6 +217,30 @@ def _normalize_skill_roots(skill_roots: Optional[Sequence[Any]]) -> Optional[Lis
     return normalized
 
 
+
+def _llm_for_request(provider: Optional[str], model: Optional[str],
+                     reasoning_effort: Optional[str] = None) -> Optional[Any]:
+    """A per-request model, or None to let the graph use the process default.
+
+    Absent both, the default is whatever build_default_llm resolves — OpenAI gpt-4o in this
+    deployment. A bad provider/model is raised here, at the edge, rather than surfacing as an
+    opaque 404 from the provider mid-turn.
+    """
+    if not provider and not model and not reasoning_effort:
+        return None
+    from agent_runtime.executor_factory import build_llm, supports_reasoning_effort
+
+    llm = build_llm(provider=provider, model=model, reasoning_effort=reasoning_effort)
+    # Log what was actually resolved. Which model answered is otherwise invisible: the
+    # transport log shows only the host, and a dropped reasoning_effort looks identical to an
+    # applied one.
+    logger.info("per-request LLM: provider=%s model=%s reasoning_effort=%s%s",
+                provider or "(inferred)", getattr(llm, "model_name", model), reasoning_effort or "-",
+                "" if (not reasoning_effort or supports_reasoning_effort(
+                    getattr(llm, "model_name", model))) else " (dropped: model does not accept it)")
+    return llm
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -237,6 +261,9 @@ def run_agent_chat(
     verbose: bool = False,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     effective_thread_id = thread_id or memory_id
     effective_memory_id = memory_id or thread_id
@@ -277,6 +304,7 @@ def run_agent_chat(
 
     result = run_agent_query(
         effective_input,
+        llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
         chat_history=chat_history,
         verbose=verbose,
         return_intermediate_steps=True,
@@ -377,6 +405,9 @@ def stream_agent_chat_events(
     agent_dev: Optional[bool] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     effective_thread_id = thread_id or memory_id
     effective_memory_id = memory_id or thread_id
@@ -452,6 +483,7 @@ def stream_agent_chat_events(
     stream_error: Optional[BaseException] = None
     for event in _guard_stream(stream_agent_query_events(
         effective_input,
+        llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
         chat_history=chat_history,
         verbose=verbose,
         return_intermediate_steps=True,

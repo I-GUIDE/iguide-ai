@@ -44,6 +44,9 @@ _STATUS_TIER_EVENTS = frozenset(
         "final_answer",
         "completed",
         "error",
+        # Plottable geometry from geo tools (e.g. overpass_search). Status-tier so a
+        # map client receives it even when detail-tier tracing (agent_dev) is off.
+        "map_layer",
     }
 )
 
@@ -322,6 +325,16 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 "message": _short_text(output),
             },
         )
+        # Geometry-bearing results (e.g. overpass_search) also stream as an untruncated
+        # `map_layer` event so a map client can plot them live; the `content` above is
+        # truncated and not reliably parseable.
+        try:
+            from agent_runtime.map_layers import build_map_layers
+
+            for layer in build_map_layers(tool_name, output):
+                self._emit("map_layer", layer)
+        except Exception:  # pragma: no cover - never let map extraction break the stream
+            logger.debug("map_layer extraction failed for %s", tool_name, exc_info=True)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
         run_key = self._tool_run_key(kwargs.get("run_id"))

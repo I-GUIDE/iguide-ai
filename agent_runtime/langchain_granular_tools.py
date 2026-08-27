@@ -217,6 +217,49 @@ def opengeodata_search_tool(query: str, limit: Optional[int] = None, session_con
     return _build_payload(hits, source="opengeodata")
 
 
+def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> str:
+    """Query live OpenStreetMap features of a given type inside a place or bbox.
+
+    Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature
+    AND an evidence-shaped ``documents`` list, so the found features count as grounding
+    evidence for the answer (not just as map geometry).
+    """
+    from rag_pipeline.search.overpass import overpass_search
+
+    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
+
+    # Project features into evidence documents so the synthesis/grounding audit treats
+    # "these features exist here" as grounded. Dedupe by name (rivers/roads come back as
+    # many segments sharing one name) and cap to keep the evidence set focused.
+    query = result.get("query") or {}
+    where = query.get("place") or (f"bbox {query.get('bbox')}" if query.get("bbox") else "the requested area")
+    documents: List[Dict[str, Any]] = []
+    seen_names: set = set()
+    for feat in result.get("features") or []:
+        name = str(feat.get("name") or "(unnamed)")
+        ftype = str(feat.get("feature_type") or feature)
+        key = f"{name}|{ftype}"
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        osm_ref = f"{feat.get('osm_type', 'osm')}/{feat.get('osm_id', '')}"
+        documents.append({
+            "doc_id": f"osm:{osm_ref}",
+            "title": name,
+            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}).",
+            "source": "overpass",
+            "element_type": "osm_feature",
+            "url": f"https://www.openstreetmap.org/{osm_ref}" if feat.get("osm_id") else "",
+        })
+        if len(documents) >= 40:
+            break
+
+    result["source"] = "overpass"
+    result["documents"] = documents
+    result["citation_ids"] = [d["doc_id"] for d in documents]
+    return json.dumps(result, ensure_ascii=True, default=str)
+
+
 def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = None) -> str:
     """Open-web search: METADATA ONLY (title, url, snippet). Reading a page is a separate step."""
     result = run_web_search(
@@ -438,7 +481,7 @@ def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[An
 def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
     # QGIS is not installed in the default agent image (only GDAL, for the geopandas-backed
     # geo tools). Expose each QGIS tool only when its backend is actually present, so the agent
-    # falls back to the working `plot_vector`/`inspect_vector` geo tools instead of attempting
+    # falls back to the working `render_map_image`/`inspect_vector` geo tools instead of attempting
     # QGIS calls that fail at runtime. The processing/buffer tools need the `qgis_process` CLI;
     # render_map / layer_summary need the PyQGIS Python module — a deployment may have one and
     # not the other. Forceable via AGENT_QGIS_ENABLED. See qgis_headless_tools.qgis_available().
@@ -499,7 +542,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
             timeout_sec=timeout_sec,
         )
 
-    def pyqgis_render_map(
+    def qgis_map_image(
         layers_json: str,
         output_filename: str = "map.png",
         width: int = 1200,
@@ -571,14 +614,15 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 metadata={"category": "spatial_analysis"},
             ),
             StructuredTool.from_function(
-                func=pyqgis_render_map,
-                name="pyqgis_render_map",
+                func=qgis_map_image,
+                name="qgis_map_image",
                 description=(
-                    "Render vector/raster layer paths to a PNG using standalone headless PyQGIS in an isolated "
-                    "per-session job directory. layers_json may contain uploaded file_id strings or objects with "
-                    "path/layer_path, optional name, and provider ('ogr' for vector or 'gdal' for raster). Set "
-                    "basemap='osm' to draw an OpenStreetMap XYZ background under the data. Returns managed_output "
-                    "with file_id and download_url when rendering succeeds."
+                    "Draw layer FILES into a STATIC PNG PICTURE with QGIS — the only renderer here that "
+                    "can composite data over an OpenStreetMap basemap (basemap='osm'). The result is an "
+                    "image to download or print, not something the user can pan or click; to put data on "
+                    "their interactive map use add_map_layer instead. layers_json may contain uploaded "
+                    "file_id strings or objects with path/layer_path, optional name, and provider ('ogr' "
+                    "for vector, 'gdal' for raster). Returns managed_output with file_id and download_url."
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
@@ -647,6 +691,29 @@ def make_langchain_granular_tools(
                 "the internal searches so the user sees both; do NOT use it to answer questions about "
                 "existing I-GUIDE elements. Optional session_context_json supplies bbox/time/provider "
                 "hints. Returns JSON with doc_ids and snippets."
+            ),
+            metadata={"category": "retrieval_external"},
+        ),
+        StructuredTool.from_function(
+            func=overpass_search_tool,
+            name="overpass_search",
+            description=(
+                "Query LIVE OpenStreetMap and return real-world features WITH geometry "
+                "(points/lines/polygons) + OSM tags: rivers, roads, hospitals, schools, parks, "
+                "dams, power plants, railways, buildings, water bodies, etc. This is the only "
+                "source here for ground-truth infrastructure — the I-GUIDE knowledge base holds "
+                "datasets and notebooks ABOUT places, not the features themselves, and catalog/web "
+                "search return records and links rather than geometry. So it is the one that "
+                "answers 'where are the X', 'what X are in / near / intersect this area or upload', "
+                "and requests to see features on a map. "
+                "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
+                "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
+                "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
+                "For an UPLOADED file, pass the file's bounding box as `bbox` (read it first with a "
+                "geo/file tool or execute_code if you don't already have it). "
+                "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
+                "NOT also call a map-rendering tool (e.g. qgis_map_image) for it. "
+                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
             ),
             metadata={"category": "retrieval_external"},
         ),
@@ -771,6 +838,7 @@ __all__ = [
     "spatial_search_tool",
     "opengeodata_search_tool",
     "web_search_tool",
+    "overpass_search_tool",
     "web_fetch_tool",
     "pyqgis_layer_summary_tool",
     "pyqgis_render_map_tool",

@@ -43,7 +43,7 @@ def test_inventory_is_read_from_the_live_registries():
     # representative tools from several independent registries
     assert {"keyword_search", "semantic_search", "neo4j_search"} <= names      # granular search
     assert "geocode_places" in names                                          # geocode registry
-    assert {"inspect_vector", "plot_vector"} <= names                         # geo registry
+    assert {"inspect_vector", "render_map_image"} <= names                         # geo registry
     assert all(t["description"] for t in inv["tools"] if t["name"] == "keyword_search")
     assert inv["code_execution"]["enabled"] in (True, False)
     assert isinstance(inv["skills"], list)

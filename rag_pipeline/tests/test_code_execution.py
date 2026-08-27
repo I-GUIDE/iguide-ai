@@ -387,3 +387,97 @@ def test_unavailable_work_root_returns_tool_error_not_crash(monkeypatch, tmp_pat
     assert res.exit_code is None
     assert "work dir unavailable" in (res.error or "")
     assert "AGENT_CODE_EXEC_WORK_ROOT" in (res.error or "")
+
+
+# --- artifacts are named for their purpose, not a fixed constant -----------------
+
+def test_saved_source_is_named_for_what_the_run_does():
+    """Several runs in one turn used to all arrive as `executed_code.py`."""
+    from agent_runtime.code_execution import _describe_code, _persist_source
+
+    assert _describe_code('"""Convert the uploaded CSV to GeoJSON."""\n') == "convert_the_uploaded_csv_to"
+    assert _describe_code("# buffer the rivers by 2 km\n") == "buffer_the_rivers_by_2"
+    assert _describe_code("def compute_flood_risk(x):\n    return x\n") == "compute_flood_risk"
+    assert _describe_code("import json\nprint(1)\n") is None      # nothing to go on
+
+    assert _persist_source("print(1)", label="CSV to GeoJSON")[0]["filename"] == "csv_to_geojson.py"
+    assert _persist_source('"""Plot rivers."""\n')[0]["filename"] == "plot_rivers.py"
+    assert _persist_source("print(1)")[0]["filename"] == "executed_code.py"   # last resort
+
+
+def test_geo_artifact_name_prefers_caller_then_source():
+    from agent_runtime.langchain_geo_tools import artifact_name
+
+    assert artifact_name("Chicago Rivers", "geojson", source="upload.zip") == "chicago_rivers.geojson"
+    assert artifact_name(None, "geojson", source="chicago_tracts.zip") == "chicago_tracts.geojson"
+    assert artifact_name(None, "png", source=None, default="vector_plot") == "vector_plot.png"
+    assert artifact_name(None, ".png", source="/vsizip//tmp/a/rivers.zip") == "rivers.png"
+
+
+def test_signal_deaths_are_diagnosed_in_both_conventions():
+    """A signalled run must name its cause: docker reports 128+N, subprocess reports -N."""
+    from agent_runtime.code_execution import _diagnose_abnormal_exit as diagnose
+
+    assert "SIGKILL" in diagnose(137, "", None) and "memory limit" in diagnose(137, "", None)
+    assert "SIGSEGV" in diagnose(139, "", None)      # container segfault
+    assert "SIGSEGV" in diagnose(-11, "", None)      # docker CLI killed
+    assert "nothing was written" in diagnose(137, "", None)
+    # An ordinary failure explains itself through stderr; don't editorialize over it.
+    assert diagnose(1, "Traceback ...", None) is None
+    assert diagnose(0, "", None) is None
+    assert diagnose(137, "", "already diagnosed") is None
+
+
+# --- a conversation's code keeps its workspace between runs -----------------------
+#
+# Both branches grew this independently: prototype copied a durable directory forward into a
+# throwaway work dir each run, this one bind-mounts the durable directory as /work. The merge kept
+# the mount — no per-run copy, and staged inputs and the gate's report live with the files instead
+# of being copied around. These two tests are prototype's, retargeted: the properties it was
+# protecting are real and the surviving design has to hold them too.
+
+def test_a_conversations_workspace_is_stable_and_not_shared(tmp_path, monkeypatch):
+    from agent_runtime.code_execution import session_work_dir
+
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    a1 = session_work_dir("thread-a")
+    a2 = session_work_dir("thread-a")
+    b = session_work_dir("thread-b")
+    assert a1 == a2 and a1.is_dir()                  # stable across runs
+    assert b != a1                                   # conversations don't share a workspace
+    escaped = session_work_dir("../../etc/passwd")   # path-safe
+    assert str(escaped.resolve()).startswith(str(tmp_path.resolve()))
+
+
+def test_a_file_from_an_earlier_run_is_not_reported_as_this_runs_output(tmp_path):
+    """A persistent workspace still holds step 1's files when step 5 runs. Re-persisting them
+    would consume the MAX_ARTIFACTS budget in sorted-path order and crowd out the real output —
+    which is what `incremental` exists to prevent."""
+    import time
+
+    from agent_runtime.code_execution import _persist_artifacts
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "script.py").write_text("print(1)")
+    (work / "from_step_1.txt").write_text("earlier")
+    first = _persist_artifacts(work, {"script.py"}, incremental=True)
+    assert [a["filename"] for a in first] == ["from_step_1.txt"]
+
+    time.sleep(0.01)
+    (work / "from_step_2.geojson").write_text("{}")
+    second = _persist_artifacts(work, {"script.py"}, incremental=True)
+    names = [a["filename"] for a in second]
+    assert "from_step_2.geojson" in names
+    assert "from_step_1.txt" not in names, "an untouched carry-in was re-reported as an output"
+
+
+def test_large_outputs_are_called_out_in_the_result():
+    """An 89MB intermediate was written every turn with nothing in the transcript saying so."""
+    from agent_runtime.code_execution import _size_report
+
+    assert _size_report([{"filename": "small.geojson", "size_bytes": 2_000_000}]) is None
+    note = _size_report([{"filename": "incidents.geojson", "size_bytes": 89_184_842},
+                         {"filename": "run.py", "size_bytes": 437}])
+    assert "incidents.geojson" in note and "85.1 MB" in note
+    assert "ORIGINAL upload" in note          # says how to avoid it, not just that it happened

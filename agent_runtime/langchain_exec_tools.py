@@ -128,6 +128,7 @@ def make_code_execution_tools(
         dependencies: Optional[List[str]] = None,
         input_files: Optional[List[str]] = None,
         tier: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> str:
         ex = executor or get_code_executor()
 
@@ -140,6 +141,15 @@ def make_code_execution_tools(
         # timeout_seconds defaults to None, NOT to DEFAULT_TIMEOUT. It used to default to
         # 60, which is truthy, so it would have overridden the execution tier's timeout on
         # every single call and the tiers would have had no effect at all.
+        #
+        # `label` and `tier` are passed OPTIONALLY, so an executor implementing an older
+        # signature (or a test double) still works. They are independent: `tier` sizes the run,
+        # `label` names the source file it saves.
+        extra = {}
+        if label:
+            extra["label"] = label
+        if tier:
+            extra["tier"] = tier
         result = ex.execute(
             code,
             language=language,
@@ -147,7 +157,7 @@ def make_code_execution_tools(
             dependencies=dependencies,
             input_files=staging,
             session_id=session_id,
-            tier=tier,
+            **extra,
         )
         payload = result.to_dict()
         if staged_info:
@@ -172,7 +182,7 @@ def make_code_execution_tools(
         description=(
             "Execute code in an isolated, sandboxed container and return JSON with "
             "exit_code, stdout, stderr, timed_out, the executed `code`, `installed`, and "
-            "`artifacts` (the source is saved as a downloadable `executed_code.py`, plus "
+            "`artifacts` (the source is saved as a downloadable .py named from `label`, plus "
             "any files the run wrote). Pass `dependencies` (a list of pip specs, e.g. "
             "[\"numpy\", \"pandas==2.2\"]) to install third-party packages before running — "
             "they are installed with network in a separate step, then the code runs with NO "
@@ -185,6 +195,10 @@ def make_code_execution_tools(
             "multi-step analysis incrementally: write an intermediate result to a file in "
             "one call and read it in the next instead of recomputing it. Installed "
             "`dependencies` also persist, so ask for them once. "
+            "`label` is a short slug for what this particular run does (e.g. "
+            "\"csv_to_geojson\", \"rivers_buffer\") and becomes the saved source's filename — "
+            "several runs in one conversation otherwise arrive as identically-named downloads; "
+            "name the files your code writes for their contents too, for the same reason. "
             "Set `tier` to size the run: 'quick' (60s/512MB) for a small check, 'standard' "
             "(300s/2GB, the default) for real analysis, 'heavy' (900s/6GB) for large "
             "geospatial joins where available. Only pass `timeout_seconds` to override the "

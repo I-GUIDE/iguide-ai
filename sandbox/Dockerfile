@@ -20,6 +20,17 @@ RUN pip install --no-cache-dir \
     scipy \
     shapely
 
+# Spatial statistics, so code the agent writes can `import esda` / `libpysal` / `spreg` /
+# `pygeoda` without a per-run install. The curated tools in
+# agent_runtime/analysis_spatial_stats_tools.py cover the common workflow (weights, Moran,
+# LISA, Gi*, spatial regression, regionalization); these are here for everything past it —
+# join counts, quantile LISA, GWR-style work, custom permutation schemes.
+RUN pip install --no-cache-dir \
+    libpysal \
+    esda \
+    spreg \
+    pygeoda
+
 # Pre-build the matplotlib font cache so first-run plotting is fast and needs no
 # writable HOME beyond /tmp.
 RUN python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.plot([0,1]); plt.savefig('/tmp/_warm.png')" && rm -f /tmp/_warm.png

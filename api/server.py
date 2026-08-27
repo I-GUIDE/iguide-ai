@@ -175,6 +175,13 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # default (ON; set AGENT_CODE_EXEC=0/false to disable). Controls the sandboxed
     # execute_code tool for this request.
     code_exec_raw = _coalesce(data.get("codeExec"), data.get("code_exec"))
+    # Per-request model selection. Absent BOTH, the agent uses its configured default —
+    # OpenAI gpt-4o in this deployment — so an old client behaves exactly as before.
+    llm_provider = _coalesce(data.get("llmProvider"), data.get("provider"), data.get("llm_provider"))
+    llm_model = _coalesce(data.get("llmModel"), data.get("model"), data.get("llm_model"))
+    # Only meaningful for the gpt-5.x / o-series reasoning models; build_llm drops it for
+    # models that would reject the argument.
+    reasoning_effort = _coalesce(data.get("reasoningEffort"), data.get("reasoning_effort"))
     code_exec = None if code_exec_raw is None else bool(code_exec_raw)
 
     return {
@@ -197,6 +204,9 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "agent_dev": agent_dev,
         "use_supervisor": use_supervisor,
         "code_exec": code_exec,
+        "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
+        "llm_model": (str(llm_model).strip() or None) if llm_model else None,
+        "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
     }
 
 
@@ -611,6 +621,42 @@ def agent_dashboard():
     """Serve the local streaming agent dashboard."""
     dashboard_path = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
     return send_file(dashboard_path)
+
+
+@app.route('/agent/models', methods=['GET'])
+def agent_models():
+    """
+    List the chat models a request may select, per provider.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          Selectable models. `default` is what a request with no `model`/`provider` uses —
+          OpenAI gpt-4o in this deployment. AnvilGPT's list is fetched live from its own
+          /api/models, so an id it no longer serves is never offered; `stale: true` on a
+          provider means that fetch failed and known ids are being shown instead.
+        schema:
+          type: object
+          properties:
+            default:
+              type: object
+            providers:
+              type: array
+              items:
+                type: object
+    """
+    from agent_runtime.executor_factory import list_available_models
+
+    try:
+        return jsonify(list_available_models())
+    except Exception as exc:  # never let a catalogue lookup break the page
+        logger.warning("model catalogue unavailable: %s", exc)
+        return jsonify({"default": {"provider": "openai", "model": "gpt-4o-2024-11-20"},
+                        "providers": [], "error": str(exc)}), 200
 
 
 @app.route('/agent/files/upload', methods=['POST'])
@@ -1434,6 +1480,9 @@ def agent_chat():
             verbose=bool(normalized.get("verbose", False)),
             use_supervisor=normalized.get("use_supervisor"),
             code_exec=normalized.get("code_exec"),
+            llm_provider=normalized.get("llm_provider"),
+            llm_model=normalized.get("llm_model"),
+            reasoning_effort=normalized.get("reasoning_effort"),
         )
         return jsonify(_format_agent_chat_result(raw)), 200
     except ValueError as e:
@@ -1941,6 +1990,9 @@ def agent_chat_stream():
                     agent_dev=normalized.get("agent_dev"),
                     use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
+                    llm_provider=normalized.get("llm_provider"),
+                    llm_model=normalized.get("llm_model"),
+                    reasoning_effort=normalized.get("reasoning_effort"),
                 ):
                     event_name = str(item.get("event") or "message")
                     payload = item.get("data") or {}
@@ -2024,6 +2076,11 @@ def agent_chat_stream():
 
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name == "map_layer":
+                        # Untruncated plottable geometry from a geo tool (overpass_search, ...).
+                        # Forwarded verbatim so a map client can add it as a live layer.
+                        yield _sse_event("map_layer", payload)
 
                     if event_name == "completed":
                         yield _sse_event(

@@ -130,7 +130,7 @@ def qgis_available() -> bool:
     """Whether ANY QGIS backend (CLI or PyQGIS) is usable.
 
     The agent image ships GDAL (for the geopandas-backed geo tools) but NOT QGIS, so this is
-    typically False — callers then expose the geopandas tools (``plot_vector`` etc.) instead
+    typically False — callers then expose the geopandas tools (``render_map_image`` etc.) instead
     of QGIS tools that would only fail at call time. Forceable via ``AGENT_QGIS_ENABLED``.
     """
     return qgis_process_available() or pyqgis_available()

@@ -28,6 +28,17 @@ ANALYSIS_HINTS: set[str] = {
     "statistics",
     "statistical",
     "hotspot",
+    # Remote-sensing embeddings are analysis, not retrieval: naming a foundation
+    # model used to send the turn to search, which then hunted the KB for a
+    # dataset called "gse model embedding" and blew the context window.
+    "embed",
+    "embedding",
+    "embeddings",
+    "satellite",
+    "remote sensing",
+    "land cover",
+    "segment",
+    "segmentation",
 }
 
 CODE_HINTS: set[str] = {

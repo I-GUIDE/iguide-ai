@@ -156,7 +156,7 @@ def generate_crime_map(title: str = "Crime Counts by Community Area", crime_type
     Render a CHOROPLETH of Chicago crime counts by COMMUNITY AREA (shaded polygons), loading
     and joining the data internally. This is an AREAL choropleth, NOT a point-density "heat
     map": if the user asked for a heat map / hotspot / kernel-density map of incident
-    locations, use a point-density tool (e.g. kb_point_heatmap on the crime points) instead.
+    locations, use a point-density tool (e.g. heatmap_image on the crime points) instead.
     Do NOT call load_chicago_community_areas, load_chicago_crime_data, or count_crimes_per_community first.
 
     Args:
@@ -206,16 +206,20 @@ def generate_crime_map(title: str = "Crime Counts by Community Area", crime_type
 
 
 @mcp_tool(category="retrieval_external")
-def search_geospatial_resources(topic: str, resource_type: str) -> list:
-    """
-    Searches for geospatial resources like datasets, notebooks, or publications on a given topic.
+def web_search_geo_links(topic: str, resource_type: str) -> list:
+    """Plain WEB SEARCH that returns page LINKS about a topic — no datasets, no files, no geometry.
+
+    Despite the geospatial wording it reads nothing and downloads nothing: it is a DuckDuckGo
+    query returning titles, urls and snippets. web_search/web_fetch cover the open web more
+    capably, opengeodata_search finds actual downloadable datasets, and overpass_search returns
+    real map features with geometry.
 
     Args:
-        topic: The geospatial topic to search for.
-        resource_type: The type of resource to find ('datasets', 'notebooks', or 'publications').
+        topic: The topic to web-search.
+        resource_type: 'datasets', 'notebooks' or 'publications' (only shapes the query).
 
     Returns:
-        A list of search results with titles, links, and snippets.
+        A list of web results (title, link, snippet) — links only, not data.
     """
     query_map = {
         "datasets": f"geospatial open data {topic}",
@@ -235,7 +239,7 @@ def analyze_and_organize_results(results: list, topic: str) -> str:
     Analyzes a list of search results and organizes metadata into a Markdown table.
 
     Args:
-        results: A list of search results from the search_geospatial_resources tool.
+        results: A list of search results from the web_search_geo_links tool.
         topic: The original geospatial topic for context.
 
     Returns:

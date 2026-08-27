@@ -1,7 +1,7 @@
 """Mixed chain: executed tools + code-gen as an INTERMEDIATE step, via file_id handles.
 
 Division of labor:
-  - reusable / expensive GIS ops  → executed tools (kb_run_geofunction, kb_point_heatmap)
+  - reusable / expensive GIS ops  → executed tools (kb_run_geofunction, heatmap_image)
   - small bespoke transforms      → code-gen (execute_code) — e.g. the violent-crime filter
 
 Everything is passed by file_id (GeoParquet), so code-gen output flows into the next tool
@@ -44,7 +44,7 @@ def main() -> int:
     from extractors.submission import Submission
     from extractors.ingest import ingest_submission
     from rag_pipeline.search.agent_kb import agent_kb_search, get_kb_block
-    from extractors.geo_handles import kb_run_geofunction, kb_point_heatmap
+    from extractors.geo_handles import kb_run_geofunction, heatmap_image
     from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
     if Path(NB).exists():
@@ -79,9 +79,9 @@ def main() -> int:
     print(f"             exit={res.get('exit_code')}  stdout={ (res.get('stdout') or '').strip() }")
 
     # 3) TOOL: render the heat map from the code-gen output file
-    r3 = json.loads(kb_point_heatmap(violent_fid, "Violent crime density — mixed tool+code chain"))
+    r3 = json.loads(heatmap_image(violent_fid, "Violent crime density — mixed tool+code chain"))
     png_fid = r3.get("png_file_id")
-    print(f"3. [TOOL]    kb_point_heatmap({violent_fid}) → PNG {png_fid}")
+    print(f"3. [TOOL]    heatmap_image({violent_fid}) → PNG {png_fid}")
 
     from agent_runtime.file_store import resolve_file_id
     print("\nlineage:  load[TOOL]=%s → filter[CODE]=%s → heatmap[TOOL]=%s" % (crime_fid, violent_fid, png_fid))

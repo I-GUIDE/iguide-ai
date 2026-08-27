@@ -39,15 +39,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
 DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
-DEFAULT_MEMORY = os.getenv("AGENT_CODE_EXEC_MEMORY", "512m")
-# The deps-install phase needs more headroom than execution: building/installing
-# the scientific stack (numpy/pandas/scipy) under the 512m exec limit was getting
-# OOM-killed (exit 137). Give install its own, larger budget.
-DEFAULT_INSTALL_MEMORY = os.getenv("AGENT_CODE_EXEC_INSTALL_MEMORY", "1g")
-DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "1.0")
+# Per-run sandbox budget. 512m was too small for the real work this agent is asked to do:
+# a city-scale incident CSV (~130k rows) through pandas + geopandas, a KDE/hexbin heatmap, or
+# a spatial join all exceed it and die as an OOM kill with no useful stderr. 4g is generous
+# for that class of job while still bounding a runaway loop far below a real server's RAM —
+# raise AGENT_CODE_EXEC_MEMORY on a big host (a 60 GB box can comfortably afford 8g-16g).
+DEFAULT_MEMORY = os.getenv("AGENT_CODE_EXEC_MEMORY", "4g")
+# The deps-install phase needs headroom of its own: building/installing the scientific stack
+# (numpy/pandas/scipy/geopandas) was getting OOM-killed (exit 137) under the old exec limit.
+DEFAULT_INSTALL_MEMORY = os.getenv("AGENT_CODE_EXEC_INSTALL_MEMORY", "2g")
+# 1 CPU serializes pandas/geopandas work that is trivially parallel; 2 keeps a single run
+# responsive without letting one job monopolize a shared host.
+DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "2.0")
 DEFAULT_PIDS = os.getenv("AGENT_CODE_EXEC_PIDS", "256")
 MAX_OUTPUT_CHARS = 20_000
 MAX_ARTIFACTS = 20
+# Above this, an output file is called out in the run result. Cost was invisible: a 37 MB CSV
+# was converted into an 89 MB intermediate GeoJSON and then immediately downsampled, every
+# turn, with nothing in the transcript hinting that it had happened.
+LARGE_ARTIFACT_MB = float(os.getenv("AGENT_LARGE_ARTIFACT_MB", "25"))
 MAX_DEPS = 50
 # Deps install under this dir inside the work dir; added to PYTHONPATH for the run.
 DEPS_DIRNAME = ".deps"
@@ -303,6 +313,28 @@ def invariant_gate_enabled() -> bool:
         "0", "false", "no", "off"}
 
 
+# The sandbox image ships no third-party packages, so code that imports pandas dies with
+# ModuleNotFoundError unless `dependencies` was passed. Observed in every data task: the model
+# omits it, burns a container run, reads the traceback, then retries the byte-identical code
+# with dependencies set. Infer the obvious ones from the source instead of charging the user a
+# failed run for a detail the code already states.
+_IMPORT_TO_PIP = {
+    "pandas": "pandas", "geopandas": "geopandas", "numpy": "numpy", "shapely": "shapely",
+    "matplotlib": "matplotlib", "scipy": "scipy", "sklearn": "scikit-learn", "pyproj": "pyproj",
+    "fiona": "fiona", "rasterio": "rasterio", "seaborn": "seaborn", "statsmodels": "statsmodels",
+    "pyarrow": "pyarrow", "networkx": "networkx", "folium": "folium", "mapclassify": "mapclassify",
+    "requests": "requests", "bs4": "beautifulsoup4", "PIL": "pillow", "openpyxl": "openpyxl",
+}
+
+
+def _infer_deps(code: str, declared: List[str]) -> List[str]:
+    """pip names for third-party modules the code imports but nobody declared."""
+    imported = set(re.findall(r"^[ \t]*(?:import|from)[ \t]+([A-Za-z_][\w.]*)", str(code or ""), re.M))
+    tops = {name.split(".")[0] for name in imported}
+    have = {re.split(r"[<>=!~\[]", d)[0].strip().lower() for d in declared}
+    return [pip for mod, pip in _IMPORT_TO_PIP.items() if mod in tops and pip.lower() not in have]
+
+
 def is_code_exec_enabled() -> bool:
     """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
     value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
@@ -507,10 +539,91 @@ def _persist_artifacts(work: Path, exclude: set, *, incremental: bool = False) -
     return artifacts
 
 
-def _persist_source(code: str, *, filename: str = "executed_code.py") -> List[Dict[str, Any]]:
-    """Save the executed source as a downloadable output artifact."""
+# A container killed by a signal exits with a NEGATIVE code and usually writes nothing to
+# stderr. Reported bare, that reads to the model as "it just failed", and it then invents a
+# cause (observed: "failed due to dependency issues") and gives up instead of retrying. Naming
+# the signal — and what usually causes it here — lets the agent choose a real next step.
+_SIGNAL_DIAGNOSIS = {
+    9: ("SIGKILL", "the sandbox hit its memory limit (or was killed). Reduce the data held in "
+                   "memory — read in chunks, downsample, or write results incrementally."),
+    11: ("SIGSEGV", "the sandbox process crashed. This is usually a native-library or memory "
+                    "fault, not your logic; retry once, and if it repeats use smaller inputs or "
+                    "avoid the heavy native dependency (a pure-stdlib or pandas-only version "
+                    "often works)."),
+    6: ("SIGABRT", "a native library aborted the process. Try a simpler approach or fewer "
+                   "third-party dependencies."),
+    15: ("SIGTERM", "the sandbox was terminated (time or resource limit)."),
+}
+
+
+
+def _size_report(artifacts: List[Dict[str, Any]]) -> Optional[str]:
+    """Name the run's output sizes when they are big enough to matter."""
+    sized = [(a.get("filename") or "?", int(a.get("size_bytes") or 0)) for a in artifacts]
+    big = [(n, b) for n, b in sized if b >= LARGE_ARTIFACT_MB * 1024 * 1024]
+    if not big:
+        return None
+    total_mb = sum(b for _, b in sized) / 1024 / 1024
+    listed = ", ".join(f"{n} {b / 1024 / 1024:.1f} MB" for n, b in big)
+    return (f"[large output: {listed}; {total_mb:.1f} MB written this run. If it is an intermediate, "
+            f"the geo tools read the ORIGINAL upload directly (CSV/shapefile/GeoPackage/GeoParquet), "
+            f"so converting first is usually avoidable; otherwise write only the columns you need.]")
+
+
+def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Optional[str]) -> Optional[str]:
+    """Explain a signal-killed run so the caller gets a cause, not a silent failure.
+
+    Two conventions reach us: a negative code when the docker CLI itself is signalled, and
+    128+N when the CONTAINER is signalled (docker's own convention — an OOM kill is 137).
+    Both used to surface as a bare non-zero exit with empty stderr.
+    """
+    if error or not isinstance(exit_code, int) or exit_code == 0:
+        return None
+    if exit_code < 0:
+        signo = -exit_code
+    elif 128 < exit_code < 160:
+        signo = exit_code - 128
+    else:
+        return None  # an ordinary non-zero exit: the traceback in stderr is the explanation
+    name, hint = _SIGNAL_DIAGNOSIS.get(signo, (f"signal {signo}", "the sandbox terminated abnormally."))
+    detail = f"code execution was killed by {name} (exit {exit_code}); {hint}"
+    if not (stderr or "").strip():
+        detail += " No stderr was produced, so nothing was written and no output files exist."
+    return detail
+
+
+def _describe_code(code: str) -> Optional[str]:
+    """A short slug for what a script does, read from the code itself.
+
+    Several execute_code calls in one turn all produced ``executed_code.py``, so the
+    download list showed the same name three or four times with no way to tell which run
+    was which. Prefer the module docstring / first comment (what the author said it does),
+    then the first function name; give up rather than invent something meaningless.
+    """
+    text = str(code or "")
+    m = re.search(r'^\s*(?:"""|\'\'\')\s*(.+)', text) or re.search(r"^\s*#\s*(.+)", text, re.M)
+    if not m:
+        m = re.search(r"^\s*def\s+([A-Za-z_]\w*)", text, re.M)
+    if not m:
+        return None
+    words = re.findall(r"[A-Za-z0-9]+", m.group(1).lower())[:5]
+    slug = "_".join(words)[:48].strip("_")
+    return slug or None
+
+
+def _persist_source(code: str, *, label: Optional[str] = None,
+                    filename: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Save the executed source as a downloadable output artifact.
+
+    Named for what the script does (caller-supplied ``label``, else derived from the
+    code) so repeated runs in one conversation are distinguishable.
+    """
     from agent_runtime.file_store import create_output_file
 
+    if not filename:
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", str(label or "")).strip("_").lower()[:48]
+        stem = stem or _describe_code(code) or "executed_code"
+        filename = f"{stem}.py"
     try:
         rec = create_output_file(filename, code or "")
         return [{
@@ -577,6 +690,32 @@ def _work_root() -> Optional[str]:
         return None
 
 
+def session_workspace_listing(session: Optional[str], *, limit: int = 25) -> List[Dict[str, Any]]:
+    """What earlier runs in this conversation left behind: ``[{name, size_bytes}]``.
+
+    A durable workspace is only useful if the model knows what is in it. Without this,
+    a steer like "now do a heatmap of that" makes the peer rebuild the dataset it already
+    has on disk — or claim it cannot, because nothing told it the file is there.
+    """
+    ws = _session_workspace(session)
+    if ws is None:
+        return []
+    items: List[Dict[str, Any]] = []
+    for p in sorted(ws.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(ws)
+        if rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}:
+            continue
+        try:
+            items.append({"name": str(rel), "size_bytes": p.stat().st_size})
+        except OSError:
+            continue
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _host_user() -> Optional[str]:
     getuid = getattr(os, "getuid", None)
     getgid = getattr(os, "getgid", None)
@@ -599,7 +738,9 @@ class CodeExecutor:
                 dependencies: Optional[List[Any]] = None,
                 input_files: Optional[List[Dict[str, str]]] = None,
                 session_id: Optional[str] = None,
-                tier: Optional[str] = None) -> ExecResult:
+                tier: Optional[str] = None,
+                label: Optional[str] = None,
+                session: Optional[str] = None) -> ExecResult:
         """Run *code* in the sandbox.
 
         With a ``session_id`` the workspace PERSISTS between calls, so a multi-step workflow
@@ -607,8 +748,15 @@ class CodeExecutor:
         kept exactly — a throwaway dir removed afterwards — because sessionless runs sharing
         a directory would leak between unrelated turns.
 
+        ``session`` is an accepted alias for ``session_id``. Both branches grew workspace
+        persistence independently under different names; the directory is mounted directly
+        rather than copied forward, so staged inputs and the gate's report live with the files
+        instead of being copied around each run.
+
         ``tier`` selects the resource budget (quick | standard | heavy); see ``EXEC_TIERS``.
+        ``label`` names the saved source artifact.
         """
+        session_id = session_id or session
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
@@ -619,6 +767,9 @@ class CodeExecutor:
         deps, rejected = _sanitize_deps(dependencies)
 
         persistent = bool((session_id or "").strip())
+        auto = _infer_deps(code, deps)
+        if auto:
+            deps = [*deps, *auto]
         try:
             if persistent:
                 sweep_workspaces()
@@ -663,10 +814,16 @@ class CodeExecutor:
             # A persistent workspace MUST persist incrementally: this walk stops at
             # MAX_ARTIFACTS, so step 1's leftovers would otherwise consume the budget in
             # sorted-path order and step 5's real output would never be persisted at all.
-            artifacts = [*_persist_source(code or ""),
+            artifacts = [*_persist_source(code or "", label=label),
                          *_persist_artifacts(work, {"script.py", *staged}, incremental=persistent)]
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
+            if auto:
+                stderr = (str(stderr or "")
+                          + f"\n[installed imports you did not declare: {auto}]").strip()
+            size_note = _size_report(artifacts)
+            if size_note:
+                stderr = (str(stderr or "") + "\n" + size_note).strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             if persistent:
@@ -674,17 +831,13 @@ class CodeExecutor:
                 if size_mb > WORKSPACE_MAX_MB:
                     stderr = (str(stderr or "") + f"\n[workspace {size_mb:.0f}MB exceeds "
                               f"{WORKSPACE_MAX_MB:.0f}MB cap; older files may be reclaimed]").strip()
+            # Signal-killed runs carry no stderr; surface a cause so the agent can react.
+            error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             verification = _read_checks(work)
             # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
             # environment, input hashes, library slice_shas) + inputs.jsonl. Emitted before
             # returning so it lands beside the run, and guarded inside emit() so a failure to
             # write provenance can never fail a successful analysis.
-            if artifacts_enabled():
-                from agent_runtime import artifacts as _artifacts
-                _artifacts.emit(code=(code or ""), work=work,
-                                image=getattr(self, "image", ""), backend=self.backend,
-                                dependencies=deps, tier=tier_name, staged=sorted(staged),
-                                verification=verification)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps,
                               verification=verification)
