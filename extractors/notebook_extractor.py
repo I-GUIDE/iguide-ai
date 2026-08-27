@@ -110,6 +110,136 @@ def _classify_cell(source: str) -> Tuple[str, bool, List[Dict[str, Any]], List[s
             constructs, sorted(set(tools)), sorted(set(imports)), sorted(set(file_refs)))
 
 
+
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.M)
+_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+([A-Za-z_]\w*)", re.M)
+_TAG_RE = re.compile(r"<[^>]{1,40}>")
+_MDLINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# Cells that are neither narrated nor named still fall into a few recognisable jobs.
+# Ordered: the first match wins, so the more specific verbs come first.
+_CODE_HINTS = (
+    ("pip install", "Install dependencies"),
+    ("conda install", "Install dependencies"),
+    (".to_crs(", "Reproject"),
+    ("sjoin", "Spatial join"),
+    (".buffer(", "Buffer"),
+    (".dissolve(", "Dissolve"),
+    (".to_file(", "Write output"),
+    (".to_csv(", "Write output"),
+    (".fit(", "Fit a model"),
+    ("read_file(", "Load data"),
+    ("read_csv(", "Load data"),
+    ("read_parquet(", "Load data"),
+    ("rasterio.open(", "Load raster"),
+    (".plot(", "Plot"),
+    ("plt.", "Plot"),
+    ("explore(", "Map"),
+    ("folium", "Map"),
+    ("import ", "Import libraries"),
+)
+
+
+def _is_prose(text: str) -> bool:
+    """Is this comment a sentence, or is it commented-out code?
+
+    Both live behind a `#` and only one is a title. Decided by parsing rather than by looking
+    for `=` or `import`: `model = model.to("cuda")` is valid Python and "Define callbacks" is
+    not, which is exactly the distinction. A lone word like `Mapping` parses as an expression
+    and is still prose, so bare names are excluded from the code verdict.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return True
+    body = tree.body
+    if len(body) == 1 and isinstance(body[0], ast.Expr):
+        return isinstance(body[0].value, (ast.Name, ast.Constant))
+    return False
+
+
+def _leading_comment(code: str) -> str:
+    """The comment block at the top of a cell, which is the author naming the cell in code."""
+    for line in (code or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            break
+        text = stripped.lstrip("#").strip()
+        # Banner rules (`# ====`, `# ----`) are decoration, not a name; skip past them.
+        if text and re.sub(r"[^\w]", "", text) and _is_prose(text):
+            return text
+    return ""
+
+
+def _block_title(md_context: str, code: str, order: int, constructs) -> str:
+    """A name for one extracted cell that says what the cell IS.
+
+    Blocks were titled ``<element> — cell 12``, which identifies the cell and describes nothing.
+    The notebook's own markdown heading was sitting unused in ``markdown_context`` one field away:
+    ``1c. Project All Files to the Same CRS`` instead of ``cell 10``. Authors write these names for
+    human readers, which is exactly the audience a retrieved block has — so every tier here reads a
+    name the author already wrote, and only the last two invent one.
+
+    Order of preference, each falling through when it yields nothing usable:
+
+    1. the cell's own markdown heading — the author's name for this step;
+    2. its first sentence of prose, when the author narrated but wrote no heading;
+    3. the comment block at the top of the code — the same act, one layer down;
+    4. what the cell defines, for a cell whose job is defining ``reproject_tif``;
+    5. what the code evidently does, by construct or call;
+    6. ``cell N``, which is where we started and still beats an empty title.
+
+    Tiers 3-5 were rebuilt after measuring: of the 871 cells that reached this point with no
+    markdown at all, classified constructs fired on 15. Leading comments and ``def`` lines are
+    what those cells actually carry.
+    """
+    for match in _HEADING_RE.finditer(md_context or ""):
+        heading = match.group(1).strip().strip("*_`")
+        if heading:
+            return _clip(heading)
+
+    prose = " ".join((md_context or "").split())
+    if prose:
+        sentence = re.split(r"(?<=[.!?])\s", prose, maxsplit=1)[0]
+        return _clip(sentence.rstrip(".") if len(sentence) >= 12 else prose)
+
+    comment = _leading_comment(code)
+    if len(comment) >= 8:
+        return _clip(comment.rstrip(":."))
+
+    defined = _DEF_RE.findall(code or "")
+    if defined:
+        shown = ", ".join(f"{name}()" for name in defined[:2])
+        return _clip(f"Define {shown}" + (" +more" if len(defined) > 2 else ""))
+
+    for construct in (constructs or []):
+        packages = (construct.get("detail") or {}).get("packages")
+        if packages:
+            return _clip(f"Install {', '.join(map(str, packages[:3]))}")
+    # Comments are excluded: this tier reports what the cell DOES, and a commented-out
+    # `# import geopandas` is a line the cell deliberately does not run.
+    lowered = "\n".join(ln for ln in (code or "").lower().splitlines()
+                        if not ln.lstrip().startswith("#"))
+    for needle, name in _CODE_HINTS:
+        if needle in lowered:
+            return name
+    return f"cell {order}"
+
+
+def _clip(text: str, limit: int = 72) -> str:
+    """Flatten one line of authored markdown into a plain-text title.
+
+    Titles are rendered as text everywhere they are used, so `<b>` and `**` arrive as literal
+    characters rather than as emphasis — markup that meant something in the notebook becomes
+    noise in a search result.
+    """
+    text = _TAG_RE.sub("", text or "")
+    text = _MDLINK_RE.sub(r"\1", text)
+    text = " ".join(text.replace("**", "").replace("*", "").replace("`", "").split())
+    return text if len(text) <= limit else text[:limit].rstrip(" ,;:-") + "…"
+
+
 def _top_level_functions(module_source: str) -> List[str]:
     try:
         tree = ast.parse(module_source)
@@ -202,7 +332,8 @@ class NotebookExtractor:
                 doc_id=doc_id,
                 emit_targets=[EMIT_OPENSEARCH],
                 source_rel_path=rel_path,
-                title=f"{title} — cell {order}",
+                # Named for what the cell IS, not where it sits. See `_block_title`.
+                title=f"{_block_title(md_context, source, order, constructs)} — {title}",
                 contents=contents,
                 # `tags` is the SUBMITTER's vocabulary and stays that way. Import names used to be
                 # merged in here, which put `os`, `time`, `copy`, `html` and `__future__` in a
