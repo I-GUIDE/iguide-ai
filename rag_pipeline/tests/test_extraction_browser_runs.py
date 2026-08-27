@@ -76,6 +76,73 @@ try {
   out.countLine = (registry.get("countline") || {}).textContent || "";
   out.tally = (registry.get("tally") || {}).innerHTML || "";
   out.records = JSON.parse(payload.replace(/<\\\/script/g, "</script")).records.length;
+
+  // --- drive the page, because rendering a list is not the whole page ---------------
+  //
+  // Everything above exercises the FIRST render only. Grouping and every detail view sit
+  // behind a click, so a page that throws the moment someone picks a record would pass all
+  // of it. `textContent = ""` does not clear the stub's children, so each render appends a
+  // fresh fragment and the newest one is the current view.
+  const newest = (el) => (el && el._children.length
+    ? el._children[el._children.length - 1] : null);
+  const detail = registry.get("detail");
+
+  const flatten = (el) => {
+    const acc = [];
+    (function walk(n) {
+      (n._children || []).forEach((c) => { acc.push(c); walk(c); });
+    })(el);
+    return acc;
+  };
+
+  // 1. Open a record of every kind and confirm each detail view builds.
+  //
+  // Reached through the kind chips rather than by scanning the first render: the list caps at
+  // 800 rows and units alone exceed that, so four of the five kinds never appear in it.
+  out.details = {};
+  const kindChips = (registry.get("kinds") || { _children: [] })._children;
+  for (const kind of ["notebook", "method unit", "dataset", "publication", "code element"]) {
+    const chip = kindChips.find(
+      (c) => (c.innerHTML || "").replace(/<span class="n">.*/, "") === kind);
+    if (!chip) { out.details[kind] = null; continue; }
+    chip.onclick();
+    const rowsNow = flatten(newest(registry.get("rows"))).filter((c) => c.className === "row");
+    // Match the kind SPAN, not the row text: a unit's meta column carries the name of the
+    // extractor that produced it, so a loose match finds a unit for every kind.
+    const hit = rowsNow.find((c) => (c.innerHTML || "").includes(
+      '<span class="kind">' + kind + '</span>'));
+    if (!hit) { out.details[kind] = null; continue; }
+    hit.onclick();
+    out.details[kind] = (detail.innerHTML || "").length;
+    if (kind === "notebook") out.notebookDetail = detail.innerHTML || "";
+  }
+  const all = kindChips.find((c) => (c.innerHTML || "").startsWith("All"));
+  if (all) all.onclick();
+
+  // 2. Switch to the grouped view.
+  const groupChips = (registry.get("grouping") || { _children: [] })._children;
+  out.groupChipLabels = groupChips.map((c) => c.innerHTML);
+  const byElement = groupChips.find((c) => (c.innerHTML || "").includes("By element"));
+  if (byElement) {
+    byElement.onclick();
+    const frag = newest(registry.get("rows"));
+    const groups = (frag ? frag._children : []).filter((c) => c.className === "grp");
+    out.groups = groups.length;
+    out.groupedCountLine = (registry.get("countline") || {}).textContent || "";
+    out.groupHeads = groups.slice(0, 3).map((g) => {
+      const head = (g._children || [])[0];
+      return head ? head.innerHTML : "";
+    });
+    // 3. A collapsed group opens when its header is clicked.
+    const first = groups[0];
+    const head = first && first._children[0];
+    out.rowsBeforeExpand = first ? first._children.length - 1 : -1;
+    if (head) {
+      head.onclick();
+      const after = flatten(newest(registry.get("rows"))).filter((c) => c.className === "grp");
+      out.rowsAfterExpand = after.length ? after[0]._children.length - 1 : -1;
+    }
+  }
 } catch (e) {
   out.ok = false;
   out.error = String((e && e.message) || e);
@@ -124,6 +191,42 @@ def test_the_count_line_reports_the_whole_payload(result):
 
 def test_the_header_tally_is_populated(result):
     assert "</b>" in result["tally"] and result["tally"].strip()
+
+
+def test_every_kind_of_record_opens_without_throwing(result):
+    """The first render is not the page. Every detail view sits behind a click, so a view that
+    throws the moment someone picks that kind of record would pass every test above it."""
+    built = {k: v for k, v in (result.get("details") or {}).items() if v is not None}
+    assert built, "no record of any kind could be opened"
+    empty = [k for k, v in built.items() if not v]
+    assert not empty, f"opening these built an empty detail pane: {empty}"
+
+
+def test_a_notebook_shows_its_extracted_cells(result):
+    """The point of the notebook view: the artifacts extracted from THIS notebook, in order."""
+    html = result.get("notebookDetail")
+    if html is None:
+        pytest.skip("no notebook record in this checkout's payload")
+    assert 'class="blk"' in html, "no extracted cells rendered"
+    assert "<pre>" in html, "cells rendered without their code"
+    assert "cells extracted" in html
+
+
+def test_the_grouped_view_organises_records_under_their_parent_element(result):
+    assert "By element" in " ".join(result.get("groupChipLabels") or []), \
+        "the grouping control is missing"
+    assert (result.get("groups") or 0) > 1, "grouping produced no groups"
+    assert "element(s)" in (result.get("groupedCountLine") or "")
+    heads = result.get("groupHeads") or []
+    assert heads and all(h.strip() for h in heads), "a group rendered without a header"
+
+
+def test_a_group_header_toggles_its_members(result):
+    """A group that cannot be opened or closed is just a heading."""
+    before, after = result.get("rowsBeforeExpand"), result.get("rowsAfterExpand")
+    if before is None or after is None:
+        pytest.skip("grouping did not run in this checkout")
+    assert before != after, f"clicking a group header changed nothing ({before} rows both times)"
 
 
 def test_a_record_whose_field_has_an_unexpected_shape_cannot_blank_the_page(tmp_path):

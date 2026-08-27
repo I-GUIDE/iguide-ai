@@ -174,7 +174,7 @@ def test_the_real_payload_parses_and_every_record_is_renderable(gen):
     reloaded = json.loads(blob)
     assert len(reloaded["records"]) == len(payload["records"])
     for record in reloaded["records"]:
-        assert record.get("kind") in {"unit", "dataset", "publication", "code"}
+        assert record.get("kind") in {"unit", "dataset", "publication", "code", "notebook"}
         assert record.get("id"), record
         assert record.get("name") is not None, record
         assert isinstance(record.get("flags", []), list)
@@ -435,3 +435,129 @@ def test_a_gap_between_callable_and_listed_units_is_shown_not_smoothed_over():
     to say so rather than quietly listing fewer."""
     js = _script()
     assert "That gap is a defect, not a filter." in js
+
+
+# ------------------------------------------------------- notebooks, grouped by their element
+
+def test_a_notebook_record_carries_its_cells_and_the_units_promoted_from_them(gen):
+    """Notebooks are the largest source in the corpus and were the only type with nothing to
+    browse: the other three have per-element outcome files, while a notebook's blocks and units
+    existed only inside a search index."""
+    blocks = {"rows": [{
+        "element": "02f7f46b", "file": "nb.ipynb", "title": "Distance and Nearest Features",
+        "bytes": 307736, "unnamed_blocks": 2,
+        "blocks": [{"doc_id": "02f7f46b::block::3", "title": "1b. Import Data", "order": 3,
+                    "code": "import geopandas", "markdown": "## 1b. Import Data",
+                    "parse_ok": True, "tools": [], "imports": ["geopandas"],
+                    "file_refs": ["a.shp"], "constructs": []}],
+        "units": [
+            {"doc_id": "u1", "symbol": "pkg.load_points", "signature": "(path)",
+             "verdict": "callable", "summary": "Load points", "cell_order": 3},
+            {"doc_id": "u2", "symbol": "pkg.plot_it", "signature": "()", "verdict": "blocked",
+             "reason": "reads a module-level frame", "global_reads": ["gdf"]},
+        ],
+        "workflow": {"workflow_id": "w1", "mode": "script", "entrypoint": "run", "params": []},
+    }]}
+    records = gen._notebooks(blocks)
+    assert len(records) == 1
+    r = records[0]
+    assert r["kind"] == "notebook" and r["id"] == "02f7f46b"
+    assert len(r["blocks"]) == 1 and r["blocks"][0]["title"] == "1b. Import Data"
+    # Both units, not only the one that shipped: a refused unit names the hidden dependency
+    # that stopped it, which is what says which extraction limit to lift next.
+    assert len(r["notebook_units"]) == 2 and r["callable"] == 1
+    assert "produced-units" in r["flags"] and "has-workflow" in r["flags"]
+
+
+def test_a_notebook_that_yielded_nothing_is_still_a_record():
+    """An extraction that produced no cells IS the finding. Dropping the row would leave the
+    page saying nothing about the notebook at all."""
+    import scripts.build_extraction_browser as gen
+    records = gen._notebooks({"rows": [{"element": "fec21e60", "file": "empty.ipynb",
+                                        "title": "Stadia Maps", "blocks": [], "units": []}]})
+    assert len(records) == 1
+    assert "no-blocks" in records[0]["flags"]
+
+
+def test_a_notebooks_file_references_are_a_list_the_page_can_iterate():
+    """The extractor stores `file_io` as `{"referenced": [...]}`. Passing that object straight
+    through gave the page something it could not iterate — the same shape mismatch that blanked
+    the whole page once already, one field deeper."""
+    source = (REPO / "scripts" / "export_notebook_blocks.py").read_text(encoding="utf-8")
+    assert '"file_refs": (block.get("file_io") or {}).get("referenced")' in source
+
+
+def test_a_promoted_unit_links_to_the_library_record_the_page_navigates_by(gen):
+    """A notebook lists units by their extraction doc id; the page navigates by registry key.
+    Without the join, every callable unit rendered as a link that quietly went nowhere."""
+    units = [{"kind": "unit", "id": "iguide.ke_x.nb.load_points", "name": "load_points",
+              "element": "02f7f46b", "signature": "(path)", "flags": []}]
+    record = {"kind": "notebook", "id": "02f7f46b", "flags": [],
+              "notebook_units": [{"symbol": "pkg.load_points", "doc_id": "u1"},
+                                 {"symbol": "pkg.never_shipped", "doc_id": "u2"}]}
+    gen._link_units_to_elements([record] + units, units)
+    promoted = {u["symbol"]: u.get("registry_id") for u in record["notebook_units"]}
+    assert promoted["pkg.load_points"] == "iguide.ke_x.nb.load_points"
+    assert promoted["pkg.never_shipped"] is None, "a refused unit must not get a link"
+
+
+def test_records_can_be_grouped_under_their_parent_knowledge_element():
+    js = _script()
+    assert "const parentOf = (r) =>" in js
+    assert "function renderGrouped(" in js
+    # A unit's parent is the element it was extracted from; an element record IS its own parent.
+    assert 'r.kind === "unit" ? r.element : r.id' in js
+
+
+def test_a_refused_unit_is_not_rendered_as_a_link_that_goes_nowhere():
+    js = _script()
+    notebook_detail = js.split("function notebookDetail(", 1)[1].split("\n  function ", 1)[0]
+    assert "u.registry_id ?" in notebook_detail
+
+
+def test_the_detail_views_cannot_be_broken_by_a_field_of_the_wrong_shape():
+    """The search index was hardened after a shape mismatch blanked the page. The detail views
+    were not, because nothing had ever opened one under test."""
+    js = _script()
+    assert "const ARRAY_FIELDS = [" in js
+    declared = js.split("const ARRAY_FIELDS = [", 1)[1].split("];", 1)[0]
+    for field in ("blocks", "notebook_units", "requires", "invariants", "params"):
+        assert f'"{field}"' in declared
+
+
+def test_the_page_declares_its_encoding():
+    """Found by opening the page in a browser, not by any test above.
+
+    The page is full of em dashes — the title separator is one. Served over HTTP with no charset
+    header and no `<meta charset>`, it decoded as windows-1252 and every one of them rendered as
+    `â€"`. Opening the same file from disk happened to guess UTF-8, which is why this survived.
+    """
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert html.lstrip().lower().startswith('<meta charset="utf-8">')
+
+
+def test_a_cell_ordinal_is_read_from_the_key_the_extractor_writes():
+    """The exporter asked for `cell_order`; the extractor writes `order`. Every ordinal came out
+    None, so the column rendered blank for all 3,830 cells and the page still passed its tests —
+    a blank column is not an exception."""
+    import json
+
+    source = (REPO / "scripts" / "export_notebook_blocks.py").read_text(encoding="utf-8")
+    assert '"order": block.get("order")' in source
+
+    exported = REPO / "outputs" / "notebook_blocks.json"
+    if not exported.is_file():
+        pytest.skip("no notebook export in this checkout")
+    rows = json.loads(exported.read_text(encoding="utf-8"))["rows"]
+    orders = [b.get("order") for r in rows for b in r.get("blocks") or []]
+    if not orders:
+        pytest.skip("the export contains no blocks")
+    assert any(o is not None for o in orders), "every cell ordinal is None"
+
+
+def test_the_page_does_not_offer_a_column_it_can_never_fill():
+    """A unit's provenance records the element and the source file, never the cell it came from.
+    Rendering `cell N` for units printed an empty column for all 382 of them."""
+    js = _script()
+    notebook_detail = js.split("function notebookDetail(", 1)[1].split("\n  function ", 1)[0]
+    assert "cell_order" not in notebook_detail

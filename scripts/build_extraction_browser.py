@@ -19,6 +19,7 @@ Sources, each optional — a missing one is reported, never silently skipped:
   outputs/publication_reach.json  per-document readability
   outputs/extract_publication_*.json   per-element publication outcome
   outputs/extract_code_gated.json      per-element code outcome
+  outputs/notebook_blocks.json    per-notebook blocks and units (scripts/export_notebook_blocks.py)
 """
 
 from __future__ import annotations
@@ -224,6 +225,58 @@ def _publications(reach: dict, outcomes: dict, specs: dict = None) -> list:
     return out
 
 
+def _notebooks(blocks: dict) -> list:
+    """One record per notebook, carrying the artifacts extracted from it in cell order.
+
+    Notebooks are the largest source in the corpus and were the only type with nothing to browse:
+    the other three have per-element outcome files, while a notebook's blocks and units existed
+    only inside a search index.
+    """
+    out = []
+    for row in ((blocks or {}).get("rows") or []):
+        blks = row.get("blocks") or []
+        units = row.get("units") or []
+        callable_units = [u for u in units if u.get("verdict") == "callable"]
+        unparsed = [b for b in blks if b.get("parse_ok") is False]
+        flags = []
+        if callable_units:
+            flags.append("produced-units")
+        if row.get("workflow"):
+            flags.append("has-workflow")
+        if unparsed:
+            flags.append("unparsed-cells")
+        if not blks:
+            flags.append("no-blocks")
+        if blks and not row.get("unnamed_blocks"):
+            flags.append("fully-named")
+        if row.get("error"):
+            flags.append("extract-error")
+        out.append({
+            "kind": "notebook",
+            "id": row.get("element"),
+            "name": row.get("file") or row.get("element"),
+            "title": row.get("title") or row.get("file"),
+            "file": row.get("file") or "",
+            "bytes": row.get("bytes"),
+            "tags": row.get("tags") or [],
+            "authors": row.get("authors") or [],
+            "repo": row.get("repo") or "",
+            "blocks": blks,
+            "unnamed_blocks": row.get("unnamed_blocks") or 0,
+            "unparsed_cells": len(unparsed),
+            # Every promoted unit, not only the ones the library kept. A unit that was analysed
+            # and REFUSED is the more informative half: it names the hidden dependency that
+            # stopped it, which is what tells you which extraction limit to lift next.
+            "notebook_units": units,
+            "callable": len(callable_units),
+            "units": len(units),
+            "workflow": row.get("workflow") or None,
+            "error": row.get("error") or "",
+            "flags": flags,
+        })
+    return out
+
+
 def _code(outcomes: dict) -> list:
     out = []
     for row in ((outcomes or {}).get("elements") or []):
@@ -277,6 +330,17 @@ def _link_units_to_elements(records: list, units: list) -> None:
         if "has-units" not in record.setdefault("flags", []):
             record["flags"].append("has-units")
 
+        # A notebook lists every unit it promoted, refused ones included, from the export — and
+        # those carry the extraction doc id, not the registry key the page navigates by. Without
+        # this the callable ones would render as links that quietly go nowhere.
+        by_name = {}
+        for u in found:
+            by_name.setdefault(u["name"], u["id"])
+        for promoted in (record.get("notebook_units") or []):
+            registry_id = by_name.get(str(promoted.get("symbol") or "").rsplit(".", 1)[-1])
+            if registry_id:
+                promoted["registry_id"] = registry_id
+
 
 def collect(repo: Path) -> dict:
     outputs = repo / "outputs"
@@ -306,6 +370,7 @@ def collect(repo: Path) -> dict:
     if pub_out is None:
         missing.append("outputs/extract_publication_*.json")
     code_out = take("code_outcomes", outputs / "extract_code_gated.json")
+    nb_blocks = take("notebook_blocks", outputs / "notebook_blocks.json")
 
     specs = _load(outputs / "publication_specs.json")
     if specs is None:
@@ -314,7 +379,7 @@ def collect(repo: Path) -> dict:
     unit_records = _units(registry or {})
     records = (unit_records + _datasets(details or {}, ds_out or {})
                + _publications(reach or {}, pub_out or {}, specs or {})
-               + _code(code_out or {}))
+               + _code(code_out or {}) + _notebooks(nb_blocks or {}))
     _link_units_to_elements(records, unit_records)
     counts = {}
     for r in records:

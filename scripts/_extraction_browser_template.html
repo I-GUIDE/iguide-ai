@@ -1,3 +1,5 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Extraction Browser</title>
 <style>
   :root {
@@ -217,6 +219,48 @@
     font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; color:var(--ink-soft);
   }
   .unitrow .unit-doc { color:var(--muted); }
+  /* One extracted cell. `<details>` so a 40-cell notebook opens as a readable outline of its
+     steps rather than as forty walls of code — the title tiers exist to make that outline work. */
+  details.blk { border-top:1px solid var(--rule-soft); }
+  details.blk > summary {
+    display:grid; grid-template-columns:auto 1fr auto; gap:2px 10px; align-items:baseline;
+    padding:9px 0; cursor:pointer; list-style:none; font-size:12.5px;
+  }
+  details.blk > summary::-webkit-details-marker { display:none; }
+  details.blk > summary:hover { background:var(--panel-alt); }
+  .blk-ord {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); min-width:3.2em;
+  }
+  .blk-name { color:var(--ink); overflow-wrap:anywhere; }
+  .blk-name.unnamed { color:var(--muted); font-style:italic; }
+  .blk-tools {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); text-align:right;
+  }
+  .blk-md {
+    margin:6px 0 0; padding:8px 12px; border-left:3px solid var(--rule);
+    color:var(--ink-soft); font-size:12.5px; white-space:pre-wrap;
+  }
+  details.blk > div { padding-bottom:10px; }
+
+  /* Grouped list: artifacts under the knowledge element they were extracted from. */
+  .grp { border-bottom:1px solid var(--rule-soft); }
+  button.grp-head {
+    display:grid; grid-template-columns:1fr auto; gap:2px 10px; align-items:baseline;
+    width:100%; text-align:left; cursor:pointer; font:inherit; color:var(--ink);
+    background:var(--panel-alt); border:0; padding:8px 24px;
+    position:sticky; top:0; z-index:1;
+  }
+  button.grp-head:hover { filter:brightness(.97); }
+  .grp-title { font-size:12.5px; font-weight:600; overflow-wrap:anywhere; }
+  .grp-meta {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted);
+  }
+  .grp-sub { grid-column:1 / -1; font-size:11px; color:var(--muted); }
+  .grp .row { padding-left:38px; }
+
   button.link {
     font:inherit; font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
     font-size:12.5px; padding:0; border:0; background:none; cursor:pointer;
@@ -250,6 +294,8 @@
          autocomplete="off" spellcheck="false" aria-label="Search extracted records">
   <div class="chips" id="kinds" role="group" aria-label="Record type"></div>
   <div class="sep" aria-hidden="true"></div>
+  <div class="chips" id="grouping" role="group" aria-label="Grouping"></div>
+  <div class="sep" aria-hidden="true"></div>
   <div class="chips" id="facets" role="group" aria-label="Filters"></div>
 </div>
 
@@ -269,11 +315,13 @@
   const DATA = JSON.parse(document.getElementById("payload").textContent);
   const RECORDS = DATA.records || [];
   const KIND_LABEL = { unit: "method unit", dataset: "dataset", publication: "publication",
-                       code: "code element" };
+                       code: "code element", notebook: "notebook" };
   const GOOD = new Set(["has-invariants", "documented", "readable", "has-schema", "has-crs",
                         "has-variables", "has-loader", "produced-units", "cc-by", "cc-by-nc-nd",
-                        "cc-by-sa", "cc0", "pdf-from-best", "pdf-from-alternate"]);
-  const WARN = new Set(["naked", "zero-arg", "off-domain", "no-local-file"]);
+                        "cc-by-sa", "cc0", "pdf-from-best", "pdf-from-alternate",
+                        "has-workflow", "fully-named"]);
+  const WARN = new Set(["naked", "zero-arg", "off-domain", "no-local-file",
+                        "unparsed-cells", "no-blocks", "extract-error"]);
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -298,6 +346,22 @@
   const joinText = (v) => list_(v).map((x) =>
     (x && typeof x === "object") ? Object.values(x).filter(
       (y) => typeof y === "string" || typeof y === "number").join(" ") : String(x)).join(" ");
+
+  // Every field the page iterates, coerced to an array once. The search index was made
+  // defensive after a shape mismatch blanked the page; the DETAIL views were not, because
+  // nothing had ever opened one under test — so `requires: 42` still threw on `.map`, one
+  // click later. Normalising here fixes every consumer at once, and a malformed field costs
+  // its own row rather than the page.
+  const ARRAY_FIELDS = ["flags", "schema", "variables", "requires", "params", "invariants",
+                        "steps", "datasets_referenced", "tools_referenced", "units_in_library",
+                        "blocks", "notebook_units", "tags", "authors", "imports", "off_domain",
+                        "dtypes", "bounds", "resolution"];
+  RECORDS.forEach((r) => {
+    ARRAY_FIELDS.forEach((k) => {
+      if (k in r && !Array.isArray(r[k])) r[k] = [];
+    });
+  });
+
   RECORDS.forEach((r) => {
     try {
       r._hay = [r.name, r.title, r.id, r.element, r.source, r.signature, r.summary, r.import,
@@ -309,13 +373,37 @@
                 list_(r.invariants).map((i) => (i && i.check) || "").join(" "),
                 joinText(r.params),
                 Object.keys(r.declared_params || {}).join(" "),
+                // A notebook's substance is its cells, so searching has to reach INTO them —
+                // otherwise the type with the most extracted content is the least findable.
+                list_(r.blocks).map((b) => [b.title, b.code, b.markdown,
+                                            list_(b.tools).join(" ")].join(" ")).join(" "),
+                list_(r.notebook_units).map((u) => [u.symbol, u.signature, u.summary,
+                                                    u.reason].join(" ")).join(" "),
+                joinText(r.tags), joinText(r.authors), r.repo,
                ].filter(Boolean).join(" ").toLowerCase();
     } catch (err) {
       r._hay = String(r.name || r.id || "").toLowerCase();
     }
   });
 
-  const state = { kind: "all", facets: new Set(), q: "", selected: null };
+  const state = { kind: "all", facets: new Set(), q: "", selected: null,
+                  grouped: false, open: new Set() };
+
+  // ---------- parent knowledge element ----------
+  //
+  // Every record traces back to one platform element: an element record IS its element, and a
+  // method unit was extracted FROM one. Flat, the 840 units drown the 500-odd elements they came
+  // from and nothing shows which artifacts share a parent — which is the question "what did we
+  // get out of this element" actually asks.
+  const ELEMENT_KINDS = new Set(["notebook", "dataset", "publication", "code"]);
+  const parentOf = (r) => String((r.kind === "unit" ? r.element : r.id) || "");
+  // The element record is the authority on a parent's title; a unit only knows its own name.
+  const PARENT = new Map();
+  RECORDS.forEach((r) => {
+    if (ELEMENT_KINDS.has(r.kind) && r.id) {
+      PARENT.set(String(r.id), { title: r.title || r.name, kind: r.kind });
+    }
+  });
 
   // ---------- header ----------
   const counts = DATA.counts || {};
@@ -351,6 +439,17 @@
       const b = chip(KIND_LABEL[k] || k, counts[k], state.kind === k);
       b.onclick = () => { state.kind = k; state.facets.clear(); render(); };
       kindsBox.appendChild(b);
+    });
+  }
+
+  const groupBox = document.getElementById("grouping");
+
+  function buildGrouping() {
+    groupBox.textContent = "";
+    [["Flat list", false], ["By element", true]].forEach(([label, on]) => {
+      const b = chip(label, null, state.grouped === on);
+      b.onclick = () => { state.grouped = on; state.open.clear(); render(); list.scrollTop = 0; };
+      groupBox.appendChild(b);
     });
   }
 
@@ -432,50 +531,113 @@
     return esc(r.error || r.title);
   }
 
+  function rowButton(r) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "row";
+    if (state.selected === r) b.setAttribute("aria-current", "true");
+    b.innerHTML =
+      `<span class="row-top"><span class="row-name">${esc(r.name)}</span>`
+      + `<span class="kind">${esc(KIND_LABEL[r.kind] || r.kind)}</span>`
+      + `<span class="row-meta">${rowMeta(r)}</span></span>`
+      + `<span class="row-sub">${rowSub(r)}</span>`
+      + ((r.flags || []).length
+          ? `<span class="row-flags">${r.flags.map(
+              (f) => `<span class="${tagClass(f)}">${esc(f)}</span>`).join("")}</span>`
+          : "");
+    b.onclick = () => {
+      // Re-rendering the list replaces its rows, which resets scrollTop. Restoring it is what
+      // keeps the reader where they were after picking a record forty rows down.
+      const keep = list.scrollTop;
+      state.selected = r;
+      render();
+      list.scrollTop = keep;
+      show(r);
+    };
+    return b;
+  }
+
+  function note(text) {
+    const p = document.createElement("p");
+    p.className = "count-line";
+    p.textContent = text;
+    return p;
+  }
+
+  function renderFlat(shown, frag) {
+    shown.slice(0, 800).forEach((r) => frag.appendChild(rowButton(r)));
+    if (shown.length > 800) {
+      frag.appendChild(note(
+        `showing the first 800 of ${shown.length} — narrow the search to see the rest`));
+    }
+  }
+
+  function renderGrouped(shown, frag) {
+    const groups = new Map();
+    shown.forEach((r) => {
+      const key = parentOf(r) || "(no parent element)";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    });
+    // The element record leads its own group; the artifacts extracted from it follow.
+    const order = (r) => (ELEMENT_KINDS.has(r.kind) ? 0 : 1);
+    const entries = [...groups.entries()].sort(
+      (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+    // Expanded when the reader has already narrowed to a handful; collapsed when they are
+    // looking at the whole corpus, where 500 open groups would just be the flat list again.
+    const autoOpen = entries.length <= 12;
+
+    entries.slice(0, 400).forEach(([key, members]) => {
+      members.sort((a, b) => order(a) - order(b)
+        || String(a.name).localeCompare(String(b.name)));
+      const meta = PARENT.get(key) || {};
+      const wrap = document.createElement("div");
+      wrap.className = "grp";
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "grp-head";
+      const open = state.open.has(key) || (autoOpen && !state.open.has("!" + key));
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+      const kinds = [...new Set(members.map((m) => KIND_LABEL[m.kind] || m.kind))];
+      head.innerHTML =
+        `<span class="grp-title">${open ? "▾" : "▸"} ${esc(meta.title || key)}</span>`
+        + `<span class="grp-meta">${members.length}</span>`
+        + `<span class="grp-sub">${esc(key)}${meta.kind ? " · " + esc(meta.kind) : ""}`
+        + ` · ${esc(kinds.join(", "))}</span>`;
+      head.onclick = () => {
+        const keep = list.scrollTop;
+        // Two marks, because a group can start open OR closed depending on `autoOpen`, and one
+        // set cannot express "explicitly closed" and "explicitly opened" at once.
+        if (open) { state.open.delete(key); state.open.add("!" + key); }
+        else { state.open.add(key); state.open.delete("!" + key); }
+        render();
+        list.scrollTop = keep;
+      };
+      wrap.appendChild(head);
+      if (open) members.slice(0, 200).forEach((r) => wrap.appendChild(rowButton(r)));
+      frag.appendChild(wrap);
+    });
+    if (entries.length > 400) {
+      frag.appendChild(note(
+        `showing the first 400 of ${entries.length} elements — narrow the search for the rest`));
+    }
+  }
+
   function render() {
-    buildKinds(); buildFacets();
+    buildKinds(); buildGrouping(); buildFacets();
     const shown = RECORDS.filter(matches);
+    const parents = state.grouped
+      ? new Set(shown.map((r) => parentOf(r) || "(no parent element)")).size : 0;
     countLine.textContent = `${shown.length} of ${RECORDS.length} record(s)`
+      + (state.grouped ? ` across ${parents} element(s)` : "")
       + (state.q ? ` matching "${state.q}"` : "");
     rowsBox.textContent = "";
     const frag = document.createDocumentFragment();
-    shown.slice(0, 800).forEach((r) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "row";
-      if (state.selected === r) b.setAttribute("aria-current", "true");
-      b.innerHTML =
-        `<span class="row-top"><span class="row-name">${esc(r.name)}</span>`
-        + `<span class="kind">${esc(KIND_LABEL[r.kind] || r.kind)}</span>`
-        + `<span class="row-meta">${rowMeta(r)}</span></span>`
-        + `<span class="row-sub">${rowSub(r)}</span>`
-        + ((r.flags || []).length
-            ? `<span class="row-flags">${r.flags.map(
-                (f) => `<span class="${tagClass(f)}">${esc(f)}</span>`).join("")}</span>`
-            : "");
-      b.onclick = () => {
-        // Re-rendering the list replaces its rows, which resets scrollTop. Restoring it is what
-        // keeps the reader where they were after picking a record forty rows down.
-        const keep = list.scrollTop;
-        state.selected = r;
-        render();
-        list.scrollTop = keep;
-        show(r);
-      };
-      frag.appendChild(b);
-    });
+    (state.grouped ? renderGrouped : renderFlat)(shown, frag);
     rowsBox.appendChild(frag);
-    if (shown.length > 800) {
-      const p = document.createElement("p");
-      p.className = "count-line";
-      p.textContent = `showing the first 800 of ${shown.length} — narrow the search to see the rest`;
-      rowsBox.appendChild(p);
-    }
     if (!shown.length) {
-      const p = document.createElement("p");
-      p.className = "count-line";
-      p.textContent = "nothing matches. Clear a filter or the search box.";
-      rowsBox.appendChild(p);
+      rowsBox.appendChild(note("nothing matches. Clear a filter or the search box."));
     }
   }
 
@@ -486,7 +648,7 @@
     return rows ? `<dl>${rows}</dl>` : "";
   }
   const code = (s) => `<pre>${esc(s)}</pre>`;
-  const chips = (arr) => `<div class="chiprow">${(arr || []).map(
+  const chips = (arr) => `<div class="chiprow">${list_(arr).map(
     (x) => `<span class="${tagClass(x)}">${esc(x)}</span>`).join("")}</div>`;
 
   const BY_ID = new Map(RECORDS.map((r) => [r.id, r]));
@@ -700,11 +862,87 @@
     return h + unitsSection(r);
   }
 
+  function notebookDetail(r) {
+    const blocks = r.blocks || [];
+    const units = r.notebook_units || [];
+    let h = dl([
+      ["file", `<span class="mono">${esc(r.file)}</span>`],
+      ["source", esc(r.repo)],
+      ["size", esc(bytes(r.bytes))],
+      ["cells extracted", esc(num(blocks.length))],
+      ["named by the author", blocks.length
+        ? esc(`${blocks.length - (r.unnamed_blocks || 0)} of ${blocks.length}`) : ""],
+      ["cells that did not parse", r.unparsed_cells ? esc(num(r.unparsed_cells)) : ""],
+      ["units promoted", esc(num(units.length))],
+      ["of those, callable", esc(num(r.callable))],
+      ["whole-notebook workflow", r.workflow
+        ? `<span class="mono">${esc(r.workflow.entrypoint || r.workflow.mode)}</span>` : ""],
+    ]);
+    if ((r.tags || []).length) h += chips(r.tags);
+    if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
+    if (!blocks.length) {
+      h += `<p class="note">No cells were extracted. An empty notebook, or every cell was
+        markdown — either way nothing from here reaches the agent.</p>`;
+    }
+
+    // Units first: they are what an agent can CALL, and a reader looking for reusable method
+    // wants them before thirty cells of narrative.
+    if (units.length) {
+      h += `<p class="sub">Units promoted from this notebook — ${units.length}`
+        + (r.callable < units.length ? `, ${r.callable} callable` : "") + `</p>`;
+      h += `<div class="unitlist">` + units.map((u) => {
+        const blockers = [...list_(u.global_reads), ...list_(u.free_names)];
+        const why = u.verdict === "callable" ? ""
+          : (blockers.length ? "needs " + blockers.slice(0, 6).join(", ")
+                             : (u.reason || u.verdict || ""));
+        // Only a unit that reached the library has a record to navigate to; a refused one is
+        // rendered as plain text rather than as a link that goes nowhere.
+        const tag = u.registry_id ? `button type="button" class="unitrow"
+          data-goto="${esc(u.registry_id)}"` : `div class="unitrow"`;
+        const close = u.registry_id ? "button" : "div";
+        return `<${tag}>`
+          + `<span class="row-name">${esc(String(u.symbol).split(".").pop())}</span>`
+          + `<span class="${u.verdict === "callable" ? "tag good" : "tag warn"}">`
+          + `${esc(u.verdict || "?")}</span>`
+          + `<span class="unit-src">${esc(u.slice_sha ? u.slice_sha.slice(0, 8) : "")}</span>`
+          + `<span class="unit-sig">${esc(u.signature)}</span>`
+          + (u.summary ? `<span class="unit-doc">${esc(u.summary)}</span>` : "")
+          + (why ? `<span class="unit-doc">${esc(why)}</span>` : "")
+          + `</${close}>`;
+      }).join("") + `</div>`;
+    }
+
+    if (blocks.length) {
+      h += `<p class="sub">Extracted cells, in notebook order</p>`;
+      h += blocks.map((b) => {
+        const unnamed = String(b.title || "").startsWith("cell ");
+        const tools = list_(b.tools).slice(0, 3).join(" ");
+        return `<details class="blk">`
+          + `<summary><span class="blk-ord">${b.order == null ? "" : esc(b.order)}</span>`
+          + `<span class="blk-name${unnamed ? " unnamed" : ""}">${esc(b.title)}</span>`
+          + `<span class="blk-tools">${esc(tools)}</span></summary><div>`
+          + (b.markdown ? `<p class="blk-md">${esc(b.markdown)}</p>` : "")
+          + code(b.code)
+          + (list_(b.imports).length ? chips(b.imports) : "")
+          + (list_(b.file_refs).length
+              ? `<p class="ev">files: ${esc(list_(b.file_refs).join(", "))}</p>` : "")
+          + (b.parse_ok === false
+              ? `<p class="note">This cell did not parse, so nothing from it was promoted.</p>`
+              : "")
+          + `</div></details>`;
+      }).join("");
+    }
+    // No `unitsSection` here: the units list above already covers this element and shows the
+    // refused units too, so appending the library-only view would list the same names twice.
+    return h;
+  }
+
   function show(r) {
     main.classList.add("showing-detail");
     const body = r.kind === "unit" ? unitDetail(r)
       : r.kind === "dataset" ? datasetDetail(r)
-      : r.kind === "publication" ? publicationDetail(r) : codeDetail(r);
+      : r.kind === "publication" ? publicationDetail(r)
+      : r.kind === "notebook" ? notebookDetail(r) : codeDetail(r);
     detail.innerHTML = `<button type="button" id="back">&larr; All records</button>`
       + `<h2>${esc(r.title || r.name)}</h2>`
       + `<p class="crumb">${esc(KIND_LABEL[r.kind] || r.kind)} · ${esc(r.id)}</p>` + body;
