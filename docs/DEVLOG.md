@@ -3829,3 +3829,73 @@ rather than from the previous one.
   counts of the frames present. What the check does is RECORD the population, so the discrepancy is
   visible to a reader rather than invisible. Judging it would need the question, which the gate
   deliberately cannot see.
+
+
+## 2026-08-27 · M8.30–M8.31 · Names for the artifacts, and a page that shows them per notebook
+
+**Change** Two commits.
+
+  `_block_title` in `extractors/notebook_extractor.py` replaces the positional `<element> — cell
+  12` with the name the author already wrote, in six tiers: markdown heading → first sentence of
+  prose → the comment block atop the code → what the cell defines → what the code does → `cell N`.
+
+  `scripts/export_notebook_blocks.py` (new) re-reads the 174 cached notebooks and writes every
+  block and unit; `build_extraction_browser.py` gains a `notebook` record kind and the page gains a
+  notebook detail view plus a **By element** mode that groups every record under its parent
+  knowledge element.
+
+**Why** A block titled `cell 12` identifies a cell and describes nothing — a retrieved block told
+  the agent, and the browser reader, only its ordinal. The author's name for the step was one field
+  away in `markdown_context` the whole time: `## 1c. Project All Files to the Same CRS` sat unused
+  on the cell titled `cell 10`.
+
+  And notebooks — the largest source in the corpus — were the only type with nothing to browse.
+  Dataset, publication and code each have a per-element outcome file under `outputs/`; a notebook's
+  blocks and units existed only inside a search index.
+
+**Measured**
+
+  | | before | after |
+  |---|---|---|
+  | blocks named `cell N` | 871 / 3,689 | **469 / 3,689** |
+  | blocks with an authored name | 2,116 | **2,464** |
+  | notebooks with a browsable record | 0 | **174** |
+  | cells reachable in the page | 0 | **3,830** |
+  | units shown per notebook | 0 | **382** (227 callable) |
+  | records grouped under a parent element | — | 1,398 across **543** elements |
+  | tests | 1,789 | **1,807** |
+
+  The 227 callable units match the registry's notebook count exactly, which is the cross-check that
+  the export and the library agree on what shipped.
+
+**Surprised by** Three things, all the same shape — *a check that reports success while the thing
+  it was meant to establish is false*.
+
+  1. **Tiers 3–5 were guesswork and the corpus said so.** The first draft named cells from a
+     substring list (`plot`, `buffer`, …) plus the classified constructs. Probing the 871 cells
+     that actually reached that point: constructs fired on **15**. What those cells carry is a
+     leading comment and `def` lines. Rebuilding the tiers around the measurement took `cell N` from
+     871 to 469; the guess would have taken it to about 840.
+
+  2. **The page's node harness only ever exercised the first render.** Every detail view sits behind
+     a click, so the hostile-record test — the one written specifically to prove that a malformed
+     field cannot blank the page — passed only because nothing was ever opened. Extending the
+     harness to click a row made it fail immediately on `chips(42)`: the search index had been
+     hardened after the original blanking, the detail views never had.
+
+  3. **A blank column raises nothing.** The exporter asked blocks for `cell_order`; the extractor
+     writes `order`. All 3,830 ordinals came out `None`, the column rendered empty, and every test
+     passed. Same class: `file_io` is `{"referenced": [...]}` and passing it through as a list gave
+     the page an object to iterate.
+
+  Then a fourth that no test could have found: the page has **no `<meta charset>`**. Served over
+  HTTP it decodes as windows-1252, and every em dash — including the separator in every block
+  title — renders as `â€"`. Opening the file from disk guessed UTF-8, which is why it survived
+  this long. Confirmed only by opening the page in a real browser, which is the standing rule here
+  precisely because of cases like this.
+
+**Deliberately not done** Units carry no cell order. A unit's provenance records the element and
+  the source file, never the cell it came from, so the notebook view does not claim one — the field
+  was emitting `None` for all 382. Adding `cell_order` to the unit contract would change
+  `contracts.py` and need a full re-ingest to take effect; it is a real gap, recorded rather than
+  faked with a blank column.
