@@ -183,7 +183,22 @@ def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
     contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
     url = _element_url(doc)
     head = f"title: {title}" + (f"\nurl: {url}" if url else "")
-    body = f"{head}\n{contents[:max_chars]}"
+
+    # An extracted METHOD SPEC is exempt from the generic budget, because it is not a document
+    # excerpt — it is the whole method in numbered steps, and its parameters live in the middle
+    # of the list.
+    #
+    # This is the fourth budget between the record and the model. `kb_db` carries a spec whole at
+    # 6,000 characters; `agent_kb.normalize_hit` re-trimmed it to 1,800 with the CELL budget;
+    # this line cut what survived to 2,500; and `EXTRACTED_MAX_CHARS` caps the enrichment at 900.
+    # Each was reasonable where it was written and none knew about the others, so the producer's
+    # budget meant nothing and nobody could predict what the model actually saw. Measured: asked
+    # for a paper's distance-decay weights, the agent answered "the retrieved evidence does not
+    # state the actual numeric weight values" while the record held "Apply distance-decay weights
+    # (1, 0.68, 0.22)" — cut, twice, between the two.
+    is_spec = (isinstance(doc, dict)
+               and doc.get("resource_type") == "PublicationMethodSpec")
+    body = f"{head}\n{contents if is_spec else contents[:max_chars]}"
     # Everything extraction produced for this element, joined on by id in _direct_search_sweep.
     # Without this the join enriched a document the model never saw the enrichment of.
     extracted = doc.get("extracted") if isinstance(doc, dict) else None

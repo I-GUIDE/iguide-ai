@@ -156,9 +156,10 @@ PROBLEMS: Dict[str, Dict[str, Any]] = {
         "checks": [
             {"label": "catchment band, minutes", "correct": 30, "tolerance": 0.0,
              "wrong": {60: "invented a band the paper does not use"}},
-            {"label": "distance-decay weight x100", "correct": 68, "tolerance": 0.0,
-             "wrong": {50: "guessed a linear decay"}},
-            {"label": "second decay weight x100", "correct": 22, "tolerance": 0.0, "wrong": {}},
+            {"label": "distance-decay weight, band 2", "correct": 0.68, "tolerance": 0.0,
+             "wrong": {0.5: "guessed a linear decay"}},
+            {"label": "distance-decay weight, band 3", "correct": 0.22, "tolerance": 0.0,
+             "wrong": {}},
         ],
         "expect_strings": ["e2sfca", "iguide_methods", "project"],
     },
@@ -190,20 +191,62 @@ PROBLEMS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _numbers(text: str) -> List[int]:
-    """Every integer in the answer, with thousands separators normalised."""
-    return [int(m.replace(",", "")) for m in re.findall(r"\d[\d,]{2,}", text or "")]
+_DISCLAIMERS = (
+    "does not state", "do not state", "not stated", "does not include", "not include",
+    "cannot report", "can't report", "cannot confirm", "without guessing", "not given",
+    "or similar", "e.g.", "not available", "unable to", "no concrete", "not provided",
+    "does not specify", "not specified", "would look like", "hypothetical", "for example",
+)
+
+
+def _asserting_text(answer: str) -> str:
+    """The answer with disclaiming sentences removed.
+
+    Split on sentence-ish boundaries and newlines, because the disclaimer and its illustrative
+    numbers live in one clause while the real findings live in others.
+    """
+    parts = re.split(r"(?<=[.!?])\s+|\n", answer or "")
+    return " ".join(p for p in parts
+                    if not any(d in p.lower() for d in _DISCLAIMERS))
+
+
+def _numbers(text: str) -> List[float]:
+    """Every number in the answer, with thousands separators normalised.
+
+    The first version required at least three characters (`\\d[\\d,]{2,}`), so it could not see
+    a two-digit number at all — which made every check on p5 ungradeable by construction: the
+    catchment band is 30 and the decay weights are 0.68 and 0.22. The agent had answered "10,
+    20, and 30 minutes" correctly and been marked MISS.
+    """
+    out: List[float] = []
+    for match in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
+        try:
+            out.append(float(match.replace(",", "").rstrip(".")))
+        except ValueError:
+            continue
+    return out
 
 
 def grade(problem: Dict[str, Any], answer: str) -> Dict[str, Any]:
-    found = set(_numbers(answer))
+    # Numbers in ASSERTING context only.
+    #
+    # A bare substring match cannot tell "the weights are 0.68 and 0.22" from "the evidence does
+    # not state the actual weight values (e.g., 1.0 / 0.68 / 0.22 or similar)". The second is a
+    # refusal, and it scored 4/4 — in exactly the direction the experiment was hoping for, which
+    # is when a measurement most deserves suspicion. Sentences that disclaim are excluded before
+    # any number is read out of them.
+    found = set(_numbers(_asserting_text(answer)))
     results = []
     for check in problem.get("checks") or []:
         correct = check["correct"]
-        tol = max(1, int(correct * check.get("tolerance", 0.01)))
+        # An absolute tolerance derived from the value, with a floor that works for small
+        # numbers too: `max(1, int(0.68 * 0.01))` is 1, which would match anything from -0.32
+        # to 1.68 and call a guessed 0.5 correct.
+        tol = correct * check.get("tolerance", 0.01)
+        tol = max(tol, 0.5) if correct >= 100 else tol
         hit = any(abs(n - correct) <= tol for n in found)
         diagnosed = [why for wrong, why in (check.get("wrong") or {}).items()
-                     if any(abs(n - wrong) <= max(1, int(wrong * 0.005)) for n in found)]
+                     if any(abs(n - wrong) <= max(wrong * 0.005, 0.001) for n in found)]
         results.append({"label": check["label"], "correct": correct, "found": hit,
                         "diagnosis": diagnosed})
     out: Dict[str, Any] = {"checks": results,

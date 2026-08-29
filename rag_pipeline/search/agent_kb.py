@@ -147,7 +147,13 @@ def normalize_hit(hit: Dict[str, Any], matched: str) -> Dict[str, Any]:
         # is most of a ~4,000-token search payload spent before the agent has decided which cell
         # it wants. Measured: trimming unit parameters saved almost nothing because cells were
         # the bulk. The full body is one `get_kb_block(doc_id)` away, and the doc_id is right here.
-        "contents": _excerpt(source.get("contents") or ""),
+        # A METHOD SPEC is already the distilled form and its producer bounded it at 6,000;
+        # re-trimming it here with the CELL budget cut it from 5,262 characters to 1,858 and
+        # took the decay weights with it — a budget set in the producer, silently overridden by
+        # a different budget in the consumer. Type decides which rule applies.
+        "contents": (str(source.get("contents") or "")
+                     if source.get("resource-type") == "PublicationMethodSpec"
+                     else _excerpt(source.get("contents") or "")),
         "resolved_tools": (extracted.get("block") or {}).get("resolved_tools") if isinstance(extracted, dict) else None,
         "runnable_tool": runnable.get("runnable_tool"),
         "score": hit.get("_score", 0.0),

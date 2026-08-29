@@ -139,11 +139,18 @@ def test_first_contact_is_an_excerpt_and_names_its_reader(conn):
     the agent had chosen a cell. The body is one `get_kb_block(doc_id)` away."""
     from rag_pipeline.search.agent_kb import normalize_hits
 
+    from rag_pipeline.search import agent_kb
+
     hits = kb_db.search_kb(conn, "reproject to a projected crs", size=8)
     docs = normalize_hits(hits, [], 8)
     assert docs
     for doc in docs:
-        assert len(doc["contents"]) <= 900, len(doc["contents"])
+        if doc.get("resource_type") == "PublicationMethodSpec":
+            continue          # a distilled spec is exempt; see the budget-chain test below
+        # The budget is corpus-derived, not a round number: 3,830 cells, median 328, p75 894,
+        # p90 2,096. A first guess of 700 cut inside the p75 cell and the agent said so —
+        # "the relevant explanatory cell is truncated before the weight values appear".
+        assert len(doc["contents"]) <= agent_kb._EXCERPT_CHARS + 120, len(doc["contents"])
         if "more chars" in doc["contents"]:
             assert "get_kb_block" in doc["contents"]
             assert doc["doc_id"], "the reader was named but not the id it needs"
@@ -233,3 +240,45 @@ def test_collapsing_does_not_shrink_the_result_set(conn):
     """The collapse happens after an over-fetch, so asking for six still returns six."""
     hits = kb_db.search_units(conn, "load data", limit=6)
     assert len(hits) == 6, len(hits)
+
+
+# --------------------------------------- one budget per document, not four in three modules
+
+def test_a_method_spec_survives_every_budget_between_the_record_and_the_model():
+    """Four independent caps sat between the record and the model, in three modules:
+
+        kb_db._SPEC_CHARS                        6,000   producer
+        agent_kb._EXCERPT_CHARS                  1,800   normaliser (the CELL budget)
+        evidence_subgraph._doc_block max_chars   2,500   evidence renderer
+        evidence_subgraph.EXTRACTED_MAX_CHARS      900   the enrichment sub-render
+
+    Each was reasonable where it was written and none knew about the others, so the producer's
+    budget meant nothing and nobody could predict what the model saw. Measured: asked for a
+    paper's distance-decay weights, the agent answered "the retrieved evidence does not state
+    the actual numeric weight values" while the record held "Apply distance-decay weights
+    (1, 0.68, 0.22)" — cut, twice, in between.
+    """
+    from agent_runtime.supervisor.evidence_subgraph import _doc_block
+    from rag_pipeline.search.agent_kb import normalize_hit
+
+    steps = "\n".join(f"{i}. step {i} of the method" for i in range(1, 40))
+    body = f"{steps}\nApply distance-decay weights (1, 0.68, 0.22) to the bands"
+    hit = {"_id": "e1::methodspec", "_index": "pg:publication", "_score": 1.0,
+           "_source": {"doc_id": "e1::methodspec", "title": "A paper", "contents": body,
+                       "resource-type": "PublicationMethodSpec",
+                       "extracted": {"parent_doc_id": "e1"}}}
+
+    doc = normalize_hit(hit, "keyword")
+    assert "0.68" in doc["contents"], "the normaliser applied the cell budget to a spec"
+
+    rendered = _doc_block(doc, max_chars=2500)
+    assert "0.68" in rendered, "the evidence renderer cut the spec before its parameters"
+
+
+def test_an_ordinary_cell_is_still_budgeted():
+    """The exemption is for distilled specs only — not a licence for every document."""
+    from agent_runtime.supervisor.evidence_subgraph import _doc_block
+
+    doc = {"doc_id": "e1::block::3", "title": "A cell", "contents": "x" * 9000,
+           "resource_type": "NotebookBlock"}
+    assert len(_doc_block(doc, max_chars=2500)) < 3000
