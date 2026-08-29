@@ -296,3 +296,25 @@ def test_an_ordinary_cell_is_still_budgeted():
     doc = {"doc_id": "e1::block::3", "title": "A cell", "contents": "x" * 9000,
            "resource_type": "NotebookBlock"}
     assert len(_doc_block(doc, max_chars=2500)) < 3000
+
+
+def test_the_evidence_renderer_carries_a_refusal_it_was_not_written_for():
+    """A fact added to the record does not reach the model unless a renderer carries it.
+
+    `_method_units_as_documents` builds `contents` from four fields chosen when it was written:
+    signature, doc_summary, import_line, requirements. `error`, `import_line_candidates` and
+    `disambiguate_with` were all present on the row and none of them appeared, so an agent that
+    had been handed the ambiguity three different ways still reported that "the entries only
+    give signature and dependency list — they don't include an import: path".
+
+    Three findings in one pass had this shape — a publication channel nothing queried, a spec
+    budget overridden by three later ones, and this. Adding to the record is not publishing to
+    the agent.
+    """
+    import inspect
+
+    from agent_runtime.supervisor import graph
+
+    src = inspect.getsource(graph._method_units_as_documents)
+    assert "AMBIGUOUS" in src and "import_line_candidates" in src, (
+        "the renderer drops the ambiguity refusal before the model sees it")

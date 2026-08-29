@@ -1538,6 +1538,18 @@ def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
             str(hit.get("signature") or ""),
             str(hit.get("doc_summary") or ""),
             f"import: {hit['import_line']}" if hit.get("import_line") else "",
+            # The refusal, in the contents the model actually reads.
+            #
+            # This renderer builds `contents` from four fields chosen when it was written, so a
+            # fact added to the record later does not reach the model however carefully it is
+            # carried. Demonstrated three times in one pass: `error`, `import_line_candidates`
+            # and `disambiguate_with` were all on the row and none appeared here, so an agent
+            # that had been given the ambiguity reported instead that "the entries only give
+            # signature and dependency list — they don't include an import: path".
+            (f"AMBIGUOUS: {hit['error']} candidates: "
+             + ", ".join(f"{c.get('qualified_name')} (element {c.get('element_id')})"
+                         for c in (hit.get("import_line_candidates") or [])))
+            if hit.get("error") and hit.get("import_line_candidates") else "",
             f"requires: {', '.join(hit.get('requirements') or [])}"
             if hit.get("requirements") else "",
         ]))
