@@ -263,6 +263,60 @@ def stage_element(element_id: str, session_id: str, *, metadata: Optional[Dict] 
     return stage_url(url, session_id, filename=filename)
 
 
+_FULL_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_SHORT_ID = re.compile(r"^[0-9a-f]{6,12}$", re.I)
+_id_index: Dict[str, str] = {}
+
+
+def _element_index() -> Dict[str, str]:
+    """Map of 8-character id prefix -> full platform UUID, fetched once per process.
+
+    Built lazily and only when a short id actually arrives, so the common path — a caller that
+    already has the full id — costs nothing.
+    """
+    global _id_index
+    if _id_index:
+        return _id_index
+    try:
+        import requests
+
+        backend = os.getenv("IGUIDE_BACKEND_URL", "https://backend.i-guide.io").rstrip("/")
+        # `size`, not `limit`: `limit` is accepted and ignored, returning the default page of 10,
+        # which would silently resolve only the first ten elements on the platform.
+        resp = requests.get(f"{backend}/api/elements", params={"size": 2000}, timeout=60)
+        if resp.status_code == 200:
+            for element in (resp.json() or {}).get("elements") or []:
+                full = str(element.get("id") or "")
+                if full:
+                    _id_index.setdefault(full[:8].lower(), full)
+    except Exception:
+        pass
+    return _id_index
+
+
+def resolve_element_id(element_id: str) -> str:
+    """Accept the 8-character id the rest of this system uses, not only the full UUID.
+
+    The short id is the canonical form everywhere in extraction — `doc_ids`, the method-library
+    registry, the Postgres record and every `provenance.element_id` — because that is what the
+    ingest pipeline stores. The REST endpoint takes only the full UUID, so `/api/elements/265e6957`
+    404s and staging reported "no platform record found".
+
+    That is not a cosmetic mismatch. The knowledge base emits, at the point of use, `FIRST call
+    stage_element("265e6957") to obtain staged_path` — the id it holds is the short one — so the
+    KB was steering the agent into a call that could never succeed. Measured: on a two-dataset
+    proximity problem the agent spent 2h07m and 21 KB tool calls following that instruction and
+    returned no answer, while the same agent with the KB ablated staged the files and answered
+    correctly in 15 minutes.
+    """
+    candidate = (element_id or "").strip()
+    if not candidate or _FULL_ID.match(candidate):
+        return candidate
+    if not _SHORT_ID.match(candidate):
+        return candidate
+    return _element_index().get(candidate[:8].lower(), candidate)
+
+
 def _element_metadata(element_id: str) -> Dict[str, Any]:
     """The platform's record for an element, from the public REST API.
 
@@ -274,7 +328,7 @@ def _element_metadata(element_id: str) -> Dict[str, Any]:
         import requests
 
         backend = os.getenv("IGUIDE_BACKEND_URL", "https://backend.i-guide.io").rstrip("/")
-        resp = requests.get(f"{backend}/api/elements/{element_id}", timeout=30)
+        resp = requests.get(f"{backend}/api/elements/{resolve_element_id(element_id)}", timeout=30)
         if resp.status_code == 200 and isinstance(resp.json(), dict):
             return resp.json()
     except Exception:
@@ -283,4 +337,5 @@ def _element_metadata(element_id: str) -> Dict[str, Any]:
 
 
 __all__ = ["stage_url", "stage_object", "stage_element", "staged_inputs", "record_input",
+           "resolve_element_id",
            "inputs_dir", "safe_filename", "StagingError", "MANIFEST_NAME", "INPUTS_DIRNAME"]
