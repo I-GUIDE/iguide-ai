@@ -385,7 +385,11 @@ def search_units(conn, query: str, *, limit: int = 8,
             siblings.append(entry)
         # The import line is the field a wrong choice breaks a run over, so an ambiguous row
         # must not present one as if it were THE answer.
-        first["ambiguous"] = True
+        # NOT `ambiguous`. That key already means "this is an ambiguity stub with no
+        # signature and no import line", and `_method_units_as_documents` filters on it — so
+        # setting it here deleted a real, callable, importable method from the evidence and the
+        # agent reported having no import line for it at all.
+        first["shared_symbol"] = True
         first["disambiguate_with"] = "get_method_contract(<qualified_name>)"
     return list(collapsed.values())[:max(1, int(limit))]
 
@@ -632,7 +636,7 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
             first.setdefault("also_defined_by", []).append(
                 {"element_id": (hit["_source"].get("extracted") or {}).get("parent_doc_id"),
                  "import_line": unit.get("import_line")})
-            first["ambiguous"] = True
+            first["shared_symbol"] = True
             continue
         seen[key] = unit
         deduped.append(hit)

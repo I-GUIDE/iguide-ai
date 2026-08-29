@@ -213,13 +213,19 @@ def test_a_collapsed_duplicate_still_reports_the_ambiguity(conn):
     consulted, because the search result already looked like an answer.
     """
     hits = kb_db.search_units(conn, "spatial join count points in polygons", limit=6)
-    shared = [h for h in hits if h.get("ambiguous")]
+    shared = [h for h in hits if h.get("shared_symbol")]
     if not shared:
         pytest.skip("no ambiguous symbol matched this query in this record")
     for hit in shared:
         assert hit.get("also_defined_by"), hit["symbol"]
         assert all(s.get("element_id") for s in hit["also_defined_by"])
         assert hit.get("disambiguate_with"), "named the problem without naming the resolution"
+        # NOT the `ambiguous` key. That one means "ambiguity stub, no signature, no import
+        # line", and `_method_units_as_documents` filters on it — reusing it here deleted a
+        # real callable method from the evidence and the agent reported having no import line.
+        assert not hit.get("ambiguous"), (
+            "reusing `ambiguous` makes the evidence builder drop this method entirely")
+        assert hit.get("import_line"), "an importable method lost its import line"
 
 
 @pytest.mark.integration

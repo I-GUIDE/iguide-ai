@@ -111,7 +111,12 @@ def _method_payload(extracted: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 
-_EXCERPT_CHARS = 700
+# Set from the corpus, not guessed. 3,830 cells: median 328 characters, p75 894, p90 2,096.
+# A first guess of 700 cut off inside the p75 cell, and the agent said so exactly — "the
+# relevant explanatory cell is truncated before the weight values appear" — losing the numbers
+# that were the point of the retrieval. 1,800 keeps three quarters of cells whole and still
+# roughly halves the old 4,000.
+_EXCERPT_CHARS = 1800
 
 
 def _excerpt(text: str) -> str:
