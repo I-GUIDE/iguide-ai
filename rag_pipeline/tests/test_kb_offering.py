@@ -232,7 +232,16 @@ def test_a_collapsed_duplicate_still_reports_the_ambiguity(conn):
         # real callable method from the evidence and the agent reported having no import line.
         assert not hit.get("ambiguous"), (
             "reusing `ambiguous` makes the evidence builder drop this method entirely")
-        assert hit.get("import_line"), "an importable method lost its import line"
+        # NO bare import line for a name that does not identify code — the same refusal
+        # `get_unit_contract` makes, applied at first contact. Carrying `shared_symbol` and
+        # `also_defined_by` was not enough: given both, the agent still answered "here's the
+        # exact import line" for one element and never mentioned the other. It had the fact and
+        # did not act on it, so the result stops looking like an answer.
+        assert hit.get("import_line") is None, (
+            "a shared symbol handed over one import line as if it were THE answer")
+        candidates = hit.get("import_line_candidates") or []
+        assert len(candidates) >= 2, candidates
+        assert all(c.get("import_line") and c.get("element_id") for c in candidates)
 
 
 @pytest.mark.integration

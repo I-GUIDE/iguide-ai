@@ -378,11 +378,13 @@ def search_units(conn, query: str, *, limit: int = 8,
             collapsed[key] = row
             continue
         siblings = first.setdefault("also_defined_by", [])
+        rows_seen = first.setdefault("also_defined_by_rows", [dict(first)])
         entry = {"element_id": row.get("element_id"),
                  "element_title": row.get("element_title"),
                  "import_line": row.get("import_line")}
         if entry not in siblings:
             siblings.append(entry)
+            rows_seen.append(row)
         # The import line is the field a wrong choice breaks a run over, so an ambiguous row
         # must not present one as if it were THE answer.
         # NOT `ambiguous`. That key already means "this is an ambiguity stub with no
@@ -390,7 +392,26 @@ def search_units(conn, query: str, *, limit: int = 8,
         # setting it here deleted a real, callable, importable method from the evidence and the
         # agent reported having no import line for it at all.
         first["shared_symbol"] = True
+        # The SAME refusal `get_unit_contract` makes, applied at first contact instead of only
+        # at the second tool call.
+        #
+        # Carrying the fact was not enough. Given `shared_symbol` and `also_defined_by` in the
+        # payload, the agent still answered "here's the exact import line" for one element and
+        # never mentioned the other — it had the fact and did not act on it. `get_contract`
+        # refuses a bare ambiguous name for exactly this case and was never consulted, because
+        # the search result already looked like an answer. So the search result stops looking
+        # like one: no bare import line for a name that does not identify code, and the
+        # candidates plus the resolution in its place. This repo's own rule — a capability the
+        # model must elect is a capability you do not have; add a check, not an instruction.
+        first["import_line"] = None
+        first["import_line_candidates"] = [
+            {"qualified_name": row.get("symbol"), "element_id": row.get("element_id"),
+             "element_title": row.get("element_title"),
+             "import_line": row.get("import_line")}
+            for row in (first.get("also_defined_by_rows") or [])]
         first["disambiguate_with"] = "get_method_contract(<qualified_name>)"
+    for row in collapsed.values():
+        row.pop("also_defined_by_rows", None)          # scaffolding, not payload
     return list(collapsed.values())[:max(1, int(limit))]
 
 
