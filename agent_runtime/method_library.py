@@ -19,6 +19,7 @@ in the agent process — that is the whole point of the sandbox.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -30,6 +31,8 @@ _REGISTRY_NAME = "_registry.json"
 # Kept in sync with code_execution.METHOD_LIBRARY_MOUNT. Imported lazily so this module stays
 # usable (and testable) without the docker-facing code path.
 _DEFAULT_MOUNT = "/opt/iguide_methods"
+
+logger = logging.getLogger(__name__)
 
 
 def library_root() -> Optional[Path]:
@@ -82,6 +85,39 @@ a an and any are as at be by can do does for from get has have how i if in into 
 my of on or that the their there these this to use using want was what when where which who
 will with would you your please already instead scratch code data platform notebook notebooks
 """.split())
+
+
+
+# --------------------------------------------------------------------------- backend
+
+# The registry stays the default and the fallback. `AGENT_KB_DB=1` routes these two reads at the
+# Postgres record instead, which holds the same units plus the ones the analyzer refused.
+#
+# Why this is safe for `import_line`, the field this module's docstring is most careful about:
+# the record stores `slice_source` itself, so the mounted library is a PROJECTION of the same
+# row that produced the import line. That is the opposite of the index-vs-library drift the
+# docstring warns about — there is no second writer to disagree with.
+
+
+def _db_backend():
+    """The Postgres reader, or None when it is not configured or not reachable.
+
+    A failure here must never cost the agent its method tools, so it degrades to the registry —
+    but silently degrading would mean a dead database looks like a small library, so the caller
+    stamps which store answered.
+    """
+    try:
+        from extractors import kb_db
+    except Exception:
+        return None
+    if not kb_db.enabled():
+        return None
+    return kb_db
+
+
+def backend_name() -> str:
+    """Which store is answering. Reported to the agent so "no such method" is attributable."""
+    return "postgres" if _db_backend() is not None else "registry"
 
 
 def _tokens(text: str) -> List[str]:
@@ -183,6 +219,14 @@ def search_methods(query: str, *, limit: int = 8,
     MethodUnit docs properly and rank there instead. It is *not* a reason to guess: a method
     that cannot be found is a coverage problem, while a wrong import line is a broken run.
     """
+    db = _db_backend() if registry is None else None
+    if db is not None:
+        try:
+            with db.connect() as conn:
+                return db.search_units(conn, query, limit=max(1, int(limit)))
+        except Exception as exc:  # pragma: no cover - exercised by the backend test
+            logger.warning("method search fell back to the registry: %s", str(exc)[:200])
+
     reg = load_registry() if registry is None else registry
     qt = [t for t in _tokens(query) if t not in _QUERY_STOPWORDS]
     if not qt:
@@ -261,10 +305,25 @@ def get_contract(symbol: str, *, registry: Optional[Dict[str, Any]] = None) -> D
     ``iguide_methods.get()`` makes at runtime. Resolving it here to "whichever was ingested
     last" would hand the agent a confidently wrong answer.
     """
-    reg = load_registry() if registry is None else registry
     name = (symbol or "").strip()
     if not name:
         return {"error": "empty symbol"}
+
+    db = _db_backend() if registry is None else None
+    if db is not None:
+        try:
+            with db.connect() as conn:
+                found = db.get_unit_contract(conn, name)
+            # Fall through ONLY when the record has no such symbol. An ambiguity refusal is
+            # an answer; re-asking the registry for it would resolve to whichever entry that
+            # store happens to hold and hand the agent a confidently wrong import line.
+            if found.get("found") is not False:
+                found["mounted_at"] = _DEFAULT_MOUNT
+                return found
+        except Exception as exc:  # pragma: no cover - exercised by the backend test
+            logger.warning("contract lookup fell back to the registry: %s", str(exc)[:200])
+
+    reg = load_registry() if registry is None else registry
 
     entry = reg.get(name)
     if entry is None:
@@ -310,6 +369,26 @@ def get_contract(symbol: str, *, registry: Optional[Dict[str, Any]] = None) -> D
 
 def library_summary() -> Dict[str, Any]:
     """Counts for observability — what the agent can actually reach right now."""
+    db = _db_backend()
+    if db is not None:
+        try:
+            with db.connect() as conn, conn.cursor() as cur:
+                cur.execute("""SELECT count(*) FILTER (WHERE verdict = 'callable'),
+                                      count(DISTINCT element_id) FILTER (WHERE verdict='callable'),
+                                      count(*) FILTER (WHERE verdict <> 'callable')
+                                 FROM unit""")
+                callable_units, elements, refused = cur.fetchone()
+                cur.execute("""SELECT coalesce(nullif(unit_kind, ''), 'unknown'), count(*)
+                                 FROM unit WHERE verdict = 'callable' GROUP BY 1""")
+                kinds = {k: int(n) for k, n in cur.fetchall()}
+            return {"units": int(callable_units), "elements": int(elements), "kinds": kinds,
+                    # Reported because it is the useful half of "what is missing": a refused
+                    # unit names the extraction limit that stopped it.
+                    "refused_units": int(refused), "ambiguous_names": [],
+                    "backend": "postgres", "root": str(library_root() or "")}
+        except Exception as exc:  # pragma: no cover - exercised by the backend test
+            logger.warning("library summary fell back to the registry: %s", str(exc)[:200])
+
     reg = load_registry()
     units = [v for k, v in reg.items()
              if isinstance(v, dict) and not v.get("alias_for") and not v.get("ambiguous")]
@@ -321,8 +400,8 @@ def library_summary() -> Dict[str, Any]:
             kinds.get(str(v.get("unit_kind") or "unknown"), 0) + 1
     return {"units": len(units), "elements": len(elements - {None}), "kinds": kinds,
             "ambiguous_names": sorted(ambiguous), "registry_entries": len(reg),
-            "root": str(library_root() or "")}
+            "backend": "registry", "root": str(library_root() or "")}
 
 
 __all__ = ["library_root", "registry_path", "load_registry", "search_methods",
-           "get_contract", "import_line", "library_summary", "PACKAGE_NAME"]
+           "get_contract", "import_line", "library_summary", "backend_name", "PACKAGE_NAME"]
