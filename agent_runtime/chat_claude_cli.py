@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+# Appended verbatim on the one retry. Deliberately restates the contract rather than scolding:
+# the failure is a format miss, and repeating the required shape is what fixes a format miss.
+_RETRY_HINT = """
+
+IMPORTANT: your previous reply was not valid JSON and could not be used.
+Reply with ONE JSON object and nothing else — no prose before or after, no code fence.
+To call a tool:   {"tool_calls": [{"name": "<tool>", "arguments": {...}}]}
+To answer:        {"content": "<your answer>"}
+"""
+
+
 
 def _tool_schema(tool: Any) -> Dict[str, Any]:
     """Best-effort JSON-schema for a LangChain tool, without importing pydantic here."""
@@ -255,6 +266,24 @@ def _build_chat_class() -> Type:
             llm_claude_cli.check_not_deployed()
             prompt = _messages_to_prompt(messages, self.tool_schemas)
             reply = llm_claude_cli.call(prompt, system=_SYSTEM)
+
+            # ONE corrective retry when the envelope did not arrive.
+            #
+            # The envelope is prompt-enforced, so a turn can come back as prose; `_parse_reply`
+            # then degrades to treating the whole reply as the final answer, which ENDS the
+            # conversation. In an agent loop that is not a cosmetic degradation — the turn that
+            # was going to call `execute_code` becomes the turn that says "I don't have access
+            # to run that", and the run reports a refusal instead of an analysis.
+            #
+            # Measured while trying to A/B the knowledge base: 0-6 malformed replies per run,
+            # which swamped the effect under test. The retry restates the contract and costs a
+            # second CLI call only on the failure path.
+            if _extract_json(reply) is None and self.tool_schemas:
+                logger.info("claude-cli reply had no JSON envelope; retrying once")
+                retry = llm_claude_cli.call(prompt + _RETRY_HINT, system=_SYSTEM)
+                if _extract_json(retry) is not None:
+                    reply = retry
+
             message = self._parse_reply(reply)
             return ChatResult(generations=[ChatGeneration(message=message)])
 

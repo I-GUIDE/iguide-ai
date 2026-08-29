@@ -256,3 +256,70 @@ def test_the_system_prompt_disowns_any_other_tool_list():
 
     assert "IGNORE" in _SYSTEM
     assert "unavailable" in _SYSTEM
+
+
+# ------------------------------------------------- the corrective retry for a missing envelope
+
+def test_a_reply_with_no_envelope_is_retried_once(monkeypatch):
+    """A prose reply ENDS the agent loop.
+
+    `_parse_reply` degrades to treating the whole reply as the final answer, which is right for
+    a last turn and wrong for every other one: the turn that was going to call `execute_code`
+    becomes the turn that says "I don't have access to run that". Measured at 0-6 per run while
+    A/B-ing the knowledge base, which swamped the effect under test.
+    """
+    from agent_runtime import chat_claude_cli
+    from rag_pipeline import llm_claude_cli
+
+    calls = []
+
+    def fake_call(prompt, system=None):
+        calls.append(prompt)
+        return ("sure, I can help with that"
+                if len(calls) == 1
+                else '{"tool_calls": [{"name": "kb_method_search", "arguments": {"query": "x"}}]}')
+
+    monkeypatch.setattr(llm_claude_cli, "call", fake_call)
+    monkeypatch.setattr(llm_claude_cli, "check_not_deployed", lambda: None)
+
+    model = chat_claude_cli.build()
+    model.tool_schemas = [{"name": "kb_method_search", "description": "d", "parameters": {}}]
+    result = model._generate([])
+
+    assert len(calls) == 2, "no retry was attempted"
+    assert "not valid JSON" in calls[1], "the retry did not restate the contract"
+    assert result.generations[0].message.tool_calls, "the retried envelope was not used"
+
+
+def test_a_good_reply_is_not_retried(monkeypatch):
+    """The retry costs a second CLI call; it must fire only on the failure path."""
+    from agent_runtime import chat_claude_cli
+    from rag_pipeline import llm_claude_cli
+
+    calls = []
+
+    def fake_call(prompt, system=None):
+        calls.append(prompt)
+        return '{"content": "done"}'
+
+    monkeypatch.setattr(llm_claude_cli, "call", fake_call)
+    monkeypatch.setattr(llm_claude_cli, "check_not_deployed", lambda: None)
+
+    model = chat_claude_cli.build()
+    model.tool_schemas = [{"name": "t", "description": "d", "parameters": {}}]
+    model._generate([])
+    assert len(calls) == 1
+
+
+def test_a_second_failure_still_answers_rather_than_raising(monkeypatch):
+    """Two bad replies must not become a stack trace mid-turn."""
+    from agent_runtime import chat_claude_cli
+    from rag_pipeline import llm_claude_cli
+
+    monkeypatch.setattr(llm_claude_cli, "call", lambda p, system=None: "still prose")
+    monkeypatch.setattr(llm_claude_cli, "check_not_deployed", lambda: None)
+
+    model = chat_claude_cli.build()
+    model.tool_schemas = [{"name": "t", "description": "d", "parameters": {}}]
+    result = model._generate([])
+    assert result.generations[0].message.content == "still prose"

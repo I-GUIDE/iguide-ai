@@ -330,6 +330,10 @@ def main() -> int:
     ap.add_argument("--problem", action="append", choices=sorted(PROBLEMS))
     ap.add_argument("--arm", action="append", choices=sorted(ARMS))
     ap.add_argument("--all", action="store_true")
+    # Replicates, because one run per cell cannot tell an effect from the shim: the same
+    # arm on the same problem passed 2/2 and then missed 2/2, and the difference was six
+    # malformed LLM replies rather than anything about the knowledge base.
+    ap.add_argument("--replicates", type=int, default=1)
     ap.add_argument("--out", default=str(REPO / "outputs" / "ab_kb_problems.json"))
     args = ap.parse_args()
 
@@ -346,14 +350,17 @@ def main() -> int:
             existing = []
 
     runs = list(existing)
-    for problem_id in problems:
+    for rep in range(max(1, args.replicates)):
+      for problem_id in problems:
         for arm in arms:
             print(f"\n{'=' * 78}\n{problem_id}  [{arm}]  "
                   f"ablate_kb={ARMS[arm]['ablate']}  tools={ARMS[arm]['tools']}\n{'=' * 78}",
                   flush=True)
             row = run_one(problem_id, arm)
+            row["replicate"] = rep
             runs = [r for r in runs
-                    if not (r["problem"] == problem_id and r["arm"] == arm)] + [row]
+                    if not (r["problem"] == problem_id and r["arm"] == arm
+                            and r.get("replicate") == rep)] + [row]
             grade_row = row["grade"]
             print(f"  {row['elapsed_s']}s   tools={len(row['called_tools'])}   "
                   f"kb={row['kb_tool_calls'] or '-'}   code={row['ran_code']}",
