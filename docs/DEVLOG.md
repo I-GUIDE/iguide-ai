@@ -3977,3 +3977,91 @@ rather than from the previous one.
   proves the schema against real data first. Making the mounted library an actual projection —
   regenerating `iguide_methods/` from `slice_source` — is the step the 840/840 fidelity result
   makes safe, and it is not taken yet.
+
+
+## 2026-08-29 · M8.35–M8.40 · Ablating the knowledge base, and the four things that had to be
+## fixed before the measurement meant anything
+
+**Change** Four analysis problems over two real corpus datasets, run with and without the
+  extracted KB (`scripts/ab_kb_problems.py`, `scripts/report_ab_kb.py`), graded against
+  independently computed ground truth. To make that possible: `agent_kb_search` can read the
+  Postgres record; `AGENT_ABLATE_KB` actually removes the KB; the claude-cli shim retries once
+  when its envelope does not arrive; and `stage_element` accepts the short element id.
+
+**Why** "Show the difference with and without the agent KB" needed four preconditions that did
+  not exist. Each one, missing, produced a confident wrong answer rather than an error — which is
+  the entry.
+
+**Measured** Ground truth for the headline problem, with two DIAGNOSTIC wrong answers so a
+  reported number names the mistake rather than merely failing:
+
+  | crimes within 100 m of a major street | count |
+  |---|---|
+  | correct, EPSG:26916 metres | **72,658** of 128,855 |
+  | 100 read as FEET in the streets' native EPSG:3435 | 47,634 |
+  | buffered in degrees | 68,419 |
+
+  Final sweep, after all four fixes, n=1 per cell:
+
+  | problem | ablated | with KB |
+  |---|---|---|
+  | p1 · 100 m street proximity | 2/2 correct, 475 s | 2/2 correct, 1,081 s |
+  | p3 · busiest month + top types | 2/2 correct, 492 s | 2/2 correct, **296 s** |
+  | p4 · negative control (no such method) | refused correctly | refused correctly, after 8 searches |
+  | | **4/4 checks** | **4/4 checks** |
+
+  And the before/after that the staging fix produced on p1's with-KB arm:
+  **0/2 in 7,612 s with 21 KB calls and no code run → 2/2 in 1,081 s.**
+
+**Surprised by** Five things. Four were my own measurement, and every one of them looked like a
+  result rather than a fault.
+
+  1. **There was nothing to ablate.** `AGENT_KB_BACKEND=local` is the default and that store has
+     never been written here, so `agent_kb_search` returned `count: 0`. The with-KB arm would have
+     been inert while reporting numbers.
+
+  2. **`enabled_search_methods` is not an ablation.** The code and analyze peers hold
+     `_CODE_PEER_KB_TOOLS` "deliberately independent of the request's enabled_search_methods", and
+     `_direct_search_sweep` unions the KB in without the model electing anything. The no-KB arm
+     called `agent_kb_search` once and answered both checks correctly — a control that was really
+     a treatment, reporting success.
+
+  3. **The instrumentation broke the arm it measured.** First clean-looking result: no_kb 8/8,
+     with_kb 0/8, every with-KB run under a minute and never reaching the sandbox. `_ToolCounter`
+     wrapped the KB tools as `def counted(*a, **kw)`; LangChain infers tool schemas from the
+     SIGNATURE, so `agent_kb_search` was advertised with no parameters and the peer turn failed on
+     first use. Only the treatment arm calls those tools. What isolated it was the SHAPE, not the
+     numbers: 24-46 s against 165-528 s, and a pre-instrumentation run that had passed 4/4.
+
+  4. **The dev shim was the dominant noise source** — 0-6 malformed replies per run, and a
+     malformed reply ENDS the agent loop, turning the turn that was going to call `execute_code`
+     into "I don't have access to run that". Same arm, same problem, 2/2 then 0/2, on shim noise.
+
+  5. Then the finding the experiment existed for. **The KB was steering the agent into a call that
+     could not succeed.** `stage_element` resolved against `/api/elements/{id}`, which takes only
+     the full UUID, while the 8-character short id is the canonical form everywhere in extraction
+     — and the evidence view emits exactly that short form at the point of use: `FIRST call
+     stage_element("265e6957")`. The with-KB arm found the right method, stated the right plan,
+     and spent 2h07m and 21 KB calls unable to obtain a staged path, correctly refusing to invent
+     a number. That instruction was added after watching an agent call a loader without staging;
+     it had been pointing at a broken call ever since.
+
+  And one genuine KB result, from the negative control. With 989 units to search, the KB surfaced
+  a real near-miss — `s2_indices(lat, lon, date, epsg, shape, transform)`, which does compute NDVI
+  from Sentinel-2 — and the agent still refused, naming why it does not answer the question: one
+  scene at one point/date, no monthly compositing, no cloud masking, no basin aggregation. The
+  risk the control was designed to catch did not materialise.
+
+**Deliberately not done** No claim that either arm is better. n=1 per cell after four rounds of
+  fixing the harness, and the same arm on the same problem has gone 2/2 and 0/2 on shim noise, so
+  the responsible output is per-run with the degradation count beside it. What IS supported: both
+  arms answer these problems correctly and reproducibly once the staging bug is fixed; the KB
+  halves the time on p3 and doubles it on p1; and it does not induce false claims of reuse.
+
+  The four problems also leave the publication half of the corpus — 203 elements with extracted
+  method specs — entirely untested. The best composable candidate found while looking:
+  publication `355786a5` (E2SFCA for COVID healthcare access, 31 steps carrying the actual
+  parameters: 10/20/30-minute bands, weights 1/0.68/0.22) against notebook `3b45070e`, whose nine
+  callable units include `e2sfca(..., distances: List[float], weights: List[float])` — the
+  paper's numbers drop straight into the signature. The `IMPLEMENTED_BY` edge that would record
+  that pairing is still never written.
