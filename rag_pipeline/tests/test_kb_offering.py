@@ -242,6 +242,11 @@ def test_a_collapsed_duplicate_still_reports_the_ambiguity(conn):
         candidates = hit.get("import_line_candidates") or []
         assert len(candidates) >= 2, candidates
         assert all(c.get("import_line") and c.get("element_id") for c in candidates)
+        # And it must SAY so, in the same words `get_unit_contract` uses. Withholding the field
+        # alone made the agent report "the module path isn't present in what was retrieved" —
+        # a deliberate refusal read as missing data, which is the third time in this codebase
+        # an absent field has been read as a negative.
+        assert "more than one element" in (hit.get("error") or ""), hit.get("error")
 
 
 @pytest.mark.integration

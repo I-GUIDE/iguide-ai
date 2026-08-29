@@ -410,6 +410,15 @@ def search_units(conn, query: str, *, limit: int = 8,
              "import_line": row.get("import_line")}
             for row in (first.get("also_defined_by_rows") or [])]
         first["disambiguate_with"] = "get_method_contract(<qualified_name>)"
+        # The same `error` key and the same sentence `get_unit_contract` uses, because an
+        # ABSENCE carries no meaning. Withholding the import line stopped the agent handing
+        # over the wrong one — the safety property held — but it then reported "the module
+        # path isn't present in what was retrieved", reading a deliberate refusal as missing
+        # data. That is the third time in this codebase that an absent field has been read as
+        # a negative: a missing callability verdict meant "not callable", a missing bbox meant
+        # "no geometry", and now a missing import line means "we don't have it".
+        first["error"] = (f"{first.get('symbol', '').rsplit('.', 1)[-1]!r} is defined by more "
+                          f"than one element; ask again with a qualified name.")
     for row in collapsed.values():
         row.pop("also_defined_by_rows", None)          # scaffolding, not payload
     return list(collapsed.values())[:max(1, int(limit))]
