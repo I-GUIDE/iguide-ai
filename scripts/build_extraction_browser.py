@@ -33,6 +33,13 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 MAX_EVIDENCE = 180
+MAX_CODE_CHARS = 4000
+MAX_MARKDOWN_CHARS = 1200
+
+
+def _clip_text(text, limit):
+    text = str(text or "")
+    return text if len(text) <= limit else text[:limit] + f"\n… [{len(text) - limit} more chars]"
 
 
 def _load(path: Path):
@@ -234,7 +241,12 @@ def _notebooks(blocks: dict) -> list:
     """
     out = []
     for row in ((blocks or {}).get("rows") or []):
-        blks = row.get("blocks") or []
+        # Clipped HERE rather than in the export: this is the display budget for a page whose
+        # payload is inlined into the HTML, and the export has to stay verbatim so the database
+        # backfilled from it holds cells that still compile.
+        blks = [dict(b, code=_clip_text(b.get("code"), MAX_CODE_CHARS),
+                     markdown=_clip_text(b.get("markdown"), MAX_MARKDOWN_CHARS))
+                for b in (row.get("blocks") or [])]
         units = row.get("units") or []
         callable_units = [u for u in units if u.get("verdict") == "callable"]
         unparsed = [b for b in blks if b.get("parse_ok") is False]

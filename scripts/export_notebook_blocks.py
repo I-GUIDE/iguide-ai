@@ -30,15 +30,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-MAX_CODE_CHARS = 4000
-MAX_MARKDOWN_CHARS = 1200
-
-
-def _clip(text, limit):
-    text = str(text or "")
-    return text if len(text) <= limit else text[:limit] + f"\n… [{len(text) - limit} more chars]"
-
-
 def _titles(cache: Path) -> dict:
     """Element titles from the listing cache — the only source that works without Neo4j."""
     out = {}
@@ -113,8 +104,10 @@ def main() -> int:
                     # inside a notebook's own page the element name is on every row already.
                     "title": str(asset.title or "").rsplit(" — ", 1)[0],
                     "order": block.get("order"),
-                    "code": _clip(block.get("code"), MAX_CODE_CHARS),
-                    "markdown": _clip(block.get("markdown_context"), MAX_MARKDOWN_CHARS),
+                    # Verbatim. A display budget belongs to the page that renders it, not to
+                    # the export: clipping here stored 79 cells that no longer compile.
+                    "code": str(block.get("code") or ""),
+                    "markdown": str(block.get("markdown_context") or ""),
                     "parse_ok": block.get("parse_ok"),
                     "tools": block.get("resolved_tools") or [],
                     "imports": block.get("imports") or [],
