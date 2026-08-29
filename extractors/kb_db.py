@@ -427,6 +427,104 @@ def slice_source(conn, element_id: str, symbol: str, slice_sha: str) -> Optional
     return row[0] if row else None
 
 
+_BLOCK_TSQUERY = _OR_TSQUERY
+
+
+def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
+    """Blocks and units, ranked together, shaped as OpenSearch hits.
+
+    Returning the cluster's hit shape rather than a shape of its own is deliberate:
+    `rag_pipeline.search.agent_kb.normalize_hits` already turns a hit into the evidence
+    document the agent reads, including the method payload and the parent-element link. A
+    second normaliser here would be a second place for those to drift, and the symptom of that
+    drift is a contract field quietly missing from the evidence view — which has already
+    happened once in this chain, at every link.
+
+    Blocks and units compete in one ranking because the agent's question ("how do I do X") is
+    answered by either: a cell that did it, or a unit that can be called to do it.
+    """
+    if not (query or "").strip():
+        return []
+    expanded = f"{query} {expand_identifiers(query)}"
+    hits: List[Dict[str, Any]] = []
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT b.doc_id, b.element_id, b.title, b.markdown, b.code, b.tools, b.ord,
+                   e.title AS element_title, e.element_type,
+                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], b.search, q) AS score
+              FROM block b JOIN element e ON e.id = b.element_id,
+                   LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
+             WHERE b.search @@ q
+             ORDER BY score DESC, b.doc_id
+             LIMIT %s
+        """, (expanded, size))
+        for (doc_id, element_id, title, markdown, code, tools, ord_, el_title,
+             el_type, score) in cur.fetchall():
+            contents = f"{markdown}\n\n{code}".strip() if markdown else (code or "")
+            hits.append({
+                "_id": doc_id, "_index": "pg:block", "_score": float(score),
+                "_source": {
+                    "doc_id": doc_id, "title": title or el_title or doc_id,
+                    "contents": contents, "resource-type": "NotebookBlock",
+                    "extracted": {"parent_doc_id": element_id, "parent_title": el_title,
+                                  "parent_type": el_type, "order": ord_,
+                                  "block": {"resolved_tools": tools or [], "code": code}},
+                }})
+
+        cur.execute("""
+            SELECT u.element_id, u.symbol, u.qualified_name, u.library_module, u.slice_sha,
+                   u.signature, u.doc_summary, u.unit_kind, u.verdict, u.requirements,
+                   u.invariants, u.params, u.returns, u.callability, e.title,
+                   ts_rank('{0.125,0.25,0.5,1.0}'::float4[], u.search, q) AS score
+              FROM unit u JOIN element e ON e.id = u.element_id,
+                   LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
+             WHERE u.search @@ q
+             ORDER BY score DESC, u.symbol
+             LIMIT %s
+        """, (expanded, size))
+        for (element_id, symbol, qualified, module, sha, signature, summary, unit_kind,
+             verdict, requirements, invariants, params, returns, callability, el_title,
+             score) in cur.fetchall():
+            hits.append({
+                "_id": f"{element_id}::unit::{symbol}::{sha}", "_index": "pg:unit",
+                "_score": float(score),
+                "_source": {
+                    "doc_id": f"{element_id}::unit::{symbol}::{sha}",
+                    "title": symbol, "contents": f"{signature}\n{summary}".strip(),
+                    "resource-type": "MethodUnit",
+                    "extracted": {"parent_doc_id": element_id, "parent_title": el_title,
+                                  "unit": {
+                                      "library_symbol": symbol, "qualified_name": qualified,
+                                      "signature": signature, "doc_summary": summary,
+                                      "unit_kind": unit_kind, "params": params or [],
+                                      "returns": returns, "invariants": invariants or [],
+                                      "requirements": requirements or {},
+                                      "callability": callability or {}, "slice_sha": sha,
+                                      # Pinned to the v_<sha> module, same as everywhere else:
+                                      # an evidence view that names a method without saying how
+                                      # to import it makes the agent guess the one field a
+                                      # sandboxed run cannot recover from.
+                                      "import_line": (f"from {module} import {symbol}"
+                                                      if module and symbol else None),
+                                  }},
+                }})
+    hits.sort(key=lambda h: -h["_score"])
+    return hits[:size]
+
+
+def parent_elements(conn, element_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Title/type/tags for the elements a result set cites, for the evidence view's header."""
+    ids = sorted({str(e) for e in element_ids if e})
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, title, element_type, source_url, doi
+                         FROM element WHERE id = ANY(%s)""", (ids,))
+        return {r[0]: {"id": r[0], "title": r[1], "resource-type": r[2],
+                       "source_url": r[3], "doi": r[4]} for r in cur.fetchall()}
+
+
 __all__ = ["DEFAULT_DSN", "SCHEMA_VERSION", "SCHEMA_SQL", "TS_WEIGHTS", "dsn", "enabled",
            "connect", "ensure_schema", "expand_identifiers", "table_counts",
-           "search_units", "get_unit_contract", "slice_source"]
+           "search_units", "get_unit_contract", "slice_source", "search_kb",
+           "parent_elements"]

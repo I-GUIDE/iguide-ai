@@ -260,6 +260,32 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         # benign note instead of crashing the agent turn.
         from extractors import kb_store
         from extractors.indices import all_agent_indices
+
+        # The Postgres record, when it is configured and no client was injected. It holds every
+        # block and unit extraction produced, so it answers the same question the cluster does —
+        # and it is checked FIRST because the alternative default is the file-backed local store,
+        # which is EMPTY on a machine that has never run an ingest. An empty store returns
+        # `count: 0`, which reads as "the corpus does not cover this" rather than "nothing was
+        # ever written here" — the most expensive kind of silence in this system, and the reason
+        # an A/B of the KB measured nothing until this existed.
+        if client is None:
+            try:
+                from extractors import kb_db
+            except Exception:
+                kb_db = None
+            if kb_db is not None and kb_db.enabled():
+                with kb_db.connect() as conn:
+                    hits = kb_db.search_kb(conn, query, size=size or 8)
+                    docs = normalize_hits(hits, [], size or 8)
+                    elements = (kb_db.parent_elements(
+                        conn, [d["parent_doc_id"] for d in docs]) if resolve_parents else {})
+                for d in docs:
+                    d["element"] = elements.get(d["parent_doc_id"])
+                return {"source": "agent_kb", "backend": "postgres", "count": len(docs),
+                        "documents": docs,
+                        "citation_ids": [d["parent_doc_id"] for d in docs],
+                        "block_ids": [d["doc_id"] for d in docs], "elements": elements}
+
         use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
         base["backend"] = "opensearch" if use_opensearch else "local"
         if not use_opensearch:
