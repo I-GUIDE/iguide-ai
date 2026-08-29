@@ -499,7 +499,15 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
                                       "unit_kind": unit_kind, "params": params or [],
                                       "returns": returns, "invariants": invariants or [],
                                       "requirements": requirements or {},
-                                      "callability": callability or {}, "slice_sha": sha,
+                                      # From the COLUMN, always. The registry never persisted
+                                      # callability for the units it ships — "it is in the
+                                      # library, therefore callable" — so all 840 callable units
+                                      # carry `{}` here while all 149 refused ones carry a full
+                                      # dict. A consumer reading the JSON saw the negative fact
+                                      # and never the positive one.
+                                      "callability": {**(callability or {}),
+                                                      "verdict": verdict},
+                                      "slice_sha": sha,
                                       # Pinned to the v_<sha> module, same as everywhere else:
                                       # an evidence view that names a method without saying how
                                       # to import it makes the agent guess the one field a
@@ -508,8 +516,58 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
                                                       if module and symbol else None),
                                   }},
                 }})
-    hits.sort(key=lambda h: -h["_score"])
-    return hits[:size]
+    # Cells and units answer DIFFERENT questions — "how did someone do this" and "what can I
+    # call" — and ranking them on one text-similarity axis lets cells win, because a cell indexes
+    # its whole markdown and code while a unit indexes a signature and one summary line.
+    # Measured over six queries: 24 of 48 hits actionable, and "count how many points fall in
+    # each polygon" returned four cells and ONE distinct callable method.
+    #
+    # Length normalisation is not the fix — tested, and it makes it worse: ts_rank flags 2 and 8
+    # promote 22-character cells ("view point", "view polygon") and push units out entirely. The
+    # fix is a quota, because the two channels are not competing for the same slot.
+    units = [h for h in hits if h["_index"] == "pg:unit"]
+    blocks = [h for h in hits if h["_index"] != "pg:unit"]
+
+    # A REFUSED unit cannot be called, so it must never displace one that can. It is still
+    # offered when nothing callable matched, because "there is a method but it reads a
+    # module-level frame" is a better answer than "no method" — the payload labels it
+    # `not_callable` with the reason.
+    def _verdict(hit):
+        # Reads the verdict the row was built with, which is now always present because
+        # `search_kb` writes the column into the payload. Before that it read a key that was
+        # absent for every callable unit, so this classified all 840 of them as refused.
+        unit = ((hit["_source"].get("extracted") or {}).get("unit") or {})
+        return (unit.get("callability") or {}).get("verdict") or ""
+
+    callable_units = [h for h in units if _verdict(h) == "callable"]
+    refused_units = [h for h in units if _verdict(h) != "callable"]
+
+    # Same symbol from two elements is a real ambiguity the caller must resolve, but two
+    # identical rows spend two slots to say one thing. Keep the best-scoring of each signature.
+    seen, deduped = set(), []
+    for hit in callable_units:
+        unit = (hit["_source"].get("extracted") or {}).get("unit") or {}
+        key = (unit.get("library_symbol"), unit.get("signature"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+
+    # A FLOOR, not a quota. The first version took exactly `size // 2` units and filled the rest
+    # with cells, which capped units as well as guaranteeing them: a query legitimately matching
+    # eight methods lost four of them to cells. It also pinned the metric it was meant to move —
+    # "actionable fraction" is exactly 50% for every query, by construction.
+    #
+    # So: rank normally, then promote units until they hold at least half the slots. Units are
+    # never capped, and a query with nothing callable is unchanged.
+    ranked = sorted(deduped + refused_units + blocks, key=lambda h: -h["_score"])[:size]
+    floor = max(1, size // 2)
+    if sum(1 for h in ranked if h["_index"] == "pg:unit") < floor:
+        promoted = (deduped or refused_units)[:floor]
+        rest = [h for h in ranked if h not in promoted]
+        ranked = (promoted + rest)[:size]
+    ranked.sort(key=lambda h: -h["_score"])
+    return ranked
 
 
 def parent_elements(conn, element_ids: List[str]) -> Dict[str, Dict[str, Any]]:

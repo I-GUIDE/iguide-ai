@@ -179,6 +179,11 @@ def main() -> int:
                 module = str(entry.get("module") or entry.get("library_module") or "")
                 package = module.split(".")[1] if module.count(".") >= 1 else ""
                 call = entry.get("callability") if isinstance(entry.get("callability"), dict) else {}
+                # The registry does not persist callability for the units it ships, so this is
+                # `{}` for all 840 of them. Record the verdict explicitly rather than leaving the
+                # affirmative fact implicit in "it is in the library": a consumer that reads the
+                # JSON should not have to infer callability from the absence of a refusal.
+                call.setdefault("verdict", "callable")
                 symbol_text = kb_db.expand_identifiers(f"{symbol} {key}")
                 element_text = kb_db.expand_identifiers(
                     f"{(elements.get(element_id) or {}).get('title') or ''} {element_id}")

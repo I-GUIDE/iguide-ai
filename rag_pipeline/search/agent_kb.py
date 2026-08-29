@@ -62,14 +62,27 @@ def _method_payload(extracted: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     unit = extracted.get("unit") if isinstance(extracted, dict) else None
     if not isinstance(unit, dict) or not unit:
         return None
-    params = [{k: p.get(k) for k in ("name", "annotation", "inferred_type", "declared_unit",
-                                     "crs_expectation", "required") if p.get(k) not in (None, "")}
-              for p in (unit.get("params") or []) if isinstance(p, dict)]
+    # Only the parameters that carry a PRECONDITION, plus a count of the rest.
+    #
+    # This function's own docstring says it "leaves the per-parameter inference evidence to
+    # get_method_contract", and it did not: it shipped annotation, inferred_type, declared_unit,
+    # crs_expectation and required for every parameter, at first contact, while the agent is
+    # still deciding whether the method is relevant. For an 8-parameter unit that is a wall of
+    # JSON restating what `signature` already says. Measured: ~3,800 tokens per search, most of
+    # it this.
+    #
+    # What survives is what the SIGNATURE cannot express — a unit expectation or a CRS
+    # expectation is a precondition the caller must satisfy or get a plausible wrong number.
+    all_params = [p for p in (unit.get("params") or []) if isinstance(p, dict)]
+    params = [{k: p.get(k) for k in ("name", "declared_unit", "crs_expectation")
+               if p.get(k) not in (None, "")}
+              for p in all_params if p.get("declared_unit") or p.get("crs_expectation")]
     payload = {
         "symbol": unit.get("library_symbol") or unit.get("qualified_name"),
         "signature": unit.get("signature"),
         "doc_summary": unit.get("doc_summary"),
-        "params": params,
+        "params_with_preconditions": params,
+        "param_count": len(all_params) or None,
         "returns": unit.get("returns"),
         "invariants": [i.get("check") for i in (unit.get("invariants") or [])
                        if isinstance(i, dict) and i.get("check")],
@@ -97,6 +110,18 @@ def _method_payload(extracted: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return payload
 
 
+
+_EXCERPT_CHARS = 700
+
+
+def _excerpt(text: str) -> str:
+    """First contact carries enough to judge relevance; `get_kb_block` carries the body."""
+    text = str(text or "")
+    if len(text) <= _EXCERPT_CHARS:
+        return text
+    return text[:_EXCERPT_CHARS].rstrip() + f"\n… [{len(text) - _EXCERPT_CHARS} more chars — call get_kb_block for the full cell]"
+
+
 def normalize_hit(hit: Dict[str, Any], matched: str) -> Dict[str, Any]:
     source = hit.get("_source") or {}
     doc_id = str(source.get("doc_id") or hit.get("_id") or "")
@@ -110,8 +135,14 @@ def normalize_hit(hit: Dict[str, Any], matched: str) -> Dict[str, Any]:
         "parent_doc_id": _parent_of(doc_id, source),
         "resource_type": source.get("resource-type") or source.get("element_type"),
         "title": source.get("title") or "Untitled",
-        # keep enough to carry a full function/method body for verbatim reuse
-        "contents": (source.get("contents") or "")[:4000],
+        # An EXCERPT at first contact, not the body.
+        #
+        # This carried 4,000 characters per cell so a retrieved block could be reused verbatim.
+        # But `get_kb_block` is the reader for exactly that, and eight cells at 4,000 characters
+        # is most of a ~4,000-token search payload spent before the agent has decided which cell
+        # it wants. Measured: trimming unit parameters saved almost nothing because cells were
+        # the bulk. The full body is one `get_kb_block(doc_id)` away, and the doc_id is right here.
+        "contents": _excerpt(source.get("contents") or ""),
         "resolved_tools": (extracted.get("block") or {}).get("resolved_tools") if isinstance(extracted, dict) else None,
         "runnable_tool": runnable.get("runnable_tool"),
         "score": hit.get("_score", 0.0),

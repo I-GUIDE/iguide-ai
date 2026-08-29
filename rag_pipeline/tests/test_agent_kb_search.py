@@ -72,10 +72,14 @@ def test_a_unit_hit_carries_what_the_agent_needs_to_call_it():
 def test_the_declared_unit_and_crs_expectation_reach_the_agent():
     """These two facts are the difference between a correct answer and a 21.5-km buffer reported
     as 25 km. The agent cannot honour a contract it was not shown."""
-    params = normalize_hit(_hit({"unit": CONTRACT}), "keyword")["method"]["params"]
+    method = normalize_hit(_hit({"unit": CONTRACT}), "keyword")["method"]
+    params = method["params_with_preconditions"]
     gdf = next(p for p in params if p["name"] == "gdf")
     assert gdf["declared_unit"] == "metres"
     assert gdf["crs_expectation"] == "projected"
+    # Only the constrained parameters are listed, so the count of the rest has to survive
+    # separately — otherwise a three-parameter method looks like a one-parameter method.
+    assert method["param_count"] == len(CONTRACT["params"])
 
 
 def test_the_import_line_is_pinned_to_the_slice():
@@ -86,9 +90,17 @@ def test_the_import_line_is_pinned_to_the_slice():
 def test_per_parameter_inference_evidence_is_left_for_the_contract_tool():
     """This payload goes into a token-limited evidence view. Full evidence belongs to
     ``get_method_contract``, which is called for one promising hit rather than for all eight."""
-    params = normalize_hit(_hit({"unit": CONTRACT}), "keyword")["method"]["params"]
+    params = normalize_hit(_hit({"unit": CONTRACT}),
+                           "keyword")["method"]["params_with_preconditions"]
     assert all("evidence" not in p for p in params)
     assert all("schema" not in p for p in params)
+    # Stricter now, and this is the point: `annotation` and `inferred_type` restate what
+    # `signature` already carries, so shipping them for every parameter of every hit was ~1,200
+    # tokens per search spent to say a thing twice. A parameter appears here only when it
+    # carries a precondition the signature CANNOT express.
+    assert all("annotation" not in p for p in params)
+    assert all("inferred_type" not in p for p in params)
+    assert all(p.get("declared_unit") or p.get("crs_expectation") for p in params)
 
 
 def test_empty_contract_fields_are_dropped_rather_than_sent_as_blanks():
