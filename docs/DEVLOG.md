@@ -3899,3 +3899,81 @@ rather than from the previous one.
   was emitting `None` for all 382. Adding `cell_order` to the unit contract would change
   `contracts.py` and need a full re-ingest to take effect; it is a real gap, recorded rather than
   faked with a blank column.
+
+
+## 2026-08-29 · M8.32–M8.34 · A store the agent owns
+
+**Change** Postgres 17 + pgvector as the system of record for extracted content
+  (`extractors/kb_db.py`), one compose service bound to loopback. `scripts/backfill_kb_db.py`
+  loads it from the built method library and the JSON exports. `AGENT_KB_DB=1` routes
+  `kb_method_search` and `get_method_contract` at it, with the registry as the fallback.
+
+**Why** The question was "can we put the extracted content into a database" — and it already is
+  in two, both of which belong to the *website*. The agent writes into `iguide_agent_*` indices
+  on the platform's OpenSearch cluster, so re-indexing its own knowledge base needs write access
+  to production website infrastructure, and a mapping change means re-crawling the corpus:
+  network fetches plus an LLM call for each of 203 publications, because nothing durable holds
+  what extraction found. The two file stores that grew alongside them — `_registry.json`, 2.5 MB
+  rewritten whole, and `outputs/*.json` — have no constraints at all.
+
+  So the gap was never a search index. It was a record with constraints, transactions and joins,
+  which the indices can be rebuilt from. Scale is explicitly **not** the argument: ~10k rows.
+
+**Measured** Backfill, no re-extraction and no LLM spend: 543 elements, 989 units, 3,830 blocks,
+  43 dataset files, 130 dataset outcomes, 203 publications. Idempotent.
+
+  | | registry | postgres |
+  |---|---|---|
+  | known-item MRR | 0.944 | 0.966 |
+  | known-item recall@1 | 0.900 | 0.936 |
+  | right element in the top 5 | 88/95 | 93/95 |
+  | **median latency, the agent's path** | **58.8 ms** | **7.8 ms** |
+  | slices byte-identical to the mounted file | — | 840/840 |
+  | duplicate unit / orphan unit / refused unit carrying code | all accepted | all rejected |
+
+  Retrieval quality is close enough to call a wash at a 120-unit sample. The load-bearing
+  results are the constraints and the fidelity, not the ranking.
+
+**Surprised by** Five things, and four of them were my own claims failing on contact.
+
+  1. **The registry can answer by element title, and I said it could not.** `element_title` is
+     absent from all 840 provenance records, so the `element` field falls back to a hex id and
+     its 1.0 weight is dead. I wrote in a docstring that it therefore "cannot answer at all".
+     It scores **92.6%**: the registry KEY embeds a slug of the element title. The slug is
+     truncated at ~50 characters — "…Mapping using Physics-Aware Spatial AI" is stored as
+     "…mapping_using_phy" — so the limit is real and far smaller than I asserted. I then built a
+     query to demonstrate the difference ("physics aware spatial AI") and **neither** store found
+     the element, because a title indexed at weight C loses to symbols matching at weight A.
+     The demonstration was abandoned rather than tuned into working.
+
+  2. **The agreement test skipped silently, twice.** `conftest` points
+     `AGENT_METHOD_LIBRARY_DIR` at an empty directory on purpose, so the one test justifying the
+     whole change — does the Postgres contract match the registry's, field by field — compared
+     nothing and passed. The fallback test had the same disease: it searched a library that was
+     not there and passed for the wrong reason. Once it actually ran it immediately found the
+     Postgres contract dropping `invariants`, which is where "requires a projected CRS" lives.
+     Every other field matched, so one eyeballed result would never have shown it.
+
+  3. **A tsvector caps at 1 MB, and the corpus holds a 4.9 MB markdown cell** — 99.8% base64
+     image data, an image embedded in a notebook. Not a tuning question: an unbounded index
+     expression made the row impossible to insert. Every index expression now bounds its input;
+     the columns keep everything. That blob also goes into `contents` for the OpenSearch doc and
+     gets embedded today, which is a separate cost nobody has looked at.
+
+  4. **`websearch_to_tsquery` ANDs its terms.** "buffer geometries by a distance" required one
+     unit to match buffer AND geometry AND distance, and returned **nothing** across all 840. The
+     ranker being replaced sums the weights of whatever matched, so the query is built as an OR
+     over the same lexemes the indexed side used.
+
+  5. **The export was truncating cells.** `export_notebook_blocks` clipped code at 4,000
+     characters — right for a browser row, wrong for the file a database is backfilled from: 79
+     cells and 283 markdown blocks were stored truncated, so the record would have held cells
+     that no longer compile. The clip moved to the page, which is the consumer that actually has
+     the constraint.
+
+**Deliberately not done** OpenSearch is untouched and still serves every search tier; nothing was
+  migrated off it, and `AGENT_KB_DB` is off by default so every existing path is unchanged. The
+  emitter (a fifth `EMIT_` target writing to Postgres during ingest) is not built — the backfill
+  proves the schema against real data first. Making the mounted library an actual projection —
+  regenerating `iguide_methods/` from `slice_source` — is the step the 840/840 fidelity result
+  makes safe, and it is not taken yet.
