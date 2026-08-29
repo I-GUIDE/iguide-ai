@@ -1,0 +1,432 @@
+"""PostgreSQL system of record for extracted content.
+
+**Why a fourth store, when OpenSearch and Neo4j already exist.** Those two belong to the
+website. The agent writes its extracted content into separate ``iguide_agent_*`` indices on the
+platform's cluster, which means re-indexing the agent's own knowledge base needs write access to
+production website infrastructure, and a mapping change is a re-crawl of the corpus — network
+fetches plus an LLM call per publication — because nothing durable holds what extraction found.
+The two file-backed stores that grew alongside them (``_registry.json`` and ``outputs/*.json``)
+have no constraints at all.
+
+So this is not another index. It is the record the indices are built FROM:
+
+  * **Constraints the JSON registry could not have.** ``UNIQUE (element_id, source_rel_path,
+    symbol, slice_sha)`` is the collision that silently dropped 58 of 362 callable units when the
+    key was ``{package}.{symbol}`` and one element spanned 35 files. In a 2.5 MB file rewritten
+    whole there is nowhere to put that rule; here it is a write error.
+  * **Transactional re-ingest.** Delete-orphans, upsert and record-the-run commit together, so a
+    half-written element is not representable.
+  * **``slice_source`` lives here.** ``agent_runtime/method_library`` deliberately reads the
+    on-disk registry rather than an index, because "an index doc and the mounted library drift
+    independently, and the failure mode of that drift is the worst kind — the agent is told to
+    import something that does not exist, inside a container with no network to check." Storing
+    the slice itself keeps that guarantee while moving the record: the mounted library becomes a
+    PROJECTION of this table rather than an independent writer, so there is nothing to drift.
+
+Scale is not the argument and should not be used as one — the whole corpus is ~10k rows and
+~100 MB. This buys correctness and joins, not throughput.
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
+
+DEFAULT_DSN = "postgresql://iguide:iguide_dev@127.0.0.1:5544/iguide_agent"
+
+# Bumped when the schema below changes in a way that makes existing rows unreadable. Recorded on
+# every ingest run so a backfill written against an older shape is identifiable rather than merely
+# wrong.
+SCHEMA_VERSION = 1
+
+
+def dsn() -> str:
+    """Connection string. Local-only default: the dev database is bound to 127.0.0.1."""
+    return (os.getenv("AGENT_KB_DSN") or "").strip() or DEFAULT_DSN
+
+
+def enabled() -> bool:
+    """Whether the Postgres record is configured for this process.
+
+    Off by default. The store is additive — every existing emit target keeps working untouched —
+    so nothing should start depending on it implicitly.
+    """
+    return (os.getenv("AGENT_KB_DB") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def connect(dsn_override: Optional[str] = None) -> Iterator[Any]:
+    """A connection with autocommit OFF, so callers get a transaction by default.
+
+    Re-ingest is the reason: an element's rows are deleted and rewritten together, and a crash
+    between those two must leave the previous version intact rather than an empty element.
+    """
+    import psycopg
+
+    conn = psycopg.connect(dsn_override or dsn())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- schema
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS element (
+    id            text PRIMARY KEY,
+    title         text NOT NULL DEFAULT '',
+    element_type  text NOT NULL DEFAULT '',
+    tags          jsonb NOT NULL DEFAULT '[]'::jsonb,
+    authors       jsonb NOT NULL DEFAULT '[]'::jsonb,
+    source_url    text NOT NULL DEFAULT '',
+    doi           text NOT NULL DEFAULT '',
+    fields        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- One row per (element, file, symbol, VERSION). The slice_sha is in the key on purpose: the
+-- library is content-addressed, an edited function mints a new module, and old versions stay
+-- importable by sha. Making the sha part of the identity is what lets both exist.
+CREATE TABLE IF NOT EXISTS unit (
+    element_id       text NOT NULL REFERENCES element(id) ON DELETE CASCADE,
+    source_rel_path  text NOT NULL,
+    symbol           text NOT NULL,
+    slice_sha        text NOT NULL,
+    qualified_name   text NOT NULL DEFAULT '',
+    library_module   text NOT NULL DEFAULT '',
+    signature        text NOT NULL DEFAULT '',
+    returns          text NOT NULL DEFAULT '',
+    return_kind      text NOT NULL DEFAULT '',
+    unit_kind        text NOT NULL DEFAULT '',
+    doc_summary      text NOT NULL DEFAULT '',
+    docstring        text NOT NULL DEFAULT '',
+    verdict          text NOT NULL DEFAULT '',
+    extractor        text NOT NULL DEFAULT '',
+    fast_path        boolean NOT NULL DEFAULT false,
+    is_current       boolean NOT NULL DEFAULT true,
+    callability      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    params           jsonb NOT NULL DEFAULT '[]'::jsonb,
+    invariants       jsonb NOT NULL DEFAULT '[]'::jsonb,
+    requirements     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    provenance       jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- The slice itself. This is what makes the mounted library a projection rather than a
+    -- second writer that can drift from the contract describing it.
+    slice_source     text NOT NULL DEFAULT '',
+    -- Identifier text pre-expanded by the caller: Postgres splits `load_crime_points` into
+    -- load/crime/point but leaves `calculateBuffers` whole, and "buffer" has to find it.
+    symbol_text      text NOT NULL DEFAULT '',
+    element_text     text NOT NULL DEFAULT '',
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (element_id, source_rel_path, symbol, slice_sha),
+    -- A refused unit has no slice, and an empty `slice_sha` is how it says so. The check makes
+    -- "we never ship code for a unit the analyzer refused" a property of the store rather than
+    -- a convention every writer has to remember — the sandbox mounts what is in this column.
+    CONSTRAINT only_callable_units_carry_code
+        CHECK (verdict = 'callable' OR slice_source = ''),
+    -- Every input is bounded. A tsvector caps at 1 MB and the corpus contains a markdown cell
+    -- of 4.9 MB, 99.8% of it base64 image data, so an unbounded index expression is not a
+    -- tuning question but a row that cannot be inserted at all. The COLUMN keeps everything;
+    -- only what is searchable is bounded.
+    search tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', left(coalesce(symbol_text, ''), 100000)), 'A') ||
+        setweight(to_tsvector('english', left(coalesce(doc_summary, ''), 100000)), 'B') ||
+        setweight(to_tsvector('english', left(coalesce(element_text, ''), 100000)), 'C') ||
+        setweight(to_tsvector('english', left(coalesce(signature, ''), 100000)), 'D')
+    ) STORED
+);
+CREATE INDEX IF NOT EXISTS unit_search_idx  ON unit USING gin (search);
+CREATE INDEX IF NOT EXISTS unit_element_idx ON unit (element_id);
+CREATE INDEX IF NOT EXISTS unit_verdict_idx ON unit (verdict) WHERE is_current;
+CREATE INDEX IF NOT EXISTS unit_symbol_idx  ON unit (symbol);
+
+CREATE TABLE IF NOT EXISTS block (
+    doc_id      text PRIMARY KEY,
+    element_id  text NOT NULL REFERENCES element(id) ON DELETE CASCADE,
+    ord         integer,
+    title       text NOT NULL DEFAULT '',
+    code        text NOT NULL DEFAULT '',
+    markdown    text NOT NULL DEFAULT '',
+    parse_ok    boolean,
+    tools       jsonb NOT NULL DEFAULT '[]'::jsonb,
+    imports     jsonb NOT NULL DEFAULT '[]'::jsonb,
+    file_refs   jsonb NOT NULL DEFAULT '[]'::jsonb,
+    constructs  jsonb NOT NULL DEFAULT '[]'::jsonb,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    search tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', left(coalesce(title, ''), 100000)), 'A') ||
+        setweight(to_tsvector('english', left(coalesce(markdown, ''), 100000)), 'B') ||
+        setweight(to_tsvector('english', left(coalesce(code, ''), 100000)), 'C')
+    ) STORED
+);
+CREATE INDEX IF NOT EXISTS block_search_idx  ON block USING gin (search);
+CREATE INDEX IF NOT EXISTS block_element_idx ON block (element_id, ord);
+
+CREATE TABLE IF NOT EXISTS dataset_file (
+    element_id     text NOT NULL REFERENCES element(id) ON DELETE CASCADE,
+    file           text NOT NULL,
+    bytes          bigint,
+    format         text NOT NULL DEFAULT '',
+    family         text NOT NULL DEFAULT '',
+    row_count      bigint,
+    crs            text NOT NULL DEFAULT '',
+    geometry_type  text NOT NULL DEFAULT '',
+    bounds         jsonb NOT NULL DEFAULT '[]'::jsonb,
+    columns        jsonb NOT NULL DEFAULT '[]'::jsonb,
+    variables      jsonb NOT NULL DEFAULT '[]'::jsonb,
+    extracted      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    envelope       jsonb,
+    loader         jsonb,
+    stage          text NOT NULL DEFAULT '',
+    error          text NOT NULL DEFAULT '',
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (element_id, file),
+    search tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', left(coalesce(file, ''), 100000)), 'A') ||
+        setweight(to_tsvector('english',
+            left(coalesce(format || ' ' || family || ' ' || crs, ''), 100000)), 'C')
+    ) STORED
+);
+CREATE INDEX IF NOT EXISTS dataset_search_idx ON dataset_file USING gin (search);
+CREATE INDEX IF NOT EXISTS dataset_crs_idx    ON dataset_file (crs);
+
+-- Per-element dataset result, separate from `dataset_file` because most dataset elements never
+-- produce a local file: 102 of 145 resolve to a portal page, a login wall or a listing. "Why
+-- there is no file" is the extraction finding for those, and dropping it would leave the record
+-- claiming the corpus has 43 datasets when it has 145 with 43 readable.
+CREATE TABLE IF NOT EXISTS dataset_outcome (
+    element_id    text PRIMARY KEY REFERENCES element(id) ON DELETE CASCADE,
+    stage         text NOT NULL DEFAULT '',
+    error         text NOT NULL DEFAULT '',
+    link_kind     text NOT NULL DEFAULT '',
+    note          text NOT NULL DEFAULT '',
+    primary_file  text NOT NULL DEFAULT '',
+    files_listed  integer,
+    members       integer,
+    listed_bytes  bigint,
+    detail        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS dataset_outcome_stage_idx ON dataset_outcome (stage);
+
+CREATE TABLE IF NOT EXISTS publication (
+    element_id           text PRIMARY KEY REFERENCES element(id) ON DELETE CASCADE,
+    doi                  text NOT NULL DEFAULT '',
+    licence              text NOT NULL DEFAULT '',
+    outcome              text NOT NULL DEFAULT '',
+    reason               text NOT NULL DEFAULT '',
+    status               text NOT NULL DEFAULT '',
+    summary              text NOT NULL DEFAULT '',
+    steps                jsonb NOT NULL DEFAULT '[]'::jsonb,
+    datasets_referenced  jsonb NOT NULL DEFAULT '[]'::jsonb,
+    tools_referenced     jsonb NOT NULL DEFAULT '[]'::jsonb,
+    declared_params      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    chars                bigint,
+    sha256               text NOT NULL DEFAULT '',
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    search tsvector GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', left(coalesce(summary, ''), 100000)), 'B') ||
+        setweight(to_tsvector('english', left(coalesce(steps::text, ''), 100000)), 'C')
+    ) STORED
+);
+CREATE INDEX IF NOT EXISTS publication_search_idx ON publication USING gin (search);
+
+-- Skip-if-unchanged, moved off the OpenSearch `ingest_runs` index so the decision to re-extract
+-- commits in the same transaction as the rows it describes.
+CREATE TABLE IF NOT EXISTS ingest_run (
+    element_id      text PRIMARY KEY,
+    fingerprint     text NOT NULL,
+    schema_version  integer NOT NULL,
+    doc_count       integer,
+    summary         jsonb NOT NULL DEFAULT '{}'::jsonb,
+    at              timestamptz NOT NULL DEFAULT now()
+);
+"""
+
+
+def ensure_schema(conn) -> None:
+    """Create every table and index if absent. Idempotent; safe to call on each ingest."""
+    with conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL)
+    conn.commit()
+
+
+def expand_identifiers(text: str) -> str:
+    """Identifier text with camelCase and snake_case boundaries made into separate words.
+
+    Postgres's text-search parser splits ``load_crime_points`` into load/crime/point but leaves
+    ``calculateBuffers`` as one token, so "buffer" would not find it. The split rule has exactly
+    one definition in this repo — ``method_library._tokens``, which documents why it exists — and
+    this reuses it rather than restating it, because two copies of a tokenizer diverge silently
+    and the symptom is a method that cannot be found.
+    """
+    from agent_runtime.method_library import _tokens
+
+    return " ".join(_tokens(text or ""))
+
+
+def table_counts(conn) -> Dict[str, int]:
+    """Row counts per table — the cheapest honest answer to "did the backfill land"."""
+    out: Dict[str, int] = {}
+    with conn.cursor() as cur:
+        for table in ("element", "unit", "block", "dataset_file", "dataset_outcome",
+                      "publication", "ingest_run"):
+            cur.execute(f"SELECT count(*) FROM {table}")
+            out[table] = int(cur.fetchone()[0])
+    return out
+
+
+# --------------------------------------------------------------------------- reads
+
+# Mirrors `method_library._FIELD_WEIGHTS` (symbol 4.0, qualified/summary 2.0, element 1.0,
+# signature 0.5) onto the four tsvector labels, normalised the way ts_rank expects them:
+# {D, C, B, A}. Keeping the same relative ordering is what makes the two rankings comparable
+# rather than merely different.
+TS_WEIGHTS = "{0.125, 0.25, 0.5, 1.0}"
+
+# ANY of the query's words, not all of them.
+#
+# `websearch_to_tsquery` and `plainto_tsquery` both AND their terms, so "buffer geometries by a
+# distance" required one unit to match buffer AND geometry AND distance and returned NOTHING
+# against all 840. The ranker being replaced sums the weights of whatever matched, so OR is both
+# the useful behaviour and the one that makes the two rankings comparable. Building the query
+# from `tsvector_to_array` keeps the same stemming and stop-word list as the indexed side —
+# an analyser mismatch between index time and query time is the classic way a search quietly
+# stops finding things.
+_OR_TSQUERY = """
+    to_tsquery('english', nullif(array_to_string(
+        tsvector_to_array(to_tsvector('english', %s)), ' | '), ''))
+"""
+
+_UNIT_SELECT = """
+    SELECT u.element_id, u.symbol, u.qualified_name, u.library_module, u.slice_sha,
+           u.signature, u.doc_summary, u.unit_kind, u.verdict, u.requirements, u.invariants,
+           e.title AS element_title,
+           ts_rank(%s::float4[], u.search, q) AS score
+      FROM unit u
+      JOIN element e ON e.id = u.element_id,
+           LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
+     WHERE u.search @@ q
+"""
+
+
+def _unit_row(row) -> Dict[str, Any]:
+    """The exact shape `method_library._summarize` returns, so this is a drop-in.
+
+    Including `import_line` pinned to the `v_<sha>` module: an agent that gets a different shape
+    from a different backend has to learn two contracts, and the import line is the one field a
+    wrong answer breaks a sandboxed run over.
+    """
+    (element_id, symbol, qualified, module, sha, signature, summary, unit_kind, verdict,
+     requirements, invariants, element_title, score) = row
+    checks = [f"{i.get('check')}({i.get('target')})"
+              for i in (invariants or []) if isinstance(i, dict)]
+    return {
+        "symbol": qualified or symbol,
+        "unit_kind": unit_kind,
+        "signature": signature,
+        "doc_summary": summary,
+        "import_line": f"from {module} import {symbol}" if module and symbol else None,
+        "element_id": element_id,
+        "element_title": element_title,
+        "slice_sha": sha,
+        "requirements": (requirements or {}).get("pip") or [],
+        "requires": checks or None,
+        "score": round(float(score), 4),
+    }
+
+
+def search_units(conn, query: str, *, limit: int = 8,
+                 callable_only: bool = True) -> List[Dict[str, Any]]:
+    """Rank units against a natural-language query using Postgres full text search.
+
+    `websearch_to_tsquery` rather than `plainto_tsquery`: it accepts quoted phrases and `-word`
+    negation, which is what a person types, and it never raises on punctuation the way
+    `to_tsquery` does.
+
+    The query text is expanded the same way the indexed identifiers were, so "calculateBuffers"
+    typed as one word still matches — an asymmetry between index-time and query-time analysis is
+    the classic way a search silently stops finding things.
+    """
+    sql = _UNIT_SELECT
+    params: List[Any] = [TS_WEIGHTS, f"{query} {expand_identifiers(query)}"]
+    if callable_only:
+        sql += " AND u.verdict = 'callable'"
+    sql += " ORDER BY score DESC, u.symbol LIMIT %s"
+    params.append(max(1, int(limit)))
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [_unit_row(r) for r in cur.fetchall()]
+
+
+def get_unit_contract(conn, symbol: str) -> Dict[str, Any]:
+    """Full contract for one symbol, by bare or qualified name.
+
+    An ambiguous bare name returns the candidates and NO import line — the same refusal the
+    registry reader makes, for the same reason: guessing which of two same-named units the
+    caller meant produces a run that imports the wrong code and reports success.
+    """
+    bare = symbol.rsplit(".", 1)[-1]
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT u.element_id, u.symbol, u.qualified_name, u.library_module, u.slice_sha,
+                   u.signature, u.doc_summary, u.unit_kind, u.verdict, u.requirements,
+                   u.invariants, e.title, u.params, u.returns, u.docstring, u.callability,
+                   u.source_rel_path, u.extractor
+              FROM unit u JOIN element e ON e.id = u.element_id
+             WHERE u.is_current AND (u.symbol = %s OR u.qualified_name = %s)
+             ORDER BY u.symbol
+        """, (bare, symbol))
+        rows = cur.fetchall()
+    if not rows:
+        # `found: False` distinguishes "this store has no such symbol" from "this store refuses
+        # to guess between two". Only the first should make a caller try another backend; the
+        # second is an answer, and falling through it would turn a correct refusal into a
+        # confidently wrong import line.
+        return {"symbol": symbol, "found": False,
+                "error": f"no method named {symbol!r} in the library"}
+    if len(rows) > 1 and symbol == bare:
+        # The same refusal text the registry reader gives, not merely the same refusal. The
+        # model has to be told what to do next — ask again with a qualified name — and a bare
+        # `ambiguous: true` leaves it to guess, which is the failure this branch exists to
+        # prevent. Two backends that refuse differently are two behaviours to learn.
+        return {"symbol": symbol, "ambiguous": True,
+                "candidates": [{"qualified_name": r[2], "element_id": r[0],
+                                "source_rel_path": r[16], "signature": r[5]} for r in rows],
+                "import_line": None,
+                "error": f"{symbol!r} is defined by more than one element; "
+                         f"ask again with a qualified name."}
+    r = rows[0]
+    out = _unit_row(tuple(r[:12]) + (0.0,))
+    # `invariants` and the full `requirements` dict, not only the `requires` summary line that
+    # `_unit_row` derives. The registry contract carries both, and the difference is not
+    # cosmetic: invariants are where "requires a projected CRS" lives, and a contract that
+    # silently drops them tells the caller nothing about the metric discipline it must keep.
+    # Caught by diffing the two backends field by field rather than eyeballing one.
+    out.update({"params": r[12], "returns": r[13], "docstring": r[14], "callability": r[15],
+                "source_rel_path": r[16], "verdict": r[8],
+                "invariants": r[10] or [], "requirements": r[9] or {},
+                "module": r[3], "provenance": {"element_id": r[0], "source_rel_path": r[16],
+                                               "extractor": r[17]}})
+    out.pop("score", None)
+    return out
+
+
+def slice_source(conn, element_id: str, symbol: str, slice_sha: str) -> Optional[str]:
+    """The exact slice a contract describes.
+
+    This is why the mounted library can be a projection: the bytes the sandbox imports are
+    reproducible from the row that describes them, so the two cannot disagree.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""SELECT slice_source FROM unit
+                        WHERE element_id = %s AND symbol = %s AND slice_sha = %s""",
+                    (element_id, symbol, slice_sha))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+__all__ = ["DEFAULT_DSN", "SCHEMA_VERSION", "SCHEMA_SQL", "TS_WEIGHTS", "dsn", "enabled",
+           "connect", "ensure_schema", "expand_identifiers", "table_counts",
+           "search_units", "get_unit_contract", "slice_source"]

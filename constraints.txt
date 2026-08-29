@@ -45,6 +45,8 @@ openai==2.45.0
 # --- retrieval backends -------------------------------------------------------
 opensearch-py==3.0.0
 neo4j==6.1.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
 
 # --- scientific / geospatial stack --------------------------------------------
 # pandas is capped deliberately: pandas 3.0 is a major release and this platform's

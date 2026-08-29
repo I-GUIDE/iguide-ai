@@ -175,9 +175,38 @@ services:
     networks:
       - iguide-network
 
+  # The agent's OWN store. OpenSearch and Neo4j belong to the website; the agent writes into
+  # their cluster today, so re-indexing its knowledge base needs write access to production
+  # website infrastructure and a mapping change means re-crawling the corpus. This holds the
+  # record those indices are built from. pgvector is in the image so embeddings can live beside
+  # the rows they describe rather than in a fourth place.
+  agent-db:
+    image: pgvector/pgvector:pg17
+    container_name: iguide-agent-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AGENT_DB_USER:-iguide}
+      POSTGRES_PASSWORD: ${AGENT_DB_PASSWORD:?set AGENT_DB_PASSWORD in .env}
+      POSTGRES_DB: ${AGENT_DB_NAME:-iguide_agent}
+    ports:
+      # Loopback only. Nothing outside this host has any reason to reach it, and a bare
+      # "5544:5432" would publish it on every interface.
+      - "127.0.0.1:${AGENT_DB_PORT:-5544}:5432"
+    volumes:
+      - agent_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AGENT_DB_USER:-iguide} -d ${AGENT_DB_NAME:-iguide_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - iguide-network
+
 networks:
   iguide-network:
     driver: bridge
 
 volumes:
   agent_chat_files:
+  agent_db_data:

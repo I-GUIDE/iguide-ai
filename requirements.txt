@@ -22,6 +22,9 @@ mcp[cli]>=1.2
 # Search backends
 opensearch-py
 neo4j
+# Postgres record for extracted content (extractors/kb_db.py). Imported lazily inside
+# connect(), so the package stays importable without it.
+psycopg[binary]
 ddgs
 
 # Open-web page extraction (web_fetch): boilerplate removal + HTML -> markdown.
