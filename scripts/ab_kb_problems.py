@@ -48,18 +48,40 @@ os.environ.setdefault("CLAUDE_CLI_MODEL", "sonnet")
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(REPO / ".env", override=False)
+# This worktree has no `.env`; the platform credentials live in the main checkout. Without them
+# `OPENSEARCH_NODE`, `FLASK_EMBEDDING_URL` and Neo4j are unset, the supervisor's search peer
+# fails, and BOTH arms degrade to a partial answer — which would have been recorded as a result.
+# override=False so an explicitly exported variable still wins.
+for candidate in (REPO / ".env", REPO.parent / "i-guide-platform-flask-servers" / ".env"):
+    if candidate.is_file():
+        load_dotenv(candidate, override=False)
+        break
+
+# Inherited from a DEPLOYMENT .env, and wrong for a local run: every download_url would be built
+# against the remote host, so a locally produced artifact 404s with `unknown file_id`.
+os.environ["AGENT_PUBLIC_BASE_URL"] = ""
+# The platform's OpenSearch is the WEBSITE's cluster. Both arms read it for keyword/semantic/
+# spatial search, which is fair and is read-only; the agent KB is served from the local Postgres
+# record, so nothing in this experiment writes to the platform.
+os.environ["AGENT_KB_BACKEND"] = "local"
 
 # Everything both arms get. Platform search, the open web, code execution and staging are NOT
 # the variable under test: without them the no-KB arm could not reach the data at all and the
 # experiment would measure file access rather than extracted knowledge.
 COMMON_TOOLS = ["keyword_search", "semantic_search", "spatial_search", "neo4j_search",
                 "web_search"]
-# The variable. Readers (`get_kb_block`, `get_method_contract`) follow their search tool
-# automatically — see the companion_of map in langchain_granular_tools.
 KB_TOOLS = ["agent_kb_search", "kb_method_search"]
 
-ARMS = {"no_kb": COMMON_TOOLS, "with_kb": COMMON_TOOLS + KB_TOOLS}
+# `enabled_search_methods` alone is NOT the ablation, and building on it cost a whole sweep. It
+# filters the search peer; the code and analyze peers are granted the KB tools "deliberately
+# independent of the request's enabled_search_methods", and `_direct_search_sweep` unions the KB
+# in without the model electing anything. The no-KB arm called `agent_kb_search` once and
+# answered both checks correctly — a control that was really a second treatment, reporting
+# success. `AGENT_ABLATE_KB` closes all four paths; see `supervisor.graph.kb_ablated`.
+ARMS = {
+    "no_kb":   {"tools": COMMON_TOOLS, "ablate": True},
+    "with_kb": {"tools": COMMON_TOOLS + KB_TOOLS, "ablate": False},
+}
 
 PROBLEMS: Dict[str, Dict[str, Any]] = {
     "p1_streets": {
@@ -149,20 +171,112 @@ def grade(problem: Dict[str, Any], answer: str) -> Dict[str, Any]:
     return out
 
 
+class _ToolCounter:
+    """Counts calls to the tools under test, by wrapping them where they are defined.
+
+    `route_trace.called_tools` records the SUPERVISOR's peer delegations —
+    `search_agent_evidence`, `code_agent_answer` — not the tools those peers then call. Reading
+    it for "did this arm use the knowledge base" gave `kb=-` on a run whose answer was exactly
+    right, which is the wrong layer entirely: the same gap the plan records as "search-peer
+    inner tool-call logging".
+
+    Patching the module attribute is enough because `Tool(func=…)` resolves it when the graph is
+    built, and the graph is built per run.
+    """
+
+    NAMES = ("agent_kb_search_tool", "get_kb_block_tool", "kb_method_search_tool",
+             "get_method_contract_tool")
+
+    def __init__(self):
+        self.calls: Dict[str, int] = {}
+        self._saved: Dict[str, Any] = {}
+
+    def _wrap(self, module, attr):
+        original = getattr(module, attr)
+
+        def counted(*a, **kw):
+            self.calls[attr] = self.calls.get(attr, 0) + 1
+            return original(*a, **kw)
+
+        counted.__name__ = getattr(original, "__name__", attr)
+        counted.__doc__ = original.__doc__
+        setattr(module, attr, counted)
+        self._saved[attr] = (module, original)
+
+    def __enter__(self):
+        from agent_runtime import langchain_granular_tools
+
+        for attr in self.NAMES:
+            if hasattr(langchain_granular_tools, attr):
+                self._wrap(langchain_granular_tools, attr)
+        # `execute_code` is a closure inside `make_code_execution_tools`, so there is no module
+        # attribute to wrap. It does not need one: the orchestration result carries `code_result`
+        # when the sandbox ran, which is a fact about the run rather than an inference from it.
+        return self
+
+    def __exit__(self, *exc):
+        for attr, (module, original) in self._saved.items():
+            setattr(module, attr, original)
+        return False
+
+
+class _WarnCounter:
+    """Counts the two degradations that would otherwise be invisible in a result.
+
+    `claude-cli` tool calling is prompt-enforced, not API-enforced, so a turn can come back as
+    prose and the envelope leaks into the answer. `ChatClaudeCli.malformed_replies` exists for
+    this but `bind_tools` returns a NEW instance, so the counter is scattered across objects and
+    unreadable from here. The log line is the reliable signal.
+
+    A run with malformed replies is not evidence about the knowledge base — it is evidence about
+    the shim — and averaging it in would let a harness artefact read as a KB result.
+    """
+
+    def __init__(self):
+        self.malformed = 0
+        self.search_failed = 0
+
+    def __enter__(self):
+        import logging
+
+        self._handler = logging.Handler()
+        self._handler.emit = self._emit
+        logging.getLogger().addHandler(self._handler)
+        logging.getLogger().setLevel(logging.WARNING)
+        return self
+
+    def _emit(self, record):
+        text = str(getattr(record, "msg", ""))
+        if "was not JSON" in text:
+            self.malformed += 1
+        if "peer search failed" in text:
+            self.search_failed += 1
+
+    def __exit__(self, *exc):
+        import logging
+
+        logging.getLogger().removeHandler(self._handler)
+        return False
+
+
 def run_one(problem_id: str, arm: str, timeout_note: str = "") -> Dict[str, Any]:
     from agent_runtime.graph_runtime import run_agent_query
 
     problem = PROBLEMS[problem_id]
+    os.environ["AGENT_ABLATE_KB"] = "1" if ARMS[arm]["ablate"] else "0"
     t0 = time.time()
     error = None
     res: Dict[str, Any] = {}
+    counter = _WarnCounter()
+    tools_used = _ToolCounter()
     try:
+      with counter, tools_used:
         res = run_agent_query(
             problem["query"],
             use_supervisor=True,
             code_exec=True,
             include_mcp_tools=False,
-            enabled_search_methods=ARMS[arm],
+            enabled_search_methods=ARMS[arm]["tools"],
             # A fresh thread per (problem, arm): a shared checkpointer would let the second arm
             # read the first one's artifacts and turn an ablation into a continuation.
             thread_id=f"ab_{problem_id}_{arm}_{int(t0)}",
@@ -178,6 +292,7 @@ def run_one(problem_id: str, arm: str, timeout_note: str = "") -> Dict[str, Any]
     return {
         "problem": problem_id,
         "arm": arm,
+        "ablated": ARMS[arm]["ablate"],
         "model": os.getenv("CLAUDE_CLI_MODEL", "?"),
         "provider": os.getenv("LLM_PROVIDER", "?"),
         "elapsed_s": round(elapsed, 1),
@@ -185,13 +300,16 @@ def run_one(problem_id: str, arm: str, timeout_note: str = "") -> Dict[str, Any]
         "final_answer": answer,
         "called_tools": called,
         # Did the arm actually USE the thing under test? A with_kb run that never called a KB
-        # tool is not evidence about the KB, and averaging it in would hide that.
-        "used_kb_tools": sorted({c for c in called
-                                 if c in {"agent_kb_search", "get_kb_block",
-                                          "kb_method_search", "get_method_contract"}}),
-        "ran_code": any(c == "execute_code" for c in called),
-        "staged": any(c.startswith("stage_") for c in called),
+        # tool is not evidence about the KB, and averaging it in would hide that. Counted at the
+        # tool itself, because `called_tools` records peer delegations one layer up — reading it
+        # reported `kb=-` on a run whose answer was exactly right.
+        "kb_tool_calls": dict(tools_used.calls),
+        "used_kb": bool(tools_used.calls),
+        "ran_code": bool((res.get("orchestration_result") or {}).get("code_result")),
         "grounding_audit": res.get("grounding_audit"),
+        # Harness health, kept beside the result so a shim failure is never read as a KB result.
+        "malformed_llm_replies": counter.malformed,
+        "peer_search_failures": counter.search_failed,
         "grade": grade(problem, answer),
         "note": timeout_note,
     }
@@ -221,14 +339,16 @@ def main() -> int:
     runs = list(existing)
     for problem_id in problems:
         for arm in arms:
-            print(f"\n{'=' * 78}\n{problem_id}  [{arm}]  tools={ARMS[arm]}\n{'=' * 78}",
+            print(f"\n{'=' * 78}\n{problem_id}  [{arm}]  "
+                  f"ablate_kb={ARMS[arm]['ablate']}  tools={ARMS[arm]['tools']}\n{'=' * 78}",
                   flush=True)
             row = run_one(problem_id, arm)
             runs = [r for r in runs
                     if not (r["problem"] == problem_id and r["arm"] == arm)] + [row]
             grade_row = row["grade"]
             print(f"  {row['elapsed_s']}s   tools={len(row['called_tools'])}   "
-                  f"kb={row['used_kb_tools'] or '-'}   code={row['ran_code']}", flush=True)
+                  f"kb={row['kb_tool_calls'] or '-'}   code={row['ran_code']}",
+                  flush=True)
             if row["error"]:
                 print(f"  ERROR {row['error']}", flush=True)
             for check in grade_row["checks"]:

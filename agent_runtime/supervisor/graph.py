@@ -1489,6 +1489,28 @@ _CODE_PEER_KB_TOOLS = {"agent_kb_search", "get_kb_block",
                        "kb_method_search", "get_method_contract"}
 
 
+def kb_ablated() -> bool:
+    """Is the extracted knowledge base switched OFF for this process?
+
+    An EXPERIMENT control, not a feature flag — the deployed answer is always "no". It exists
+    because there was no way to run the corpus without the KB and get a trustworthy result:
+    `enabled_search_methods` filters the SEARCH peer only, while the code and analyze peers hold
+    `_CODE_PEER_KB_TOOLS` regardless and `_direct_search_sweep` unions the KB in deterministically.
+    All three are right for serving, and all three mean an ablation built on
+    `enabled_search_methods` measures nothing while reporting numbers.
+
+    Read at call time rather than captured at import, so a harness can set it per run.
+    """
+    import os
+
+    return (os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _peer_kb_tools() -> set:
+    """The KB tools a code/analyze peer gets. Empty under ablation."""
+    return set() if kb_ablated() else set(_CODE_PEER_KB_TOOLS)
+
+
 def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
     """Library methods rendered as evidence documents.
 
@@ -1600,7 +1622,7 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
                                         source="opengeodata"))
         except Exception:
             pass
-    if permitted("agent_kb_search"):
+    if permitted("agent_kb_search") and not kb_ablated():
         try:
             from rag_pipeline.search.agent_kb import agent_kb_search
 
@@ -1629,7 +1651,8 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
         # COVERAGE and REUSE rules, the peer called it ZERO times and answered "adapt this
         # notebook" while `plot_choropleth_map` sat in the library with a working import line.
         try:
-            docs.extend(_method_units_as_documents(query, k))
+            if not kb_ablated():
+                docs.extend(_method_units_as_documents(query, k))
         except Exception:
             pass
     # web_search is deliberately NOT part of this sweep. Every other method here is a cheap call to
@@ -2172,8 +2195,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
             tools.extend(t for t in make_langchain_granular_tools(
-                enabled_search_methods=sorted(_CODE_PEER_KB_TOOLS))
-                if getattr(t, "name", "") in _CODE_PEER_KB_TOOLS)
+                enabled_search_methods=sorted(_peer_kb_tools()))
+                if getattr(t, "name", "") in _peer_kb_tools())
         except Exception:
             pass
         if include_mcp_tools:
@@ -2417,8 +2440,8 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
             tools.extend(t for t in make_langchain_granular_tools(
-                enabled_search_methods=sorted(_CODE_PEER_KB_TOOLS))
-                if getattr(t, "name", "") in _CODE_PEER_KB_TOOLS)
+                enabled_search_methods=sorted(_peer_kb_tools()))
+                if getattr(t, "name", "") in _peer_kb_tools())
         except Exception:
             pass
         # Geocoding runs agent-side (the sandbox has NO network): lets the peer turn named
