@@ -4065,3 +4065,82 @@ rather than from the previous one.
   callable units include `e2sfca(..., distances: List[float], weights: List[float])` — the
   paper's numbers drop straight into the signature. The `IMPLEMENTED_BY` edge that would record
   that pairing is still never written.
+
+
+## 2026-08-29 · M8.42–M8.48 · A strong case, a challenging case, and one defect three times
+
+**Change** Two new A/B cases the earlier four could not reach — compose a workflow from a
+  publication's method spec plus a separate element's callable implementation (p5), and resolve
+  a symbol two elements define identically (p6) — and seven revisions to the knowledge
+  *reference* strategy that running them forced.
+
+**Why** The first four problems named their datasets and asked for counts, which the agent does
+  well unaided; both arms scored 4/4 and the experiment said nothing about the knowledge base.
+  A strong case has to need what only pre-computed cross-document structure provides.
+
+**Measured** p5 asks for a paper's catchment bands, its distance-decay weights, whether the
+  platform already implements the method, and what that implementation requires of its inputs:
+
+  | | ablated | with KB |
+  |---|---|---|
+  | p5 · spec + implementation | **0/4** | **4/4** |
+  | p6 · ambiguous symbol | picked one silently | refuses, names both elements |
+
+  The with-KB answer states 0-10/10-20/20-30 minute bands, weights 1/0.68/0.22 mapped to the
+  right bands, the pinned import line for `e2sfca`, and the projected-CRS precondition. The
+  ablated arm, with the same web access and the paper publicly available, got none of it. This
+  is the first decisive separation in the whole experiment, and it lands exactly where the
+  thesis predicts: not on analysis the agent can do, but on structure it cannot cheaply
+  rebuild.
+
+  Retrieval, over six probe queries: actionable hits 24/48 -> 31/48, tokens per search
+  3,818 -> 2,620, callable methods returned for three method-shaped questions 1/2/2 -> 4/4/4.
+
+**Surprised by** One defect, three times, and it is architectural rather than incidental:
+  **adding to the record is not publishing to the agent.**
+
+  1. `search_kb` queried `block` and `unit`. 203 publication method specs — one LLM call each
+     to produce — sat behind their own GIN index that nothing queried. Asked for the paper's
+     weights, the agent answered "its abstract (the only text retrieved) does not state the
+     specific minute-based catchment bands".
+  2. With the channel added, a spec carried whole at 6,000 characters arrived at 1,858. Four
+     independent truncation budgets sit between the record and the model, in three modules —
+     producer 6,000, normaliser 1,800 (the CELL budget), evidence renderer 2,500, enrichment
+     sub-render 900 — each reasonable alone, none aware of the others, so the producer's budget
+     was decoration.
+  3. With that fixed, `error`, `import_line_candidates` and `disambiguate_with` were all on the
+     row and none reached the model, because `_method_units_as_documents` builds its contents
+     from four fields chosen when it was written. The agent called `get_method_contract` eight
+     times and still reported "the entries only give signature and dependency list".
+
+  And three of my own fixes were wrong in instructive ways. A 50/50 **quota** capped units as
+  well as guaranteeing them and pinned "actionable fraction" at 50% by construction — the same
+  defect as an eval that cannot move; replaced by a floor. Reusing the **`ambiguous`** key, which
+  already means "ambiguity stub, no import line", made an existing filter delete a real callable
+  method from the evidence entirely. And **two budgets I guessed** (700 chars for cells, 2,600
+  for specs) both cut through the thing being retrieved; both are now set from the corpus.
+
+  The grader was wrong twice, and the second time is the one to remember. It reported **4/4**
+  on an answer that read "the retrieved evidence does not state the actual numeric weight values
+  (e.g., 1.0 / 0.68 / 0.22 or similar)" — the agent wrote those digits as an example of what it
+  did NOT have. A substring match cannot tell assertion from negation, and the false pass came
+  out in exactly the direction the experiment was hoping for. Earlier the same grader could not
+  see two-digit numbers at all, so every check on p5 was ungradeable by construction and a
+  correct "10, 20, and 30 minutes" was scored MISS.
+
+  Also worth naming, because it is now three-for-three in this codebase: **absence is never a
+  message.** A missing callability verdict meant "not callable" and hid the affirmative fact
+  from every consumer — all 840 callable units carry `callability = {}` while all 149 refused
+  ones carry the full dict. A missing bbox meant "no geometry" rather than "unknown CRS". And a
+  withheld import line meant "we don't have it" rather than "you have not said which one".
+
+**Deliberately not done** The `IMPLEMENTED_BY` edge is still never written, so the pairing p5
+  depends on — publication `355786a5` and notebook `3b45070e` — has to be rediscovered by search
+  on every turn. That is the obvious next change, and it is an EXTRACTION change rather than a
+  reference one: the corpus holds the relation and nothing records it.
+
+  Nor is the deeper structural problem fixed. Between the record and the model sit a search, a
+  normaliser, an evidence renderer and a type-specific sub-renderer, each written against the
+  fields that existed at the time and each silently lossy for anything added later. Every one of
+  the three findings above is an instance. The fix is not another patch at a fourth site; it is
+  a single typed evidence contract that every layer must carry forward or explicitly drop.
