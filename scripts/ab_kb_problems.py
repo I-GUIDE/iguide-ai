@@ -24,6 +24,7 @@ recorded in every result because a number produced under a different model is no
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -192,14 +193,22 @@ class _ToolCounter:
         self._saved: Dict[str, Any] = {}
 
     def _wrap(self, module, attr):
+        """`functools.wraps`, and it is load-bearing — not tidiness.
+
+        LangChain infers a tool's argument schema from the wrapped function's SIGNATURE. A
+        hand-rolled wrapper copying only `__name__` and `__doc__` left `(*a, **kw)`, so
+        `agent_kb_search` was advertised to the model with no parameters at all and the peer
+        turn failed the moment it tried to call one. Only the with-KB arm calls these tools, so
+        only that arm broke: 8/8 versus 0/8, a perfectly clean result produced entirely by the
+        instrumentation. `functools.wraps` sets `__wrapped__`, which `inspect.signature` follows.
+        """
         original = getattr(module, attr)
 
+        @functools.wraps(original)
         def counted(*a, **kw):
             self.calls[attr] = self.calls.get(attr, 0) + 1
             return original(*a, **kw)
 
-        counted.__name__ = getattr(original, "__name__", attr)
-        counted.__doc__ = original.__doc__
         setattr(module, attr, counted)
         self._saved[attr] = (module, original)
 

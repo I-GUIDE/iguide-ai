@@ -68,3 +68,46 @@ def test_the_deterministic_sweep_drops_both_of_its_kb_arms():
     sweep = inspect.getsource(graph._direct_search_sweep)
     assert 'permitted("agent_kb_search") and not kb_ablated()' in sweep
     assert "if not kb_ablated():\n                docs.extend(_method_units_as_documents" in sweep
+
+
+# --------------------------------------------------- the harness must not change the treatment
+
+def test_the_ab_harness_instrumentation_is_signature_transparent():
+    """The counter that measures KB use must not alter the tools it counts.
+
+    LangChain infers a tool's argument schema from the wrapped function's SIGNATURE. A wrapper
+    that copied only `__name__` and `__doc__` left `(*a, **kw)`, so `agent_kb_search` was
+    advertised to the model with NO parameters and the peer turn failed as soon as it called
+    one. Because only the with-KB arm calls those tools, only that arm broke — producing
+    no_kb 8/8 against with_kb 0/8, a perfectly clean and completely false result.
+    """
+    import inspect
+    import sys
+
+    sys.argv = ["ab_kb_problems"]
+    from agent_runtime import langchain_granular_tools as tools_module
+    from scripts.ab_kb_problems import _ToolCounter
+
+    for attr in _ToolCounter.NAMES:
+        if not hasattr(tools_module, attr):
+            continue
+        before = inspect.signature(getattr(tools_module, attr))
+        with _ToolCounter():
+            during = inspect.signature(getattr(tools_module, attr))
+        after = inspect.signature(getattr(tools_module, attr))
+        assert str(before) == str(during) == str(after), attr
+        assert "*a" not in str(during), f"{attr} lost its parameters to the wrapper"
+
+
+def test_the_counter_restores_the_originals():
+    """A leaked wrapper would follow the process into every later run."""
+    import sys
+
+    sys.argv = ["ab_kb_problems"]
+    from agent_runtime import langchain_granular_tools as tools_module
+    from scripts.ab_kb_problems import _ToolCounter
+
+    original = tools_module.agent_kb_search_tool
+    with _ToolCounter():
+        assert tools_module.agent_kb_search_tool is not original
+    assert tools_module.agent_kb_search_tool is original
