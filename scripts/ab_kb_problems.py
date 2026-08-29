@@ -137,6 +137,45 @@ PROBLEMS: Dict[str, Dict[str, Any]] = {
             {"label": "THEFT that month", "correct": 4599, "tolerance": 0.01, "wrong": {}},
         ],
     },
+    "p5_spec_to_implementation": {
+        "query": (
+            "The I-GUIDE platform holds a publication describing how to measure spatial "
+            "accessibility of COVID-19 healthcare resources in Illinois using the Enhanced "
+            "Two-Step Floating Catchment Area method. Report, precisely: (a) the travel-time "
+            "catchment bands the paper uses in minutes, (b) the distance-decay weight applied "
+            "to each band, (c) whether the platform already provides a callable implementation "
+            "of E2SFCA and if so the exact import line for it, and (d) what the implementation "
+            "requires of the coordinate reference system of its inputs."),
+        "why": ("The strong case for pre-computed structure. The corpus holds the method spec "
+                "(publication 355786a5, 31 extracted steps carrying the actual parameters) and, "
+                "in a SEPARATE element, a callable implementation (notebook 3b45070e, whose "
+                "e2sfca signature takes the very `distances` and `weights` the paper states). "
+                "Nothing records that pairing — IMPLEMENTED_BY is never written — so both arms "
+                "must find it. The paper is public, so the ablated arm can reach it by web "
+                "search; what it cannot reach is the extracted contract."),
+        "checks": [
+            {"label": "catchment band, minutes", "correct": 30, "tolerance": 0.0,
+             "wrong": {60: "invented a band the paper does not use"}},
+            {"label": "distance-decay weight x100", "correct": 68, "tolerance": 0.0,
+             "wrong": {50: "guessed a linear decay"}},
+            {"label": "second decay weight x100", "correct": 22, "tolerance": 0.0, "wrong": {}},
+        ],
+        "expect_strings": ["e2sfca", "iguide_methods", "project"],
+    },
+    "p6_ambiguous_symbol": {
+        "query": (
+            "I want to use the platform's extracted method `spatial_join_and_count`. Give me "
+            "the exact import line to use it, and tell me anything I need to know before "
+            "calling it."),
+        "why": ("`spatial_join_and_count` is defined by TWO elements with byte-identical "
+                "signatures and different slice shas, so a bare name does not identify code. "
+                "The library refuses to resolve it and returns the candidates; the failure "
+                "mode under test is an agent that picks one silently and hands over an import "
+                "line for code the user did not choose."),
+        "checks": [],
+        "expect_strings": ["two", "element"],
+        "expect_ambiguity": True,
+    },
     "p4_negative_control": {
         "query": (
             "Using only methods that already exist in the I-GUIDE platform's extracted method "
@@ -170,6 +209,18 @@ def grade(problem: Dict[str, Any], answer: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {"checks": results,
                            "passed": sum(1 for r in results if r["found"]),
                            "total": len(results)}
+    low = (answer or "").lower()
+    wanted = [w for w in (problem.get("expect_strings") or [])]
+    if wanted:
+        out["strings_found"] = [w for w in wanted if w.lower() in low]
+        out["strings_missing"] = [w for w in wanted if w.lower() not in low]
+    if problem.get("expect_ambiguity"):
+        # Naming both candidates, or refusing to pick, both count. Handing over ONE import
+        # line with no mention of the other element is the failure.
+        out["flagged_ambiguity"] = any(
+            p in low for p in ("ambiguous", "two elements", "more than one element",
+                               "two different", "qualified name", "both elements",
+                               "defined by more than one"))
     if problem.get("expect_refusal"):
         low = (answer or "").lower()
         refused = any(p in low for p in (
@@ -380,6 +431,13 @@ def main() -> int:
                 mark = "OK  " if check["found"] else "MISS"
                 extra = f"   <- {'; '.join(check['diagnosis'])}" if check["diagnosis"] else ""
                 print(f"  {mark} {check['label']:<34}{check['correct']:>10,}{extra}", flush=True)
+            if grade_row.get("strings_missing") is not None:
+                print(f"  {'OK  ' if not grade_row['strings_missing'] else 'MISS'} "
+                      f"expected terms, missing: {grade_row['strings_missing'] or 'none'}",
+                      flush=True)
+            if "flagged_ambiguity" in grade_row:
+                print(f"  {'OK  ' if grade_row['flagged_ambiguity'] else 'MISS'} "
+                      f"flagged the ambiguity instead of picking one", flush=True)
             if "refused_correctly" in grade_row:
                 print(f"  {'OK  ' if grade_row['refused_correctly'] else 'MISS'} "
                       f"refused a capability it does not have", flush=True)

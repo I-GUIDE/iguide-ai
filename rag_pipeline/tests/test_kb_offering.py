@@ -147,3 +147,83 @@ def test_first_contact_is_an_excerpt_and_names_its_reader(conn):
         if "more chars" in doc["contents"]:
             assert "get_kb_block" in doc["contents"]
             assert doc["doc_id"], "the reader was named but not the id it needs"
+
+
+# ------------------------------------------------- publications: the third channel
+
+@pytest.mark.integration
+def test_extracted_method_specs_are_reachable(conn):
+    """203 publication specs sat behind a GIN index nothing queried.
+
+    `search_kb` searched `block` and `unit`. Each of those specs cost an LLM call to produce and
+    none of them could reach the agent. Measured on the case that exposed it: asked for a
+    paper's catchment bands and decay weights, the agent answered "its abstract (the only text
+    retrieved) does not state the specific minute-based catchment bands" — it had found the
+    paper AND the callable implementation, and the spec between them was the missing half.
+    """
+    hits = kb_db.search_kb(conn, "enhanced two step floating catchment area accessibility",
+                           size=8)
+    specs = [h for h in hits if h["_index"] == "pg:publication"]
+    assert specs, "no method spec reachable for a query that names the method"
+
+
+@pytest.mark.integration
+def test_a_spec_is_carried_whole_including_its_parameters(conn):
+    """The parameters a signature cannot express live in the middle of the step list.
+
+    A first budget of 2,600 characters cut the E2SFCA spec at step 12, one step before "Apply
+    distance-decay weights (1, 0.68, 0.22)" — truncating away the exact numbers that were the
+    reason to retrieve it. The budget is now set from the corpus (63 specs, median 3,060, max
+    5,615), not guessed.
+    """
+    hits = kb_db.search_kb(conn, "enhanced two step floating catchment area distance decay "
+                                 "weights", size=8)
+    spec = next((h for h in hits if h["_index"] == "pg:publication"), None)
+    if spec is None:
+        pytest.skip("the E2SFCA spec is not in this record")
+    contents = spec["_source"]["contents"]
+    assert "0.68" in contents and "0.22" in contents, "the decay weights were truncated away"
+    assert spec["_source"]["extracted"]["spec"]["step_count"] > 20
+
+
+@pytest.mark.integration
+def test_no_spec_in_the_corpus_is_truncated(conn):
+    """The budget must clear the real distribution, not the median."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT max(length(summary) + coalesce((
+                         SELECT sum(length(v)) + 4 * count(*)
+                           FROM jsonb_array_elements_text(p.steps) v), 0))
+                         FROM publication p WHERE jsonb_array_length(p.steps) > 0""")
+        longest = cur.fetchone()[0] or 0
+    assert longest <= kb_db._SPEC_CHARS, (
+        f"the longest spec is {longest} chars and the budget is {kb_db._SPEC_CHARS}")
+
+
+# ------------------------------------------- collapsing a duplicate must not erase the fact
+
+@pytest.mark.integration
+def test_a_collapsed_duplicate_still_reports_the_ambiguity(conn):
+    """Dedup that hides a real ambiguity is worse than the duplication it removes.
+
+    `spatial_join_and_count` is defined by two elements with byte-identical signatures and
+    different slice shas, so the bare name does not identify code. Asked for "the exact import
+    line", the agent returned ONE and did not mention the other — it had been shown both,
+    adjacent and distinguishable only by a hash inside a module path, and took the first.
+    `get_contract` refuses a bare ambiguous name for exactly this reason and was never
+    consulted, because the search result already looked like an answer.
+    """
+    hits = kb_db.search_units(conn, "spatial join count points in polygons", limit=6)
+    shared = [h for h in hits if h.get("ambiguous")]
+    if not shared:
+        pytest.skip("no ambiguous symbol matched this query in this record")
+    for hit in shared:
+        assert hit.get("also_defined_by"), hit["symbol"]
+        assert all(s.get("element_id") for s in hit["also_defined_by"])
+        assert hit.get("disambiguate_with"), "named the problem without naming the resolution"
+
+
+@pytest.mark.integration
+def test_collapsing_does_not_shrink_the_result_set(conn):
+    """The collapse happens after an over-fetch, so asking for six still returns six."""
+    hits = kb_db.search_units(conn, "load data", limit=6)
+    assert len(hits) == 6, len(hits)

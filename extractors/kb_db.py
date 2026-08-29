@@ -353,11 +353,41 @@ def search_units(conn, query: str, *, limit: int = 8,
     params: List[Any] = [TS_WEIGHTS, f"{query} {expand_identifiers(query)}"]
     if callable_only:
         sql += " AND u.verdict = 'callable'"
+    # Over-fetch, because collapsing same-symbol duplicates below can otherwise return fewer
+    # results than asked for.
     sql += " ORDER BY score DESC, u.symbol LIMIT %s"
-    params.append(max(1, int(limit)))
+    params.append(max(1, int(limit)) * 3)
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        return [_unit_row(r) for r in cur.fetchall()]
+        rows = [_unit_row(r) for r in cur.fetchall()]
+
+    # One entry per (symbol, signature), carrying the elements that share it.
+    #
+    # Two identical rows spend two slots to say one thing — but simply dropping the second
+    # ERASES a real ambiguity, and that is worse. Asked for "the exact import line" for
+    # `spatial_join_and_count`, which two elements define identically, the agent returned one
+    # and did not mention the other; it had been shown both, adjacent and distinguishable only
+    # by a hash inside a module path, and took the first. `get_contract` refuses a bare
+    # ambiguous name for exactly this reason and was never consulted, because the search result
+    # already looked like an answer.
+    collapsed: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("symbol") or "").rsplit(".", 1)[-1], row.get("signature"))
+        first = collapsed.get(key)
+        if first is None:
+            collapsed[key] = row
+            continue
+        siblings = first.setdefault("also_defined_by", [])
+        entry = {"element_id": row.get("element_id"),
+                 "element_title": row.get("element_title"),
+                 "import_line": row.get("import_line")}
+        if entry not in siblings:
+            siblings.append(entry)
+        # The import line is the field a wrong choice breaks a run over, so an ambiguous row
+        # must not present one as if it were THE answer.
+        first["ambiguous"] = True
+        first["disambiguate_with"] = "get_method_contract(<qualified_name>)"
+    return list(collapsed.values())[:max(1, int(limit))]
 
 
 def get_unit_contract(conn, symbol: str) -> Dict[str, Any]:
@@ -428,6 +458,14 @@ def slice_source(conn, element_id: str, symbol: str, slice_sha: str) -> Optional
 
 
 _BLOCK_TSQUERY = _OR_TSQUERY
+
+# A spec is already the distilled form — 31 numbered steps, not 31 cells of code — so it is
+# carried WHOLE, and the budget is set from the corpus rather than guessed: 63 specs, median
+# 3,060 characters, maximum 5,615. A first guess of 2,600 truncated the E2SFCA spec at step 12,
+# one step before "Apply distance-decay weights (1, 0.68, 0.22)" — losing the exact parameters
+# that were the reason to retrieve it. Truncating a compression discards information that has
+# no cheaper representation; 6,000 clears every spec in the corpus and still bounds a runaway.
+_SPEC_CHARS = 6000
 
 
 def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
@@ -516,6 +554,44 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
                                                       if module and symbol else None),
                                   }},
                 }})
+        # --- publications: the method as the literature states it ------------------------
+        #
+        # A third question, not a variant of the other two. A cell says how someone did it, a
+        # unit says what can be called, and a spec says what the method IS — including the
+        # parameters a caller has to supply and that no signature can carry: the paper's own
+        # catchment bands and decay weights are what turn `e2sfca(..., distances, weights)`
+        # from a signature into a runnable call.
+        cur.execute("""
+            SELECT p.element_id, e.title, p.summary, p.steps, p.tools_referenced,
+                   p.datasets_referenced, p.doi,
+                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], p.search, q) AS score
+              FROM publication p JOIN element e ON e.id = p.element_id,
+                   LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
+             WHERE p.search @@ q AND jsonb_array_length(p.steps) > 0
+             ORDER BY score DESC, p.element_id
+             LIMIT %s
+        """, (expanded, size))
+        for (element_id, title, summary, steps, tools, datasets, doi, score) in cur.fetchall():
+            # The steps ARE the payload and they are already the distilled form, so they get a
+            # larger budget than a raw cell excerpt. Numbered, because the agent has to be able
+            # to say which step it is following.
+            body = [summary.strip()] if summary else []
+            body += [f"{i}. {st}" for i, st in enumerate(steps or [], start=1)]
+            contents = "\n".join(body)
+            hits.append({
+                "_id": f"{element_id}::methodspec", "_index": "pg:publication",
+                "_score": float(score),
+                "_source": {
+                    "doc_id": f"{element_id}::methodspec", "title": title or element_id,
+                    "contents": contents[:_SPEC_CHARS],
+                    "resource-type": "PublicationMethodSpec",
+                    "extracted": {"parent_doc_id": element_id, "parent_title": title,
+                                  "parent_type": "publication", "doi": doi,
+                                  "spec": {"step_count": len(steps or []),
+                                           "tools_referenced": tools or [],
+                                           "datasets_referenced": datasets or []}},
+                }})
+
     # Cells and units answer DIFFERENT questions — "how did someone do this" and "what can I
     # call" — and ranking them on one text-similarity axis lets cells win, because a cell indexes
     # its whole markdown and code while a unit indexes a signature and one summary line.
@@ -526,7 +602,8 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
     # promote 22-character cells ("view point", "view polygon") and push units out entirely. The
     # fix is a quota, because the two channels are not competing for the same slot.
     units = [h for h in hits if h["_index"] == "pg:unit"]
-    blocks = [h for h in hits if h["_index"] != "pg:unit"]
+    blocks = [h for h in hits if h["_index"] not in ("pg:unit", "pg:publication")]
+    specs = [h for h in hits if h["_index"] == "pg:publication"]
 
     # A REFUSED unit cannot be called, so it must never displace one that can. It is still
     # offered when nothing callable matched, because "there is a method but it reads a
@@ -544,13 +621,20 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
 
     # Same symbol from two elements is a real ambiguity the caller must resolve, but two
     # identical rows spend two slots to say one thing. Keep the best-scoring of each signature.
-    seen, deduped = set(), []
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    deduped = []
     for hit in callable_units:
         unit = (hit["_source"].get("extracted") or {}).get("unit") or {}
         key = (unit.get("library_symbol"), unit.get("signature"))
         if key in seen:
+            # Collapse the row, keep the fact. See `search_units` for what erasing it cost.
+            first = seen[key]
+            first.setdefault("also_defined_by", []).append(
+                {"element_id": (hit["_source"].get("extracted") or {}).get("parent_doc_id"),
+                 "import_line": unit.get("import_line")})
+            first["ambiguous"] = True
             continue
-        seen.add(key)
+        seen[key] = unit
         deduped.append(hit)
 
     # A FLOOR, not a quota. The first version took exactly `size // 2` units and filled the rest
@@ -560,12 +644,23 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
     #
     # So: rank normally, then promote units until they hold at least half the slots. Units are
     # never capped, and a query with nothing callable is unchanged.
-    ranked = sorted(deduped + refused_units + blocks, key=lambda h: -h["_score"])[:size]
+    ranked = sorted(deduped + refused_units + specs + blocks,
+                    key=lambda h: -h["_score"])[:size]
     floor = max(1, size // 2)
     if sum(1 for h in ranked if h["_index"] == "pg:unit") < floor:
         promoted = (deduped or refused_units)[:floor]
         rest = [h for h in ranked if h not in promoted]
         ranked = (promoted + rest)[:size]
+
+    # ONE spec, when one matched. A floor of one and never a cap, for the same reason units get
+    # one: a spec answers a question the other two channels cannot, and it lost every slot on
+    # raw score — "enhanced two step floating catchment area accessibility" returned four units
+    # and two cells from the implementing notebook while the paper that DEFINES the method sat
+    # ninth. One slot, because a spec is dense (up to 6,000 characters) and a second adds little.
+    if specs and not any(h["_index"] == "pg:publication" for h in ranked):
+        rest = [h for h in ranked if h is not ranked[-1]]
+        ranked = [specs[0]] + rest
+        ranked.sort(key=lambda h: -h["_score"])
     ranked.sort(key=lambda h: -h["_score"])
     return ranked
 
