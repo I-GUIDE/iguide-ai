@@ -111,3 +111,25 @@ def test_the_counter_restores_the_originals():
     with _ToolCounter():
         assert tools_module.agent_kb_search_tool is not original
     assert tools_module.agent_kb_search_tool is original
+
+
+def test_importing_the_harness_does_not_reconfigure_the_process():
+    """A module that mutates `os.environ` on import is a landmine for every test after it.
+
+    This one loaded the platform `.env` at module scope, so importing it — which a test does,
+    to check the instrumentation — supplied OPENSEARCH_NODE, NEO4J_* and the rest to the whole
+    pytest process. Two unrelated tests asserting what happens when a lookup FAILS then passed
+    alone and failed in a full run, with the cause three files away.
+    """
+    import inspect
+    import sys
+
+    sys.argv = ["ab_kb_problems"]
+    from scripts import ab_kb_problems
+
+    module_level = "".join(
+        line for line in inspect.getsource(ab_kb_problems).splitlines(keepends=True)
+        if line and not line[0].isspace())
+    assert "load_dotenv(" not in module_level
+    assert "os.environ[" not in module_level
+    assert "os.environ.setdefault(" not in module_level

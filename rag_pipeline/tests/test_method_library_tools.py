@@ -436,9 +436,16 @@ def test_both_code_running_peers_can_reach_the_method_library():
 
     from agent_runtime.supervisor import graph
 
+    # `_peer_kb_tools()` rather than the constant: the grant is now read through an accessor so
+    # `AGENT_ABLATE_KB` can empty it for an experiment. The property this test protects is
+    # unchanged — both peers take their KB tools from that one place — and asserting the
+    # accessor keeps it protected while ALSO catching a peer that reads the constant directly
+    # and would therefore keep the library through an ablation.
     for fn in (graph.default_code_fn, graph.default_analyze_fn):
         src = inspect.getsource(fn)
-        assert "_CODE_PEER_KB_TOOLS" in src, f"{fn.__name__} cannot reach the method library"
+        assert "_peer_kb_tools()" in src, f"{fn.__name__} cannot reach the method library"
+        assert "_CODE_PEER_KB_TOOLS" not in src, (
+            f"{fn.__name__} reads the constant directly, so an ablation cannot remove its KB")
     assert {"kb_method_search", "get_method_contract"} <= graph._CODE_PEER_KB_TOOLS
 
 

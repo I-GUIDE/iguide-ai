@@ -36,35 +36,43 @@ from typing import Any, Dict, List
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-# Set before the runtime is imported.
-os.environ.setdefault("AGENT_FILE_STORAGE_ROOT", str(REPO / "agent_chat_files"))
-os.environ.setdefault("AGENT_KB_BACKEND", "local")
-os.environ["AGENT_CODE_EXEC"] = "1"
-os.environ.setdefault("AGENT_CODE_EXEC_BACKEND", "docker")
-# Stays off. It routes ingested notebook source into a bare exec() in a credentialed process.
-os.environ["AGENT_ALLOW_WORKFLOW_EXEC"] = "0"
-os.environ.setdefault("AGENT_SKILLS_ENABLED", "0")
-os.environ.setdefault("LLM_PROVIDER", "claude-cli")
-os.environ.setdefault("CLAUDE_CLI_MODEL", "sonnet")
+def configure() -> None:
+    """Environment for a real run. Called from `main`, NEVER at import.
 
-from dotenv import load_dotenv  # noqa: E402
+    This used to run at module scope, which made importing the harness — as a test does, to
+    check the instrumentation — load the platform `.env` into the whole pytest process and set
+    OPENSEARCH_NODE, NEO4J_* and the rest. Two unrelated tests that assert what happens when a
+    lookup FAILS then passed alone and failed in a full run, because the credentials they assume
+    are absent had been supplied by an import three files away.
+    """
+    from dotenv import load_dotenv
 
-# This worktree has no `.env`; the platform credentials live in the main checkout. Without them
-# `OPENSEARCH_NODE`, `FLASK_EMBEDDING_URL` and Neo4j are unset, the supervisor's search peer
-# fails, and BOTH arms degrade to a partial answer — which would have been recorded as a result.
-# override=False so an explicitly exported variable still wins.
-for candidate in (REPO / ".env", REPO.parent / "i-guide-platform-flask-servers" / ".env"):
-    if candidate.is_file():
-        load_dotenv(candidate, override=False)
-        break
+    os.environ.setdefault("AGENT_FILE_STORAGE_ROOT", str(REPO / "agent_chat_files"))
+    os.environ["AGENT_CODE_EXEC"] = "1"
+    os.environ.setdefault("AGENT_CODE_EXEC_BACKEND", "docker")
+    # Stays off. It routes ingested notebook source into a bare exec() in a credentialed process.
+    os.environ["AGENT_ALLOW_WORKFLOW_EXEC"] = "0"
+    os.environ.setdefault("AGENT_SKILLS_ENABLED", "0")
+    os.environ.setdefault("LLM_PROVIDER", "claude-cli")
+    os.environ.setdefault("CLAUDE_CLI_MODEL", "sonnet")
 
-# Inherited from a DEPLOYMENT .env, and wrong for a local run: every download_url would be built
-# against the remote host, so a locally produced artifact 404s with `unknown file_id`.
-os.environ["AGENT_PUBLIC_BASE_URL"] = ""
-# The platform's OpenSearch is the WEBSITE's cluster. Both arms read it for keyword/semantic/
-# spatial search, which is fair and is read-only; the agent KB is served from the local Postgres
-# record, so nothing in this experiment writes to the platform.
-os.environ["AGENT_KB_BACKEND"] = "local"
+    # This worktree has no `.env`; the platform credentials live in the main checkout. Without
+    # them OPENSEARCH_NODE, FLASK_EMBEDDING_URL and Neo4j are unset, the supervisor's search peer
+    # fails, and BOTH arms degrade to a partial answer — which would be recorded as a result.
+    # override=False so an explicitly exported variable still wins.
+    for candidate in (REPO / ".env", REPO.parent / "i-guide-platform-flask-servers" / ".env"):
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+            break
+
+    # Inherited from a DEPLOYMENT .env and wrong locally: every download_url would be built
+    # against the remote host, so a locally produced artifact 404s with `unknown file_id`.
+    os.environ["AGENT_PUBLIC_BASE_URL"] = ""
+    # The platform's OpenSearch is the WEBSITE's cluster. Both arms read it for keyword/semantic/
+    # spatial search, which is fair and read-only; the agent KB is served from the local Postgres
+    # record, so nothing in this experiment writes to the platform.
+    os.environ["AGENT_KB_BACKEND"] = "local"
+
 
 # Everything both arms get. Platform search, the open web, code execution and staging are NOT
 # the variable under test: without them the no-KB arm could not reach the data at all and the
@@ -336,6 +344,7 @@ def main() -> int:
     ap.add_argument("--replicates", type=int, default=1)
     ap.add_argument("--out", default=str(REPO / "outputs" / "ab_kb_problems.json"))
     args = ap.parse_args()
+    configure()
 
     problems = args.problem or (sorted(PROBLEMS) if args.all else ["p1_streets"])
     arms = args.arm or ["no_kb", "with_kb"]
