@@ -358,7 +358,14 @@ class NotebookExtractor:
                            "parent_title": title, "order": order},
             ))
             edges.append(ProvenanceEdge(src=nb_doc_id, rel="INCLUDES", dst=doc_id, detail={"order": order}))
-            ordered_steps.append({"order": order, "tools": tools, "summary": (md_context or source.splitlines()[0])[:120]})
+            # The author's own name for the step, not 120 characters of truncated prose. The
+            # same `_block_title` the index and the browser use — a skill that says
+            # "1c. Project All Files to the Same CRS" is followable; one that says
+            # "# AI Agent for Chicago Crime Analysis This notebook walks you through" is not.
+            ordered_steps.append({
+                "order": order, "tools": tools,
+                "title": _block_title(md_context, source, order, constructs),
+                "summary": (md_context or source.splitlines()[0])[:120]})
 
         # ---- cross-element citations ---------------------------------------------------
         # The only edges this extractor emits whose dst is NOT derivable from src. Everything
@@ -442,6 +449,20 @@ class NotebookExtractor:
                 # "os, time, copy, __future__" answers no question anyone asks of it.
                 tags=list(form_tags),
                 ordered_steps=ordered_steps,
+                # Every unit this element promoted, so the skill can say WHICH functions to
+                # reuse and how to import them. Built from the assets already emitted above
+                # rather than re-derived, so the skill and the library cannot disagree.
+                methods=[{
+                    "symbol": (a.unit or {}).get("library_symbol"),
+                    "signature": (a.unit or {}).get("signature"),
+                    "doc_summary": (a.unit or {}).get("doc_summary"),
+                    "requirements": ((a.unit or {}).get("requirements") or {}).get("pip") or [],
+                    "invariants": [i.get("check") for i in ((a.unit or {}).get("invariants") or [])
+                                   if isinstance(i, dict)],
+                } for a in assets
+                    if a.kind == KIND_METHOD_UNIT and a.unit
+                    and ((a.unit.get("callability") or {}).get("verdict") or "callable")
+                    == "callable"],
             )
         else:
             skill = None

@@ -84,6 +84,11 @@ class SkillSpec:
     allowed_tools: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
     ordered_steps: List[Dict[str, Any]] = field(default_factory=list)
+    # The callable units this element promoted: symbol, signature and the version-pinned import
+    # line. Without them the rendered skill can only say "reuse the functions extracted from this
+    # element" — which is a table of contents, not a procedure, and leaves the code agent to
+    # rediscover by search what extraction already knows.
+    methods: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
