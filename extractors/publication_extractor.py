@@ -459,6 +459,38 @@ def extract_method(text: str, *, max_chars: int = 12000,
     return merged
 
 
+def _tool_name_candidates(raw: Any, generic: set) -> List[str]:
+    """Every name a referenced tool could be, INCLUDING the one in parentheses.
+
+    The first version took `name.rsplit("(", 1)[0]`, which discards the parenthetical — and the
+    parenthetical is where the symbol lives. A paper writes "Enhanced Two-Step Floating Catchment
+    Area (E2SFCA) method"; the callable unit is `e2sfca`. Measured over the real corpus: the old
+    rule produced ZERO edges from 61 specs that reference tools, and considering the parenthetical
+    produces exactly one — `355786a5` to `3b45070e.e2sfca` — with no false positives at all.
+
+    One edge from 73 specs is also the honest measure of this approach's ceiling, and the reason
+    is a category mismatch rather than a tuning problem: `tools_referenced` is what SOFTWARE a
+    paper used ("OSMnx", "Python", "Jupyter Notebook", "Census Bureau API"), while a method
+    library is indexed by FUNCTION. Papers name libraries; libraries contain functions. Linking
+    a spec to an element, on evidence other than a shared identifier, is the open design
+    question — see docs/DEVLOG.md.
+    """
+    text = str(raw or "").strip()
+    out = [text.rsplit(".", 1)[-1].rsplit("(", 1)[0].strip().lower()]
+    for inner in re.findall(r"\(([^)]{2,40})\)", text):
+        inner = inner.strip().lower()
+        out.append(inner)
+        out.append(inner.replace("-", "").replace(" ", "_"))
+    out.append(text.lower().replace(" ", "_"))
+    seen: set = set()
+    keep = []
+    for name in out:
+        if len(name) >= 4 and name not in generic and name not in seen:
+            seen.add(name)
+            keep.append(name)
+    return keep
+
+
 def implemented_by_edges(spec_doc_id: str, tools_referenced: Any) -> List[ProvenanceEdge]:
     """IMPLEMENTED_BY edges from a method spec to library units whose symbol it names.
 
@@ -493,18 +525,15 @@ def implemented_by_edges(spec_doc_id: str, tools_referenced: Any) -> List[Proven
     edges: List[ProvenanceEdge] = []
     seen: set = set()
     for raw in (tools_referenced or []):
-        name = str(raw or "").strip().lower()
-        # A paper writes "we used geopandas.sjoin"; the unit is named `sjoin`.
-        name = name.rsplit(".", 1)[-1].rsplit("(", 1)[0].strip()
-        if len(name) < 4 or name in generic:
-            continue
-        for qualified in by_symbol.get(name, []):
-            if qualified in seen:
-                continue
-            seen.add(qualified)
-            edges.append(ProvenanceEdge(
-                src=spec_doc_id, rel="IMPLEMENTED_BY", dst=qualified,
-                detail={"confidence": "low", "by": "symbol_match", "matched_name": name}))
+        for name in _tool_name_candidates(raw, generic):
+            for qualified in by_symbol.get(name, []):
+                if qualified in seen:
+                    continue
+                seen.add(qualified)
+                edges.append(ProvenanceEdge(
+                    src=spec_doc_id, rel="IMPLEMENTED_BY", dst=qualified,
+                    detail={"confidence": "low", "by": "symbol_match",
+                            "matched_name": name}))
     return edges
 
 

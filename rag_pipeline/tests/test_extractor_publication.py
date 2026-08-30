@@ -198,3 +198,54 @@ def test_the_extractor_emits_the_edges(monkeypatch, tmp_path, registry):
     rels = [e.rel for e in result.edges]
     assert "IMPLEMENTED_BY" in rels
     assert "DESCRIBES_METHOD" in rels
+
+
+# ------------------------------------------- the parenthetical is where the symbol lives
+
+def test_a_method_named_by_its_acronym_still_links(monkeypatch):
+    """`rsplit("(", 1)[0]` discarded the parenthetical, and the parenthetical is the symbol.
+
+    A paper writes "Enhanced Two-Step Floating Catchment Area (E2SFCA) method"; the callable
+    unit is `e2sfca`. Measured over the real corpus: the old rule produced ZERO edges from the
+    61 specs that reference tools at all, and considering the parenthetical produces exactly one
+    — `355786a5` to `3b45070e.e2sfca` — with no false positives.
+    """
+    from extractors import publication_extractor as pub
+
+    monkeypatch.setattr(
+        "agent_runtime.method_library.load_registry",
+        lambda: {"ke_x.e2sfca": {"library_symbol": "e2sfca", "signature": "def e2sfca(a)"}})
+    edges = pub.implemented_by_edges(
+        "355786a5::methodspec",
+        ["Enhanced Two-Step Floating Catchment Area (E2SFCA) method", "Python", "OSMnx"])
+    assert [e.dst for e in edges] == ["ke_x.e2sfca"]
+    assert edges[0].detail["matched_name"] == "e2sfca"
+
+
+def test_the_parenthetical_does_not_open_the_floodgates(monkeypatch):
+    """The widening must not start linking papers to half the library. Generic names and short
+    ones are still refused, whether they arrive bare or in parentheses."""
+    from extractors import publication_extractor as pub
+
+    monkeypatch.setattr(
+        "agent_runtime.method_library.load_registry",
+        lambda: {"ke_x.model": {"library_symbol": "model", "signature": "def model()"},
+                 "ke_x.plot": {"library_symbol": "plot", "signature": "def plot()"},
+                 "ke_x.run": {"library_symbol": "run", "signature": "def run()"}})
+    edges = pub.implemented_by_edges(
+        "e::methodspec",
+        ["a statistical model (model)", "plotting (plot)", "the runner (run)", "R"])
+    assert edges == [], [e.dst for e in edges]
+
+
+def test_an_edge_still_says_how_confident_it_is(monkeypatch):
+    """An edge asserting a paper's method IS this function, on a shared name, would be a
+    fabricated provenance claim. The widening does not change that it is `low`."""
+    from extractors import publication_extractor as pub
+
+    monkeypatch.setattr(
+        "agent_runtime.method_library.load_registry",
+        lambda: {"ke_x.e2sfca": {"library_symbol": "e2sfca", "signature": "def e2sfca(a)"}})
+    edges = pub.implemented_by_edges("e::methodspec", ["... Area (E2SFCA) method"])
+    assert edges[0].detail["confidence"] == "low"
+    assert edges[0].detail["by"] == "symbol_match"
