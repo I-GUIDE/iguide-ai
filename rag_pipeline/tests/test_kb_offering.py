@@ -318,3 +318,32 @@ def test_the_evidence_renderer_carries_a_refusal_it_was_not_written_for():
     src = inspect.getsource(graph._method_units_as_documents)
     assert "AMBIGUOUS" in src and "import_line_candidates" in src, (
         "the renderer drops the ambiguity refusal before the model sees it")
+
+
+@pytest.mark.integration
+def test_a_spec_carries_its_implementation_in_the_contents(conn):
+    """In the CONTENTS, not only in a field beside them.
+
+    A fact the model must go looking for is a fact it does not use — measured three times in the
+    previous pass, most plainly when `error`, `import_line_candidates` and `disambiguate_with`
+    were all on a row and the agent still reported having none of them.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM spec_link")
+        if not cur.fetchone()[0]:
+            pytest.skip("no links; run scripts/build_spec_links.py first")
+
+    hits = kb_db.search_kb(conn, "enhanced two step floating catchment area accessibility",
+                           size=8)
+    spec = next((h for h in hits if h["_index"] == "pg:publication"), None)
+    if spec is None:
+        pytest.skip("no spec matched")
+    contents = spec["_source"]["contents"]
+    linked = spec["_source"]["extracted"]["spec"]["implemented_by"]
+    if not linked:
+        pytest.skip("this spec has no implementation link")
+    assert "IMPLEMENTED BY" in contents
+    assert linked[0]["element_id"] in contents
+    # The evidence travels with the claim: a reader has to be able to judge it.
+    assert linked[0]["evidence"] in contents
+    assert linked[0]["confidence"] in contents

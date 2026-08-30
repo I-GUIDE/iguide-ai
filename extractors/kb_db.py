@@ -232,6 +232,28 @@ CREATE TABLE IF NOT EXISTS publication (
 );
 CREATE INDEX IF NOT EXISTS publication_search_idx ON publication USING gin (search);
 
+-- A publication's method spec and the element that implements it.
+--
+-- The one relation in this vocabulary whose `dst` is NOT derivable from `src`: measured over
+-- the 174 cached notebooks, 4,071 of 4,212 emitted edges satisfy `dst.startswith(src + "::")`
+-- and cross-element count is 0. Everything else is a forest of stars. This is the graph.
+--
+-- `evidence` and `detail` are not decoration. An edge asserting that a paper's method IS this
+-- notebook has to say why it was drawn, or a reader cannot judge it — and both routes here are
+-- fallible in different ways: a cited DOI is a human's own statement, while shared authorship
+-- plus topical agreement is an inference.
+CREATE TABLE IF NOT EXISTS spec_link (
+    spec_element    text NOT NULL REFERENCES element(id) ON DELETE CASCADE,
+    target_element  text NOT NULL REFERENCES element(id) ON DELETE CASCADE,
+    confidence      text NOT NULL CHECK (confidence IN ('high', 'medium')),
+    evidence        text NOT NULL,
+    detail          jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (spec_element, target_element),
+    CONSTRAINT a_spec_does_not_implement_itself CHECK (spec_element <> target_element)
+);
+CREATE INDEX IF NOT EXISTS spec_link_target_idx ON spec_link (target_element);
+
 -- Skip-if-unchanged, moved off the OpenSearch `ingest_runs` index so the decision to re-extract
 -- commits in the same transaction as the rows it describes.
 CREATE TABLE IF NOT EXISTS ingest_run (
@@ -271,7 +293,7 @@ def table_counts(conn) -> Dict[str, int]:
     out: Dict[str, int] = {}
     with conn.cursor() as cur:
         for table in ("element", "unit", "block", "dataset_file", "dataset_outcome",
-                      "publication", "ingest_run"):
+                      "publication", "spec_link", "ingest_run"):
             cur.execute(f"SELECT count(*) FROM {table}")
             out[table] = int(cur.fetchone()[0])
     return out
@@ -598,18 +620,37 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
         cur.execute("""
             SELECT p.element_id, e.title, p.summary, p.steps, p.tools_referenced,
                    p.datasets_referenced, p.doi,
-                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], p.search, q) AS score
+                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], p.search, q) AS score,
+                   -- The implementation, joined on. A spec that describes a method without
+                   -- saying which element runs it leaves the agent to rediscover the pairing by
+                   -- search on every turn, which is what this edge exists to stop.
+                   (SELECT jsonb_agg(jsonb_build_object(
+                             'element_id', sl.target_element, 'title', te.title,
+                             'confidence', sl.confidence, 'evidence', sl.evidence))
+                      FROM spec_link sl JOIN element te ON te.id = sl.target_element
+                     WHERE sl.spec_element = p.element_id) AS implemented_by
               FROM publication p JOIN element e ON e.id = p.element_id,
                    LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
              WHERE p.search @@ q AND jsonb_array_length(p.steps) > 0
              ORDER BY score DESC, p.element_id
              LIMIT %s
         """, (expanded, size))
-        for (element_id, title, summary, steps, tools, datasets, doi, score) in cur.fetchall():
+        for (element_id, title, summary, steps, tools, datasets, doi, score,
+             implemented_by) in cur.fetchall():
             # The steps ARE the payload and they are already the distilled form, so they get a
             # larger budget than a raw cell excerpt. Numbered, because the agent has to be able
             # to say which step it is following.
             body = [summary.strip()] if summary else []
+            # In the CONTENTS, not only in a field beside it. A fact the model has to go looking
+            # for is a fact it does not use — measured three times in the previous pass, most
+            # plainly when `error`, `import_line_candidates` and `disambiguate_with` were all on
+            # a row and an agent still reported having none of them.
+            for impl in (implemented_by or []):
+                body.append(
+                    f"IMPLEMENTED BY element {impl['element_id']} "
+                    f"({impl.get('title') or '?'}) — evidence: {impl.get('evidence')}, "
+                    f"confidence: {impl.get('confidence')}. Its callable units are in the "
+                    f"method library; search them with kb_method_search.")
             body += [f"{i}. {st}" for i, st in enumerate(steps or [], start=1)]
             contents = "\n".join(body)
             hits.append({
@@ -622,6 +663,7 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
                     "extracted": {"parent_doc_id": element_id, "parent_title": title,
                                   "parent_type": "publication", "doi": doi,
                                   "spec": {"step_count": len(steps or []),
+                                           "implemented_by": implemented_by or [],
                                            "tools_referenced": tools or [],
                                            "datasets_referenced": datasets or []}},
                 }})
