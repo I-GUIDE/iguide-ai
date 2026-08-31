@@ -48,7 +48,11 @@ def _render(skill: Dict[str, Any]) -> str:
                               ["agent_kb_search", "get_kb_block", "execute_code"])),
         "tags": list(skill.get("tags") or []),
     }
-    fm = yaml.safe_dump(front, sort_keys=False, default_flow_style=False, allow_unicode=True).strip()
+    # `width` prevents folding. `parse_frontmatter` is a "simple YAML-style" line parser and a
+    # folded scalar — its continuation line carries no `key:` — makes it reject the entire
+    # skill. A long line is ugly; an unreadable skill is absent.
+    fm = yaml.safe_dump(front, sort_keys=False, default_flow_style=False, allow_unicode=True,
+                        width=10 ** 6).strip()
 
     title = skill["name"].replace("-", " ").title()
     lines: List[str] = [f"---\n{fm}\n---", "", f"# {title}", "",
@@ -159,8 +163,17 @@ def emit(manifest: UnifiedManifest, *, skills_root: Optional[str] = None,
     dest = root / skill["name"] / "SKILL.md"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(md, encoding="utf-8")
+    discoverable = _roundtrip_ok(root, skill["name"])
+    # A skill the registry cannot read is not a skill, and this was previously reported as a
+    # note beside a successful write — `discoverable=False` in a warning string, with the file
+    # left on disk. Say it where the caller cannot miss it.
+    reason = None
+    if discoverable is False:
+        reason = ("written but NOT discoverable: the registry refused it. Its front-matter "
+                  "parser accepts only simple `key: value` lines, so a folded YAML scalar or "
+                  "an unquoted special character makes the whole skill invisible.")
     return {"written": str(dest), "name": skill["name"], "root": str(root),
-            "discoverable": _roundtrip_ok(root, skill["name"])}
+            "discoverable": discoverable, **({"error": reason} if reason else {})}
 
 
 __all__ = ["emit"]

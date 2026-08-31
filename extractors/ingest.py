@@ -241,8 +241,14 @@ def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
         try:
             from .emitters import skill_emitter
             summary = skill_emitter.emit(manifest)
-            if summary.get("written"):
-                manifest.warnings.append(f"[skill] wrote {summary['written']} (discoverable={summary.get('discoverable')})")
+            if summary.get("error"):
+                # Not a footnote on a success. The file exists and the registry will never
+                # load it, which is indistinguishable from never having written it.
+                manifest.warnings.append(f"[skill] {summary['error']} — {summary['written']}")
+            elif summary.get("written"):
+                manifest.warnings.append(
+                    f"[skill] wrote {summary['written']} "
+                    f"(discoverable={summary.get('discoverable')})")
         except Exception as exc:
             manifest.warnings.append(f"[skill] emit failed: {type(exc).__name__}: {exc}")
 

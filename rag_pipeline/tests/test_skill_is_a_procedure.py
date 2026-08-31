@@ -109,3 +109,42 @@ def test_the_import_line_is_resolved_at_emit_time_not_in_the_extractor():
     src = inspect.getsource(skill_emitter.emit)
     assert 'd.get("assets")' in src
     assert "library_module" in src
+
+
+# ------------------------------------- a skill the registry cannot read is not a skill
+
+def test_a_long_description_does_not_fold_the_front_matter(tmp_path):
+    """`yaml.safe_dump` wraps a long scalar across lines and
+    `agent_runtime.skills.parse_frontmatter` is, by its own docstring, a "simple YAML-style"
+    line parser — the continuation carries no `key:`, so it rejects the WHOLE skill.
+
+    The flood skill was generated, written to disk, and silently absent from the registry.
+    """
+    from agent_runtime.skills import parse_frontmatter
+
+    long_desc = ("Run the Probabilistic Flood Inundation Mapping using Physics-Aware Spatial "
+                 "AI workflow extracted from "
+                 "05269a1a__flood_mapping_using_remotesensing_deeplearning.ipynb.")
+    md = skill_emitter._render({**SKILL, "description": long_desc})
+    front = md.split("---")[1]
+    assert all(":" in line for line in front.strip().splitlines()
+               if line.strip() and not line.strip().startswith("-")), front
+    parsed, _ = parse_frontmatter(md, skill_file=tmp_path / "SKILL.md")
+    assert parsed["description"] == long_desc
+
+
+def test_an_undiscoverable_skill_is_reported_as_an_error(tmp_path, monkeypatch):
+    """`_roundtrip_ok` already caught this and returned `discoverable: False`; ingest recorded
+    it in a warning string beside a successful write and carried on. A check whose result
+    nothing acts on is not a check."""
+    monkeypatch.setattr(skill_emitter, "_roundtrip_ok", lambda root, name: False)
+    out = skill_emitter.emit({"skill": SKILL}, skills_root=str(tmp_path))
+    assert out["discoverable"] is False
+    assert "NOT discoverable" in out.get("error", ""), out
+
+
+def test_a_discoverable_skill_reports_no_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_emitter, "_roundtrip_ok", lambda root, name: True)
+    out = skill_emitter.emit({"skill": SKILL}, skills_root=str(tmp_path))
+    assert out["discoverable"] is True
+    assert "error" not in out

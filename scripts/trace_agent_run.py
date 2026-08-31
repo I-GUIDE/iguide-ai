@@ -116,11 +116,27 @@ CASES = {
 
 
 def run(case_id: str, arm: str) -> Dict[str, Any]:
-    from scripts.ab_kb_problems import ARMS, configure
+    from scripts.ab_kb_problems import ARMS as _ARMS, configure
+
+    # The skills arm gets the same tools as with_kb; only the skill registry differs.
+    ARMS = {**_ARMS, "with_kb_skills": _ARMS["with_kb"]}
 
     configure()
     os.environ["AGENT_KB_DB"] = "1"
     os.environ["AGENT_ABLATE_KB"] = "1" if ARMS[arm]["ablate"] else "0"
+    # A third arm: the knowledge base AND the generated SKILL.md for the element in question.
+    # Both A/B harnesses set AGENT_SKILLS_ENABLED=0, so every measurement so far ran with this
+    # path off — and the flood trace is the argument for turning it on. Twelve of its
+    # thirty-three calls were spent reading the library's SOURCE and searching the filesystem
+    # for a dataset nothing had staged, which is precisely what the skill's Run section says to
+    # do instead.
+    if arm == "with_kb_skills":
+        os.environ["AGENT_SKILLS_ENABLED"] = "1"
+        extra = os.environ.get("TRACE_SKILL_PATHS", "")
+        if extra:
+            os.environ["AGENT_SKILL_PATHS"] = extra
+    else:
+        os.environ["AGENT_SKILLS_ENABLED"] = "0"
 
     from agent_runtime.graph_runtime import run_agent_query
 
@@ -140,6 +156,7 @@ def run(case_id: str, arm: str) -> Dict[str, Any]:
 
     return {
         "case": case_id, "arm": arm, "ablated": ARMS[arm]["ablate"],
+        "skills": os.environ.get("AGENT_SKILLS_ENABLED") == "1",
         "query": case["query"], "why": case["why"], "truth": case.get("truth"),
         "elapsed_s": round(time.time() - started, 1), "error": error,
         "model": os.getenv("CLAUDE_CLI_MODEL", "?"),
@@ -153,12 +170,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--case", action="append", choices=sorted(CASES))
-    ap.add_argument("--arm", default="both", choices=["no_kb", "with_kb", "both"])
+    ap.add_argument("--arm", action="append",
+                    choices=["no_kb", "with_kb", "with_kb_skills"])
     ap.add_argument("--out", default=str(REPO / "outputs" / "agent_traces.json"))
     args = ap.parse_args()
 
     cases = args.case or sorted(CASES)
-    arms = ["no_kb", "with_kb"] if args.arm == "both" else [args.arm]
+    arms = args.arm or ["no_kb", "with_kb"]
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
