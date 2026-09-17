@@ -29,12 +29,16 @@ TRUSTED_USER_PLUS 5, TRUSTED_USER 8, UNTRUSTED_USER 10.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import threading
+import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import jwt
+import requests
 
 # Admit UNRESTRICTED_CONTRIBUTOR (4) and above. This excludes an ordinary TRUSTED_USER (8) — a
 # normal .edu account — on purpose: the agent spends LLM budget and runs generated code in a
@@ -161,6 +165,136 @@ def decode_token(token: str) -> User:
     if user_id is None or not str(user_id).strip():
         raise TokenInvalid("token has no 'id' claim")
     return User(id=str(user_id).strip(), role=_coerce_role(claims.get("role")))
+
+
+# ---------------------------------------------------------------------------
+# Verifying WITHOUT the signing secret
+# ---------------------------------------------------------------------------
+# Local verification needs this deployment to hold the platform's HS256 secret, and that secret
+# mints a valid token for ANY user on the platform. On the dev tier it is already in this host's
+# .env, so there was nothing left to protect and local verification cost nothing.
+#
+# Against PRODUCTION that reasoning inverts. This host runs LLM-generated code in a sandbox with
+# a Docker socket, and putting the production signing secret on it would make a sandbox escape
+# equivalent to minting tokens for every I-GUIDE account. So the agent can instead ASK the
+# platform who the caller is: it forwards the cookie it received to the backend's own
+# /api/check-tokens, which reads it with its own secret and its own cookie name and answers
+# {id, role}. Nothing secret lives here, and the cookie name stops mattering too.
+#
+# The cost is a round-trip per request and a dependency on the backend being reachable. The
+# round trip is cached for the token's own lifetime; the dependency is real and deliberate —
+# failing closed when identity cannot be established is the correct direction to fail.
+
+_LOCAL = "local"
+_INTROSPECT = "introspect"
+
+# Short on purpose. The cache exists to collapse a burst of requests carrying the SAME token into
+# one backend call, not to keep a verdict alive: a longer window is a window in which a token
+# revoked upstream still works here.
+_INTROSPECT_TTL_SECONDS = 60
+_INTROSPECT_MAX_ENTRIES = 512
+_INTROSPECT_TIMEOUT = 8
+
+# Keyed by a HASH of the token, never the token: this dict is the kind of thing that ends up in a
+# heap dump or a debug print, and a raw access token in either is a credential leak.
+_introspect_cache: Dict[str, Tuple[float, "User"]] = {}
+_introspect_lock = threading.Lock()
+
+
+def verify_mode() -> str:
+    """How this deployment establishes identity: ``local`` (default) or ``introspect``."""
+    raw = str(os.getenv("AGENT_TOKEN_VERIFY") or _LOCAL).strip().lower()
+    if raw not in (_LOCAL, _INTROSPECT):
+        raise IdentityNotConfigured(
+            f"AGENT_TOKEN_VERIFY={raw!r} is not a mode. Expected {_LOCAL} or {_INTROSPECT}.")
+    return raw
+
+
+def _check_tokens_url() -> str:
+    return str(os.getenv("PLATFORM_CHECK_TOKENS_URL") or "").strip()
+
+
+def _cache_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> Optional["User"]:
+    with _introspect_lock:
+        hit = _introspect_cache.get(key)
+        if not hit:
+            return None
+        expires, user = hit
+        if expires <= time.time():
+            _introspect_cache.pop(key, None)
+            return None
+        return user
+
+
+def _cache_put(key: str, user: "User") -> None:
+    with _introspect_lock:
+        if len(_introspect_cache) >= _INTROSPECT_MAX_ENTRIES:
+            # Drop the soonest-to-expire rather than an arbitrary entry, so a burst of new
+            # tokens cannot evict the ones still actively in use.
+            oldest = min(_introspect_cache, key=lambda k: _introspect_cache[k][0])
+            _introspect_cache.pop(oldest, None)
+        _introspect_cache[key] = (time.time() + _INTROSPECT_TTL_SECONDS, user)
+
+
+def clear_introspection_cache() -> None:
+    with _introspect_lock:
+        _introspect_cache.clear()
+
+
+def introspect_token(token: str) -> User:
+    """Ask the platform who this caller is, forwarding the cookie exactly as received.
+
+    Only FAILURES are distinguished by status, and they carry the same meanings the agent's own
+    endpoints use, because they come from the same middleware: 401 is an expired token that a
+    refresh will fix, 403 is anything else.
+    """
+    if not token or not str(token).strip():
+        raise TokenMissing("no access token presented")
+    url = _check_tokens_url()
+    if not url:
+        raise IdentityNotConfigured(
+            "PLATFORM_CHECK_TOKENS_URL is not set; this deployment cannot verify identity")
+
+    key = _cache_key(str(token).strip())
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(url, timeout=_INTROSPECT_TIMEOUT,
+                            cookies={cookie_name(): str(token).strip()})
+    except requests.RequestException as exc:
+        # Fails CLOSED. An unreachable backend must not read as "nobody is signed in", which
+        # would silently downgrade a token deployment to anonymous access.
+        raise IdentityNotConfigured(f"could not reach the platform to verify identity: {exc}")
+
+    if resp.status_code == 401:
+        raise TokenExpired("access token expired")
+    if resp.status_code == 403:
+        raise TokenInvalid("the platform rejected this access token")
+    if resp.status_code != 200:
+        raise IdentityNotConfigured(
+            f"the platform answered {resp.status_code} when asked to verify identity")
+    try:
+        claims = resp.json() or {}
+    except ValueError as exc:
+        raise IdentityNotConfigured(f"the platform's verify response was not JSON: {exc}")
+
+    user_id = claims.get("id")
+    if user_id is None or not str(user_id).strip():
+        raise TokenInvalid("the platform returned no 'id' for this token")
+    user = User(id=str(user_id).strip(), role=_coerce_role(claims.get("role")))
+    _cache_put(key, user)
+    return user
+
+
+def identify(token: str) -> User:
+    """Establish the caller, by whichever route this deployment is configured for."""
+    return introspect_token(token) if verify_mode() == _INTROSPECT else decode_token(token)
 
 
 def authorize(user: User, required: Optional[int] = None) -> None:

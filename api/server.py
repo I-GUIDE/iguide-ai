@@ -162,7 +162,9 @@ def _require_user():
     if not token and _service_key_presented():
         return None
     try:
-        user = identity.decode_token(token)
+        # `identify`, not `decode_token`: against production this deployment verifies by ASKING
+        # the platform rather than by holding its signing secret. See identity.verify_mode.
+        user = identity.identify(token)
         identity.authorize(user)
     except identity.IdentityError:
         if not _token_strict():
