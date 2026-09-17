@@ -49,20 +49,27 @@ class FakeOpenSearch:
         # query on the bare field matches only if the value is a single token, which is the
         # rule that makes the real failure reproducible: a platform id is a URL, and a URL is
         # not one token.
-        term = body["query"]["term"]
-        if "owner_id.keyword" in term:
-            want, tokenised = term["owner_id.keyword"], False
-        else:
-            want, tokenised = term["owner_id"], True
+        query = body["query"]
+        clauses = query["bool"]["filter"] if "bool" in query else [query]
+        want, tokenised, must_exist = None, True, []
+        for clause in clauses:
+            if "term" in clause:
+                term = clause["term"]
+                if "owner_id.keyword" in term:
+                    want, tokenised = term["owner_id.keyword"], False
+                else:
+                    want, tokenised = term["owner_id"], True
+            elif "exists" in clause:
+                must_exist.append(clause["exists"]["field"])
         keep = body.get("_source")
         def project(doc):
             return {k: v for k, v in doc.items() if k in keep} if keep else dict(doc)
-        def matches(stored):
-            if not tokenised:
-                return stored == want
-            return stored == want and len(_tokens(want)) == 1
+        def matches(doc):
+            stored = doc.get("owner_id")
+            owned = stored == want and (not tokenised or len(_tokens(want)) == 1)
+            return owned and all(doc.get(f) is not None for f in must_exist)
         hits = [{"_id": k, "_source": project(v)} for k, v in self.docs.items()
-                if matches(v.get("owner_id"))]
+                if matches(v)]
         hits.sort(key=lambda h: self.docs[h["_id"]].get("updatedAt") or "", reverse=True)
         return {"hits": {"hits": hits[:body.get("size", 10)]}}
 
@@ -172,9 +179,9 @@ def test_a_write_stamps_updated_at(store):
 # --- my conversations -----------------------------------------------------------
 
 def test_listing_returns_only_my_conversations(store):
-    as_user("alice", lambda: mm.create_memory("alice one"))
-    as_user("alice", lambda: mm.create_memory("alice two"))
-    as_user("bob", lambda: mm.create_memory("bob one"))
+    conversation("alice one", "alice")
+    conversation("alice two", "alice")
+    conversation("bob one", "bob")
     names = as_user("alice", lambda: [c["conversationName"] for c in mm.list_memories()])
     assert sorted(names) == ["alice one", "alice two"]
 
@@ -183,6 +190,14 @@ def test_listing_without_identity_is_empty_not_everything(store):
     """The failure that would matter: no caller resolving to 'all conversations'."""
     as_user("alice", lambda: mm.create_memory("alice one"))
     assert mm.list_memories() == []
+
+
+# A conversation the CLIENT has stored its view of. Creating a memory is not enough to be
+# listed: the list and the detail endpoint must agree, and the detail serves `session_snapshot`.
+def conversation(name, owner):
+    mid = as_user(owner, lambda: mm.create_memory(name))
+    as_user(owner, lambda: mm.save_session_snapshot(mid, {"title": name, "messages": [], "layers": []}))
+    return mid
 
 
 # The shape a platform account ACTUALLY has. Every other test here uses "alice", which is a
@@ -200,16 +215,16 @@ def test_listing_finds_a_real_platform_id(store):
     while saving, fetching by id and every ownership check kept working, because those go by
     document id and never search.
     """
-    as_user(PLATFORM_ID, lambda: mm.create_memory("first"))
-    as_user(PLATFORM_ID, lambda: mm.create_memory("second"))
+    conversation("first", PLATFORM_ID)
+    conversation("second", PLATFORM_ID)
     names = as_user(PLATFORM_ID, lambda: [c["conversationName"] for c in mm.list_memories()])
     assert sorted(names) == ["first", "second"]
 
 
 def test_a_real_platform_id_still_excludes_other_people(store):
     other = "http://cilogon.org/serverE/users/999999"
-    as_user(PLATFORM_ID, lambda: mm.create_memory("mine"))
-    as_user(other, lambda: mm.create_memory("theirs"))
+    conversation("mine", PLATFORM_ID)
+    conversation("theirs", other)
     assert as_user(PLATFORM_ID,
                    lambda: [c["conversationName"] for c in mm.list_memories()]) == ["mine"]
     assert as_user(other,
@@ -217,7 +232,24 @@ def test_a_real_platform_id_still_excludes_other_people(store):
 
 
 def test_listing_never_returns_transcripts(store):
-    mid = as_user("alice", lambda: mm.create_memory("mine"))
+    mid = conversation("mine", "alice")
     as_user("alice", lambda: mm.update_memory(mid, "secret question", "m", "secret answer", []))
     listed = as_user("alice", lambda: mm.list_memories())
     assert listed and all("chat_history" not in c for c in listed)
+
+
+def test_a_memory_with_no_client_snapshot_is_not_offered(store):
+    """Listed must mean restorable. The two endpoints read different things.
+
+    This index holds every memory, including ones the AGENT created mid-turn, while
+    GET /agent/conversations/<id> serves `session_snapshot` and 404s without one. Listing the
+    snapshot-less ones produced rows that rendered, reported their age, and did nothing when
+    clicked — observed live as two `conversation-sess-...` entries that could not be opened.
+    """
+    conversation("openable", "alice")
+    as_user("alice", lambda: mm.create_memory("agent-side only"))     # no snapshot ever stored
+    names = as_user("alice", lambda: [c["conversationName"] for c in mm.list_memories()])
+    assert names == ["openable"]
+    # And the reason it must not be listed: there is nothing to give back.
+    mid = as_user("alice", lambda: mm.create_memory("still nothing"))
+    assert as_user("alice", lambda: mm.get_session_snapshot(mid)) is None

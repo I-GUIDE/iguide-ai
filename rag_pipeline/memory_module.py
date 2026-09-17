@@ -208,7 +208,18 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
                 # empty for a user with three stored conversations, and every other path —
                 # fetching one by id, saving, ownership checks — worked, because they go by
                 # document id and never search.
-                "query": {"term": {"owner_id.keyword": owner}},
+                # Owned by this caller AND actually openable. The list and the detail read
+                # two different things: this index holds every memory, including ones the
+                # AGENT created mid-turn with no client snapshot, while
+                # GET /agent/conversations/<id> serves `session_snapshot` and 404s without
+                # one. Listing those produced rows that rendered, reported their age, and
+                # could not be opened — the worst kind of entry, because nothing about them
+                # says why. A conversation becomes listable exactly when it becomes
+                # restorable: when the client has stored its view of it.
+                "query": {"bool": {
+                    "filter": [{"term": {"owner_id.keyword": owner}},
+                               {"exists": {"field": "session_snapshot"}}],
+                }},
                 "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
                 "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
                             "messageCount", "layerCount", "fileCount"],

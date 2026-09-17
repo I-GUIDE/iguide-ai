@@ -290,6 +290,13 @@ export default function App() {
       }
       return;                       // could not ask; keep whatever is on screen
     }
+    if (tokenMode) {
+      // Token mode, no viewer: identity has not landed (or has aged out). The local store is a
+      // CACHE of somebody's conversations, and until we know whose, showing it is the same
+      // mistake the owner filter closes — just reached by a different route. Empty is honest.
+      setSessions([]);
+      return;
+    }
     setSessions(await listSessions(viewerRef.current));
   }, [tokenMode, asAgentConfig]);
 
@@ -327,9 +334,26 @@ export default function App() {
   const restoreSession = useCallback(async (id: string) => {
     // Local first — it is a cache, and a hit avoids a round trip. In token mode fall back to
     // the server, which is where a conversation opened on another browser actually lives.
+    //
+    // `tokenMode` MUST stay in the deps below. It starts false and flips when /agent/ui-config
+    // lands, so a callback memoised without it keeps the initial false forever — and then this
+    // line never runs, every server-listed conversation fails to open, and the click is a
+    // silent no-op. That is exactly what shipped: rows that rendered, reported "3 messages ·
+    // 2 layers", and did nothing at all, with not even a network request to show for it. The
+    // neighbouring reads use `viewerRef` precisely to dodge this; `tokenMode` was plain state
+    // and went stale.
     let rec = await loadSession(id, viewerRef.current);
     if (!rec && tokenMode && viewerRef.current) rec = await getConversation(asAgentConfig(), id);
-    if (!rec) return;
+    if (!rec) {
+      // Never silent. A row the server listed but cannot produce is a real state — an agent
+      // memory that predates client snapshots has no transcript to restore — and "nothing
+      // happens on click" is the least debuggable way to express it.
+      pushMsg({ role: 'agent', text:
+        'That conversation could not be opened — the server has no saved transcript for it. '
+        + 'It may have been started before conversations were saved to your account.' });
+      setShowHistory(false);
+      return;
+    }
     setShowHistory(false);
     // Identity first: the next turn must continue the SAME agent conversation, and must
     // re-attach the files or the analysis tools will not even load.
@@ -374,7 +398,7 @@ export default function App() {
       `Continuing "${rec.title}" — ${(rec.messages || []).length} messages, ` +
       `${restored.length} layer(s) restored${missing > 0 ? `, ${missing} no longer available` : ''}` +
       `${(rec.fileIds || []).length ? `, ${(rec.fileIds || []).length} file(s) re-attached` : ''}.` });
-  }, [resolveUrl, fitView, pushMsg]);
+  }, [resolveUrl, fitView, pushMsg, tokenMode, asAgentConfig]);
 
   const startNewSession = useCallback(() => {
     sessionIdRef.current = newSessionId();

@@ -895,6 +895,38 @@ for a human reading a log; nothing matches on it. And `fetchWhoAmI` refreshes on
 `token_expired` and re-asks — one attempt, the same bound as every other retry, and only for
 expiry: a forged token or an under-privileged account is not fixed by a new cookie.
 
+### Stage S9.6 The history list, once it was finally readable
+
+Fixing the owner query made the list render for the first time — and immediately produced two
+more failures, both of which had been hiding behind an empty list.
+
+**Rows that could not be opened.** Clicking a conversation did nothing: no navigation, no error,
+*no network request*. `restoreSession` reads `tokenMode` to decide whether to fall back to the
+server, and the callback was memoised as `[resolveUrl, fitView, pushMsg]` — without it.
+`tokenMode` starts `false` and flips when `/agent/ui-config` lands, so the closure kept the
+initial `false` forever and the server fallback never ran. Every server-listed conversation
+failed on `if (!rec) return`. The neighbouring reads use `viewerRef` precisely to dodge this;
+`tokenMode` was plain state and went stale. Two deps and a message on the failure path, because
+"nothing happens on click" is the least debuggable way to express a real state.
+
+**Rows that could not be opened for a second, unrelated reason.** The list and the detail read
+different things: `list_memories` returns every memory this owner has, including ones the
+*agent* created mid-turn, while `GET /agent/conversations/<id>` serves `session_snapshot` and
+404s without one. Two of four live rows were `conversation-sess-...` entries with 0 messages that
+404'd on open. The list now filters on `exists: session_snapshot`, so **listed means restorable**.
+Rebuilding the client's view server-side would have been the other way to close it, and S9.3
+already rejected that: `sessionStore.ts` is server-shaped on purpose, and a second implementation
+of its layer-descriptor rules would drift.
+
+**And the local cache, once more.** In token mode with no viewer yet, `refreshSessions` fell
+through to the local store — the same mistake `visibleTo()` closes, reached by a different route,
+and the reason a signed-in user briefly saw 29 stale local rows. Token mode with no identity now
+lists nothing.
+
+*Still open:* one conversation produced **two** memory documents — the agent's own
+(`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
+the orphan rather than explaining it, and why the two ids diverge is not yet understood.
+
 ---
 
 ---
