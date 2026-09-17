@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from math import sqrt
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -124,15 +125,205 @@ def _get_embedder() -> Any:
     return _EMBEDDER
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _coerce_mapping(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     return {}
 
 
-def create_memory(conversation_name: str) -> str:
+class MemoryAccessDenied(Exception):
+    """This conversation belongs to someone else."""
+
+
+def _current_owner() -> Optional[str]:
+    """The signed-in user, or None in a deployment that identifies nobody."""
+    try:
+        from agent_runtime import identity
+    except Exception:  # noqa: BLE001 - identity is optional; memory predates it
+        return None
+    return identity.current_user_id()
+
+
+def owner_of(memory_id: str) -> Optional[str]:
+    """Who owns this conversation, or None if it is unowned or does not exist."""
+    doc = get_memory(memory_id)
+    value = (doc or {}).get("owner_id")
+    return str(value).strip() or None if value else None
+
+
+def assert_owner(memory_id: str, *, allow_unowned: Optional[bool] = None) -> None:
+    """Refuse to touch a conversation that belongs to someone else.
+
+    Checked at the EDGE rather than inside every read and write, for one specific reason: a
+    mismatched ``get_or_create`` must not fall through to CREATE, because the id it would create
+    under is the id of the document it just refused to read — and indexing there overwrites the
+    owner's conversation with an empty one. Refusing at the door removes that whole class of
+    mistake rather than guarding each door.
+
+    A memory_id is a UUID4 and not guessable, which is why an unowned legacy conversation stays
+    reachable during the migration and closes with everything else once strict.
+    """
+    caller = _current_owner()
+    if not caller:
+        return                      # dev / demo / service: no identity, nothing to enforce
+    if allow_unowned is None:
+        try:
+            from agent_runtime import identity
+            allow_unowned = not identity.token_strict()
+        except Exception:  # noqa: BLE001
+            allow_unowned = True
+    owner = owner_of(memory_id)
+    if owner is None:
+        if not allow_unowned:
+            raise MemoryAccessDenied(f"conversation {memory_id} has no owner")
+        return
+    if owner != caller:
+        raise MemoryAccessDenied(f"conversation {memory_id} belongs to another user")
+
+
+def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Dict[str, Any]]:
+    """This user's conversations, newest first — the "my conversations" list.
+
+    Returns summaries, never whole transcripts: the caller is rendering a sidebar, and a
+    conversation carrying a turn's worth of analysis per entry is not something to fetch fifty
+    of to show fifty titles.
+    """
+    owner = owner_id or _current_owner()
+    if not owner:
+        return []
+    try:
+        response = _get_opensearch_client().search(
+            index=MEMORY_INDEX,
+            body={
+                "size": max(1, int(limit)),
+                "query": {"term": {"owner_id": owner}},
+                "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
+                "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                            "messageCount", "layerCount", "fileCount"],
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error listing memories for %s: %s", owner, err)
+        return []
+    # Projected EXPLICITLY rather than spread from _source. `_source` in the query is a request,
+    # not a guarantee, and the field this must never leak — chat_history — is the whole
+    # transcript. Naming the summary keys means a new field cannot leak by simply existing.
+    summary_keys = ("conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                    "messageCount", "layerCount", "fileCount")
+    out: List[Dict[str, Any]] = []
+    for hit in (response.get("hits", {}) or {}).get("hits", []) or []:
+        source = hit.get("_source") or {}
+        out.append({"memoryId": hit.get("_id"),
+                    **{k: source.get(k) for k in summary_keys if k in source}})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The client's view of a conversation
+# ---------------------------------------------------------------------------
+# `chat_history` is the AGENT's memory: what was asked and answered, used to give the next turn
+# context. It is not what the user sees. The map UI additionally holds the layers drawn on the
+# map, every file uploaded across the session, the selected region and the model used — and a
+# conversation restored from `chat_history` alone comes back as a text shell whose answers say
+# "you can see these features on the map" beside an empty map.
+#
+# The client already models this correctly (`map-ui-prototype/src/sessionStore.ts`, written
+# server-shaped on purpose), so the server STORES that record rather than reconstructing it from
+# tool output. Rebuilding it here would duplicate the client's layer-descriptor rules — which
+# geometry is small enough to inline, which layer re-fetches by url — in a second place, where
+# they would drift.
+#
+# The snapshot is client-supplied, so it is treated as data: capped in size, and stripped of the
+# fields the server owns. Nothing in it is ever executed or trusted to name its own owner.
+_SNAPSHOT_MAX_BYTES_DEFAULT = 5_000_000
+
+
+def _snapshot_max_bytes() -> int:
+    """Read at call time, not frozen at import: a limit that needs a restart to change is a
+    limit nobody adjusts when a real conversation turns out to sit just over it."""
+    raw = str(os.getenv("AGENT_SESSION_SNAPSHOT_MAX_BYTES") or "").strip()
+    try:
+        return int(raw) if raw else _SNAPSHOT_MAX_BYTES_DEFAULT
+    except ValueError:
+        return _SNAPSHOT_MAX_BYTES_DEFAULT
+
+# Server-owned: a client that sends these is ignored, not obeyed.
+_SNAPSHOT_RESERVED = {"owner_id", "chat_history", "createdAt", "updatedAt", "_id"}
+
+
+class SnapshotTooLarge(Exception):
+    """The client's conversation record exceeds what this store will hold."""
+
+
+def _snapshot_size(snapshot: Mapping[str, Any]) -> int:
+    import json as _json
+    return len(_json.dumps(snapshot, default=str).encode("utf-8"))
+
+
+def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Store the client's view of this conversation. Caller must already own it.
+
+    Ownership is NOT re-derived from the snapshot: it is asserted by the caller before this runs
+    and the document's own ``owner_id`` is left untouched, so a snapshot cannot hand a
+    conversation to someone else by claiming to.
+    """
+    clean = {k: v for k, v in dict(snapshot or {}).items() if k not in _SNAPSHOT_RESERVED}
+    size = _snapshot_size(clean)
+    limit = _snapshot_max_bytes()
+    if size > limit:
+        raise SnapshotTooLarge(
+            f"conversation record is {size} bytes, over the {limit} limit")
+    client = _get_opensearch_client()
+    patch: Dict[str, Any] = {"session_snapshot": clean, "updatedAt": _now()}
+    # A rename in the client should show up in the conversation list, which sorts and labels on
+    # the document's own fields rather than reaching into the snapshot.
+    title = clean.get("title")
+    if isinstance(title, str) and title.strip():
+        patch["conversationName"] = title.strip()
+    thread_id = clean.get("threadId")
+    if isinstance(thread_id, str) and thread_id.strip():
+        patch["threadId"] = thread_id.strip()
+    # Counts live on the DOCUMENT, not inside the snapshot, so a history list can show "12
+    # messages, 3 layers" without fetching twelve messages and three layers to count them.
+    for field, key in (("messageCount", "messages"), ("layerCount", "layers"),
+                       ("fileCount", "fileIds")):
+        value = clean.get(key)
+        patch[field] = len(value) if isinstance(value, (list, tuple)) else 0
+    try:
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
+    except NotFoundError:
+        owner = _current_owner()
+        client.index(index=MEMORY_INDEX, id=memory_id,
+                     body={"conversationName": patch.get("conversationName")
+                           or f"conversation-{memory_id}",
+                           "chat_history": [], "owner_id": owner,
+                           "createdAt": patch["updatedAt"], **patch})
+    return {"memoryId": memory_id, "bytes": size}
+
+
+def get_session_snapshot(memory_id: str) -> Optional[Dict[str, Any]]:
+    """The client's stored view of this conversation, or None. Caller must already own it."""
+    doc = get_memory(memory_id)
+    if not doc:
+        return None
+    snapshot = doc.get("session_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    return {**dict(snapshot), "memoryId": memory_id,
+            "title": doc.get("conversationName") or dict(snapshot).get("title"),
+            "createdAt": doc.get("createdAt"), "updatedAt": doc.get("updatedAt")}
+
+
+def create_memory(conversation_name: str, owner_id: Optional[str] = None) -> str:
     memory_id = str(uuid.uuid4())
-    new_memory = {"conversationName": conversation_name, "chat_history": []}
+    stamp = _now()
+    new_memory = {"conversationName": conversation_name, "chat_history": [],
+                  "owner_id": owner_id or _current_owner(),
+                  "createdAt": stamp, "updatedAt": stamp}
     _get_opensearch_client().index(index=MEMORY_INDEX, id=memory_id, body=new_memory)
     return memory_id
 
@@ -143,7 +334,12 @@ def get_or_create_memory(memory_id: str) -> Dict:
         response = client.get(index=MEMORY_INDEX, id=memory_id)
         return response["_source"]
     except NotFoundError:
-        new_memory = {"conversationName": f"conversation-{memory_id}", "chat_history": []}
+        # Claiming the id on creation is what stops a later caller inheriting this conversation
+        # simply by knowing its id.
+        stamp = _now()
+        new_memory = {"conversationName": f"conversation-{memory_id}", "chat_history": [],
+                      "owner_id": _current_owner(),
+                      "createdAt": stamp, "updatedAt": stamp}
         client.index(index=MEMORY_INDEX, id=memory_id, body=new_memory)
         return new_memory
 
@@ -183,7 +379,20 @@ def update_memory(
             entry["ratings"] = ratings
 
         chat_history.append(entry)
-        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": {"chat_history": chat_history}})
+        # `updatedAt` is what orders the user's conversation list; without it every conversation
+        # sorts equal and the list is arbitrary. `owner_id` is written only when the document
+        # does not already have one, so a write can never move a conversation between users.
+        patch: Dict[str, Any] = {"chat_history": chat_history, "updatedAt": _now()}
+        existing_owner = doc["_source"].get("owner_id")
+        existing_owner = str(existing_owner).strip() if existing_owner else ""
+        # Attributed only if the document has no owner yet, so a write can never move a
+        # conversation between users — a mismatched caller is refused upstream by assert_owner,
+        # and this is the second half of that guarantee rather than a repeat of it.
+        if not existing_owner:
+            owner = _current_owner()
+            if owner:
+                patch["owner_id"] = owner
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
     except Exception as err:
         logger.error("Error updating memory %s: %s", memory_id, err)
         raise

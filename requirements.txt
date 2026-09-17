@@ -68,3 +68,8 @@ boto3
 python-dotenv
 pytest
 pydantic
+
+# Verifies the platform's HS256 access token in token mode (agent_runtime/identity.py).
+# Pinned explicitly although it already arrives transitively: identity must not stop
+# working because something else dropped its dependency on it.
+PyJWT>=2.8

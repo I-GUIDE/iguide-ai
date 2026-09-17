@@ -38,6 +38,13 @@ export interface StoredSession {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Whose conversation this is, when the deployment identifies anyone.
+   *
+   *  IndexedDB is per-ORIGIN, not per-user: signing out of the platform does not touch it, so
+   *  without this the next person to use the browser opens the previous person's conversations.
+   *  Observed live — logged out, history still there. Undefined on a record written by a
+   *  deployment with no identity (dev, demo), which stays visible exactly as before. */
+  ownerId?: string | null;
   /** Agent-side identity: replaying these continues the conversation rather than starting one. */
   threadId: string;
   memoryId?: string | null;
@@ -122,10 +129,22 @@ export async function saveSession(s: StoredSession): Promise<void> {
   }
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
+/**
+ * Conversations this viewer may see.
+ *
+ * `viewer` is the signed-in user's id, or null when the deployment identifies nobody. The rule
+ * is deliberately asymmetric: with no viewer, everything is listed (dev and demo behave exactly
+ * as they always have); with a viewer, only their own records AND unowned ones, so a
+ * conversation started before sign-in is not orphaned by signing in.
+ *
+ * Another user's records are never listed — and are not deleted either. They are that person's
+ * data, this is their browser too, and quietly destroying it would be worse than hiding it.
+ */
+export async function listSessions(viewer?: string | null): Promise<SessionSummary[]> {
   try {
     const all = await tx<StoredSession[]>('readonly', (store) => store.getAll() as IDBRequest<StoredSession[]>);
     return (all || [])
+      .filter((s) => !viewer || !s.ownerId || s.ownerId === viewer)
       .map((s) => ({
         id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
         threadId: s.threadId,
@@ -140,9 +159,16 @@ export async function listSessions(): Promise<SessionSummary[]> {
   }
 }
 
-export async function loadSession(id: string): Promise<StoredSession | null> {
+/** Read one conversation. `viewer` is checked for the same reason the list filters: a stale id
+ *  in a URL or in React state must not open someone else's transcript after a user switch. */
+export async function loadSession(id: string, viewer?: string | null): Promise<StoredSession | null> {
   try {
-    return (await tx<StoredSession>('readonly', (store) => store.get(id) as IDBRequest<StoredSession>)) || null;
+    const found = (await tx<StoredSession>('readonly',
+      (store) => store.get(id) as IDBRequest<StoredSession>)) || null;
+    if (!found) return null;
+    // Same rule as the list: unowned is shared, owned belongs to one person.
+    if (viewer && found.ownerId && found.ownerId !== viewer) return null;
+    return found;
   } catch (err) {
     console.warn('[sessions] load failed', err);
     return null;

@@ -3,6 +3,7 @@
 // so the map/chat update AS the agent works; onFinal reconciles against the
 // authoritative terminal `result`. This module IS the swap point that replaces the
 // local deterministic agentBrain.
+import { authErrorFrom, isAuthStatus, setRefreshUrl, setSigninUrl, withTokenRetry } from './auth';
 export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
@@ -58,8 +59,15 @@ export interface ModelCatalogue {
 }
 
 export interface UiConfig {
+  /** What this deployment is for. Absent on a server built before modes existed. */
+  mode?: 'dev' | 'demo' | 'token';
   demo_mode: boolean;
   api_key_required: boolean;
+  /** Token mode only: where the BROWSER refreshes an aged-out access cookie, and where it
+   *  sends someone who is not signed in. Reported by the server rather than compiled in, so
+   *  one bundle runs against either tier — dev and production are different backends. */
+  refresh_url?: string;
+  signin_url?: string;
 }
 
 /** Ask the deployment whether it is open, BEFORE trying to authenticate against it.
@@ -72,7 +80,94 @@ export async function fetchUiConfig(cfg: AgentConfig): Promise<UiConfig | null> 
   try {
     const r = await fetch(absoluteUrl('/agent/ui-config', cfg));
     if (!r.ok) return null;
-    return (await r.json()) as UiConfig;
+    const parsed = (await r.json()) as UiConfig;
+    // Learned here and nowhere else: every later 401 depends on knowing where to refresh, and
+    // this is the one call that happens before the page can authenticate at all.
+    setRefreshUrl(parsed.refresh_url);
+    setSigninUrl(parsed.signin_url);
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export interface WhoAmI {
+  mode: string;
+  signedIn: boolean;
+  user: { id: string; role: number } | null;
+  permitted: boolean;
+  reason: string | null;
+  requiredRole?: number;
+}
+
+/** Who the SERVER thinks we are. The cookie is httpOnly, so the browser cannot answer this
+ *  itself — it has to ask. Used to scope stored conversations to their owner and, later, to
+ *  render a profile. Degrades to "nobody", which lists nothing rather than everything. */
+export async function fetchWhoAmI(cfg: AgentConfig): Promise<WhoAmI | null> {
+  try {
+    const r = await fetch(absoluteUrl('/agent/whoami', cfg), { credentials: CREDENTIALS });
+    if (!r.ok) return null;
+    return (await r.json()) as WhoAmI;
+  } catch {
+    return null;
+  }
+}
+
+export interface ConversationSummary {
+  memoryId: string;
+  conversationName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  threadId?: string;
+  messageCount?: number;
+  layerCount?: number;
+  fileCount?: number;
+}
+
+/** THIS USER's conversations, from the server. Summaries only — never transcripts. */
+export async function listConversations(cfg: AgentConfig): Promise<ConversationSummary[] | null> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl('/agent/conversations', cfg), { credentials: CREDENTIALS });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      if (!r.ok) return null;
+      const body = await r.json();
+      return (body?.conversations || []) as ConversationSummary[];
+    });
+  } catch {
+    // null, NOT []: "could not ask" and "you have none" look identical to a caller otherwise,
+    // and the first must not silently present as an empty history.
+    return null;
+  }
+}
+
+/** Store this conversation server-side, so it follows the user rather than the browser. */
+export async function putConversation(cfg: AgentConfig, memoryId: string,
+                                      record: unknown): Promise<boolean> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl(`/agent/conversations/${encodeURIComponent(memoryId)}`, cfg), {
+        method: 'PUT', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
+        body: JSON.stringify(record),
+      });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      return r.ok;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Read one conversation back. */
+export async function getConversation(cfg: AgentConfig, memoryId: string): Promise<any | null> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl(`/agent/conversations/${encodeURIComponent(memoryId)}`, cfg),
+                            { credentials: CREDENTIALS });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      if (!r.ok) return null;
+      return await r.json();
+    });
   } catch {
     return null;
   }
@@ -84,7 +179,7 @@ export async function fetchModels(cfg: AgentConfig): Promise<ModelCatalogue | nu
     // apiBase is only the ORIGIN, so name the path explicitly — the same way download
     // URLs are resolved. new URL('models', origin) would hit /models.
     const url = absoluteUrl('/agent/models', cfg);
-    const r = await fetch(url, { headers: authHeaders(cfg, false) });
+    const r = await fetch(url, { headers: authHeaders(cfg, false), credentials: CREDENTIALS });
     if (!r.ok) return null;
     return (await r.json()) as ModelCatalogue;
   } catch {
@@ -166,6 +261,13 @@ export function absoluteUrl(path: string, cfg: AgentConfig): string {
   try { return new URL(p, apiBase(cfg)).toString(); } catch { return '#'; }
 }
 
+/** Send cookies on every agent call.
+ *
+ *  Same-origin would send them anyway — the UI and the API share agent.i-guide.io — but a
+ *  developer running `npm run dev` against the deployed API is cross-origin, and there the
+ *  default omits the cookie and every request looks unauthenticated for no visible reason. */
+const CREDENTIALS: RequestCredentials = 'include';
+
 function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
   const h: Record<string, string> = {};
   if (json) h['Content-Type'] = 'application/json';
@@ -205,8 +307,13 @@ function parseMaybeJson(raw: any): any {
 export async function uploadFiles(files: File[], cfg: AgentConfig): Promise<FileRecord[]> {
   const fd = new FormData();
   files.forEach((f) => fd.append('files', f, f.name));
-  const res = await fetch(cfg.uploadEndpoint, { method: 'POST', headers: authHeaders(cfg, false), body: fd });
-  if (!res.ok) throw new Error(await describeError(res));
+  const res = await withTokenRetry(async () => {
+    const r = await fetch(cfg.uploadEndpoint, {
+      method: 'POST', headers: authHeaders(cfg, false), credentials: CREDENTIALS, body: fd });
+    if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+    if (!r.ok) throw new Error(await describeError(r));
+    return r;
+  });
   const json = await res.json();
   return (json.files || []) as FileRecord[];
 }
@@ -262,11 +369,17 @@ export async function streamChat(
     ...(cfg.orchestration ? { unifiedPeer: cfg.orchestration === 'unified' } : {}),
   };
 
-  const resp = await fetch(cfg.endpoint, {
-    method: 'POST', headers: authHeaders(cfg, true),
-    body: JSON.stringify(payload), signal: opts.signal,
+  // A thunk, not a Promise: a retry has to ISSUE a new POST, and a started request cannot be
+  // re-issued. Only an expired token retries — see withTokenRetry.
+  const body = await withTokenRetry(async () => {
+    const r = await fetch(cfg.endpoint, {
+      method: 'POST', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
+      body: JSON.stringify(payload), signal: opts.signal,
+    });
+    if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+    if (!r.ok || !r.body) throw new Error(await describeError(r));
+    return r.body;      // narrowed here; a Response would lose it crossing the await
   });
-  if (!resp.ok || !resp.body) throw new Error(await describeError(resp));
 
   const downloads = new Map<string, FileRecord>();
   // Tool calls whose result has not arrived. Only used to decide whether a result row has to
@@ -280,7 +393,7 @@ export async function streamChat(
   // in full or not at all, and the counter resets when the batch drains.
   let batchWidth = 0;
   const state: StreamResult = { answer: '', response: null, downloads: [], threadId: opts.threadId, memoryId: opts.memoryId ?? undefined };
-  const reader = resp.body.getReader();
+  const reader = body.getReader();
   const dec = new TextDecoder();
   let buf = '';
 
