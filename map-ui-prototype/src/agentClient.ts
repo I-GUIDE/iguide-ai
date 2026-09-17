@@ -3,7 +3,9 @@
 // so the map/chat update AS the agent works; onFinal reconciles against the
 // authoritative terminal `result`. This module IS the swap point that replaces the
 // local deterministic agentBrain.
-import { authErrorFrom, isAuthStatus, setRefreshUrl, setSigninUrl, withTokenRetry } from './auth';
+import type { AuthReason } from './auth';
+import { authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
+  withTokenRetry } from './auth';
 export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
@@ -96,7 +98,11 @@ export interface WhoAmI {
   signedIn: boolean;
   user: { id: string; role: number; roleName?: string } | null;
   permitted: boolean;
+  /** Prose, for a human reading a log. Never match on it — use `reasonCode`. */
   reason: string | null;
+  /** Machine-readable twin of `reason`, same vocabulary as a refusal's. `token_expired` is the
+   *  one to act on rather than display: refresh once and ask again. */
+  reasonCode: AuthReason | 'no_identity_in_this_mode' | null;
   requiredRole?: number | null;
   requiredRoleName?: string | null;
   /** Where to send someone who is not signed in. Carried HERE as well as on /agent/ui-config
@@ -106,14 +112,32 @@ export interface WhoAmI {
   platformTier?: string | null;
 }
 
-/** Who the SERVER thinks we are. The cookie is httpOnly, so the browser cannot answer this
- *  itself — it has to ask. Scopes stored conversations to their owner and renders the account
- *  badge. Degrades to "nobody", which lists nothing rather than everything. */
-export async function fetchWhoAmI(cfg: AgentConfig): Promise<WhoAmI | null> {
+/**
+ * Who the SERVER thinks we are. The cookie is httpOnly, so the browser cannot answer this
+ * itself — it has to ask. Scopes stored conversations to their owner and renders the account
+ * badge. Degrades to "nobody", which lists nothing rather than everything.
+ *
+ * **Refreshes here, and this is the case withTokenRetry cannot cover.** That wrapper reacts to
+ * a 401, and whoami answers 200 by design — it exists to explain a refusal, so it never makes
+ * one. The result was that an access cookie aging out (one hour) turned a signed-in page into
+ * a signed-out one: the badge read "Sign in", the history emptied, and the refresh cookie sat
+ * there unused, because nothing had a 401 to react to. Observed live, an hour into a session.
+ *
+ * Bounded at one attempt, the same rule as every other retry here, and only for
+ * `token_expired` — a token that is invalid, or an account that lacks the role, will not be
+ * fixed by a new one.
+ */
+export async function fetchWhoAmI(cfg: AgentConfig,
+                                  opts: { allowRefresh?: boolean } = {}): Promise<WhoAmI | null> {
   try {
     const r = await fetch(absoluteUrl('/agent/whoami', cfg), { credentials: CREDENTIALS });
     if (!r.ok) return null;
-    return (await r.json()) as WhoAmI;
+    const me = (await r.json()) as WhoAmI;
+    if (me.reasonCode === 'token_expired' && (opts.allowRefresh ?? true)
+        && await refreshAccessToken()) {
+      return fetchWhoAmI(cfg, { allowRefresh: false });
+    }
+    return me;
   } catch {
     return null;
   }

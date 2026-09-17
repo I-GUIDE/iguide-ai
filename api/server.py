@@ -196,6 +196,26 @@ def _require_user():
     return user
 
 
+def _identity_reason(exc: Exception) -> str:
+    """One vocabulary for "why not", shared by the refusals and by /agent/whoami.
+
+    /agent/whoami answers 200 by design — it exists to EXPLAIN a refusal, so it cannot make
+    one — which means a client reading it has no status code to act on. Without this it would
+    have to match on the prose in `reason`, and the whole point of labelling refusals was that
+    nobody should ever do that. Derived from the same exception here so the two cannot drift:
+    a 401 on /agent/chat and a `token_expired` from whoami are the same fact.
+    """
+    if isinstance(exc, identity.TokenExpired):
+        return "token_expired"
+    if isinstance(exc, identity.InsufficientRole):
+        return "insufficient_role"
+    if isinstance(exc, identity.TokenMissing):
+        return "not_signed_in"
+    if isinstance(exc, identity.IdentityNotConfigured):
+        return "identity_not_configured"
+    return "token_invalid"
+
+
 def _identity_error_response(exc: Exception):
     """Map an identity failure to a status a client can ACT on without reading prose.
 
@@ -808,6 +828,9 @@ def agent_whoami():
         # and no amount of guessing beats the server saying what arrived.
         "cookiesSeen": sorted(request.cookies.keys()),
         "expectedCookie": identity.cookie_name(),
+        # Machine-readable twin of `reason`. Clients act on this; `reason` is for a human
+        # reading a log or a support request.
+        "reasonCode": None,
     }
     # Every field below reads configuration that REFUSES TO GUESS: an unrecognised
     # PLATFORM_TIER raises rather than picking a platform, and an unparseable AGENT_MIN_ROLE
@@ -836,21 +859,26 @@ def agent_whoami():
         body["verify"] = identity.verify_mode()
     except identity.IdentityError as exc:
         body["verify"] = None
-        body["reason"] = str(exc)
+        body["reason"], body["reasonCode"] = str(exc), _identity_reason(exc)
         return jsonify(body)
 
     if not deployment_mode.is_token():
         body["reason"] = "this deployment does not identify callers"
+        body["reasonCode"] = "no_identity_in_this_mode"
         return jsonify(body)
 
     token = _extract_user_token()
     if not token:
         body["reason"] = "no access token was presented"
+        body["reasonCode"] = "not_signed_in"
         return jsonify(body)
     try:
         user = identity.identify(token)
     except identity.IdentityError as exc:
-        body["reason"] = f"{type(exc).__name__}: {exc}"
+        # `token_expired` here is the one a client must ACT on rather than display: the access
+        # cookie aged out, the refresh cookie almost certainly has not, and telling someone to
+        # sign in again when one silent refresh would do it is the worst of the options.
+        body["reason"], body["reasonCode"] = f"{type(exc).__name__}: {exc}", _identity_reason(exc)
         return jsonify(body)
 
     body["signedIn"] = True
@@ -859,7 +887,7 @@ def agent_whoami():
         identity.authorize(user)
         body["permitted"] = True
     except identity.InsufficientRole as exc:
-        body["reason"] = str(exc)
+        body["reason"], body["reasonCode"] = str(exc), _identity_reason(exc)
     return jsonify(body)
 
 

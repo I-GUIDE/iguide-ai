@@ -878,6 +878,23 @@ in those tests was one token, which is exactly why a bug about tokenisation coul
 them. Two new tests use the shape a platform account actually has; with the old query they fail,
 which is the only evidence that a regression test is one.
 
+**An hour in, the page presented a signed-in user as signed out.** The access cookie lives one
+hour; the refresh cookie was still there and unused. Stage S9.4 gave every *request* path
+refresh-and-retry, and it works — but it hangs off a **401**, and `/agent/whoami` answers **200
+by design**, because it exists to explain a refusal rather than make one. So the one call that
+decides whether you appear signed in at all was the one call that could never trigger a refresh:
+the badge read `Sign in`, the history emptied, and nothing was wrong except an aged-out cookie.
+
+The badge is what made this visible. The same expiry before it was silent — the page looked
+normal until you sent something, and then `withTokenRetry` quietly fixed it.
+
+Two halves. `whoami` gains `reasonCode`, drawn from the **same vocabulary as the refusals** and
+derived from the same exception through a shared `_identity_reason()`, so a 401 on `/agent/chat`
+and a `token_expired` from whoami cannot become two names for one fact. The prose `reason` stays
+for a human reading a log; nothing matches on it. And `fetchWhoAmI` refreshes once on
+`token_expired` and re-asks — one attempt, the same bound as every other retry, and only for
+expiry: a forged token or an under-privileged account is not fixed by a new cookie.
+
 ---
 
 ---

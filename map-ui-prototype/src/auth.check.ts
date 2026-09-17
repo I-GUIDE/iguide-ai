@@ -9,6 +9,7 @@
 import { AuthError, authErrorFrom, authMessage, describeRole, isAuthStatus, setRefreshUrl,
   withTokenRetry } from './auth';
 import { visibleTo } from './sessionStore';
+import { fetchWhoAmI, type AgentConfig } from './agentClient';
 
 let bad = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
@@ -191,6 +192,71 @@ await (async () => {
   eq('  ...including in dev, where there is no viewer at all', visibleTo(unowned, null), true);
   eq('an OWNED record is hidden from a signed-out viewer', visibleTo(mine, null), false);
   eq('  ...and from an undefined one', visibleTo(mine, undefined), false);
+})();
+
+// --- an aged-out access cookie must not present as signed out ------------------------
+await (async () => {
+  // withTokenRetry cannot cover this: it reacts to a 401, and /agent/whoami answers 200 by
+  // design because it exists to EXPLAIN a refusal rather than make one. So an access cookie
+  // aging out (one hour) turned a signed-in page into a signed-out one — badge reading
+  // "Sign in", history emptied — while the refresh cookie sat unused. Observed live.
+  const cfg = { endpoint: 'https://agent.example/agent/chat/stream', uploadEndpoint: '',
+                apiKey: '' } as AgentConfig;
+  let whoamiCalls = 0, refreshes = 0, refreshWorks = true;
+  const expired = { mode: 'token', signedIn: false, user: null, permitted: false,
+                    reason: 'TokenExpired: access token expired', reasonCode: 'token_expired' };
+  const live = { mode: 'token', signedIn: true, user: { id: 'u-1', role: 4, roleName: 'Contributor' },
+                 permitted: true, reason: null, reasonCode: null };
+  (globalThis as unknown as { fetch: unknown }).fetch = async (url: unknown) => {
+    const u = String(url);
+    if (u.includes('/agent/whoami')) {
+      whoamiCalls++;
+      const body = (whoamiCalls === 1 || !refreshWorks) ? expired : live;
+      return { ok: true, json: async () => body } as unknown as Response;
+    }
+    refreshes++;
+    return { ok: refreshWorks } as Response;
+  };
+
+  let me = await fetchWhoAmI(cfg);
+  eq('an expired token is refreshed rather than reported', me?.signedIn, true);
+  eq('  ...with exactly one refresh', refreshes, 1);
+  eq('  ...and exactly one re-ask', whoamiCalls, 2);
+
+  // Bounded at one attempt: a refresh that "succeeds" but yields another expired token must
+  // not loop the page against the auth backend.
+  whoamiCalls = 0; refreshes = 0; refreshWorks = true;
+  const stillExpired = async (url: unknown) => {
+    const u = String(url);
+    if (u.includes('/agent/whoami')) { whoamiCalls++; return { ok: true, json: async () => expired } as unknown as Response; }
+    refreshes++; return { ok: true } as Response;
+  };
+  (globalThis as unknown as { fetch: unknown }).fetch = stillExpired;
+  me = await fetchWhoAmI(cfg);
+  eq('a refresh that does not help is not retried', [refreshes, whoamiCalls], [1, 2]);
+  eq('  ...and the caller still learns it is expired', me?.reasonCode, 'token_expired');
+
+  // A failed refresh must not cost a second whoami either.
+  whoamiCalls = 0; refreshes = 0; refreshWorks = false;
+  (globalThis as unknown as { fetch: unknown }).fetch = async (url: unknown) => {
+    const u = String(url);
+    if (u.includes('/agent/whoami')) { whoamiCalls++; return { ok: true, json: async () => expired } as unknown as Response; }
+    refreshes++; return { ok: false } as Response;
+  };
+  me = await fetchWhoAmI(cfg);
+  eq('a failed refresh does not re-ask', [refreshes, whoamiCalls], [1, 1]);
+
+  // Only expiry. A forged token or an under-privileged account is not fixed by a new cookie.
+  for (const code of ['token_invalid', 'insufficient_role', 'not_signed_in']) {
+    whoamiCalls = 0; refreshes = 0;
+    (globalThis as unknown as { fetch: unknown }).fetch = async (url: unknown) => {
+      const u = String(url);
+      if (u.includes('/agent/whoami')) { whoamiCalls++; return { ok: true, json: async () => ({ ...expired, reasonCode: code }) } as unknown as Response; }
+      refreshes++; return { ok: true } as Response;
+    };
+    await fetchWhoAmI(cfg);
+    eq(`${code} triggers no refresh`, [refreshes, whoamiCalls], [0, 1]);
+  }
 })();
 
 console.log(bad ? `\n${bad} FAILED` : '\nall passed');

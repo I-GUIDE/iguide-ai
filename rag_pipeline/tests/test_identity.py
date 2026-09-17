@@ -365,3 +365,48 @@ def test_whoami_survives_a_misconfigured_deployment(monkeypatch):
     assert body["platformTier"] is None and body["requiredRole"] is None
     assert body["requiredRoleName"] is None
     assert body["reason"]
+
+
+# --- whoami says WHY in a form a client can act on --------------------------------
+
+def test_whoami_reason_code_marks_an_expired_token_as_refreshable(monkeypatch):
+    """The one whoami state a client must act on instead of displaying.
+
+    whoami answers 200 by design, so there is no status for withTokenRetry to react to; an
+    access cookie aging out therefore turned a signed-in page into a signed-out one while the
+    refresh cookie sat unused. The code is what lets the client tell "refresh me" from "sign
+    in" without matching on the prose in `reason`.
+    """
+    body = _whoami(monkeypatch, cookie=token(exp_delta=-3600))
+    assert body["signedIn"] is False
+    assert body["reasonCode"] == "token_expired"
+    assert "TokenExpired" in body["reason"]        # prose stays, for a human reading a log
+
+
+@pytest.mark.parametrize("cookie_factory,code", [
+    (lambda: None, "not_signed_in"),
+    (lambda: "not-a-token", "token_invalid"),
+    (lambda: token(secret="w" * 64), "token_invalid"),
+    (lambda: token(role=8), "insufficient_role"),
+])
+def test_whoami_reason_codes(monkeypatch, cookie_factory, code):
+    assert _whoami(monkeypatch, cookie=cookie_factory())["reasonCode"] == code
+
+
+def test_whoami_reason_code_shares_the_refusals_vocabulary(monkeypatch):
+    """The same fact must not have two names: a 403 body and whoami have to agree."""
+    monkeypatch.setenv("AGENT_MODE", "token")
+    for exc, expected in ((idm.TokenExpired("x"), "token_expired"),
+                          (idm.TokenMissing("x"), "not_signed_in"),
+                          (idm.InsufficientRole(8, 4), "insufficient_role"),
+                          (idm.TokenInvalid("x"), "token_invalid"),
+                          (idm.IdentityNotConfigured("x"), "identity_not_configured")):
+        with server.app.test_request_context("/agent/chat"):
+            payload, _status = server._identity_error_response(exc)
+            assert payload.get_json()["reason"] == expected == server._identity_reason(exc)
+
+
+def test_whoami_in_dev_mode_says_so_in_code_form(monkeypatch):
+    monkeypatch.setenv("AGENT_MODE", "dev")
+    body = server.app.test_client().get("/agent/whoami").get_json()
+    assert body["reasonCode"] == "no_identity_in_this_mode"
