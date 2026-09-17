@@ -391,7 +391,12 @@ export default function App() {
     setMessages([{ role: 'agent', text: "New conversation. Ask me anything." }]);
   }, []);
 
-  useEffect(() => { void refreshSessions(); }, [refreshSessions]);
+  // `viewer` is in the deps even though refreshSessions reads it from a REF. The ref exists so
+  // the callback is not rebuilt on every identity change, but that also meant nothing re-ran
+  // the list when identity finally arrived: whoami lands after ui-config, so token mode listed
+  // the local cache once and kept showing that count until someone clicked History. Live, that
+  // read as "History (27)" for an account with no conversations at all.
+  useEffect(() => { void refreshSessions(); }, [refreshSessions, viewer]);
 
   // --- layer management + feature inspection (left panel) ---
   const toggleLayer = useCallback((id: string) => {
@@ -758,7 +763,17 @@ export default function App() {
             <button className="hbtn" onClick={startNewSession}>New conversation</button>
             <button className="hbtn" onClick={() => setShowHistory(false)}>Close</button>
           </div>
-          {!sessions.length && <p className="hempty">No saved conversations yet. They are kept in this browser only.</p>}
+          {/* Where they are kept is DIFFERENT in token mode, and the account badge two inches
+              away already promises that conversations follow the account to another browser.
+              The old line said the opposite of that, to the same person, on the same screen. */}
+          {!sessions.length && (
+            <p className="hempty">
+              No saved conversations yet.{' '}
+              {tokenMode
+                ? 'They will be saved to your I-GUIDE account and follow you to another browser.'
+                : 'They are kept in this browser only.'}
+            </p>
+          )}
           <ul className="hlist">
             {sessions.map((s2) => (
               <li key={s2.id} className={s2.id === sessionIdRef.current ? 'hrow current' : 'hrow'}>

@@ -200,7 +200,15 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
             index=MEMORY_INDEX,
             body={
                 "size": max(1, int(limit)),
-                "query": {"term": {"owner_id": owner}},
+                # `.keyword`, not `owner_id`. The index maps strings dynamically, which gives
+                # `text` + a `keyword` subfield — and a `term` query against the analysed
+                # `text` field compares the whole owner id to individual TOKENS, so a platform
+                # id like `http://cilogon.org/serverE/users/137206` is indexed as `http`,
+                # `cilogon.org`, `users`, `137206` and matches nothing. The list came back
+                # empty for a user with three stored conversations, and every other path —
+                # fetching one by id, saving, ownership checks — worked, because they go by
+                # document id and never search.
+                "query": {"term": {"owner_id.keyword": owner}},
                 "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
                 "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
                             "messageCount", "layerCount", "fileCount"],

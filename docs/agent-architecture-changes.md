@@ -859,6 +859,25 @@ stay visible. They are unattributable by construction and they are this browser'
 hiding them would lose it for no gain. Verified live — 28 records in the store, 27 listed, the one
 stamped with another owner absent.
 
+**And then, signed in, the conversation list was empty for an account that had three.** Saving
+worked, fetching one by id worked, every ownership check worked — only the *list* was blind, and
+it failed silently, with a 200 and `[]`. `owner_id` is mapped `text` with a `keyword` subfield
+(OpenSearch's default for a string), and `list_memories` ran `term` against the bare field. A term
+query on an analysed field compares the whole value to individual **tokens**, and a platform id is
+a URL: `http://cilogon.org/serverE/users/137206` is indexed as `http`, `cilogon.org`, `users`,
+`137206`, none of which is the id. Everything else worked because everything else addresses
+documents *by id* and never searches. The query now names `owner_id.keyword`.
+
+The test that should have caught this is the more interesting half. `test_memory_ownership.py`
+had covered the filter for months with a fake OpenSearch whose `search` compared the stored value
+to the term — which is what real OpenSearch does for a `keyword` field and not for a `text` one.
+The fake asserted the query's *shape*: that we filter by owner. It could not assert that the
+filter matches anything. Both were then fixed: the fake models analysis, so a term query on the
+bare field matches only a single-token value, and the fixtures stopped being `"alice"`. Every id
+in those tests was one token, which is exactly why a bug about tokenisation could not show up in
+them. Two new tests use the shape a platform account actually has; with the old query they fail,
+which is the only evidence that a regression test is one.
+
 ---
 
 ---
