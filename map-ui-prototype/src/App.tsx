@@ -663,7 +663,28 @@ export default function App() {
         : e instanceof AuthError ? authMessage(e) : `Request failed: ${e.message}`;
       patch({ text, streaming: false });
     } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
-  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
+    // `snapshotSession` MUST be in these deps. It was not, and that single omission is the
+    // whole of "after I ask a question the wrong history shows up" — plus two things that
+    // looked unrelated.
+    //
+    // This callback was memoised on the first render, when `tokenMode` was still false
+    // (/agent/ui-config had not answered yet), so the `snapshotSession` it captured was the
+    // one built in that render — and IT captured `tokenMode: false` and the matching
+    // `refreshSessions`. Every turn therefore ended by: saving locally (fine), SKIPPING the
+    // server PUT because its `tokenMode` said this deployment has no users, and then
+    // refreshing the list through the local branch — which is why the history flipped to 30
+    // browser-local rows the moment a question finished.
+    //
+    // The two consequences that did not look like this bug: conversations never reached the
+    // server on their own, and the agent's own mid-turn memory was left snapshot-less, which
+    // is where the orphan `conversation-sess-...` documents came from.
+    //
+    // Third instance of this exact class in this file (`refreshSessions`/`viewer`,
+    // `restoreSession`/`tokenMode`, now this). The neighbouring long-lived reads use refs for
+    // the same reason; anything read inside a callback that outlives a render either goes in
+    // the deps or goes in a ref.
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts,
+      snapshotSession]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;

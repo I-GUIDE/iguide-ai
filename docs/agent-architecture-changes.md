@@ -940,6 +940,29 @@ nothing ever asks for another frame. The fix repaints at the one moment that mat
 each raster image and `triggerRepaint()` on its `load` — rather than polling for it. One repaint
 per image, nothing on a timer.
 
+**The same stale closure a third time — and it was the cause of the orphans.** Reported as
+"after I ask a question the wrong history and number show up": finishing a turn flipped the list
+from the server's 2 conversations to 30 browser-local rows, including ones from before token mode
+existed. `runLive` calls `snapshotSession()` in its `finally` and did not declare it, so it kept
+the `snapshotSession` built on the FIRST render — the one that captured `tokenMode: false`. Every
+turn therefore saved locally, **skipped the server PUT** because its `tokenMode` said this
+deployment has no users, and refreshed the list through the local branch.
+
+That also answers the item left open above. Conversations were not reaching the server on their
+own at all — the Champaign snapshot only existed because it had been PUT by hand while
+debugging — and the agent's own mid-turn memory was left snapshot-less, which is exactly what an
+orphan `conversation-sess-...` document is. One omission, three symptoms that looked unrelated.
+
+Three instances of one class in one file (`refreshSessions`/`viewer`,
+`restoreSession`/`tokenMode`, `runLive`/`snapshotSession`), all sharing a shape: the value is
+false or null on the first render and becomes real once `/agent/ui-config` and `/agent/whoami`
+answer, so a callback memoised before that keeps the pre-identity world forever. None of the
+symptoms pointed at a closure — they read as a routing bug, a dead button, a wrong list. So
+`npm run check:hooks` now watches those six names and asks one question: if a callback reads one,
+is it declared? Not a general exhaustive-deps implementation, and no new dependency — the same
+shape as `check:auth` and `check:fold`. Verified the only way a regression check can be: with the
+fix reverted it fails, with it applied it passes.
+
 *Still open:* one conversation produced **two** memory documents — the agent's own
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
 the orphan rather than explaining it, and why the two ids diverge is not yet understood.
