@@ -211,7 +211,9 @@ def verify_mode() -> str:
 
 
 def _check_tokens_url() -> str:
-    return str(os.getenv("PLATFORM_CHECK_TOKENS_URL") or "").strip()
+    """Explicit PLATFORM_CHECK_TOKENS_URL, else derived from PLATFORM_TIER."""
+    from agent_runtime import platform_endpoints
+    return platform_endpoints.check_tokens_url()
 
 
 def _cache_key(token: str) -> str:

@@ -15,7 +15,7 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            resolve_file_id, save_uploaded_file,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
-from agent_runtime import deployment_mode, identity
+from agent_runtime import deployment_mode, identity, platform_endpoints
 from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
                                         get_session_snapshot, list_memories,
@@ -85,8 +85,12 @@ def _get_agent_chat_api_key() -> str:
 # At import, so it appears once in the container log rather than per request. An open
 # deployment should never be a thing someone discovers from its behaviour, and the mode an
 # operator THINKS is set is the one thing worth stating out loud on every boot.
-logger.info("Agent deployment mode: %s (api key %s)", deployment_mode.current_mode(),
-            "configured" if _get_agent_chat_api_key() else "NOT configured")
+logger.info("Agent deployment mode: %s (api key %s, platform tier %s)",
+            deployment_mode.current_mode(),
+            "configured" if _get_agent_chat_api_key() else "NOT configured",
+            platform_endpoints.current_tier() or "unset")
+if platform_endpoints.consistency_warning():
+    logger.warning("%s", platform_endpoints.consistency_warning())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
 
@@ -762,8 +766,8 @@ def agent_ui_config():
         # the browser calls the platform directly, which re-mints the .i-guide.io cookie. Sent
         # from here rather than compiled into the bundle so the same build runs against any
         # tier — the dev and production backends are different hosts.
-        body["refresh_url"] = str(os.getenv("PLATFORM_REFRESH_URL") or "").strip()
-        body["signin_url"] = str(os.getenv("PLATFORM_SIGNIN_URL") or "").strip()
+        body["refresh_url"] = platform_endpoints.refresh_url()
+        body["signin_url"] = platform_endpoints.signin_url()
     return jsonify(body)
 
 
@@ -794,6 +798,8 @@ def agent_whoami():
         # and no amount of guessing beats the server saying what arrived.
         "cookiesSeen": sorted(request.cookies.keys()),
         "expectedCookie": identity.cookie_name(),
+        "platformTier": platform_endpoints.current_tier(),
+        "checkTokensUrl": platform_endpoints.check_tokens_url(),
     }
     try:
         body["verify"] = identity.verify_mode()
