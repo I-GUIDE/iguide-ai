@@ -21,6 +21,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 5 | [The action ledger](#stage-5) | 2026-09 → `9e35950` | the agent records what tools *did*, not that they ran |
 | 6 | [What the decider reads](#stage-6) | `claude/evidence-summary` | evidence described, capabilities generated, the ledger shared |
 | 7 | [Who the caller is](#stage-7) | `claude/jwt-identity` | identity, ownership, server-owned history |
+| 8 | [Removing the second path](#stage-8) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 
 Stages 6 and 7 are **unmerged branches**, independent of each other. Deployment state is at the
 end; do not infer it from the commits.
@@ -734,6 +735,110 @@ A failed fetch returns `null`, not `[]` — *"could not ask"* and *"you have non
 and rendering an empty history because the server blinked reads as data loss.
 
 ---
+
+---
+
+## Stage 8 — Removing the second path {#stage-8}
+
+*Branch `claude/evidence-summary`. Removes what stages 2 and 3 left behind.*
+
+Two orchestration paths existed from `665db95` (stage 3.4) onward: the supervisor, and the
+agents-as-tools arm it replaced, kept behind `AGENT_SUPERVISOR=0` and a per-request
+`useSupervisor: false`. A third remained inside the tool layer: `tool_strategy="full_pipeline"`,
+a single `rag_tool` wrapping the whole stage-1 pipeline.
+
+Both are now gone. The reason is that neither was a fallback any more.
+
+### 8.1 The measurement
+
+`agent_runtime/legacy/` had not been touched since **2026-06-25** — while `agent_runtime/supervisor/`
+was being changed the same week this was written. In that gap it acquired none of:
+
+| | legacy arm | supervisor |
+|---|---|---|
+| `map_layer` delivery (stage 4.1) | ✗ | ✓ |
+| the action ledger (stage 5.1) | ✗ | ✓ |
+| terrain / DEM tools (stage 5.8) | ✗ | ✓ |
+| the capability registry (stage 6.2) | ✗ | ✓ |
+| the evidence summary (stage 6.1) | ✗ | ✓ |
+| the grounding gate (stage 5.4) | ✗ | ✓ |
+
+And it could not have caught up by accident. `collect_tools` in `tool_policy.py` binds six
+factories — granular, file, MCP, quality, rag, skills. The terrain, rs-embed, overlay, aggregate,
+temporal, spatial-stats and admin-boundary toolsets are **built directly in the supervisor's peer
+builders**, so the legacy arm could not reach roughly half the current tool surface even in
+principle. That is the same registered-≠-reachable split that made `list_conversation_files`
+invisible in stage 5.9.
+
+So `AGENT_SUPERVISOR=0` did not degrade the agent. It produced a **June 2026 agent**: no layers on
+the map, no cross-turn tool memory, no elevation, no grounding gate. For a product whose defining
+claim is that analyses land as map layers, that is not a fallback — it is a different and much
+worse product, and it would have presented as catastrophic breakage rather than as a mode.
+
+A flag that silently rewinds the system by three months is worse than no flag, because someone
+eventually sets it while debugging something else.
+
+### 8.2 What was removed
+
+- `agent_runtime/legacy/` — 792 lines across `orchestration.py`, `graph_nodes.py`, `builders.py`
+  and `prompts.py`, including a second full prompt set.
+- The `AGENT_SUPERVISOR` env switch and `is_supervisor_enabled()`.
+- The `useSupervisor` / `use_supervisor` **request field** — an API change, noted below.
+- `tool_strategy="full_pipeline"`, `agent_runtime/langchain_tool.py` and
+  `make_langchain_rag_tool`. The granular tools are its superset, and a strategy that bypasses
+  them also bypasses everything built on them since.
+- `run_code_agent_query` and `agent_runtime/graph_nodes.py`. This one followed rather than being
+  chosen: it *is* the agents-as-tools shape — a CodeAgent with SearchAgent bound as a tool — and
+  its implementation lived in the deleted package. It was reachable only from a CLI flag.
+
+### 8.3 What was kept, and why
+
+- **The strategy registry**, now with one entry. It is what made the two paths independent, and
+  it is the seam a genuine second path would use again. Deleting the shape as well would save a
+  file and cost the next fork.
+- **`rag_pipeline.pipeline.run_pipeline` and `POST /query`.** These share a name with the removed
+  `full_pipeline` strategy and are a different thing: a separate HTTP product surface from stage
+  1, still served by `api/server.py`, not an agent arm. Removing an endpoint the platform may
+  call is not this change's business.
+
+### 8.4 What happened to the tests
+
+Deleting a path deletes the tests that pin it, which is where the real care was needed:
+
+- **Deleted**, subject gone: the `AGENT_SUPERVISOR` flag-parsing test, the per-request
+  `use_supervisor=False` override test, and two tests of `make_search_agent_evidence_tool`.
+- **Replaced**: those two covered dedup and failure handling. Dedup is already covered on the
+  supervisor arm; failure handling was **not**, so it became a new test — a throwing search peer
+  must cost its own result, not the whole turn including evidence already gathered.
+- **Repointed**: the response and stream contract tests stubbed the legacy arm and pinned
+  `AGENT_SUPERVISOR=0`. They now stub `run_supervisor` — deliberately **below**
+  `run_supervisor_orchestration`, because that wrapper emits the orchestrate node lifecycle pair
+  one of them asserts on, and stubbing in its place would have quietly deleted the thing under
+  test. The contract itself did not change, which is the point: the shape a client sees should
+  survive the graph behind it being replaced.
+- **Rewritten**: a test asserting the legacy arm keeps the string "Orchestrator agent started"
+  *"because there it is accurate"* now asserts no module claims it at all. It scans string
+  constants through the AST rather than grepping text — the comment in
+  `supervisor/orchestration.py` recording why the string was renamed contains the phrase, and a
+  text-shaped test fails on the explanation for its own existence.
+
+### 8.5 The API change
+
+`useSupervisor` was a documented field on `POST /agent/chat` and `/agent/chat/stream`. It is gone
+from the request contract and the Swagger docs. A caller still sending it is now ignored rather
+than honoured — which is the quiet direction to fail, and worth knowing if anything outside this
+repo sends it.
+
+`tool_strategy` still exists and still accepts `"granular"`. `"full_pipeline"` now **raises**
+naming what changed, rather than silently resolving to granular: a stale caller should find out.
+
+### 8.6 What is not recorded
+
+`3b7e181` built per-request architecture switching *"because otherwise the two architectures could
+only be compared by restarting the deployment between arms"*, and the same mechanism existed here.
+**No commit records a measured supervisor-vs-legacy comparison.** If one was run outside the repo,
+its result is gone — which is the argument of this document, applied to its own final stage.
+
 
 ## What is deployed
 

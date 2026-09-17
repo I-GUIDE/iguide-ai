@@ -12,7 +12,6 @@ import pytest
 
 from agent_runtime.supervisor_graph import (
     build_supervisor_graph,
-    is_supervisor_enabled,
     run_supervisor,
 )
 
@@ -374,7 +373,6 @@ def test_initialized_advertises_supervisor_peers(monkeypatch):
     """P1-7: the initialized event advertises the peers that actually run."""
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
 
     class _Graph:
         def invoke(self, *a, **k):
@@ -385,7 +383,7 @@ def test_initialized_advertises_supervisor_peers(monkeypatch):
             }
 
     monkeypatch.setattr(gr, "build_orchestrator_graph", lambda **k: _Graph())
-    events = list(gr.stream_agent_query_events("q", use_supervisor=True))
+    events = list(gr.stream_agent_query_events("q"))
     init = [e for e in events if (e.get("data") or {}).get("stage") == "initialized"]
     assert init and init[0]["data"]["available_agents"] == ["search", "analyze", "code"]
 
@@ -433,26 +431,11 @@ def test_graph_has_peer_nodes():
         assert n in nodes
 
 
-def test_flag_parsing(monkeypatch):
-    # Default ON when unset.
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
-    assert is_supervisor_enabled() is True
-    # Explicit opt-out.
-    monkeypatch.setenv("AGENT_SUPERVISOR", "0")
-    assert is_supervisor_enabled() is False
-    monkeypatch.setenv("AGENT_SUPERVISOR", "false")
-    assert is_supervisor_enabled() is False
-    # Explicit on.
-    monkeypatch.setenv("AGENT_SUPERVISOR", "1")
-    assert is_supervisor_enabled() is True
-
-
 def test_orchestrate_uses_supervisor_by_default(monkeypatch):
-    """With AGENT_SUPERVISOR unset, the orchestrate node defaults to the supervisor."""
+    """The orchestrate node runs the supervisor — the only path."""
     import agent_runtime.supervisor_graph as sg
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
     monkeypatch.setattr(
         sg, "run_supervisor",
         lambda query, **kwargs: {"final_answer": "supervisor answer", "evidence": [], "actions": ["analyze", "done"]},
@@ -504,7 +487,6 @@ def test_audit_surfaced_in_orchestrate_return(monkeypatch):
     import agent_runtime.supervisor_graph as sg
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
     monkeypatch.setattr(
         sg, "run_supervisor",
         lambda query, **kwargs: {
@@ -566,25 +548,36 @@ def test_search_peer_forwards_enabled_search_methods(monkeypatch):
 
 # --- P0-4: collect_tools no longer silently defaults to full_pipeline ---------
 
-def test_collect_tools_defaults_to_granular_not_full_pipeline(monkeypatch):
+def test_collect_tools_resolves_an_empty_strategy_to_granular(monkeypatch):
+    """An absent or empty strategy must resolve to the real tool set, never to nothing.
+
+    This used to guard against falling through to `full_pipeline`, a single rag_tool wrapping
+    the whole stage-1 pipeline. That strategy is gone; the property it protected — a missing
+    strategy resolves to granular rather than silently to something lesser — is not.
+    """
     import agent_runtime.langchain_granular_tools as gt
     import agent_runtime.langchain_quality_tools as qt
     import agent_runtime.skills as sk
-    import agent_runtime.langchain_tool as lt
     from agent_runtime.tool_policy import collect_tools
 
     monkeypatch.setattr(gt, "make_langchain_granular_tools", lambda **k: ["GRANULAR"])
     monkeypatch.setattr(qt, "make_quality_tools", lambda: [])
     monkeypatch.setattr(sk, "make_skill_tools", lambda **k: [])
 
-    def boom():
-        raise AssertionError("deprecated full_pipeline rag_tool must not be built by default")
+    for strategy in ("", None, "granular"):
+        assert collect_tools(tool_strategy=strategy, include_mcp_tools=False,
+                             mcp_modules=None) == ["GRANULAR"]
 
-    monkeypatch.setattr(lt, "make_langchain_rag_tool", boom)
 
-    # empty/falsy strategy must resolve to granular, not full_pipeline
-    tools = collect_tools(tool_strategy="", include_mcp_tools=False, mcp_modules=None)
-    assert tools == ["GRANULAR"]
+def test_a_removed_strategy_is_refused_loudly(monkeypatch):
+    """`full_pipeline` silently resolving to granular would hide a stale caller; raising names
+    what changed."""
+    import pytest as _pytest
+    from agent_runtime.tool_policy import collect_tools
+
+    with _pytest.raises(ValueError) as exc:
+        collect_tools(tool_strategy="full_pipeline", include_mcp_tools=False, mcp_modules=None)
+    assert "full_pipeline was removed" in str(exc.value)
 
 
 # --- P2-7: decider uses the fenced-block JSON extractor ----------------------
@@ -659,31 +652,6 @@ def test_bounded_checkpointer_evicts_least_recently_used_thread():
     assert "t1" not in saver.storage
     assert "t2" in saver.storage and "t3" in saver.storage
 
-
-def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):
-    """A per-request use_supervisor=False overrides the default and skips the supervisor."""
-    from types import SimpleNamespace
-
-    import agent_runtime.legacy.orchestration as lo
-    import agent_runtime.supervisor_graph as sg
-    import agent_runtime.graph_runtime as gr
-
-    def boom(*a, **k):
-        raise AssertionError("run_supervisor should NOT be called when use_supervisor=False")
-
-    monkeypatch.setattr(sg, "run_supervisor", boom)
-    monkeypatch.setattr(lo, "collect_orchestration_tools", lambda **k: [])
-    monkeypatch.setattr(lo, "build_orchestrator_agent_executor", lambda **k: object())
-    monkeypatch.setattr(
-        lo, "invoke_agent_with_payload_fallback",
-        lambda *a, **k: {"messages": [SimpleNamespace(content="agents-as-tools answer", type="ai", tool_calls=[])]},
-    )
-
-    result = gr.run_agent_query("substantive query", use_supervisor=False)
-    assert result["final_answer"] == "agents-as-tools answer"
-
-
-# --- inline image embedding in the final answer ----------------------------
 
 def test_collect_image_artifacts_walks_json_tool_results():
     import json as _json

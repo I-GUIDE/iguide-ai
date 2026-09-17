@@ -16,8 +16,7 @@ Single-responsibility split:
 The supervisor only ever sees a *distilled* view (counts/flags), never the heavy
 documents. Everything is dependency-injected so the graph is unit-testable with no
 live LLM/backends. Default adapters wire to existing agents (best-effort; need
-live validation). Default ON; per-request override ``use_supervisor``; env opt-out
-``AGENT_SUPERVISOR=0``.
+live validation). It is the only orchestration path.
 """
 
 from __future__ import annotations
@@ -131,13 +130,6 @@ class SupervisorState(TypedDict, total=False):
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
 
 
-def is_supervisor_enabled() -> bool:
-    """Whether the orchestrate path should use the supervisor-over-peers graph.
-
-    Default **on**; set ``AGENT_SUPERVISOR`` to a falsy value (0/false/no/off) to
-    fall back to the legacy agents-as-tools orchestrator.
-    """
-    return (os.getenv("AGENT_SUPERVISOR") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -4629,7 +4621,6 @@ __all__ = [
     "SupervisorState",
     "build_supervisor_graph",
     "run_supervisor",
-    "is_supervisor_enabled",
     "default_decide_fn",
     "default_search_fn",
     "default_analyze_fn",

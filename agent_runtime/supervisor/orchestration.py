@@ -23,13 +23,13 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         run_supervisor,
     )
 
-    # "Orchestrator agent started" for years, and there is no orchestrator agent on this arm.
-    # The string is TRUE in agent_runtime/legacy/orchestration.py, where an orchestrator LLM
-    # really is wrapped over the sub-agents as tools — it was copied from there into this
-    # function, which only builds three peer callables and hands them to run_supervisor. No
-    # LLM, no decision, nothing an "agent" does. The pair was asymmetric too: it opened as the
-    # orchestrator and closed as the supervisor graph. Renamed rather than deleted, because
-    # every node_started has a node_completed and other clients read that lifecycle.
+    # This said "Orchestrator agent started" for years. It was copied from the agents-as-tools
+    # arm, where an orchestrator LLM really was wrapped over the sub-agents as tools and the
+    # string was true. Here it names nothing: this function builds three peer callables and
+    # hands them to run_supervisor — no LLM, no decision. The pair was asymmetric too, opening
+    # as the orchestrator and closing as the supervisor graph. Renamed rather than deleted,
+    # because every node_started has a node_completed and other clients read that lifecycle.
+    # The arm that made it true was removed in 2026-09; see docs/agent-architecture-changes.md.
     emit_trace_event(
         "node_started",
         {"stage": "orchestrate", "message": "Supervisor started"},
