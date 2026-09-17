@@ -918,10 +918,15 @@ Rebuilding the client's view server-side would have been the other way to close 
 already rejected that: `sessionStore.ts` is server-shaped on purpose, and a second implementation
 of its layer-descriptor rules would drift.
 
-**And the local cache, once more.** In token mode with no viewer yet, `refreshSessions` fell
-through to the local store — the same mistake `visibleTo()` closes, reached by a different route,
-and the reason a signed-in user briefly saw 29 stale local rows. Token mode with no identity now
-lists nothing.
+**And the local cache, once more — twice.** In token mode with no viewer yet, `refreshSessions`
+fell through to the local store: the same mistake `visibleTo()` closes, reached by a different
+route. Fixing the branch was not enough, because the calls also **raced**. On load this runs once
+before `/agent/ui-config` answers (`tokenMode` still false, so it reads IndexedDB) and again the
+moment it does; the second call takes a synchronous path and finishes first, then the first
+resolves its IndexedDB read and overwrites the correct answer with the stale one. The slow call
+won. That is why a signed-in page settled on 27 local rows and why signing out left them there —
+not a wrong branch, a lost race. Every write is now generation-guarded, which covers all three
+callers rather than just the mount effect.
 
 *Still open:* one conversation produced **two** memory documents — the agent's own
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides

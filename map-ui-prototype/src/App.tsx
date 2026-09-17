@@ -272,11 +272,20 @@ export default function App() {
    *
    *  A failed fetch returns null and is NOT treated as "no conversations": showing an empty
    *  history because the server was briefly unreachable reads as data loss. */
+  //  Every write is GENERATION-GUARDED, because the calls race and the slow one was winning.
+  //  On load this runs once before /agent/ui-config has answered (tokenMode still false, so it
+  //  reads the local store) and again the moment it does. The second call takes a synchronous
+  //  path and finishes first; the first one then resolves its IndexedDB read and overwrites the
+  //  correct answer with the stale one. That is why a signed-in page settled on 27 local rows,
+  //  and why signing out left them there: not a wrong branch, a lost race.
+  const sessionsGen = useRef(0);
   const refreshSessions = useCallback(async () => {
+    const gen = ++sessionsGen.current;
+    const apply = (next: SessionSummary[]) => { if (gen === sessionsGen.current) setSessions(next); };
     if (tokenMode && viewerRef.current) {
       const remote = await listConversations(asAgentConfig());
       if (remote) {
-        setSessions(remote.map((c) => ({
+        apply(remote.map((c) => ({
           id: c.memoryId,
           title: c.conversationName || 'Untitled conversation',
           createdAt: Date.parse(c.createdAt || '') || 0,
@@ -294,10 +303,10 @@ export default function App() {
       // Token mode, no viewer: identity has not landed (or has aged out). The local store is a
       // CACHE of somebody's conversations, and until we know whose, showing it is the same
       // mistake the owner filter closes — just reached by a different route. Empty is honest.
-      setSessions([]);
+      apply([]);
       return;
     }
-    setSessions(await listSessions(viewerRef.current));
+    apply(await listSessions(viewerRef.current));
   }, [tokenMode, asAgentConfig]);
 
   const snapshotSession = useCallback(() => {
