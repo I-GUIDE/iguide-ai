@@ -192,10 +192,19 @@ def make_admin_boundary_tools() -> List[Any]:
 
     meta = {"category": "geo"}
 
+    # Words that name a KIND of place. An `area` holding one of these is a mis-slotted level.
+    _LEVEL_WORDS = {"city", "cities", "county", "counties", "state", "states", "place", "places",
+                    "town", "towns", "municipality", "cdp", "tract", "tracts", "block_group",
+                    "block_groups"}
+
     def admin_boundary(area: str, state: Optional[str] = None, level: str = "county",
                        subdivide: Optional[str] = None, name: Optional[str] = None) -> str:
         """Look up a US state, county or city BY NAME, draw it on the map, and return it as a
         polygon file other tools can use — no upload required.
+
+        `area` is the PLACE NAME — "Urbana", "Champaign County", "Illinois". It is NOT the kind
+        of place: that is `level`, and passing "city" as the area finds nothing. (`name` is
+        something else again — the stem for the output filename.)
 
         This is how to answer "the embeddings for Champaign County" or "show me Cook County"
         when the user has attached nothing. `level`: "county" (default), "state", "city"
@@ -210,6 +219,29 @@ def make_admin_boundary_tools() -> List[Any]:
 
         US only; it reads the Census TIGERweb service.
         """
+        # `area` holds the place NAME but reads like the KIND of place, and a model reading it
+        # that way puts "city" in it. Observed live with gpt-oss:120b: four calls, three of them
+        # area='city', before it stumbled onto area='Urbana'. `level` already carries the kind,
+        # so an `area` holding a level word is unambiguous — recover instead of refusing, and
+        # say so, because a silent correction teaches the caller nothing.
+        swap_note = None
+        if str(area or "").strip().lower() in _LEVEL_WORDS:
+            candidate = str(name or "").strip()
+            if candidate and candidate.lower() not in _LEVEL_WORDS:
+                swap_note = (f"`area` was {area!r}, which is a kind of place rather than a name; "
+                             f"used {candidate!r} as the place and kept it as the level. `area` "
+                             f"takes the NAME.")
+                level = level or area
+                area, name = candidate, None
+            else:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"`area` is the place NAME, not the kind of place — {area!r} is a "
+                             f"level.",
+                    "hint": "Call it as admin_boundary(area='Urbana', level='city', "
+                            "state='Illinois'). `level` takes city/county/state/cdp; `name` is "
+                            "only the output filename."})
+
         lvl = str(level or "county").strip().lower()
         if lvl in {"place", "town", "municipality"}:
             lvl = "city"
@@ -338,6 +370,7 @@ def make_admin_boundary_tools() -> List[Any]:
                               else f"{area_text} ({len(matched)})")
         result: Dict[str, Any] = {
             "ok": True,
+            **({"note": swap_note} if swap_note else {}),
             "level": lvl,
             "matched": matched[:12],
             "feature_count": len(feats),
