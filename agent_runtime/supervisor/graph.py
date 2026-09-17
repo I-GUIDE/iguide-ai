@@ -1179,6 +1179,13 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "queries_searched": list(state.get("searched_queries") or []),
         "has_analysis": state.get("analysis_results") is not None,
         "analysis_summary": _peer_summary(state.get("analysis_results")),
+        # Whether the thing the user asked to SEE is already in front of them. The decider had
+        # no way to know this: `has_analysis` says a peer ran, `artifacts_produced` lists images,
+        # and neither answers "is the deliverable delivered?" — so after analyze put a DEM on the
+        # map it routed to code, which fetched the same DEM again. Measured: 266s and 16
+        # execute_code iterations to redo work already done in one call.
+        "map_layer_delivered": _map_delivered_this_turn(state.get("analysis_results"),
+                                                        state.get("code_result")),
         "has_code": state.get("code_result") is not None,
         "code_summary": _peer_summary(state.get("code_result")),
         "artifacts_produced": [a.get("filename") for a in artifacts],
@@ -1193,6 +1200,21 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "available_actions": _available_actions(state),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
+        # THIS turn's ledger, in the same rendering the answering model and the grounding
+        # auditor read. The rows were always kept — they are what the trace shows as
+        # "dem_for_region(...) -> 1 layer on the map" — but _ledger_lines had exactly two
+        # consumers and the decider was not one of them. It saw counts and flags about the
+        # current turn and the ledger only of PREVIOUS turns, so it could not tell that the
+        # tool it was about to route to had already run and produced the answer.
+        **({"this_turn": _ledger_lines([*_ledger_rows(state.get("analysis_results"),
+                                                      state.get("code_result")),
+                                        *(state.get("action_rows") or [])]),
+            "this_turn_note": (
+                "What THIS turn has already done, oldest first — the same record the answering "
+                "model and the auditor see. A line here is work that is DONE: routing to a peer "
+                "to redo it produces a second copy, not a better answer. A line marked FAILED "
+                "means the tool did not run and its result does not exist.")}
+           if for_decision else {}),
         **({"prior_turns_in_this_conversation": _budgeted(_prior_actions(state)),
             "prior_turns_note": (
                 "What THIS conversation already did, oldest first. If the user's question is "
@@ -1930,6 +1952,12 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "genuinely new external information is needed.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
             "requests are fulfilled automatically before you are consulted again.\n"
+            "`map_layer_delivered` in Progress means a layer is ALREADY on the user's map. When "
+            "the request was to see something and it is there, choose `done` — `code` exists for "
+            "work no existing tool covers, not for redoing work a tool has already done, and a "
+            "second pass fetches the same data again and draws a second copy of the same layer. "
+            "Choose `code` after a successful analyze only when the request asks for something "
+            "the delivered result does not contain.\n"
             "`evidence_summary` in Progress is a DESCRIPTION of what was retrieved, written by "
             "the model that read it. It deliberately does not say whether the evidence is "
             "sufficient — that is your call. Search again only when it names a specific gap a "
