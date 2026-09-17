@@ -101,6 +101,18 @@ def _secret() -> str:
     return str(os.getenv("JWT_ACCESS_TOKEN_SECRET") or "").strip()
 
 
+def token_strict() -> bool:
+    """Whether an unusable or absent identity is REJECTED, or merely noted.
+
+    ``AGENT_TOKEN_STRICT=0`` is the migration window and nothing else: it lets identity flow and
+    records get stamped with an owner while nothing is yet refused, so ownership can be
+    backfilled before it starts gating. Delete it once the backfill is done — a permanently
+    non-strict token mode is just dev mode wearing a costume.
+    """
+    return str(os.getenv("AGENT_TOKEN_STRICT") or "1").strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
 def min_role() -> int:
     raw = str(os.getenv("AGENT_MIN_ROLE") or "").strip()
     if not raw:

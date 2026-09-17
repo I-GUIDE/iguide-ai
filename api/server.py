@@ -15,6 +15,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity
+from rag_pipeline.memory_module import (MemoryAccessDenied, assert_owner as assert_memory_owner,
+                                        list_memories)
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -117,14 +119,8 @@ def _service_key_presented() -> bool:
 
 
 def _token_strict() -> bool:
-    """Whether token mode REJECTS an unusable identity, or merely notes its absence.
-
-    ``AGENT_TOKEN_STRICT=0`` is the migration window and nothing else: it lets identity flow and
-    records get stamped with an owner while nothing is yet refused, so ownership can be
-    backfilled before it starts gating. Delete it once the backfill is done — a permanently
-    non-strict token mode is just dev mode wearing a costume.
-    """
-    return str(os.getenv("AGENT_TOKEN_STRICT") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    """See ``identity.token_strict`` — the memory store needs the same answer."""
+    return identity.token_strict()
 
 
 def _extract_user_token() -> str:
@@ -746,6 +742,45 @@ def agent_ui_config():
         "demo_mode": demo,
         "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
     })
+
+
+@app.route('/agent/conversations', methods=['GET'])
+def agent_conversations():
+    """
+    The signed-in user's own conversations, newest first.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ "conversations": [ { memoryId, conversationName, createdAt, updatedAt } ] }`.
+          Summaries only, never transcripts. Outside token mode this is always empty: a
+          deployment that identifies nobody has no "your" conversations to list.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in, or this account is not permitted to use the agent.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        if not user:
+            # Deliberately 200-with-nothing rather than an error: dev and demo have no users,
+            # and a client that shows a history pane should render it empty, not break.
+            return jsonify({"conversations": []})
+        token = identity.set_user(user)
+        try:
+            return jsonify({"conversations": list_memories(limit=50)})
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error listing conversations: %s", exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
 @app.route('/agent/models', methods=['GET'])
@@ -1621,6 +1656,19 @@ def agent_chat():
         _session_token = set_file_store_session(normalized.get("thread_id"))
         _user_token = identity.set_user(_request_user)
         try:
+            # Checked INSIDE the identity binding: assert_owner reads the caller from the same
+            # ContextVar everything else does, so before this line it would see nobody and wave
+            # every conversation through.
+            if normalized.get("memory_id"):
+                try:
+                    assert_memory_owner(normalized["memory_id"])
+                except MemoryAccessDenied:
+                    # 404 for the same reason the download endpoint uses it: a 403 confirms the
+                    # conversation exists, and a memory_id is the only thing guarding it.
+                    logger.info("Chat refused: memory %s is not this caller's",
+                                normalized["memory_id"])
+                    return jsonify({"error": "No conversation found for that id.",
+                                    "reason": "not_your_conversation"}), 404
             raw = run_agent_chat(
                 user_input=user_query,
                 thread_id=normalized.get("thread_id"),
@@ -2154,6 +2202,17 @@ def agent_chat_stream():
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
             try:
+                if normalized.get("memory_id"):
+                    try:
+                        assert_memory_owner(normalized["memory_id"])
+                    except MemoryAccessDenied:
+                        logger.info("Stream refused: memory %s is not this caller's",
+                                    normalized["memory_id"])
+                        # Headers are long gone by now, so the refusal travels as an SSE frame
+                        # rather than a status code. Same wording as the JSON path.
+                        yield _sse_event("error", {"error": "No conversation found for that id.",
+                                                   "reason": "not_your_conversation"})
+                        return
                 for item in stream_agent_chat_events(
                     user_input=user_query,
                     thread_id=normalized.get("thread_id"),
