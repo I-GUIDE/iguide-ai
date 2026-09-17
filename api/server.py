@@ -1054,11 +1054,38 @@ def upload_agent_files():
         description: Internal server error.
     """
     try:
+        # This endpoint had NO guard of any kind — not identity, not even the API key — so the
+        # deployed server accepted uploads from anyone who could reach it, and the files landed
+        # in a store the download endpoint then served. Measured live before this fix: a keyless
+        # POST returned 200.
+        #
+        # Identity first, then the key, exactly as the chat endpoints do: a signed-in caller is
+        # already a credential, and running the key gate first refuses them for lacking one they
+        # have no way to supply.
+        try:
+            _upload_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        try:
+            _require_agent_chat_api_key(_upload_user)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent file upload API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+
         files = _normalize_uploaded_files()
         if not files:
             return jsonify({"error": "No files uploaded. Use form field `file` or `files`."}), 400
 
-        uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+        # Bound so save_uploaded_file stamps the owner. Without this every upload was written
+        # owner_id: None, which made AGENT_TOKEN_STRICT=1 unreachable in practice: a user could
+        # not download their own attachment.
+        _upload_token = identity.set_user(_upload_user)
+        try:
+            uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+        finally:
+            identity.reset_user(_upload_token)
         return jsonify({"files": uploaded, "count": len(uploaded)}), 200
     except ValueError as e:
         logger.error(f"Agent file upload validation error: {str(e)}")
