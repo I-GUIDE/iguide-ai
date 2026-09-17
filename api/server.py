@@ -2,6 +2,7 @@ import os
 import logging
 import json
 from pathlib import Path
+from typing import Any, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -100,7 +101,17 @@ def _extract_presented_api_key() -> str:
     return ""
 
 
-def _require_agent_chat_api_key() -> None:
+def _require_agent_chat_api_key(user: Optional[Any] = None) -> None:
+    # A verified user IS a credential, and the stronger one: the API key says only "someone who
+    # has the key", the JWT says WHO. Requiring both would mean a signed-in visitor is refused
+    # for lacking a key that token mode gives them no way to enter — the settings panel is
+    # hidden precisely because there is nothing to paste. Observed live: sign in, then
+    # "You are not signed in".
+    #
+    # The key remains the way a caller with no browser gets in (the eval harness, scripts), so
+    # the two are ALTERNATIVES, never a pair.
+    if user is not None:
+        return
     # Checked BEFORE the key is read, so a deployment can keep AGENT_CHAT_API_KEY configured and
     # simply stop enforcing it for the duration of a demo — rather than having to unset the
     # secret and remember to put it back.
@@ -753,6 +764,66 @@ def agent_ui_config():
         # tier — the dev and production backends are different hosts.
         body["refresh_url"] = str(os.getenv("PLATFORM_REFRESH_URL") or "").strip()
         body["signin_url"] = str(os.getenv("PLATFORM_SIGNIN_URL") or "").strip()
+    return jsonify(body)
+
+
+@app.route('/agent/whoami', methods=['GET'])
+def agent_whoami():
+    """
+    Who the server thinks you are, and — when it thinks nobody — why.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ mode, verify, signedIn, user: {id, role}|null, permitted, reason, cookiesSeen }`.
+          Always 200, even when the caller is anonymous or refused: this endpoint exists to
+          EXPLAIN a refusal, so answering with one would defeat it.
+    """
+    body = {
+        "mode": deployment_mode.current_mode(),
+        "signedIn": False,
+        "user": None,
+        "permitted": False,
+        "reason": None,
+        # Names only, never values. A cookie value is a live credential; the NAME is what is
+        # actually in question when a tier turns out to use a different one than configured,
+        # and no amount of guessing beats the server saying what arrived.
+        "cookiesSeen": sorted(request.cookies.keys()),
+        "expectedCookie": identity.cookie_name(),
+    }
+    try:
+        body["verify"] = identity.verify_mode()
+    except identity.IdentityError as exc:
+        body["verify"] = None
+        body["reason"] = str(exc)
+        return jsonify(body)
+
+    if not deployment_mode.is_token():
+        body["reason"] = "this deployment does not identify callers"
+        return jsonify(body)
+
+    token = _extract_user_token()
+    if not token:
+        body["reason"] = "no access token was presented"
+        return jsonify(body)
+    try:
+        user = identity.identify(token)
+    except identity.IdentityError as exc:
+        body["reason"] = f"{type(exc).__name__}: {exc}"
+        return jsonify(body)
+
+    body["signedIn"] = True
+    body["user"] = user.to_dict()
+    body["requiredRole"] = identity.min_role()
+    try:
+        identity.authorize(user)
+        body["permitted"] = True
+    except identity.InsufficientRole as exc:
+        body["reason"] = str(exc)
     return jsonify(body)
 
 
@@ -1715,18 +1786,20 @@ def agent_chat():
               description: Optional readable diagnostic trace.
     """
     try:
+        # Identity first: it can satisfy the credential check on its own, and running the key
+        # gate ahead of it refuses a signed-in visitor before anyone asks who they are.
         try:
-            _require_agent_chat_api_key()
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
+        try:
+            _require_agent_chat_api_key(_request_user)
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
         except RuntimeError as exc:
             logger.error("Agent chat API key misconfigured: %s", exc)
             return jsonify({"error": "Server misconfiguration: API key not set"}), 500
-
-        try:
-            _request_user = _require_user()
-        except identity.IdentityError as exc:
-            return _identity_error_response(exc)
 
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)
@@ -2255,18 +2328,20 @@ def agent_chat_stream():
               example: "Internal server error: agent execution failed"
     """
     try:
+        # Identity first: it can satisfy the credential check on its own, and running the key
+        # gate ahead of it refuses a signed-in visitor before anyone asks who they are.
         try:
-            _require_agent_chat_api_key()
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
+        try:
+            _require_agent_chat_api_key(_request_user)
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
         except RuntimeError as exc:
             logger.error("Agent chat stream API key misconfigured: %s", exc)
             return jsonify({"error": "Server misconfiguration: API key not set"}), 500
-
-        try:
-            _request_user = _require_user()
-        except identity.IdentityError as exc:
-            return _identity_error_response(exc)
 
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)

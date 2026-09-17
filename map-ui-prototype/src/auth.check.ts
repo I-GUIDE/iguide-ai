@@ -6,7 +6,7 @@
  * a burst of parallel 401s that each refresh is a thundering herd on the auth backend. None of
  * those are visible until they are in production, so they get counted here.
  */
-import { AuthError, authErrorFrom, isAuthStatus, setRefreshUrl, withTokenRetry } from './auth';
+import { AuthError, authErrorFrom, authMessage, isAuthStatus, setRefreshUrl, withTokenRetry } from './auth';
 
 let bad = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
@@ -130,6 +130,22 @@ await (async () => {
      true);
   eq('401 and 403 are the auth statuses', [isAuthStatus(401), isAuthStatus(403), isAuthStatus(500)],
      [true, true, false]);
+})();
+
+// --- a refusal that is not about identity must not read like one -------------------
+await (async () => {
+  // The live bug: token mode still demanded the API key, the browser had none, and the bare
+  // 403 that came back was rendered as "You are not signed in" — sending someone who HAD just
+  // signed in to the login page again.
+  const bare = await authErrorFrom({ status: 403,
+    clone: () => ({ json: async () => ({ error: 'Forbidden: invalid API key.' }) }) } as unknown as Response);
+  eq('a 403 with no reason keeps the server\'s own message',
+     authMessage(bare), 'Forbidden: invalid API key.');
+  eq('  ...and is not reported as a sign-in problem',
+     authMessage(bare).includes('not signed in'), false);
+  const real = await authErrorFrom({ status: 403,
+    clone: () => ({ json: async () => ({ reason: 'not_signed_in', error: 'Please sign in.' }) }) } as unknown as Response);
+  eq('a real identity refusal still says so', authMessage(real).includes('not signed in'), true);
 })();
 
 console.log(bad ? `\n${bad} FAILED` : '\nall passed');

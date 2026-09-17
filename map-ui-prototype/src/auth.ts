@@ -106,8 +106,12 @@ export function authMessage(err: AuthError): string {
     case 'token_expired':
     case 'not_signed_in':
     case 'token_invalid':
-    default:
       return `You are not signed in.${signIn}`;
+    default:
+      // No identity `reason` at all, so this is NOT an identity refusal — an API-key rejection
+      // arrives as a bare 403. Reporting it as "not signed in" sends someone to a login page
+      // that cannot fix it; observed live, after signing in successfully.
+      return err.message;
   }
 }
 
