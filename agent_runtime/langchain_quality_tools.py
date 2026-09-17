@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, List, Optional
+from agent_runtime.tool_args import accept_null_defaults
 
 
 def make_quality_tools(llm: Optional[Any] = None) -> List[Any]:
@@ -42,8 +43,7 @@ def make_quality_tools(llm: Optional[Any] = None) -> List[Any]:
         verdict = audit_answer_grounding(question, answer, evidence, llm=llm)
         return json.dumps(verdict, ensure_ascii=True, default=str)
 
-    rerank_tool = StructuredTool.from_function(
-        func=rerank_evidence,
+    rerank_tool = StructuredTool.from_function(func=accept_null_defaults(rerank_evidence),
         name="rerank_evidence",
         description=(
             "Re-rank retrieved documents by LLM-judged relevance to the query. "
@@ -51,8 +51,7 @@ def make_quality_tools(llm: Optional[Any] = None) -> List[Any]:
             "returns the documents reordered most-relevant-first (top_k)."
         ),
     )
-    audit_tool = StructuredTool.from_function(
-        func=audit_answer_grounding_tool,
+    audit_tool = StructuredTool.from_function(func=accept_null_defaults(audit_answer_grounding_tool),
         name="audit_answer_grounding",
         description=(
             "Audit whether a composed answer is grounded in the evidence (hallucination "

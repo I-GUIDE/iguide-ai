@@ -38,6 +38,7 @@ from agent_runtime.langchain_geo_tools import (
     artifact_name,
     read_vector,
 )
+from agent_runtime.tool_args import accept_null_defaults
 
 # sjoin predicates that make sense for "which area is this point in" style questions.
 _PREDICATES = ("within", "intersects", "contains", "covered_by", "covers", "touches", "crosses",
@@ -1243,8 +1244,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=select_by_attribute, name="select_by_attribute", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(select_by_attribute), name="select_by_attribute", metadata=meta,
             description=(
                 "SELECT A SUBSET of a layer by its attributes — the everyday GIS 'select by "
                 "attribute' / query, and the step that turns a whole layer into THE ONE FEATURE "
@@ -1256,8 +1256,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "into buffer_layer/clip_layer instead of operating on every feature. A test that "
                 "matches nothing returns the column's real range and example values rather than "
                 "an empty layer. " + _SIB)),
-        StructuredTool.from_function(
-            func=count_points_in_areas, name="count_points_in_areas", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(count_points_in_areas), name="count_points_in_areas", metadata=meta,
             description=(
                 "Aggregate POINTS INTO AREAS (point-in-polygon) and put the result on the user's "
                 "INTERACTIVE MAP as a choropleth: 'how many crashes per neighborhood', 'total "
@@ -1266,16 +1265,14 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "`<statistic>_<value_column>` when you name a value column), plus a CSV of "
                 "area -> value. statistic: count|sum|mean|median|min|max|std; predicate: "
                 "within|intersects|... CRS is aligned automatically. " + _SIB)),
-        StructuredTool.from_function(
-            func=aggregate_to_grid, name="aggregate_to_grid", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(aggregate_to_grid), name="aggregate_to_grid", metadata=meta,
             description=(
                 "Bin POINTS INTO A HEX OR SQUARE GRID and map the density as a choropleth — the "
                 "answer to 'where are these densest?' when there is no polygon layer to aggregate "
                 "into. `cell_km` is the real cell width in kilometres (computed in a projected "
                 "CRS, never degrees), `shape` is 'hex' or 'square'. Returns the occupied cells "
                 "with point_count and per_km2, plus a CSV. " + _SIB)),
-        StructuredTool.from_function(
-            func=nearest_distance, name="nearest_distance", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(nearest_distance), name="nearest_distance", metadata=meta,
             description=(
                 "Measure how far each feature of one layer is from the NEAREST feature of another "
                 "('distance from every school to the closest hospital'). Distances are true "
@@ -1283,16 +1280,14 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "distance_m/distance_km, a map layer styled by distance, a CSV, and min/mean/"
                 "median/max. Optional max_km caps the search; units sets the reported units. "
                 + _SIB)),
-        StructuredTool.from_function(
-            func=cluster_points, name="cluster_points", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(cluster_points), name="cluster_points", metadata=meta,
             description=(
                 "Detect spatial CLUSTERS / HOTSPOTS among points with DBSCAN and map them "
                 "coloured by cluster id. `eps_km` is the neighbourhood radius in real kilometres "
                 "and `min_samples` the minimum points per cluster; unclustered points are noise "
                 "(cluster = -1). Returns the classified points plus a CSV of cluster, n, "
                 "centroid and radius. Needs scikit-learn. " + _SIB)),
-        StructuredTool.from_function(
-            func=summary_statistics, name="summary_statistics", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(summary_statistics), name="summary_statistics", metadata=meta,
             description=(
                 "Descriptive statistics for a dataset's attributes: count, min, max, mean, "
                 "median, std, sum — for every numeric column by default, for one `column` when "

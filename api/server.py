@@ -134,10 +134,6 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # (None) falls back to the AGENT_DEV env var in the streaming layer.
     agent_dev_raw = _coalesce(data.get("agentDev"), data.get("agent_dev"))
     agent_dev = None if agent_dev_raw is None else bool(agent_dev_raw)
-    # use_supervisor is tri-state too: absent (None) falls back to the
-    # AGENT_SUPERVISOR env default (on).
-    use_supervisor_raw = _coalesce(data.get("useSupervisor"), data.get("use_supervisor"))
-    use_supervisor = None if use_supervisor_raw is None else bool(use_supervisor_raw)
     # code_exec is tri-state: absent (None) falls back to the AGENT_CODE_EXEC env
     # default (ON; set AGENT_CODE_EXEC=0/false to disable). Controls the sandboxed
     # execute_code tool for this request.
@@ -180,7 +176,6 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "skill_roots": skill_roots,
         "verbose": verbose,
         "agent_dev": agent_dev,
-        "use_supervisor": use_supervisor,
         "code_exec": code_exec,
         "code_peer": (str(code_peer).strip() or None) if code_peer else None,
         "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
@@ -1203,15 +1198,6 @@ def agent_chat():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
-            useSupervisor:
-              type: boolean
-              nullable: true
-              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
-              example: true
-            use_supervisor:
-              type: boolean
-              nullable: true
-              description: Snake_case alias for `useSupervisor`.
             codeExec:
               type: boolean
               nullable: true
@@ -1514,7 +1500,6 @@ def agent_chat():
                 file_ids=normalized.get("file_ids"),
                 skill_roots=normalized.get("skill_roots"),
                 verbose=bool(normalized.get("verbose", False)),
-                use_supervisor=normalized.get("use_supervisor"),
                 code_exec=normalized.get("code_exec"),
                 code_peer=normalized.get("code_peer"),
                 unified_peer=normalized.get("unified_peer"),
@@ -1605,7 +1590,6 @@ def agent_chat_stream():
     - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
     - `mcpModules`: null = all MCP modules (when MCP tools are on).
     - `smartToolRouting`: `true`.
-    - `useSupervisor`: server default `AGENT_SUPERVISOR` (ON = supervisor-over-peers graph).
     - `codeExec`: server default `AGENT_CODE_EXEC` (ON = sandboxed `execute_code` tool); send
       `false` to disable.
     - `agentDev`: server default `AGENT_DEV` (off = status-only SSE). When true, also emit the SSE
@@ -1867,15 +1851,6 @@ def agent_chat_stream():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
-            useSupervisor:
-              type: boolean
-              nullable: true
-              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
-              example: true
-            use_supervisor:
-              type: boolean
-              nullable: true
-              description: Snake_case alias for `useSupervisor`.
             codeExec:
               type: boolean
               nullable: true
@@ -2041,7 +2016,6 @@ def agent_chat_stream():
                     skill_roots=normalized.get("skill_roots"),
                     verbose=bool(normalized.get("verbose", False)),
                     agent_dev=normalized.get("agent_dev"),
-                    use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
                     code_peer=normalized.get("code_peer"),
                     unified_peer=normalized.get("unified_peer"),

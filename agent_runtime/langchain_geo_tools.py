@@ -28,6 +28,7 @@ import tempfile
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from agent_runtime.tool_args import accept_null_defaults
 
 # Above this, a GeoJSON is too bulky to ship and parquet is written instead.
 _GEOJSON_MAX_FEATURES = int(os.getenv("AGENT_GEOJSON_MAX_FEATURES", "60000"))
@@ -335,6 +336,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     # apply, and told the user an interactive heat map was impossible. An image genuinely cannot
     # become a layer — but the dataset it was drawn from can, so name it instead of dead-ending.
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+    # A GeoTIFF is neither of the two things these tools knew about. add_map_layer tried to read
+    # it as a table and reported "unreadable vector/tabular source"; add_raster_layer said it was
+    # not an image. Both were true and neither was useful — a DEM took four tool calls to reach
+    # the map. It IS a raster, and it carries its own georeferencing, so add_raster_layer now
+    # takes one directly and derives the bounds instead of asking for them.
+    _GEOTIFF_EXTS = {".tif", ".tiff"}
     _MAPPABLE_EXTS = {".geojson", ".json", ".csv", ".tsv", ".shp", ".zip", ".gpkg",
                       ".parquet", ".geoparquet", ".gml", ".kml"}
 
@@ -355,7 +362,15 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         except Exception:
             return None
         name = _true_name(path, rec)
-        if Path(name).suffix.lower() not in _IMAGE_EXTS:
+        suffix = Path(name).suffix.lower()
+        if suffix in _GEOTIFF_EXTS:
+            return {"ok": False,
+                    "error": f"{name} is a raster, so it has no features to click or style.",
+                    "hint": "Drape it with add_raster_layer, passing this same file_id — it "
+                            "reads the bounds out of the GeoTIFF, so you do not need to supply "
+                            "them.",
+                    "mappable_file_ids": _mappable_attached(exclude=file_id)}
+        if suffix not in _IMAGE_EXTS:
             return None
         return {"ok": False,
                 "error": f"{name} is an image, so it has no geometry to pan, zoom or click and "
@@ -634,8 +649,49 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
     meta = {"category": "geo"}
 
-    def add_raster_layer(file_id: str, bounds: List[float], name: Optional[str] = None,
-                         opacity: float = 0.85) -> str:
+    def _geotiff_to_drapable(path: Any, name_on_disk: str) -> Dict[str, Any]:
+        """Render a GeoTIFF to a PNG the map can drape, and read its true extent.
+
+        The extent comes from the FILE, never from the caller. A draped image is positioned
+        solely by its bounds and nothing downstream can check that the box matches the picture,
+        so a restated box draws a plausible layer in the wrong place — which is exactly the
+        misregistration that took three rounds to diagnose when the DEM was draped over the
+        requested bbox instead of the one actually served.
+        """
+        try:
+            import rasterio
+            from rasterio.warp import transform_bounds
+        except ImportError:
+            return {"ok": False,
+                    "error": "this deployment cannot read GeoTIFFs (rasterio is not installed)",
+                    "hint": "Render the raster to a PNG yourself and pass it with explicit bounds."}
+        from agent_runtime.file_store import create_output_file_from_path
+        try:
+            # Reuse the terrain renderer rather than a matplotlib figure: axes, margins and a
+            # colorbar would become part of the image, and a draped layer is positioned by its
+            # bounds — so the pixels would stop lining up with the ground.
+            from agent_runtime.terrain_tools import _render, _wgs84
+        except ImportError:
+            return {"ok": False, "error": "raster rendering is unavailable in this deployment"}
+        import tempfile
+        try:
+            with rasterio.open(str(path)) as src:
+                values = src.read(1, masked=True).filled(float("nan"))
+                left, bottom, right, top = src.bounds
+                georeferenced = src.crs is not None
+                if georeferenced and src.crs != _wgs84():
+                    left, bottom, right, top = transform_bounds(
+                        src.crs, _wgs84(), left, bottom, right, top, densify_pts=21)
+            out = Path(tempfile.mkdtemp()) / (Path(name_on_disk).stem + "_preview.png")
+            _render(values, out)
+            rec = create_output_file_from_path(str(out), filename=out.name)
+        except Exception as exc:  # noqa: BLE001 - a bad raster is a tool error, not a dead turn
+            return {"ok": False, "error": f"could not render {name_on_disk}: {exc}"}
+        return {"ok": True, "file_id": rec["file_id"], "georeferenced": georeferenced,
+                "bounds": [round(float(v), 6) for v in (left, bottom, right, top)]}
+
+    def add_raster_layer(file_id: str, bounds: Optional[List[float]] = None,
+                         name: Optional[str] = None, opacity: float = 0.85) -> str:
         """Drape a georeferenced IMAGE over the map — a heat surface, a cluster mask, a rendered
         grid you computed yourself.
 
@@ -652,10 +708,28 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
         Rows are assumed north-up: image row 0 is the maxlat edge. Flip the array before saving if
         yours runs the other way.
+
+        A GeoTIFF may be passed directly and `bounds` left out: it carries its own
+        georeferencing, so the extent is read from the file, which is more reliable than any
+        box a caller could restate.
         """
         try:
             path, rec = _resolve(file_id)
             name_on_disk = _true_name(path, rec)
+            if Path(name_on_disk).suffix.lower() in _GEOTIFF_EXTS:
+                drawn = _geotiff_to_drapable(path, name_on_disk)
+                if not drawn.get("ok"):
+                    return json.dumps(drawn)
+                file_id = drawn["file_id"]
+                # The FILE wins, even when bounds were supplied. A georeferenced raster knows
+                # where it is; a caller restating that box can only agree or be wrong, and a
+                # wrong box draws a plausible layer in the wrong place that nothing downstream
+                # can detect. The one exception is a GeoTIFF carrying no CRS, where the file
+                # knows nothing and the caller's box is all there is.
+                bounds = drawn["bounds"] if drawn.get("georeferenced") else (
+                    bounds or drawn["bounds"])
+                path, rec = _resolve(file_id)
+                name_on_disk = _true_name(path, rec)
             if Path(name_on_disk).suffix.lower() not in _IMAGE_EXTS:
                 return json.dumps({
                     "ok": False,
@@ -854,7 +928,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 shutil.rmtree(tmp, ignore_errors=True)
 
     return [
-        StructuredTool.from_function(func=add_map_layer, name="add_map_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(add_map_layer), name="add_map_layer", metadata=meta,
             description=("Put a dataset on the user's INTERACTIVE MAP as a styled layer they can pan, "
                          "zoom and click — this is how a map is delivered here, and it is what to use "
                          "when the user asks to see/plot/visualize data on the map. `render`: "
@@ -864,7 +938,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download.")),
-        StructuredTool.from_function(func=add_raster_layer, name="add_raster_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(add_raster_layer), name="add_raster_layer", metadata=meta,
             description=("Drape a georeferenced IMAGE over the user's map, for pixels that ARE the "
                          "result: a k-means cluster mask over an embedding grid, a per-pixel change "
                          "or similarity surface, a rendering you computed in code. Takes the image "
@@ -872,25 +946,25 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "an embedding package's region_bbox is exactly that. Rows are north-up. "
                          "Use add_map_layer instead whenever the result has geometry: a raster "
                          "cannot be clicked and carries no legend.")),
-        StructuredTool.from_function(func=inspect_vector, name="inspect_vector", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(inspect_vector), name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
                          "shapefile .zip, a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet by "
                          "file_id. " + _SIB)),
-        StructuredTool.from_function(func=render_map_image, name="render_map_image", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(render_map_image), name="render_map_image", metadata=meta,
             description=("Draw a vector dataset into a STATIC PNG PICTURE (optionally shaded by "
                          "`column`) and return a downloadable file_id. The picture cannot be "
                          "panned, zoomed or clicked, so choose it when someone wants an IMAGE to "
                          "download, embed in a document or print. To show data on the user's "
                          "interactive map instead, use add_map_layer. Large layers auto-downsample. "
                          + _SIB)),
-        StructuredTool.from_function(func=vector_to_geojson, name="vector_to_geojson", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(vector_to_geojson), name="vector_to_geojson", metadata=meta,
             description=("Convert a vector dataset to GeoJSON (reprojected to WGS84 by default) and "
                          "return a downloadable file_id, e.g. for web mapping. " + _SIB)),
-        StructuredTool.from_function(func=reproject_vector, name="reproject_vector", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(reproject_vector), name="reproject_vector", metadata=meta,
             description=("Reproject a vector dataset to a target CRS (e.g. EPSG:5070 for equal-area "
                          "US analysis) and return a downloadable GeoParquet file_id. " + _SIB)),
-        StructuredTool.from_function(func=vector_spatial_join, name="vector_spatial_join", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(vector_spatial_join), name="vector_spatial_join", metadata=meta,
             description=("Spatial-join two vector datasets (e.g. assign points to the TIGER polygon "
                          "they fall in). CRS is aligned automatically. Returns a downloadable "
                          "GeoParquet file_id.")),

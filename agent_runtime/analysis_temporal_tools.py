@@ -43,6 +43,7 @@ from agent_runtime.langchain_geo_tools import (  # reuse, do not reinvent
     artifact_name,
     read_vector,
 )
+from agent_runtime.tool_args import accept_null_defaults
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from langchain_core.tools import StructuredTool
@@ -1228,40 +1229,35 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=detect_time_column, name="detect_time_column", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(detect_time_column), name="detect_time_column", metadata=meta,
             description=("Find which column holds the DATE/TIME in a dataset and report the parsed "
                          "span (min -> max), granularity (year/month/day/hour/...), the parse method "
                          "used and how many rows failed to parse. Handles messy string formats such "
                          "as '07/26/2026 08:00:00 PM', ISO timestamps, bare years and epoch numbers. "
                          "Call this FIRST for any 'when / trend / recent / since' question before "
                          "filtering or charting by time.")),
-        StructuredTool.from_function(
-            func=filter_by_time, name="filter_by_time", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(filter_by_time), name="filter_by_time", metadata=meta,
             description=("Slice a dataset to a time window and put just that window on the user's "
                          "INTERACTIVE MAP (points/shapes, or heatmap for very large point sets). "
                          "start/end accept '2026-07-26', '2026-07', '2026' or a full timestamp, and "
                          "either can be omitted for an open-ended window; a plain date as `end` "
                          "covers that whole day. Returns a downloadable GeoJSON of the slice and "
                          "reports how many records were dropped for an unparseable time.")),
-        StructuredTool.from_function(
-            func=time_series, name="time_series", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(time_series), name="time_series", metadata=meta,
             description=("Count records per time period and return a CSV table plus a PNG line/bar "
                          "chart — use it for 'is this rising or falling?', 'what time of day?', "
                          "'which months?'. freq: hour|day|week|month|quarter|year, or a cyclical "
                          "profile hour_of_day|day_of_week|month_of_year. `by` splits the series by a "
                          "category column. This output is NON-SPATIAL: it produces a chart and a "
                          "table, not a map layer.")),
-        StructuredTool.from_function(
-            func=compare_periods, name="compare_periods", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(compare_periods), name="compare_periods", metadata=meta,
             description=("Compare two time windows per AREA: counts records inside each polygon of "
                          "an areas layer (tracts, neighborhoods, counties) in period_a and period_b "
                          "and maps the change as a DIVERGING choropleth centred on zero, styled by "
                          "the `change` column. Periods accept '2026-07', '2026' or ranges like "
                          "'2026-01-01..2026-06-30'. Also returns a CSV of area / a / b / change / "
                          "pct_change. Use it for 'which areas got better or worse?'.")),
-        StructuredTool.from_function(
-            func=temporal_hotspots, name="temporal_hotspots", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(temporal_hotspots), name="temporal_hotspots", metadata=meta,
             description=("Find WHERE activity concentrated in the most recent period compared with "
                          "the average of the earlier ones, without needing an areas layer: bins the "
                          "records into a square grid (`cell_km` kilometres on a side, computed in a "

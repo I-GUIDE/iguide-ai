@@ -40,19 +40,34 @@ def _tool(name, content, call_id):
     return SimpleNamespace(content=content, name=name, tool_call_id=call_id, type="tool", tool_calls=[])
 
 
-def _canned_orchestration_result():
+def _decider(sequence):
+    """A decide_fn that walks a fixed sequence of actions, then stops."""
+    steps = list(sequence)
+
+    def decide(state, distilled):
+        return steps.pop(0) if steps else "done"
+
+    return decide
+
+
+def _canned_supervisor_state():
+    """What `run_supervisor` hands back to its wrapper.
+
+    This used to be the RAW executor shape (`{"messages": [...]}`) stubbed into the
+    agents-as-tools arm, which did its own conversion. That arm is gone; the canned value now
+    sits at the seam that remains. The messages are kept underneath because the stream tests
+    read the tool call out of them.
+    """
     return {
         "messages": [
             _human("What datasets exist for floods?"),
-            _ai(
-                "",
-                tool_calls=[
-                    {"name": "search_agent_evidence", "args": {"query": "floods"}, "id": "c1"}
-                ],
-            ),
+            _ai("", tool_calls=[{"name": "search_agent_evidence", "args": {"query": "floods"},
+                                 "id": "c1"}]),
             _tool("search_agent_evidence", '{"search_agent_summary": "found 2 docs"}', "c1"),
             _ai(FINAL_ANSWER),
-        ]
+        ],
+        "final_answer": FINAL_ANSWER,
+        "audit": {},
     }
 
 
@@ -60,30 +75,24 @@ def _canned_orchestration_result():
 def stub_orchestrator(monkeypatch):
     """Replace the orchestrate-node invocation seam with canned data.
 
-    The legacy arm now lives in agent_runtime.legacy.orchestration, which imports these
-    functions into its namespace, so they are patched there.
+    These tests characterise the RESPONSE and STREAM contract — what a caller and an SSE client
+    receive — not how the orchestration reaches its answer. They used to stub the
+    agents-as-tools arm and pin `AGENT_SUPERVISOR=0`; that arm was removed, so they stub the
+    one seam that remains. The contract under test did not change with it, which is the point:
+    the shape a client sees should survive the graph behind it being replaced.
     """
-    import agent_runtime.legacy.orchestration as lo
+    import agent_runtime.supervisor.graph as sg
 
-    # These tests characterize the agents-as-tools orchestrate path; the supervisor
-    # path is now the default, so pin it off here.
-    monkeypatch.setenv("AGENT_SUPERVISOR", "0")
+    # Stubbed BELOW run_supervisor_orchestration, not in place of it: that wrapper emits the
+    # orchestrate node_started/node_completed pair the lifecycle test asserts on, so replacing
+    # it would quietly delete the thing under test. Canning `run_supervisor` leaves the real
+    # wrapper, the real trace emission and the real state mapping in the path.
+    def fake_run_supervisor(query, **kwargs):
+        return _canned_supervisor_state()
 
-    def fake_collect(**kwargs):
-        return [
-            SimpleNamespace(name="search_agent_evidence"),
-            SimpleNamespace(name="analysis_agent_answer"),
-        ]
-
-    def fake_build(**kwargs):
-        return object()
-
-    def fake_invoke(*args, **kwargs):
-        return _canned_orchestration_result()
-
-    monkeypatch.setattr(lo, "collect_orchestration_tools", fake_collect)
-    monkeypatch.setattr(lo, "build_orchestrator_agent_executor", fake_build)
-    monkeypatch.setattr(lo, "invoke_agent_with_payload_fallback", fake_invoke)
+    monkeypatch.setattr(sg, "run_supervisor", fake_run_supervisor)
+    for name in ("default_search_fn", "default_analyze_fn", "default_code_fn"):
+        monkeypatch.setattr(sg, name, lambda **kwargs: (lambda *a, **k: None))
     return None
 
 
@@ -193,52 +202,36 @@ def test_stream_emits_graph_node_lifecycle_events(stub_orchestrator):
 # Fix #2/#3: shared, deduplicated evidence store
 # ---------------------------------------------------------------------------
 
-def test_search_tool_dedups_against_shared_store(monkeypatch):
-    import agent_runtime.graph_nodes as gn
+def test_a_throwing_search_peer_does_not_kill_the_turn(monkeypatch):
+    """Replaces two tests of `make_search_agent_evidence_tool`, the agents-as-tools search tool
+    removed with that arm. Dedup, the other property they covered, is tested on the supervisor
+    arm already (test_supervisor_graph: evidence accumulates and dedups across searches). This
+    one was not, and it is the half that matters: a dead peer must cost its own result, not the
+    whole turn including evidence already gathered.
+    """
+    from agent_runtime.supervisor import graph as sg
 
-    calls = {"n": 0}
+    def exploding_search(query, state):
+        raise RuntimeError("the search backend is down")
 
-    monkeypatch.setattr(gn, "collect_tools", lambda **k: [])
-    monkeypatch.setattr(gn, "build_search_agent_executor", lambda **k: object())
-
-    def fake_invoke(*args, **kwargs):
-        calls["n"] += 1
-        return {"messages": []}
-
-    def fake_payload(query, search_response, route_trace):
-        return {"user_query": query, "search_agent_summary": f"summary::{query}"}
-
-    monkeypatch.setattr(gn, "invoke_agent_with_payload_fallback", fake_invoke)
-    monkeypatch.setattr(gn, "build_search_evidence_payload", fake_payload)
-
-    shared = []
-    tool = gn.make_search_agent_evidence_tool(
-        llm=None,
-        verbose=False,
-        return_intermediate_steps=False,
-        tool_strategy="granular",
-        include_mcp_tools=False,
-        mcp_modules=None,
-        enabled_search_methods=None,
-        smart_tool_routing=False,
-        forced_intent=None,
-        search_invocations=shared,
-        thread_id=None,
-        checkpointer=None,
+    # do_audit=False is load-bearing, not tidiness: the grounding audit builds a default LLM
+    # and calls it. Left on, this unit test reached the live provider — which is how it turned a
+    # 3-minute suite into 25 minutes and left the live spatial e2e test failing behind it, while
+    # passing on its own. A test that touches the network is not a unit test, and one that
+    # spends a shared rate limit breaks tests it never mentions.
+    out = sg.run_supervisor(
+        "find flood datasets",
+        search_fn=exploding_search,
+        analyze_fn=lambda q, ev, st: {"summary": "analysed anyway", "tool_calls": [],
+                                      "tool_results": []},
+        code_fn=lambda q, ev, st: None,
+        synthesize_fn=lambda *a, **k: "an answer",
+        decide_fn=_decider(["search", "analyze", "done"]),
+        do_audit=False,
+        max_steps=4,
     )
+    assert out.get("final_answer") == "an answer"
 
-    tool.invoke({"query": "Floods in Texas"})
-    tool.invoke({"query": "floods in texas"})  # same query (normalized) -> cache hit
-    assert calls["n"] == 1, "duplicate query should not re-invoke the search executor"
-
-    tool.invoke({"query": "Droughts in California"})  # new query -> real search
-    assert calls["n"] == 2
-    assert len(shared) == 2, "shared store should hold one entry per unique query"
-
-
-# ---------------------------------------------------------------------------
-# Phase 1: AGENT_DEV gates detail-tier SSE events
-# ---------------------------------------------------------------------------
 
 def test_agent_dev_off_emits_status_only(stub_orchestrator, monkeypatch):
     monkeypatch.delenv("AGENT_DEV", raising=False)
@@ -286,32 +279,6 @@ def test_agent_dev_request_flag_overrides_env(stub_orchestrator, monkeypatch):
 # ---------------------------------------------------------------------------
 # Robustness: tool failures return a result (never leave a dangling tool_call)
 # ---------------------------------------------------------------------------
-
-def test_search_tool_failure_returns_error_string(monkeypatch):
-    import agent_runtime.graph_nodes as gn
-
-    monkeypatch.setattr(gn, "collect_tools", lambda **k: [])
-    monkeypatch.setattr(gn, "build_search_agent_executor", lambda **k: object())
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("backend exploded")
-
-    monkeypatch.setattr(gn, "invoke_agent_with_payload_fallback", boom)
-
-    shared = []
-    tool = gn.make_search_agent_evidence_tool(
-        llm=None, verbose=False, return_intermediate_steps=False,
-        tool_strategy="granular", include_mcp_tools=False, mcp_modules=None,
-        enabled_search_methods=None, smart_tool_routing=False, forced_intent=None,
-        search_invocations=shared, thread_id=None, checkpointer=None,
-    )
-
-    out = tool.invoke({"query": "anything"})  # must NOT raise
-    parsed = json.loads(out)
-    assert parsed["error"] == "search_agent_failed"
-    assert "backend exploded" in parsed["message"]
-    assert shared == [], "failed search must not be cached as evidence"
-
 
 def test_fallback_does_not_retry_on_tool_ordering_400():
     from agent_runtime.executor_factory import invoke_agent_with_payload_fallback

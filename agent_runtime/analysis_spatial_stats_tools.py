@@ -68,6 +68,7 @@ from agent_runtime.analysis_aggregate_tools import (  # reuse, do not reinvent
     _write_geojson,
 )
 from agent_runtime.langchain_geo_tools import _index_attached, artifact_name
+from agent_runtime.tool_args import accept_null_defaults
 
 # --- weights ------------------------------------------------------------------------
 
@@ -1223,8 +1224,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=global_spatial_autocorrelation, name="global_spatial_autocorrelation",
+        StructuredTool.from_function(func=accept_null_defaults(global_spatial_autocorrelation), name="global_spatial_autocorrelation",
             metadata=meta,
             description=(
                 "Test whether a variable is spatially CLUSTERED — Moran's I, Geary's C and "
@@ -1234,8 +1234,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "each statistic against its expected value under spatial randomness plus a "
                 "plain-language verdict. Run before local_moran_lisa. `weights`: queen|rook|knn|"
                 "distance_band|kernel. " + _SIB)),
-        StructuredTool.from_function(
-            func=local_moran_lisa, name="local_moran_lisa", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(local_moran_lisa), name="local_moran_lisa", metadata=meta,
             description=(
                 "LISA CLUSTER MAP (Local Moran's I) — puts the HOT SPOTS and COLD SPOTS on the "
                 "user's interactive map. Answers 'which neighborhoods/counties/tracts are the "
@@ -1244,8 +1243,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "(spatial outliers), or Not significant, and the layer is delivered as a "
                 "CATEGORICAL map layer with a legend plus a CSV of per-area statistics and "
                 "p-values. This is GeoDa's cluster map. " + _SIB)),
-        StructuredTool.from_function(
-            func=local_getis_ord, name="local_getis_ord", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(local_getis_ord), name="local_getis_ord", metadata=meta,
             description=(
                 "Getis-Ord Gi* HOT SPOT / COLD SPOT analysis — the ArcGIS-style hotspot map, "
                 "banded by confidence (99%/95%). Use when the question is 'where are the "
@@ -1253,16 +1251,14 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "instead when spatial OUTLIERS matter too. `star=True` (default) includes each "
                 "area in its own neighbourhood. Returns a categorical map layer with a legend "
                 "plus a CSV of z-scores and p-values. " + _SIB)),
-        StructuredTool.from_function(
-            func=moran_scatterplot, name="moran_scatterplot", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(moran_scatterplot), name="moran_scatterplot", metadata=meta,
             description=(
                 "The MORAN SCATTERPLOT as a downloadable PNG: each area's value against its "
                 "neighbours' average, coloured by LISA quadrant, with the regression line whose "
                 "slope IS Moran's I. GeoDa's signature plot — use it to SHOW spatial "
                 "autocorrelation and its outliers, alongside "
                 "global_spatial_autocorrelation which states it numerically. " + _SIB)),
-        StructuredTool.from_function(
-            func=spatial_regression, name="spatial_regression", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(spatial_regression), name="spatial_regression", metadata=meta,
             description=(
                 "SPATIAL REGRESSION — 'does X explain Y?' done correctly for areal data, where "
                 "plain OLS understates the standard errors because neighbours resemble each "
@@ -1273,8 +1269,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "ols|lag|error. `x_columns` is a LIST. Returns the coefficient table with "
                 "p-values, fit statistics (R-squared/pseudo-R-squared, AIC, log-likelihood), the "
                 "diagnostics, a coefficients CSV, and a residual map layer. " + _SIB)),
-        StructuredTool.from_function(
-            func=regionalize, name="regionalize", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(regionalize), name="regionalize", metadata=meta,
             description=(
                 "REGIONALIZATION — group areas into CONTIGUOUS regions similar on several "
                 "variables, using GeoDa's own algorithms (SKATER, REDCAP, AZP, SCHC, max-p). "
@@ -1285,8 +1280,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "maximises the region count subject to bound_column/min_bound (e.g. 50000 people "
                 "each) and ignores n_regions. Returns a categorical region map with a legend and "
                 "a per-region summary CSV. Needs polygons. " + _SIB)),
-        StructuredTool.from_function(
-            func=spatial_weights, name="spatial_weights", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(spatial_weights), name="spatial_weights", metadata=meta,
             description=(
                 "Build and INSPECT the spatial weights matrix ('who is next to whom') that every "
                 "other spatial statistic depends on: neighbour counts, islands (areas with NO "

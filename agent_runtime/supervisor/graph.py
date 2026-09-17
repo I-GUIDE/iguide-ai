@@ -16,8 +16,7 @@ Single-responsibility split:
 The supervisor only ever sees a *distilled* view (counts/flags), never the heavy
 documents. Everything is dependency-injected so the graph is unit-testable with no
 live LLM/backends. Default adapters wire to existing agents (best-effort; need
-live validation). Default ON; per-request override ``use_supervisor``; env opt-out
-``AGENT_SUPERVISOR=0``.
+live validation). It is the only orchestration path.
 """
 
 from __future__ import annotations
@@ -115,6 +114,7 @@ class SupervisorState(TypedDict, total=False):
     actions: List[str]             # supervisor decision history
     next_action: str
     step: int
+    evidence_summary: Optional[str]
     max_steps: int
     final_answer: str
     distilled: Dict[str, Any]
@@ -130,13 +130,6 @@ class SupervisorState(TypedDict, total=False):
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
 
 
-def is_supervisor_enabled() -> bool:
-    """Whether the orchestrate path should use the supervisor-over-peers graph.
-
-    Default **on**; set ``AGENT_SUPERVISOR`` to a falsy value (0/false/no/off) to
-    fall back to the legacy agents-as-tools orchestrator.
-    """
-    return (os.getenv("AGENT_SUPERVISOR") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +220,76 @@ def _min_coverage() -> float:
         return min(1.0, max(0.0, float(os.getenv("AGENT_SEARCH_MIN_COVERAGE", "0.34"))))
     except (TypeError, ValueError):
         return 0.34
+
+
+# ---------------------------------------------------------------------------
+# What the evidence SAYS, not just how much of it there is
+# ---------------------------------------------------------------------------
+# The decider sees titles, per-source counts, a top score and `topical_coverage`. Those are
+# cheap, deterministic and cannot be talked into anything — but they are all LEXICAL. They can
+# say "8 documents, 0.75 of them mention your subject terms" and still leave the decider unable
+# to tell a set of PySAL accessibility notebooks from a set of DEM sources, because both mention
+# "elevation". Measured live on a self-hosted model: two full search rounds where the second
+# added nothing the first had not, because "is this enough?" was being answered from counts.
+#
+# So the model that just read the documents writes a few lines about what is actually in them.
+#
+# Two rules keep this from making things worse:
+#
+#  * It DESCRIBES, and names gaps. It does not rule on sufficiency. That judgement belongs to
+#    the decider, which also sees the deterministic signals and the action history; a summary
+#    that announced "this is enough" would collapse two independent checks into one and give a
+#    weak model's opinion the final word.
+#  * It never REPLACES the lexical signals — it sits beside them. If the summary is wrong, the
+#    decider still has coverage, scores and titles to disagree with.
+#
+# Failure is always None: a summary is an aid to a decision, never a precondition for one.
+
+_EVIDENCE_SUMMARY_MAX_CHARS = 700
+_EVIDENCE_SUMMARY_DOCS = 8
+_EVIDENCE_SUMMARY_SNIPPET = 400
+
+
+def _evidence_summary_enabled() -> bool:
+    return str(os.getenv("AGENT_EVIDENCE_SUMMARY", "1")).strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+_EVIDENCE_SUMMARY_PROMPT = (
+    "You are helping an agent decide what to do next. Below are search results retrieved for a "
+    "user's request.\n\n"
+    "Write at most four sentences covering:\n"
+    "1. What these results actually contain — the kinds of things, not their titles restated.\n"
+    "2. Which parts of the request they DO address.\n"
+    "3. Which parts they do NOT address, or say 'they address the request directly' if nothing "
+    "is missing.\n\n"
+    "Describe only. Do NOT recommend an action, do not say whether to search again, and do not "
+    "say whether the evidence is sufficient — another step decides that and needs your "
+    "description, not your verdict. If the results are off-topic, say so plainly.\n\n"
+    "REQUEST: {query}\n\nRESULTS:\n{docs}"
+)
+
+
+def _summarize_evidence(llm: Any, query: str, docs: List[Any]) -> Optional[str]:
+    """A few lines on what the retrieved evidence contains. None if unavailable."""
+    if not llm or not docs or not _evidence_summary_enabled():
+        return None
+    lines: List[str] = []
+    for i, d in enumerate(docs[:_EVIDENCE_SUMMARY_DOCS], 1):
+        title = _doc_field(d, "title", "name", default="Untitled")
+        body = _doc_field(d, "contents", "content", "text", "abstract", "description", default="")
+        lines.append(f"[{i}] {title}\n{str(body)[:_EVIDENCE_SUMMARY_SNIPPET]}")
+    prompt = _EVIDENCE_SUMMARY_PROMPT.format(query=query, docs="\n\n".join(lines))
+    try:
+        resp = llm.invoke(prompt)
+    except Exception as exc:  # noqa: BLE001 - an aid to a decision, never a precondition
+        logger.warning("evidence summary failed, continuing without it: %s", exc)
+        return None
+    text = getattr(resp, "content", resp)
+    text = str(text or "").strip()
+    if not text:
+        return None
+    return text[:_EVIDENCE_SUMMARY_MAX_CHARS]
 
 
 def _results_are_poor(docs: List[Any], query: str) -> bool:
@@ -1100,10 +1163,21 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "evidence_titles": titles,
         "evidence_sources": sources,
         "topical_coverage": _term_coverage(docs, query),
+        # What the evidence SAYS. Written by the model that read it; descriptive, never a
+        # verdict on sufficiency. Sits beside the lexical signals so a wrong summary can be
+        # disagreed with rather than obeyed.
+        "evidence_summary": state.get("evidence_summary"),
         "top_score": round(max(scores), 3) if scores else None,
         "queries_searched": list(state.get("searched_queries") or []),
         "has_analysis": state.get("analysis_results") is not None,
         "analysis_summary": _peer_summary(state.get("analysis_results")),
+        # Whether the thing the user asked to SEE is already in front of them. The decider had
+        # no way to know this: `has_analysis` says a peer ran, `artifacts_produced` lists images,
+        # and neither answers "is the deliverable delivered?" — so after analyze put a DEM on the
+        # map it routed to code, which fetched the same DEM again. Measured: 266s and 16
+        # execute_code iterations to redo work already done in one call.
+        "map_layer_delivered": _map_delivered_this_turn(state.get("analysis_results"),
+                                                        state.get("code_result")),
         "has_code": state.get("code_result") is not None,
         "code_summary": _peer_summary(state.get("code_result")),
         "artifacts_produced": [a.get("filename") for a in artifacts],
@@ -1118,6 +1192,21 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "available_actions": _available_actions(state),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
+        # THIS turn's ledger, in the same rendering the answering model and the grounding
+        # auditor read. The rows were always kept — they are what the trace shows as
+        # "dem_for_region(...) -> 1 layer on the map" — but _ledger_lines had exactly two
+        # consumers and the decider was not one of them. It saw counts and flags about the
+        # current turn and the ledger only of PREVIOUS turns, so it could not tell that the
+        # tool it was about to route to had already run and produced the answer.
+        **({"this_turn": _ledger_lines([*_ledger_rows(state.get("analysis_results"),
+                                                      state.get("code_result")),
+                                        *(state.get("action_rows") or [])]),
+            "this_turn_note": (
+                "What THIS turn has already done, oldest first — the same record the answering "
+                "model and the auditor see. A line here is work that is DONE: routing to a peer "
+                "to redo it produces a second copy, not a better answer. A line marked FAILED "
+                "means the tool did not run and its result does not exist.")}
+           if for_decision else {}),
         **({"prior_turns_in_this_conversation": _budgeted(_prior_actions(state)),
             "prior_turns_note": (
                 "What THIS conversation already did, oldest first. If the user's question is "
@@ -1795,6 +1884,23 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
 
+def _capability_inventory(capability: str) -> str:
+    """What a peer can actually do, from ``agent_runtime.capability_registry``.
+
+    GENERATED rather than written here on purpose. The hand-written version drifted behind the
+    peers three times without anyone noticing — terrain, administrative boundaries and geocoding
+    were all bound to a peer while the supervisor's description of it never mentioned them, and
+    a DEM request became a knowledge-base search as a direct result. The reasoning guidance in
+    this prompt stays hand-written, because that is judgement rather than inventory.
+    """
+    try:
+        from agent_runtime.capability_registry import describe
+        return describe(capability)
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        logger.exception("capability inventory unavailable; falling back to a generic phrase")
+        return "geospatial analysis over the evidence or uploaded files"
+
+
 def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
     """LLM-driven next-action chooser with a deterministic heuristic fallback."""
 
@@ -1806,9 +1912,12 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
-            "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
-            "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
-            "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
+            "- analyze: run a workflow with EXISTING purpose-built tools over the evidence or "
+            "uploaded files. It can currently do: "
+            + _capability_inventory("analyze") + ". "
+            "Anything in that list is analyze work, not a retrieval question — a DEM, a "
+            "boundary and a geocode all come from live services, not from the knowledge base, "
+            "so searching for them finds writing ABOUT them and never the thing itself. "
             "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
             "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
             "it changed across years, comparing two areas, and running pretrained heads. "
@@ -1819,7 +1928,8 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "tools do not. "
             "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS, not datasets "
             "to retrieve — a request naming one is analyze work, not search.\n"
-            "- code: produce and run NEW code for work no existing tool covers\n"
+            "- code: produce and run NEW code for work no existing tool covers. It binds the "
+            "same toolkit as analyze, plus packaged skills and saved workflows\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
             f"Actions available this step: {', '.join(available)}. "
@@ -1833,7 +1943,21 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "find'), the answer is composed from that conversation, so 'done' is enough unless "
             "genuinely new external information is needed.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
-            "requests are fulfilled automatically before you are consulted again.\n\n"
+            "requests are fulfilled automatically before you are consulted again.\n"
+            "`map_layer_delivered` in Progress means a layer is ALREADY on the user's map. When "
+            "the request was to see something and it is there, choose `done` — `code` exists for "
+            "work no existing tool covers, not for redoing work a tool has already done, and a "
+            "second pass fetches the same data again and draws a second copy of the same layer. "
+            "Choose `code` after a successful analyze only when the request asks for something "
+            "the delivered result does not contain.\n"
+            "`evidence_summary` in Progress is a DESCRIPTION of what was retrieved, written by "
+            "the model that read it. It deliberately does not say whether the evidence is "
+            "sufficient — that is your call. Search again only when it names a specific gap a "
+            "DIFFERENT query could fill; repeating a search because the count looks small "
+            "returns the same documents and wastes the step. And when the request is work for a "
+            "tool rather than a question about the literature — computing a DEM, buffering, "
+            "embedding a region — retrieval cannot help at all, however thin the evidence "
+            "looks.\n\n"
             "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
@@ -4170,6 +4294,7 @@ def build_supervisor_graph(
         prev_streak = state.get("search_empty_streak", 0)
         update: Dict[str, Any] = {
             "evidence": merged,
+            "evidence_summary": _summarize_evidence(llm, q, merged) or state.get("evidence_summary"),
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
             "searched_queries": tried,
@@ -4496,7 +4621,6 @@ __all__ = [
     "SupervisorState",
     "build_supervisor_graph",
     "run_supervisor",
-    "is_supervisor_enabled",
     "default_decide_fn",
     "default_search_fn",
     "default_analyze_fn",

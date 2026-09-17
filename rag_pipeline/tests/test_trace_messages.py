@@ -10,6 +10,7 @@ really is wrapped over the sub-agents as tools; it was copied across and never r
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -36,14 +37,29 @@ def test_the_pair_opens_and_closes_with_the_same_name():
     assert src.count('agent_role="supervisor"') == 2
 
 
-def test_the_legacy_arm_keeps_the_name_because_it_is_true_there():
-    """The one place an orchestrator agent exists. Renaming it there would trade an accurate
-    string for a vague one."""
-    from agent_runtime.legacy import orchestration as legacy
+def test_no_arm_claims_an_orchestrator_agent_any_more():
+    """"Orchestrator agent started" was accurate on the agents-as-tools arm, where an
+    orchestrator LLM really did call the other agents as tools. That arm is gone, so the string
+    has no true home left — and a trace line naming a component that does not exist is how a
+    reader builds the wrong mental model of the graph."""
+    import agent_runtime
 
-    src = inspect.getsource(legacy.run_legacy_orchestration)
-    assert "Orchestrator agent started" in src
-    assert "build_orchestrator_agent_executor" in src, "the thing the string names"
+    # Scanned as STRING CONSTANTS via the AST, not as text: the comment in
+    # supervisor/orchestration.py that records why this was renamed contains the phrase, and a
+    # grep-shaped test would fail on the explanation for its own existence.
+    import ast
+
+    root = Path(agent_runtime.__file__).parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value == "Orchestrator agent started":
+                offenders.append(path.name)
+    assert not offenders, offenders
 
 
 def test_the_route_line_describes_the_request_not_the_graph():
