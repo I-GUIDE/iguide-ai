@@ -1870,6 +1870,23 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
 
+def _capability_inventory(capability: str) -> str:
+    """What a peer can actually do, from ``agent_runtime.capability_registry``.
+
+    GENERATED rather than written here on purpose. The hand-written version drifted behind the
+    peers three times without anyone noticing — terrain, administrative boundaries and geocoding
+    were all bound to a peer while the supervisor's description of it never mentioned them, and
+    a DEM request became a knowledge-base search as a direct result. The reasoning guidance in
+    this prompt stays hand-written, because that is judgement rather than inventory.
+    """
+    try:
+        from agent_runtime.capability_registry import describe
+        return describe(capability)
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        logger.exception("capability inventory unavailable; falling back to a generic phrase")
+        return "geospatial analysis over the evidence or uploaded files"
+
+
 def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
     """LLM-driven next-action chooser with a deterministic heuristic fallback."""
 
@@ -1881,9 +1898,12 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
-            "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
-            "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
-            "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
+            "- analyze: run a workflow with EXISTING purpose-built tools over the evidence or "
+            "uploaded files. It can currently do: "
+            + _capability_inventory("analyze") + ". "
+            "Anything in that list is analyze work, not a retrieval question — a DEM, a "
+            "boundary and a geocode all come from live services, not from the knowledge base, "
+            "so searching for them finds writing ABOUT them and never the thing itself. "
             "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
             "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
             "it changed across years, comparing two areas, and running pretrained heads. "
@@ -1894,7 +1914,8 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "tools do not. "
             "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS, not datasets "
             "to retrieve — a request naming one is analyze work, not search.\n"
-            "- code: produce and run NEW code for work no existing tool covers\n"
+            "- code: produce and run NEW code for work no existing tool covers. It binds the "
+            "same toolkit as analyze, plus packaged skills and saved workflows\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
             f"Actions available this step: {', '.join(available)}. "
