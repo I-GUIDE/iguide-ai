@@ -13,7 +13,7 @@ from rag_pipeline.agent_file_store import (require_file_record, reset_session as
                                            resolve_file_id, save_uploaded_file,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
-from agent_runtime import deployment_mode
+from agent_runtime import deployment_mode, identity
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -107,6 +107,97 @@ def _require_agent_chat_api_key() -> None:
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
+
+
+def _service_key_presented() -> bool:
+    """True when this request carried the VALID service key (not merely some key)."""
+    expected = _get_agent_chat_api_key()
+    return bool(expected) and _extract_presented_api_key() == expected
+
+
+def _token_strict() -> bool:
+    """Whether token mode REJECTS an unusable identity, or merely notes its absence.
+
+    ``AGENT_TOKEN_STRICT=0`` is the migration window and nothing else: it lets identity flow and
+    records get stamped with an owner while nothing is yet refused, so ownership can be
+    backfilled before it starts gating. Delete it once the backfill is done — a permanently
+    non-strict token mode is just dev mode wearing a costume.
+    """
+    return str(os.getenv("AGENT_TOKEN_STRICT") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _extract_user_token() -> str:
+    """The platform access token for this request.
+
+    The cookie is the real path: it is httpOnly, scoped to `.i-guide.io`, and arrives here on
+    its own because the UI is served from this same origin. A Bearer value is accepted too, but
+    ONLY when it is structurally a JWT — `Authorization: Bearer` is also how a service caller
+    presents the API key, and treating that key as a token would turn a valid service request
+    into a confusing 403 about signatures.
+    """
+    cookie = str(request.cookies.get(identity.cookie_name()) or "").strip()
+    if cookie:
+        return cookie
+    auth = str(request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        value = auth[7:].strip()
+        if value.count(".") == 2:
+            return value
+    return ""
+
+
+def _require_user():
+    """Identify the caller. Returns a ``User``, or None when this deployment has no identity.
+
+    Only token mode identifies anyone. In dev and demo the answer is None and the file store
+    keeps scoping by conversation — which is the important part: "no identity" must resolve to
+    SESSION scoping, never to one shared owner that every anonymous caller lands in and can
+    read each other's files through.
+    """
+    if not deployment_mode.is_token():
+        return None
+    token = _extract_user_token()
+    # A service caller — the eval harness, a script, anything without a browser — has no JWT and
+    # presents the service key instead. `_require_agent_chat_api_key` already validated it; such
+    # a request simply gets no user, and falls back to session scoping like dev mode.
+    if not token and _service_key_presented():
+        return None
+    try:
+        user = identity.decode_token(token)
+        identity.authorize(user)
+    except identity.IdentityError:
+        if not _token_strict():
+            return None
+        raise
+    return user
+
+
+def _identity_error_response(exc: Exception):
+    """Map an identity failure to a status a client can ACT on without reading prose.
+
+    401 and 403 mean different things here and the split is the whole contract: 401 says the
+    token was fine and has simply aged out, so refresh once and retry; 403 says stop. Collapsing
+    them leaves the UI unable to tell those apart, so it either never refreshes or refreshes
+    forever against a token that will never validate. `reason` carries the same distinction in
+    machine-readable form, because a client should never have to match on an error string.
+    """
+    if isinstance(exc, identity.TokenExpired):
+        return jsonify({"error": "Your session has expired.",
+                        "reason": "token_expired"}), 401
+    if isinstance(exc, identity.InsufficientRole):
+        return jsonify({"error": "This account is not permitted to use the agent.",
+                        "reason": "insufficient_role",
+                        "role": exc.role, "requiredRole": exc.required}), 403
+    if isinstance(exc, identity.TokenMissing):
+        return jsonify({"error": "Please sign in to use the agent.",
+                        "reason": "not_signed_in"}), 403
+    if isinstance(exc, identity.IdentityNotConfigured):
+        # Fails CLOSED: a deployment that cannot verify identity must not serve as if it had.
+        logger.error("Identity misconfigured: %s", exc)
+        return jsonify({"error": "Server misconfiguration: identity is not configured.",
+                        "reason": "identity_not_configured"}), 500
+    return jsonify({"error": "Please sign in to use the agent.",
+                    "reason": "token_invalid"}), 403
 
 
 # ---------------------------------------------------------------------------
@@ -1492,6 +1583,11 @@ def agent_chat():
             logger.error("Agent chat API key misconfigured: %s", exc)
             return jsonify({"error": "Server misconfiguration: API key not set"}), 500
 
+        try:
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)
         user_query = normalized["user_query"]
@@ -1504,6 +1600,7 @@ def agent_chat():
         # because nothing deeper knows what a session is. JWT will change where this id comes
         # from, not what it does with it.
         _session_token = set_file_store_session(normalized.get("thread_id"))
+        _user_token = identity.set_user(_request_user)
         try:
             raw = run_agent_chat(
                 user_input=user_query,
@@ -1534,6 +1631,7 @@ def agent_chat():
             return jsonify(_format_agent_chat_result(raw)), 200
         finally:
             reset_file_store_session(_session_token)
+            identity.reset_user(_user_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -2012,6 +2110,11 @@ def agent_chat_stream():
             logger.error("Agent chat stream API key misconfigured: %s", exc)
             return jsonify({"error": "Server misconfiguration: API key not set"}), 500
 
+        try:
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)
         user_query = normalized["user_query"]
@@ -2030,6 +2133,7 @@ def agent_chat_stream():
         def generate():
             error_emitted = False
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
+            stream_user_token = identity.set_user(_request_user)
             try:
                 for item in stream_agent_chat_events(
                     user_input=user_query,
@@ -2238,6 +2342,7 @@ def agent_chat_stream():
                 # A stream that is cancelled mid-flight must not leave this thread bound to
                 # the conversation; the next request on it would inherit the scope.
                 reset_file_store_session(stream_session_token)
+                identity.reset_user(stream_user_token)
         return Response(
             generate(),
             mimetype="text/event-stream",
