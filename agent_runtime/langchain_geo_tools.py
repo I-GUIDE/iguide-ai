@@ -335,6 +335,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     # apply, and told the user an interactive heat map was impossible. An image genuinely cannot
     # become a layer — but the dataset it was drawn from can, so name it instead of dead-ending.
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+    # A GeoTIFF is neither of the two things these tools knew about. add_map_layer tried to read
+    # it as a table and reported "unreadable vector/tabular source"; add_raster_layer said it was
+    # not an image. Both were true and neither was useful — a DEM took four tool calls to reach
+    # the map. It IS a raster, and it carries its own georeferencing, so add_raster_layer now
+    # takes one directly and derives the bounds instead of asking for them.
+    _GEOTIFF_EXTS = {".tif", ".tiff"}
     _MAPPABLE_EXTS = {".geojson", ".json", ".csv", ".tsv", ".shp", ".zip", ".gpkg",
                       ".parquet", ".geoparquet", ".gml", ".kml"}
 
@@ -355,7 +361,15 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         except Exception:
             return None
         name = _true_name(path, rec)
-        if Path(name).suffix.lower() not in _IMAGE_EXTS:
+        suffix = Path(name).suffix.lower()
+        if suffix in _GEOTIFF_EXTS:
+            return {"ok": False,
+                    "error": f"{name} is a raster, so it has no features to click or style.",
+                    "hint": "Drape it with add_raster_layer, passing this same file_id — it "
+                            "reads the bounds out of the GeoTIFF, so you do not need to supply "
+                            "them.",
+                    "mappable_file_ids": _mappable_attached(exclude=file_id)}
+        if suffix not in _IMAGE_EXTS:
             return None
         return {"ok": False,
                 "error": f"{name} is an image, so it has no geometry to pan, zoom or click and "
@@ -634,8 +648,49 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
     meta = {"category": "geo"}
 
-    def add_raster_layer(file_id: str, bounds: List[float], name: Optional[str] = None,
-                         opacity: float = 0.85) -> str:
+    def _geotiff_to_drapable(path: Any, name_on_disk: str) -> Dict[str, Any]:
+        """Render a GeoTIFF to a PNG the map can drape, and read its true extent.
+
+        The extent comes from the FILE, never from the caller. A draped image is positioned
+        solely by its bounds and nothing downstream can check that the box matches the picture,
+        so a restated box draws a plausible layer in the wrong place — which is exactly the
+        misregistration that took three rounds to diagnose when the DEM was draped over the
+        requested bbox instead of the one actually served.
+        """
+        try:
+            import rasterio
+            from rasterio.warp import transform_bounds
+        except ImportError:
+            return {"ok": False,
+                    "error": "this deployment cannot read GeoTIFFs (rasterio is not installed)",
+                    "hint": "Render the raster to a PNG yourself and pass it with explicit bounds."}
+        from agent_runtime.file_store import create_output_file_from_path
+        try:
+            # Reuse the terrain renderer rather than a matplotlib figure: axes, margins and a
+            # colorbar would become part of the image, and a draped layer is positioned by its
+            # bounds — so the pixels would stop lining up with the ground.
+            from agent_runtime.terrain_tools import _render, _wgs84
+        except ImportError:
+            return {"ok": False, "error": "raster rendering is unavailable in this deployment"}
+        import tempfile
+        try:
+            with rasterio.open(str(path)) as src:
+                values = src.read(1, masked=True).filled(float("nan"))
+                left, bottom, right, top = src.bounds
+                georeferenced = src.crs is not None
+                if georeferenced and src.crs != _wgs84():
+                    left, bottom, right, top = transform_bounds(
+                        src.crs, _wgs84(), left, bottom, right, top, densify_pts=21)
+            out = Path(tempfile.mkdtemp()) / (Path(name_on_disk).stem + "_preview.png")
+            _render(values, out)
+            rec = create_output_file_from_path(str(out), filename=out.name)
+        except Exception as exc:  # noqa: BLE001 - a bad raster is a tool error, not a dead turn
+            return {"ok": False, "error": f"could not render {name_on_disk}: {exc}"}
+        return {"ok": True, "file_id": rec["file_id"], "georeferenced": georeferenced,
+                "bounds": [round(float(v), 6) for v in (left, bottom, right, top)]}
+
+    def add_raster_layer(file_id: str, bounds: Optional[List[float]] = None,
+                         name: Optional[str] = None, opacity: float = 0.85) -> str:
         """Drape a georeferenced IMAGE over the map — a heat surface, a cluster mask, a rendered
         grid you computed yourself.
 
@@ -652,10 +707,28 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
         Rows are assumed north-up: image row 0 is the maxlat edge. Flip the array before saving if
         yours runs the other way.
+
+        A GeoTIFF may be passed directly and `bounds` left out: it carries its own
+        georeferencing, so the extent is read from the file, which is more reliable than any
+        box a caller could restate.
         """
         try:
             path, rec = _resolve(file_id)
             name_on_disk = _true_name(path, rec)
+            if Path(name_on_disk).suffix.lower() in _GEOTIFF_EXTS:
+                drawn = _geotiff_to_drapable(path, name_on_disk)
+                if not drawn.get("ok"):
+                    return json.dumps(drawn)
+                file_id = drawn["file_id"]
+                # The FILE wins, even when bounds were supplied. A georeferenced raster knows
+                # where it is; a caller restating that box can only agree or be wrong, and a
+                # wrong box draws a plausible layer in the wrong place that nothing downstream
+                # can detect. The one exception is a GeoTIFF carrying no CRS, where the file
+                # knows nothing and the caller's box is all there is.
+                bounds = drawn["bounds"] if drawn.get("georeferenced") else (
+                    bounds or drawn["bounds"])
+                path, rec = _resolve(file_id)
+                name_on_disk = _true_name(path, rec)
             if Path(name_on_disk).suffix.lower() not in _IMAGE_EXTS:
                 return json.dumps({
                     "ok": False,

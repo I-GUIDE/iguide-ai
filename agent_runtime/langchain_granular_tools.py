@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from .langchain_file_tools import make_langchain_file_tools
 from rag_pipeline.search.opengeodata import get_opengeodata_results
@@ -158,14 +158,26 @@ def get_kb_block_tool(doc_id: str) -> str:
     return json.dumps(run_get_kb_block(doc_id), ensure_ascii=True, default=str)
 
 
-def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Optional[str] = None) -> str:
+def opengeodata_search_tool(query: str, limit: int = 8,
+                            session_context_json: Optional[Union[str, Dict[str, Any]]] = None) -> str:
+    """Search OpenGeoData. ``session_context_json`` takes the context object either as a JSON
+    string or as the object itself.
+
+    Both are accepted because insisting on one costs a whole tool call. The parameter name says
+    "json", and a model that takes it at face value sends the OBJECT — which pydantic rejected
+    before this function ever ran. Observed live on a self-hosted model: the identical search
+    issued twice, once as a dict and once stringified, the first wasted entirely. Nothing is
+    gained by demanding the caller serialise something parsed here on the next line.
+    """
     session_ctx: Optional[Mapping[str, Any]] = None
-    if session_context_json:
+    if isinstance(session_context_json, Mapping):
+        session_ctx = dict(session_context_json)
+    elif session_context_json:
         try:
             parsed = json.loads(session_context_json)
             if isinstance(parsed, dict):
                 session_ctx = parsed
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             session_ctx = None
     hits = get_opengeodata_results(query, limit=_safe_int(limit), session_ctx=session_ctx)
     return _build_payload(hits, source="opengeodata")
