@@ -1,816 +1,797 @@
-# Agent architecture changes: what the supervisor is told, what tools accept, and who the caller is
+# Agent architecture: what changed, and why
 
-**Covers:** 16 commits on two branches, both cut from `origin/prototype` at `9e35950`.
-**Written:** 2026-09-17
+**Covers** the project's whole commit history — 408 commits on `prototype`, 2025-04-08 through
+2026-09-10 — plus two unmerged branches cut from its tip. 222 of those commits touch
+`agent_runtime/`.
 
-| branch | commits | subject |
-|---|---|---|
-| `claude/evidence-summary` | 6 (`1044afb` … `25c3e1e`) | what the supervisor's decider reads; what the tool surface accepts |
-| `claude/jwt-identity` | 10 (`152a537` … `4daf2e1`) | deployment modes, platform identity, record ownership |
+**This document is maintained incrementally.** See [Adding to this document](#adding-to-this-document)
+at the end. It was reconstructed once, from five parallel passes over the history, and that
+reconstruction is exactly what the rule exists to prevent happening again: where a reason was
+never written down, it is gone, and reading the diff does not bring it back.
 
-The branches are **unmerged** and independent — neither touches a file the other touches, and
-neither is a prerequisite for the other. Deployment state is at the end; do not infer it from the
-commits.
+## The stages
 
-This is organised as six **stages**. A stage is one coherent architectural shift, not one commit:
-the evidence-summary branch contains two unrelated shifts interleaved in time (the supervisor work
-is commits 1, 2 and 6; the tool work is 3, 4 and 5), and the jwt branch's ten commits collapse into
-four. Every change carries the measurement that motivated it, because without the number the reason
-is just an opinion.
+| | stage | span | the shift |
+|---|---|---|---|
+| 0 | [Two Flask servers](#stage-0) | 2025-04 → 2025-09 | no LLM anywhere; embeddings and metadata extraction |
+| 1 | [A RAG pipeline with a typed state](#stage-1) | 2025-10 → 2026-01 | one `AgentState`, one `EvidenceEntry`, one merge |
+| 2 | [The agent becomes a package](#stage-2) | 2026-02 → 2026-05 | a 2048-line monolith split into `agent_runtime/` |
+| 3 | [Supervisor over peers](#stage-3) | 2026-06 → 2026-07 | nesting replaced by peers sharing typed state |
+| 4 | [Map-native delivery](#stage-4) | 2026-08 | one boundary every layer crosses; prompts stop issuing mandates |
+| 5 | [The action ledger](#stage-5) | 2026-09 → `9e35950` | the agent records what tools *did*, not that they ran |
+| 6 | [What the decider reads](#stage-6) | `claude/evidence-summary` | evidence described, capabilities generated, the ledger shared |
+| 7 | [Who the caller is](#stage-7) | `claude/jwt-identity` | identity, ownership, server-owned history |
+
+Stages 6 and 7 are **unmerged branches**, independent of each other. Deployment state is at the
+end; do not infer it from the commits.
+
+One thread runs through all eight: **the system repeatedly discovers that a component was
+deciding from what was cheap to compute rather than what the decision needed**, and the fix is
+almost always to give it the record that already existed somewhere else.
 
 ---
 
-## Stage 1 — The decider is told what happened, not just how much of it there is
+## Stage 0 — Two Flask servers {#stage-0}
 
-Commits `1044afb`, `99d71ad`, `25c3e1e`. All in `agent_runtime/supervisor/graph.py` plus one new
-module.
+*2025-04-08 (`a5e0a88`) → 2025-09. ~5 commits.*
 
-The supervisor picks one action per step — `search`, `analyze`, `code`, `done` — from a JSON payload
-built by `_distill(state, for_decision=True)` and a hand-written prompt built by
-`default_decide_fn`. Three separate things it was choosing from turned out to be wrong in the same
-way: each was *cheap and available* rather than *what the decision actually needed*.
+The repo is two unrelated Flask processes. `embedding-server/dense_embedding_server.py` serves
+`POST /get_embedding` from `all-MiniLM-L6-v2`. `metadata-extraction-server/minio_webhook.py`
+takes an S3 event and shells out to an extractor that uses `ast` for Python, regex for Java,
+`nbformat` for notebooks, and rasterio/fiona for raster and vector bounds, writing results back
+as MinIO object tags. Stores: OpenSearch and MinIO.
+
+**There is no LLM in the project until 2025-10-06.** No prompts, no agent, no state object. This
+is worth stating because it dates everything else: the first prompt in the history is six months
+in, and the supervisor architecture is fourteen months in.
+
+---
+
+## Stage 1 — A RAG pipeline with a typed state {#stage-1}
+
+*2025-10 → 2026-01. ~34 commits.*
+
+### 1.1 The first LLM, and the first prompt (`e885183`)
+
+`generation.py` and `llm_utils.py` arrive together. The state shape —
+`query_information` / `session_context` / `evidence` / `planner_reasoning` / `answer` — appears
+here only as a hand-written literal in `main()`, not as a type. **Reason not recorded.**
+
+The first system prompt establishes a rule that survives to today: *"Your ONLY source of truth is
+the `<doc>` blocks provided"*, with *"If you cannot find an answer, reply exactly: 'I don't have
+enough information.'"*
+
+### 1.2 The typed state contract (`a4edd87`) — the foundation everything else sits on
+
+`state.py` introduces `AgentState`, `EvidenceEntry`, `ensure_state_shapes` and `merge_retrieval`.
+Before it, five search modules each returned their own dict shape and were called ad hoc. After
+it, every retriever is `f(state) -> hits` merging through one deduplicating function.
+
+That contract is why generation, LLM reranking, hallucination auditing and an entire external
+catalogue could be added later without touching the retrievers. It is the direct ancestor of
+today's `SupervisorState`.
+
+A detail that causes trouble later: `merge_retrieval`'s limit is **cumulative across sources**
+(`space = max(limit - len(current_docs), 0)`), not per-source.
+
+### 1.3 The declarative router, deleted five days later (`a4edd87` → `0e0435d`)
+
+`a4edd87` also added a `SearchStrategy(name, predicate, runner, …)` table. `0e0435d` deleted it,
+cutting `routing.py` from 206 lines to 20 and replacing it with hardcoded `if` gates. It also
+orphaned `search_agents.py` — after this commit nothing imports it, and nothing imports it at the
+end of the era either.
+
+**Reason not recorded**, for any part of the reversal.
+
+### 1.4 Two routers written and never wired
+
+`search_agents.py` (orphaned above) and `router_llm.py` (`f997384`, 364 lines) both implement
+LLM-driven routing. `router_llm.py`'s own README says the position plainly: *"routing.py #
+Original router (unchanged)"*. `docker-compose.yml` exports `USE_LLM_ROUTER`, and **no Python
+file in the era reads it**. The flag is dead on arrival.
+
+### 1.5 Prompt revisions in this stage
+
+| commit | change | reason |
+|---|---|---|
+| `0e0435d` | the generation prompt is cut to *"You are a factual assistant. Use ONLY the provided evidence. Cite by [doc_id]"*; the hyperlink block is deleted; context format goes from `<doc>` blocks to flat `[doc_id] title:` lines | **not recorded** |
+| `971fd9d` | the prompt is restored and expanded — `<doc>` blocks return, snippet 800 → **2000** chars, 10-document cap, the `[doc_id]` auto-append hack deleted | *"Replicate the javascript prompts and structure"* — parity with the platform's existing JS implementation |
+| `4b9eae8` | first rerank and hallucination-audit prompts, including *"Scores MUST show meaningful variance"* and a JSON verdict schema | reason not recorded; the schema shape becomes a measured defect in stage 4 |
+
+### 1.6 Worth knowing
+
+`api_server.py` was **unimportable for eight days** (2026-01-14 → 01-22). A commit titled
+*"Revert to see the references"* left a literal `\n+` on line 20 — a module-level `SyntaxError` —
+silently repaired later by an unrelated commit.
+
+`f0cd457` raised `top_k` from 8 to 100 with no recorded reason. Given `merge_retrieval`'s
+cumulative cap, a budget of 8 consumed by keyword hits would leave opengeodata zero slots — that
+is a reading of the code, not a claim the commit makes.
+
+---
+
+## Stage 2 — The agent becomes a package {#stage-2}
+
+*2026-02 → 2026-05. 79 commits.*
+
+### 2.1 The monolith
+
+`rag_pipeline/langchain_agent_executor.py` is created at `2cfcdf8` (266 lines) and grows
+monotonically: 503 (`c22d79f`, MCP bridge) → 893 (`37b7f6a`, CodeAgent + intent classification)
+→ 1231 (`deefd45`, LangGraph `StateGraph` + checkpointer) → 1672 (`cd031f3`) → **2048**
+(`f3533e1`).
+
+`f3533e1` is an explicit failure record kept on the mainline: *"Try to add an orchestrator agent…
+These features are not workin as expected."* It is the peak that triggers the extraction.
+
+### 2.2 Three agent designs in five weeks
+
+- `37b7f6a` — keyword-hint intent classification picks an intent, a tool filter narrows the list,
+  one executor runs.
+- `deefd45` — a LangGraph `StateGraph`: `initialize → route → search → extract → analysis →
+  finalize`, with `InMemorySaver` keyed on `thread_id`. `8c502d6` flattens it so search and
+  analysis are siblings, with child threads `{thread}::search` / `{thread}::analysis` so the two
+  stop sharing checkpoint state.
+- `cd031f3` — **the StateGraph is removed entirely**. An orchestrator LLM is given the other
+  agents *as tools* (`search_agent_evidence`, `analysis_agent_answer`, `code_agent_answer`). The
+  route is reconstructed post-hoc from which tools were called. This is the "agents-as-tools"
+  shape that stage 3 replaces.
+
+### 2.3 The extraction, done twice, independently
+
+After `9a40136` the history **forks into two branches that both extract `agent_runtime/`**, and
+they are not merged for a month.
+
+*Branch A* (`refactor/agent-runtime-extraction`) splits the monolith in place across six commits
+on 2026-04-11, each reporting the remaining size: `graph_state.py` (56) → `intent_classifier.py`
+(*"2048 → 1717"*) → `tool_policy.py` → `executor_factory.py` (*"1668 → 1271"*) →
+`runtime_utils.py` (*"1271 → 875"*, reason: *"pure functions with no side effects — ideal for unit
+testing"*) → `graph_nodes.py` + `graph_runtime.py`, which deletes the monolith. Final:
+*"7 focused modules totaling 2300 lines, with the largest being 453."*
+
+*Branch B* (`Restructure-agent-repo-architecture`) moves whole files instead, leaving one-line
+re-export shims, then decomposes them into **the same seven module names** — arrived at
+independently. Its internals differ: it kept a `StateGraph` and defined a
+`VERIFICATION_AGENT_PROMPT` that exists nowhere else in the history.
+
+**The merge `c504ec0` lists 21 conflicted paths.** Branch A's seven modules won byte-identically;
+branch B's file relocations won. Branch B's graph and its verification agent were discarded.
+**No commit records why branch B was started two days after branch A began on the same problem,
+or why its decomposition was dropped.**
+
+The residue is still visible: seven `rag_pipeline/*.py` files are five-line `sys.modules` aliases
+pointing into `agent_runtime`.
+
+### 2.4 Around the core
+
+`d08d580` makes `rag_pipeline/search/` a subpackage; `eea3bb8` fixes the resulting circular
+import with a lazy `__getattr__`. `be91702` lifts the Flask layer into `api/` — and fixes a
+Dockerfile that *"was missing both"* new packages. `9af4ea2` replaces a hand-rolled FastAPI MCP
+shim with the official SDK (`FastMCP`); `a5d2461` adds dual transport (`/mcp` + `/api`) and fixes
+a real bug recorded in a code comment: *"Bypassing this with `spec_from_file_location` created a
+second instance of every module and broke shared state between tools."*
+
+`db75167` adds the first loop bounds — `max_iterations=15`, `max_execution_time=120`,
+`recursion_limit=25` — *"discovered during live MCP testing where an AnalysisAgent loop had to be
+killed manually."*
+
+`53dc3be`: CPU-only torch, *"Full CUDA torch pulls ~4GB of NVIDIA libraries per image, exhausting
+disk on the VM."*
+
+### 2.5 Prompt revisions in this stage
+
+| commit | change | reason |
+|---|---|---|
+| `2cfcdf8` | the origin prompt: *"You are a retrieval-grounded assistant"* with *"Cite only doc_ids that appear in the tool response"* | the anti-fabrication core; survives the whole history |
+| `37b7f6a` | split into `SEARCH_AGENT_PROMPT` / `ANALYSIS_AGENT_PROMPT` / `CODE_AGENT_PROMPT` | one role per prompt |
+| `cd031f3` | SearchAgent gains *"Do not infer local file paths or use file tools unless the user explicitly provided attached/uploaded files"* | the agent was inventing file paths |
+| `ad6361b` | the router's `graph` hint expands into a trigger list with worked examples | the LLM router was not enabling graph search for entity queries |
+| `ad6361b` | `_CYPHER_SYSTEM_PROMPT`: *"READ-ONLY… Never use MERGE, CREATE, DELETE"*, with a regex sanitizer and a LIMIT injector | few-shot examples record specific observed failures, e.g. *"Do NOT use label union syntax like (r:A\|B\|C)"* |
+| `7f71a90` | *"Never call `load_skill` twice in the same assistant turn"* across four prompts, enforced in code by per-run loaded sets | a code comment names it: *"Some models pass the skill directory as `resource_path` after the main skill is already loaded"* |
+| `8dc7f25` | *"do not fake binary files with `write_output_file`"* | the model had been writing fabricated binaries through the text file tool |
+
+### 2.6 A taxonomy that was never consumed
+
+`722e4ed` adds `@mcp_tool(category=...)` validated at decoration time against six categories, and
+says it is *"replacing the hardcoded tool-name sets in graph_state.py (consumption comes in the
+next commit)"*. **That consumption never lands.** At the end of the era `tool_policy` still
+switches on the name sets, and no commit in the range touches it with the string `category`. The
+taxonomy is metadata-only.
+
+### 2.7 A tool unreachable for three weeks
+
+`9c45d82` is a one-line-per-call fix: `neo4j_search_tool` was calling the tier-3 function instead
+of the 3-tier dispatcher added in `ad6361b`, so the hierarchy had been unreachable from the agent
+since it was written.
+
+---
+
+## Stage 3 — Supervisor over peers {#stage-3}
+
+*2026-06 → 2026-07. 42 commits. This is the pivot of the project.*
+
+### 3.1 The model changes (`7adf7d1`, then `fb8bdfa` one day later)
+
+`7adf7d1` introduces `supervisor_graph.py` behind `AGENT_SUPERVISOR`, **off by default**. Its
+docstring states the model: search, analysis and code are **peer** capability nodes sharing one
+typed `SupervisorState`; an LLM supervisor picks the next action and the graph loops back to it.
+*"This is the agentic alternative to nesting search under analysis."* Three rules: peers not
+pipeline stages; operators bundled into capabilities (rerank inside search, audit inside
+analysis); and **context hygiene** — the heavy evidence lives in shared state, the supervisor sees
+only a distilled view.
+
+`fb8bdfa`, one day later, does four things at once and its subject line understates all of them:
+
+1. **The default flips** to on, with a per-request `useSupervisor` override.
+2. **`finalize` becomes `synthesize`.** `analyze` stops composing prose: *"It does NOT compose
+   prose."* The audit moves with it.
+3. **A `needs` FIFO queue** is added to state; the supervisor fulfils the oldest peer request
+   before consulting the decider.
+4. **`request_capability`** — a tool, *"so this makes the 'needs' signal model-driven — the agent
+   decides, mid-reasoning, that it needs another peer."*
+
+Everything after this is consequence work on that one graph.
+
+### 3.2 Bounding the loop (`af1ead0`)
+
+`AGENT_SUPERVISOR_MAX_SEARCHES` (2), `AGENT_SUPERVISOR_MAX_PEER_RUNS` (3), `_search_exhausted`,
+`_is_unproductive_repeat` — which guards `analyze`/`code` but **deliberately not `search`**,
+because search accumulates into evidence so a follow-up can add documents.
+
+Same commit makes the grounding audit non-cosmetic: *"a flagged verdict changes the text the user
+actually sees, rather than being computed and discarded."*
+
+### 3.3 Deterministic short-circuits (`4624187`, `79cb450`, `e31272c`)
+
+Three commits convert LLM tool-choice into code paths, all from one root cause: *"nothing steered
+the SearchAgent to the wired `neo4j_explore_related_nodes` tool, so it fell back to
+`semantic_search`"*. The symptom was a related-elements query *"returning a generic semantic
+search of topically-similar papers presented as if they were curated relationships — which the
+grounding audit correctly flagged HIGH."*
+
+`e31272c` adds a subtlety worth keeping: recalling an element from conversation must be
+**role-aware**, because *"a prior ANSWER embeds other elements' UUIDs in its citation URLs"*, so a
+naive newest-first scan would recall a *cited* element instead of the user's subject —
+reintroducing the bug *"in a form the grounding auditor can't catch."*
+
+### 3.4 The packages split (`665db95`)
+
+The two orchestrators move into `agent_runtime/supervisor/` and `agent_runtime/legacy/`, behind a
+strategy registry, *"so neither's code/prompts can leak into the other"*. The packages never
+import each other. Agents-as-tools survives only as an `AGENT_SUPERVISOR=0` fallback.
+
+### 3.5 Prompt revisions in this stage
+
+| commit | change | reason |
+|---|---|---|
+| `fb8bdfa` | `analyze` redefined from *"compose an answer"* to *"run a GIS/data analysis workflow"*; `done` becomes *"a grounded final answer is composed automatically"* | stop the decider treating analyze as the answer-writer now that `synthesize` exists |
+| `af1ead0` | *"Each peer ITERATES INTERNALLY… do NOT pick it again to 'retry' or 'improve'"* | the observed loop the bounds also address |
+| `665db95` | `SYNTHESIS_PROMPT` replaces the reused legacy prompt | the legacy one is *"a tool-calling AnalysisAgent persona whose rule 7 — 'call `code_agent_answer`' — is contradictory here"* |
+| `b060d1a` | evidence rendering, not the prompt, is changed to show only `title:`/`url:` | rule 2 alone was insufficient: `_format_documents` *"still led each evidence item with `[<doc_id>] title`, which trained the synthesis LLM (esp. the small default model) to cite `[<uuid>]`" |
+| `6e48d65` | the audit prompt: *"the execution record is FIRST-CLASS grounding"* | an answer presenting a real computed result was being flagged for lacking a document |
+| `0dc93e8` | the audit gains a precision section: flag only contradictions and checkable specifics | *"A correct answer that adds non-contentious domain framing… was being flagged medium and surfacing a scary '⚠️ Grounding check' caveat"* |
+
+### 3.6 A second code-peer runtime (`4758ea2`)
+
+`AGENT_CODE_PEER=opencode` swaps the whole LangChain code peer for a container-per-run CLI. The
+differences are deliberate and recorded: the container **keeps network access** (the CLI must
+reach its LLM endpoint), unlike the `execute_code` sandbox which is `--network none`. This is the
+boundary that still makes `analyze` and `code` genuinely distinct peers — not their toolsets,
+which overlap almost entirely.
+
+---
+
+## Stage 4 — Map-native delivery {#stage-4}
+
+*2026-08. 137 commits — the busiest month. Only 10 of them came through PRs; ~126 landed directly
+on `prototype`, so the PR titles are not a useful index.*
+
+There is a hard 12-day gap (Aug 6 → Aug 18) with no recorded reason, and the work either side is
+qualitatively different. It is the real seam in the month.
+
+### 4.1 The delivery contract (`30cae40`, `3eaaa2e`, `261772a`, `0456bf2`)
+
+`30cae40` adds `map-ui-prototype/` — React + MapLibre + deck.gl, chat driving the map. But the
+structural change is server-side:
+
+- `3eaaa2e` adds `agent_runtime/map_layers.py` and a **`map_layer` SSE event**, registered
+  status-tier *"so it streams even without agent_dev"*. Geometry previously *"only traveled as a
+  truncated tool_result."*
+- `261772a` adds `add_map_layer`, filling the gap that *"There was no tool at all that produced a
+  styled MAP LAYER"* — the existing tools only rendered PNGs. The descriptor carries a **URL
+  rather than inlining 50k points**.
+- `0456bf2` renames five tools so names match products (`plot_vector → render_map_image`,
+  `kb_point_heatmap → heatmap_image`, …): *"Four tools had map-sounding names but rendered a
+  static PNG."*
+
+**`build_map_layer` becomes the single boundary every layer crosses**, and the rest of the
+project either exploits or repairs that invariant.
+
+### 4.2 Prompt philosophy inverted — mandates become capability statements
+
+This is a deliberate, documented reversal, and `28cc904` flags it as *"the shape a future editor
+is most likely to 'tidy' back into 'you MUST' without knowing it was tried."*
+
+`818fe4b` is the clearest statement. `CODE_PEER_PROMPT` carried *"you MUST RUN your code… an
+answer that only pastes code is a FAILURE"* with nothing checking it:
+
+> *"That is the shape most likely to backfire: a model told non-execution is a failure will claim
+> it ran when the sandbox dies — which is exactly what we watched happen when a run exited -11
+> with empty stderr and the model reported 'dependency issues'."*
+
+The mandate is replaced by a **structural check**: the peer node looks for an `execute_code`
+record in its own tool calls and re-invokes **once** with the observation. The same shape then
+recurs four more times (`7e3c356` map delivery, `8489d94` repeated failures, `a19df4b` layer QA).
+
+`839a855` and `f8a2803` apply the principle to the search and decide prompts: *"each duplicated a
+deterministic mechanism in supervisor/graph.py… so the prose could not change behaviour when the
+detector fired and was unreliable when it did not."* `f8a2803` adds `_available_actions(state)`
+so the decider is shown only what it may pick, instead of prose forbidding things.
+
+A related lesson, from `d15bce9`: the steer moved **out of the prompt into the tool result
+payload** — *"beside the data rather than only in a system prompt far above it."*
+
+### 4.3 The grounding audit, rewritten from measurement (`11490d6`)
+
+The most carefully measured prompt change in the project. The symptom: the same answer, clean and
+with a fabricated journal, date, institution, benchmark score and price appended, got **the same
+verdict** — and *"in both cases the flagged claims were the LEGITIMATE ones while not one
+fabrication was noticed."*
+
+Two structural causes:
+
+1. **Verdict before proof.** `hallucination_detected` and `severity` were the *first keys* of the
+   response schema, so *"the model committed to a verdict autoregressively and then backfilled
+   rationalisations."*
+2. **No obligation to look.** Every ledger row now demands a VERBATIM span, *"and a row without
+   one cannot be 'supported'."*
+
+New wording: *"You must work CLAIM BY CLAIM, and in this order. Do not write a verdict before the
+ledger exists."* And: *"Every number and every proper name in the answer gets its OWN row"* —
+against a measured failure where *"an invented figure and benchmark embedded in an
+otherwise-supported sentence were summarised into one 'supported' row and passed clean 3 times
+out of 3."*
+
+The meta-lesson is in the commit: *"Prose rules did NOT work… Four formulations were then measured
+against a fixed bar and independently re-verified; two passed the bar but broke under further
+probing."* The in-code comment ends *"Keep changes to this prompt measured."*
+
+### 4.4 The web, behind an SSRF guard (`f16ae4b`, `e0741a6`, `aa7105b`)
+
+`web_search` is metadata-only by construction, and deliberately excluded from the every-turn
+sweep: *"every other method there is a cheap in-house call, the open web is a third-party network
+hop."*
+
+`web_fetch`'s guard is built on **"RESOLVE, THEN CLASSIFY THE ADDRESS — never the hostname
+string"**, verified against `http://127.1/` and `http://2130706433/`. A private-range check was
+judged insufficient *"because its own services are published on PUBLIC addresses."*
+
+`aa7105b` then closed **12 bypasses from an adversarial review (16 claims, 12 confirmed, 4
+refuted)**. The critical one *"needed a single character"*: a trailing DNS root dot
+(`storage-dev.i-guide.io.`) missed exact-string deny-list membership and reached the real object
+store. DNS rebinding is confirmed exploitable and **only partially closed** — the commit says so
+rather than implying otherwise.
+
+### 4.5 The spatial toolkit, and an absence that produced a false answer
+
+`7cb9f47` adds seven PySAL/GeoDa tools with a stated engine policy: *"One engine per job so the
+model is never choosing between two ways to compute the same number."*
+
+`2212f8a` adds `select_by_attribute`, and its reason is the sharpest argument in the history for
+minding gaps rather than only bugs:
+
+> *"the analyze peer had 21 spatial tools and no way to isolate one feature… So it buffered all
+> 708 grid cells — 4,504 overlapping polygons covering the whole city — and reported 'a 2 km
+> buffer around the busiest grid cell'. Attribute selection is the plainest GIS operation there
+> is, and its absence produced a false answer."*
+
+### 4.6 Remote-sensing embeddings (`28832b5`, `b44a202`, `9b1001b`)
+
+Seven tools **proxy** the rs-embed service rather than importing it, *"which keeps torch /
+earthengine-api / geemap out of the agent environment and Earth Engine credentials in one place."*
+Georeferencing is computed agent-side because the service's footprint *"is a square in EPSG:3857,
+where a metre is 1/cos(latitude) too long."*
+
+Two measurement-driven decisions worth carrying: zones carry **sum and pixel count, not a mean**,
+because *"A mean of means is wrong across unequal zones"*; and scoring is **spatial-block CV with
+the naive score reported beside it**, because *"a health outcome scored +0.15 under a random split
+and -0.91 when whole blocks are held out."*
+
+`9b1001b` establishes a hard rule: nothing on the zonal path may import scikit-learn — *"Its
+KMeans does not warn beside torch, it SEGFAULTS: the pytest run died outright, mid-suite."*
+
+### 4.7 Model provider becomes a per-request choice
+
+`81f6e9e` adds `GET /agent/models` and per-request model/provider/effort. `34d1fb5` replaces a
+prefix heuristic with a **measured per-model table** after picking `gpt-5.6-luna` made every later
+turn fail and, because the choice persisted to localStorage, *"the setting was unrecoverable from
+the UI."* Key row: *"gpt-5.6-\* REFUSES tools unless reasoning_effort='none' is sent."*
+
+Two commits **retract their own earlier claims** after re-measuring — `cd1adae` (*"I said twice
+that CLAUDE_CODE_OAUTH_TOKEN 'cannot call the Messages API'… It is wrong"*) and `c0d5617`. And
+`6198e7b` removes a liveness probe added an hour earlier, with the measurement that killed it:
+*"Within the same minute on this credential, claude-haiku-4-5 answered with tool calls while
+claude-sonnet-5 and claude-opus-5 both returned 429. The limits are PER MODEL."*
+
+### 4.8 The first move toward collapsing the peers (`299e35d`, `3b7e181`, `daf5862`)
+
+`299e35d` records the design conclusion: *"The peers have never run in parallel — decide() returns
+one action per step through conditional edges — so the usual justification does not apply."* What
+the split does buy is *"a place to stand outside the loop"*: the in-loop LLM audit passed a wrong
+model attribution that only the deterministic outside check caught.
+
+`3b7e181` adds a context budget (*"BoundedInMemorySaver caps THREADS, not messages inside one…
+One clay turn hit 199,605"*) and an opt-in unified peer, per-request *"because otherwise the two
+architectures could only be compared by restarting the deployment between arms."*
+
+`daf5862` is the immediate fallout, and the finding generalises: removing `search` from the menu
+*"also removed the decider's cue that retrieval was the opening move"*, so a retrieval question
+went straight to `done`. **Shaping the menu alone did nothing; a veto in `supervisor_node` was
+required.**
+
+---
+
+## Stage 5 — The action ledger {#stage-5}
+
+*2026-09-01 → `9e35950` (2026-09-10). 106 commits.*
+
+The stage's centre is one idea: **record what tools DID, not that they ran.** Eight commits build
+it, and everything else in the stage either feeds it or reads it.
+
+The justification is stated in `9e1201e` and proved by `7f0888f`, whose self-assessment is the
+most useful sentence in the history:
+
+> *"I diagnosed these two lines twice from the trace alone and was wrong both times… Two Earth
+> Engine sweeps and two wrong commits, because the trace shows that a tool was called and never
+> what it returned."*
+
+### 5.1 Building it
+
+| commit | change | reason |
+|---|---|---|
+| `3d9587f` | the ledger gets its own delivery channel instead of riding as `chat_history` item 0 | measured present *"at 2-7 history items and ABSENT at 8+"*, while the auditor got it regardless — so the answerer was *"told to answer from a line the auditor could not see, then flagged for hallucinating it."* The browser check that passed when it shipped *"had two history items. It was inside the only window where the wiring worked."* |
+| `86f2922` | failure becomes row-level; facts curated | rows were bucketed by tool name and zipped positionally, so a fail-then-succeed pair put the good run's `file_id` **on the FAILED row**, *"where `_map_delivered_earlier` read them as a delivered layer."* `execute_code` had produced zero rows |
+| `1deeec1` | retrieval joins the ledger | *"every retrieval method left NO trace and the ledger could not answer 'what did we search for?' — the most common follow-up, and the one whose absence sends the agent searching again for something already in hand"* |
+| `9e1201e` | `_visible_state_lines` — what is still on screen | the map is persistent, so *"no map was produced"* was a false statement the answerer had no way to check |
+| `02473bf` | the budget is measured in the unit each consumer pays | `_budgeted` sized rows by `json.dumps` while the rendered form expands 3.7x: *"19 rows passed a JSON budget of 6,000 and rendered 14,764 chars"* |
+| `4fcd474` | the whole note is bounded | the visible-state section was appended *outside* the budget: *"88,250 characters against a 6,000 ceiling — a context overflow caused by the mechanism whose own comment says it exists BECAUSE a turn overflowed the context window"* |
+| `e8f57de` | output `file_id` is rendered, gated on `outputs` **not** on `file_id` | `read_text_file` returns the id of a file the user uploaded and creates nothing; *"the grounding auditor reads these same lines as evidence, so it would have confirmed the fabrication"* |
+
+Three of those eight exist because the mechanism that prevents context overflow was itself
+overflowing context.
+
+### 5.2 One authority for "is it on the map?" (`8f9f24a`)
+
+Four signals answered that question, combined with `or`, *"so the weakest won"*: a tool name in
+`tool_calls` (never checking success), a bare nested `"on_map": true`, a recursive name match, and
+a regex over the JSON blob. A **failed** `admin_boundary` tripped two of them; the supervisor then
+*"suppressed its own corrective retry, wrote the conclusion into `result["on_map"]`, and RE-READ
+that conclusion as evidence a layer existed."*
+
+`map_layers.delivers_map_layer` becomes the single authority. Found in passing: `vector_spatial_join`
+set `on_map` with no descriptor, *"so nothing has ever reached the map from it."*
+
+### 5.3 Per-turn scoping (`2be2b83`)
+
+Peer threads outlived the turn, so four verifiers asking *"what happened THIS turn?"* got the
+whole conversation: *"last turn's `execute_code` made this turn's bare code fence report
+executed=True"*; *"turn 1's documents came back as turn 2's evidence."* `PeerSession` scopes per
+**invocation**, not per turn, because `default_analyze_fn` invokes the same thread three times and
+concatenated slices made *"two failures of one tool render as four."*
+
+### 5.4 The audit becomes a gate (`05fa222`, `e9801dd`, `76df5b9`, `29f24c2`)
+
+`05fa222` routes one corrective pass back through the **needs FIFO** rather than a plain edge —
+*"the decider is precisely what already said 'done' on this state."* Reproduced with *"Which
+counties border Champaign County?"*: the peer downloaded a Census gazetteer, *"computing no
+adjacency, and from a gazetteer it could not, since those carry centroids and not geometry"*, then
+answered from memory. Corroboration that it was recall: *"Vermilion was placed 'to the east' in
+one run and 'to the northeast' in another."*
+
+Three false-positive classes were closed first:
+
+- `e9801dd` — a verified-correct turn shipped a caveat because the auditor flagged *"You can pan,
+  zoom, and click the hospital markers"*. Structurally unprovable: an affordance is a property of
+  the **client** that no tool result can report. Fixed by injecting a `_MAP_CLIENT_AFFORDANCES`
+  line into the auditor's environment **only when a layer really was delivered** — plus
+  word-boundary matching, because *"'pan' is inside 'expand'/'Japan'/'company' and 'click' is
+  inside the '[popularity: 42 clicks]' real evidence carries."*
+- `76df5b9` — the auditor was starved: *"87,648 chars of record, 2,218 reaching the auditor, and
+  exactly ONE of the 26 county names surviving"*, because the cut was a blind prefix over a dump
+  that is *"94.2% coordinate arrays"*. Elision is **size-gated, not key-based**, because *"a bbox
+  is 4 numbers"* and answers quote those.
+- `29f24c2` — truncation markers now say a cut was a cut (*"truncated is not absent"*), and the
+  turn **under audit** stops being the worst-described section: earlier turns arrived as rendered
+  ledger lines while the current turn arrived as raw JSON, so *"a tool's ARGUMENTS were quotable
+  for every turn except the one being judged."*
+
+### 5.5 Capability introspection becomes discovery (`6ba1bd3` … `cd083ad`)
+
+`9e33911` found the capability answer received the inventory and **no query**, and truncated it:
+*"`json.dumps(inventory, indent=1)[:12000]` against a 27,397-char blob dropped 56% of the surface…
+and sliced mid-object so the model received malformed JSON. Measured: 0 of the 6 embedding tools
+reached the prompt."*
+
+`fb9baf5` replaces 20 hand-written try/excepts with convention-based discovery: *"Discovery finds
+17 factories against 12 hand-listed, and 70 tools against 66"* — and notes the hand list *"was
+wrong again within the same session that fixed it."* `cd083ad` then finds 12 more hidden by a
+keyword-name mismatch swallowed by a bare `except`.
+
+**A conclusion recorded here and worth keeping** (`cd083ad`): discovery is *not* this system's
+failure mode. *"Of 15 documented selection failures 7 were 'the tool was ABSENT', which no lookup
+can fix, and of the 8 'present and not chosen' none was ever fixed by a lookup mechanism; every
+remedy that worked was a deterministic bypass, an out-of-loop retry, a rewritten description, or
+the ledger."* A planned capability map in every peer prompt was therefore deliberately **not**
+shipped.
+
+### 5.6 Context budget from measurement, not assumption
+
+`c15c3da` replaces a flat 48,000 ceiling *"wrong in BOTH directions"* with a per-request
+derivation, fixing accounting bugs including that `request.messages` excludes the system message
+and `tools` is a sibling field — *"the old count omitted the larger half of the analyze peer's
+request."*
+
+`4a36a0e`: `gpt-5.6-luna` matched no prefix and inherited the 65,536 floor, so *"every call
+capped messages at ceiling=50,825 against a real limit of 922,000 — the budget was discarding
+~94% of the usable window."*
+
+`ee77a2c` probes all 26 models with a deliberately oversized request: `gpt-4.1` assumed 128,000,
+**actual 1,047,576**. The gpt-5 family splits into 922,000 and 272,000 tiers that *"do NOT follow
+version order"*, making prefix **order** load-bearing.
+
+### 5.7 Layer identity becomes a content digest
+
+Seven commits over two days. `349a6f7` → labels carry a region tag; `895fb4a` → `slug[:40]` was
+the id, and *"a one-character margin decided which region kept its layer"*; `3c73f3b` → the id
+becomes a digest of everything that decides **content** and nothing else, with the caller's `name`
+deliberately excluded (*"Renaming a layer now leaves it the same layer"*).
+
+Two adversarial reviews found **twelve** and **fifteen** confirmed defects respectively, including
+one the change itself introduced. `895fb4a` also records that the author's own earlier commit
+caused the bug it fixes.
+
+### 5.8 Terrain, and two misregistrations found by arithmetic
+
+`c169723` adds `dem_for_region`, deliberately **not** through the rs-embed service: *"That service
+holds the Earth Engine credential — a personal Google account that has expired twice — and
+elevation does not need it."* Two container-only facts were measured on the deployed image, not a
+laptop: `PROJ_LIB` points at a v5 `proj.db` while rasterio needs ≥6, so `CRS.from_epsg(4326)`
+*"FAILS in production today — this would have shipped broken while passing locally"*; and
+`cm.get_cmap` was removed in matplotlib 3.11.
+
+`3ac9b76` / `0e07fa7` fix the DEM in both directions. 3DEP pads the shorter axis, so *"a
+0.0275-degree-tall request came back 0.0360 degrees tall — 466 m added at each edge"*, and draping
+over the requested box squeezed it 23.5% — *"8 px at zoom 11, 510 px at zoom 17."* Found by
+arithmetic, not by looking, and the tests **could not** have caught it: *"the fixture returned a
+raster whose bounds equalled the request, which is the one thing the real server never does."*
+
+### 5.9 File-store session scoping (`9b83546`, `0fa5d25`, `db843f8`)
+
+*"The file record had seven fields and none of them said who wrote it, so the store was one flat
+space shared by every session."* A session id is stamped at creation and bound at the request edge
+as a ContextVar — *"the same shape the streaming trace state uses… When JWT arrives it changes
+where that id comes from, not what is done with it."* That sentence is the plan stage 7 executes.
+
+`0fa5d25` is the follow-up worth remembering: **ContextVars do not cross threads**, and the agent
+runs on a worker. *"Every unit test passed and the live path still wrote session=None, because the
+tests all ran on one thread."*
+
+`db843f8`: registering `list_conversation_files` was not enough — the file toolset attaches only
+on an upload turn, so *"the analyse peer had no file tool, wrote `os.listdir('.')` in
+`execute_code`, listed the sandbox working directory, and reported its own scratch script as one
+of the artifacts."*
+
+### 5.10 Prompt revisions in this stage
+
+| commit | change | reason |
+|---|---|---|
+| `3d9587f` | `SYNTHESIS_PROMPT` rule 8: earlier-turn tool records are *"first-class grounding"*; *"A line marked FAILED means the tool did not work"* | worded **conditionally on purpose** — `default_compose_fn` reuses the prompt without that section |
+| `9e33911` | the capability prompt gains the question: *"A user has asked what you can do. Answer THEIR question"* | it had been composing an identical grouped catalogue for every capability question |
+| `05fa222` | `_REGROUND_DIRECTIVE`: *"downloading or inspecting a file is not the same as computing the answer"* | names the observed gazetteer trap |
+| `5f828f4` → `4fcefd7` | two successive rewrites removing instructions the sandbox cannot satisfy — *"REUSE it verbatim — including real data-loading URLs/APIs"* under `--network none`, then its replacement naming `web_fetch`, which *"returns a page's on-topic passages, not the bytes of a dataset"* | a prompt that names an unavailable route teaches a failing habit |
+| `ae813f6` | *"UNSURE OF AN API? Look it up before you write against it… a lookup is something you do BEFORE execute_code"* | *"a bound tool the prompt never mentions does not get used"* |
+| `d1b171a` | `"Routed to {route}"` becomes a name table; the orchestrator label is renamed on the supervisor arm only | `fast`/`orchestrate` *"are node names in THIS graph"*, not facts about the request; legacy keeps the old label *"because there it is accurate"* |
+
+---
+
+## Stage 6 — What the decider reads {#stage-6}
+
+*Branch `claude/evidence-summary`, 7 commits off `9e35950`. Unmerged.*
+
+Three things the supervisor chose from turned out to be wrong the same way: each was **cheap and
+available** rather than **what the decision needed**.
 
 | | before | after |
 |---|---|---|
-| what the evidence is | counts, titles, `topical_coverage`, `top_score` — all lexical | plus `evidence_summary`, four sentences written by the model that read the documents |
-| what peers can do | a hand-written paragraph, derived from nothing | generated from `agent_runtime/capability_registry`, with a test holding the registry against the peer builders |
-| what this turn already did | `has_analysis` / `has_code` booleans and counts; the ledger of *previous* turns only | the same `this_turn` ledger lines the answering model and the grounding auditor already read |
+| what the evidence is | counts, titles, `topical_coverage`, `top_score` — all lexical | plus `evidence_summary`, written by the model that read the documents |
+| what peers can do | a hand-written paragraph, derived from nothing | generated from `capability_registry`, held against the peer builders by test |
+| what this turn did | booleans and counts; the ledger of *previous* turns only | the same `this_turn` lines the answerer and auditor already read |
 
-### 1.1 Evidence gains a description (`1044afb`)
+### 6.1 Evidence gains a description (`1044afb`)
 
-**The measurement.** Live on a self-hosted model: two full search rounds where the second added
-nothing the first had not. "Is this enough?" was being answered from counts. The signals available
-were all lexical — they can report "8 documents, 0.75 of them mention your subject terms" and still
-leave the decider unable to separate a set of PySAL accessibility notebooks from a set of DEM
-sources, because both mention "elevation".
+Lexical signals cannot separate PySAL accessibility notebooks from DEM sources when both mention
+"elevation". Measured on a self-hosted model: two full search rounds where the second added
+nothing, because *"is this enough?"* was being answered from counts.
 
-**Structural.** `SupervisorState` gains `evidence_summary: Optional[str]`. The search node's state
-update now computes it:
+Two rules keep it from making things worse: it **describes and names gaps, it does not rule on
+sufficiency** — that judgement belongs to the decider, and a summary announcing "this is enough"
+would collapse two independent checks into one — and it sits **beside** the lexical signals rather
+than replacing them, so a wrong summary can be disagreed with.
 
-```python
-"evidence_summary": _summarize_evidence(llm, q, merged) or state.get("evidence_summary"),
-```
+### 6.2 The capability paragraph becomes generated (`99d71ad`)
 
-The `or` matters: a failed summarisation on round two keeps round one's summary rather than blanking
-it. `_distill` emits the field beside the lexical signals — `evidence_titles`, `evidence_sources`,
-`topical_coverage`, `top_score` — deliberately *beside* and not *instead of*, so a wrong summary is
-something the decider can disagree with rather than something it must obey.
+The supervisor's description of its peers had drifted behind them **three times**: terrain,
+administrative boundaries and geocoding were all bound to a peer while the prompt never mentioned
+them. The cost was not cosmetic — asked for a DEM, the supervisor searched the knowledge base,
+because as far as it had been told, `analyze` did overlays and embeddings. *That was a correct
+decision from a stale description.*
 
-Failure is always `None`, from every direction: no LLM, no documents, a thrown exception, an empty
-reply, or `AGENT_EVIDENCE_SUMMARY=0` — a summary is an aid to a decision, never a precondition for
-one. Three caps, because it rides in every later decision prompt for the rest of the turn:
-`_EVIDENCE_SUMMARY_DOCS = 8` documents in, `_EVIDENCE_SUMMARY_SNIPPET = 400` characters of each,
-`_EVIDENCE_SUMMARY_MAX_CHARS = 700` out.
+The drift guard was written first, against terrain alone, and **failed on its first run naming two
+more** nobody had noticed. It now holds the registry against reality in both directions: a bound
+toolset the registry omits, and a toolset the registry claims that no peer binds.
 
-**Prompt (new).** `_EVIDENCE_SUMMARY_PROMPT` asks for at most four sentences covering what the
-results contain, which parts of the request they address, and which they do not. The constraint is
-the interesting half:
+Live result: the same model, told the truth, went `analyze → code → done` with **zero searches**,
+against `search → search → analyze → code → done` before.
 
-> Describe only. Do NOT recommend an action, do not say whether to search again, and do not say
-> whether the evidence is sufficient — another step decides that and needs your description, not
-> your verdict.
+### 6.3 The decider joins the ledger's readers (`25c3e1e`)
 
-This is a separation-of-powers rule, not politeness. The decider also sees the deterministic signals
-and the action history; a summary that announced "this is enough" would collapse two independent
-checks into one and give a weak model's opinion the final word.
+Asked for a DEM, the supervisor ran `analyze` — which fetched and drew it — then routed to `code`,
+which fetched the same DEM again. In a sweep that second pass cost **266 s and 16 `execute_code`
+iterations** to redo work one tool call had done.
 
-**Prompt (decider, revised).** The decider prompt gains a paragraph telling it how to weigh the new
-field — because a new field with no guidance is a field a model will over-read:
+The rows were never missing. `_ledger_lines` had exactly **two** consumers — the answering model
+and the grounding auditor — and the decider was not one of them. This is the same fix stage 5's
+`29f24c2` made for the auditor, which had the identical blind spot.
 
-> `evidence_summary` in Progress is a DESCRIPTION of what was retrieved […] It deliberately does not
-> say whether the evidence is sufficient — that is your call. Search again only when it names a
-> specific gap a DIFFERENT query could fill; repeating a search because the count looks small
-> returns the same documents and wastes the step. And when the request is work for a tool rather
-> than a question about the literature — computing a DEM, buffering, embedding a region — retrieval
-> cannot help at all, however thin the evidence looks.
+**Revised during the work:** this began as a `map_layer_delivered` boolean. The boolean was kept
+for the one question the prompt asks directly, but it was treating the symptom; the ledger is the
+structural answer, and it is richer, already budgeted, and shared with the other two readers.
 
-Two behaviours targeted: the observed repeat-search (fixed by "a DIFFERENT query"), and searching at
-all for something no document contains (fixed by the tool-work clause, which is the same failure
-Stage 1.2 attacks from the other side).
+### 6.4 The tool surface absorbs how models actually call tools
 
-Guarded by `rag_pipeline/tests/test_evidence_summary.py`.
+A sweep of ten spatial prompts through a self-hosted model, collecting every failed tool call,
+found four defects of one class — **a parameter whose name or type invites the wrong value**:
 
-### 1.2 The supervisor's view of its peers becomes generated (`99d71ad`)
-
-**The measurement.** The capability paragraph had drifted behind the peers three times. Terrain,
-administrative boundaries and geocoding were all bound to a peer while the supervisor's description
-of that peer never mentioned them. The visible cost: asked for a DEM, the supervisor searched the
-knowledge base for "digital elevation model", because as far as it had been told, `analyze` did
-overlays and embeddings. That was a *correct decision from a stale description* — the distinction
-matters, because a model that gets this right is guessing past the prompt rather than following it,
-and that is not a property you can rely on.
-
-**Structural.** New module `agent_runtime/capability_registry.py`. A frozen `Toolset(factory,
-summary)` dataclass, three tuples — `_SHARED` (14 toolsets bound by both peers), `_ANALYZE_ONLY` (3),
-`_CODE_ONLY` (1) — and `CAPABILITIES: Dict[str, Tuple[Toolset, ...]]` mapping `analyze` and `code` to
-their unions. The three-way split, rather than one flat list, is what stops a capability only one
-peer binds from being described as if both had it. Two functions: `factories()` for the guard,
-`describe(capability)` for the prompt.
-
-`graph.py` gains `_capability_inventory(capability)`, which calls `describe()` and falls back to the
-generic phrase `"geospatial analysis over the evidence or uploaded files"` if the import fails —
-a prompt must still be produced.
-
-**What deliberately stayed hand-written.** The REASONING guidance: when to stop, how to read the
-evidence summary, that model names are arguments rather than datasets. That is judgement, not
-inventory, and generating it would lose the nuance that makes it useful. The split is the point of
-the design — the inventory is a fact that drifts, the guidance is a decision that does not.
-
-**Prompt (decider, revised).** The `analyze` clause was:
-
-> analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools (QGIS/PyQGIS,
-> overlay/buffer/clip/dissolve, aggregation, temporal analysis, statistics, vector
-> inspect/plot/reproject) over the evidence or uploaded files.
-
-It is now the generated list, plus a hand-written sentence that converts the inventory into a routing
-rule:
-
-> Anything in that list is analyze work, not a retrieval question — a DEM, a boundary and a geocode
-> all come from live services, not from the knowledge base, so searching for them finds writing
-> ABOUT them and never the thing itself.
-
-The `code` clause also changed, from `"produce and run NEW code for work no existing tool covers"` to
-the same plus `"It binds the same toolkit as analyze, plus packaged skills and saved workflows"` —
-previously the prompt implied `code` was a bare interpreter, which understates it and encourages
-writing from scratch what a bound tool already does.
-
-**The guard came first and earned its place immediately.**
-`rag_pipeline/tests/test_supervisor_knows_its_peers.py` was written against terrain alone and failed
-on its first run, naming two more undescribed toolsets nobody had noticed. It holds the registry
-against reality in **both** directions:
-
-- `test_the_registry_describes_everything_the_peers_bind` — `_bound_toolsets()` regexes
-  `make_*_tools(` call sites out of `graph.py` and diffs them against `factories()`.
-- `test_the_registry_does_not_claim_tools_the_peers_do_not_bind` — the reverse, which matters
-  independently: promising a capability that is not bound routes work to a peer that cannot deliver,
-  and the turn then fails much further downstream where the cause is hard to see.
-- `test_the_inventory_actually_reaches_the_prompt` asserts `_capability_inventory("analyze") ==
-  describe("analyze")`, because a silent fallback would leave every keyword check passing against
-  leftover prose. The keyword checks (`REQUIRED_TERMS`) now read the prompt *the model receives*,
-  composed at runtime, rather than the source file — which no longer contains the inventory.
-
-### 1.3 This turn's ledger reaches the decider (`25c3e1e`)
-
-**The measurement.** Asked for a DEM, the supervisor ran `analyze` — which fetched it and drew it —
-then routed to `code`, which fetched the same DEM again and drew a second copy. In the sweep that
-second pass cost **266 seconds and 16 `execute_code` iterations** to redo work one tool call had
-already done.
-
-**Structural — this is a readership change, not a new computation.** Nothing was missing. The rows
-accumulate on `state["action_rows"]`; `_ledger_line` already renders exactly what is needed,
-including `[produced area_dem.tif, file_id ...]` and `FAILED ... -> DID NOT RUN`; the trace UI
-already shows them as `dem_for_region(...) -> 1 layer on the map`. `_map_delivered_this_turn`
-already existed (added on `prototype` in `8f9f24a`) and already required the tool to have succeeded.
-
-The gap was **who got to read them**. `_ledger_lines` had exactly two consumers — the answering model
-(`_prior_actions_note`) and the grounding auditor — and the decider was not one of them. `_distill`
-handed it counts and flags about the current turn plus the ledger of *previous* turns. So it knew
-what earlier turns did and what this turn's state totals were, but not what this turn's tools had
-actually done. Routing to a peer to redo finished work was a reasonable decision from that view.
-
-`_distill(..., for_decision=True)` now emits `this_turn` in the same rendering, with a note:
-
-> What THIS turn has already done, oldest first — the same record the answering model and the auditor
-> see. A line here is work that is DONE: routing to a peer to redo it produces a second copy, not a
-> better answer. A line marked FAILED means the tool did not run and its result does not exist.
-
-The last sentence exists because a ledger without it is ambiguous in the dangerous direction: a
-decider that reads `FAILED` as "was attempted, so it exists" stops re-running something that never
-produced anything.
-
-This is the same fix already made for the grounding auditor on `prototype`, which had the identical
-blind spot and audited a turn against evidence its own ledger contained.
-
-**Revised during the work: the boolean became a ledger.** The first attempt was the narrow fix —
-surface `map_layer_delivered`, the one question the prompt asks directly. The test file is still
-named `test_delivered_signal.py` and its docstring is still about the boolean. That fix was too
-small: it answers "is a layer on the map?" and nothing else, so the same class of duplicated work
-recurs for any deliverable that is not a layer (a written file, a computed statistic, a failed tool
-whose failure the decider cannot see). The boolean is **kept alongside** as an unmissable signal for
-the question the prompt asks in one line, and the ledger carries the general case.
-
-**Prompt (decider, revised).** A rule for the boolean, framed as a signal rather than a veto:
-
-> `map_layer_delivered` in Progress means a layer is ALREADY on the user's map. When the request was
-> to see something and it is there, choose `done` […] Choose `code` after a successful analyze only
-> when the request asks for something the delivered result does not contain.
-
-Deliberately not a hard veto on `code`: "map it, then compute the statistics" legitimately needs
-`code` after a successful `analyze`, and vetoing `code` whenever a layer exists would break it.
-
-### Decider prompt revisions in Stage 1, in one place
-
-| revision | commit | behaviour it targets |
+| commit | defect | measurement |
 |---|---|---|
-| `analyze` capability clause replaced by generated inventory + "not a retrieval question" | `99d71ad` | a DEM request becoming a knowledge-base search |
-| `code` clause gains "binds the same toolkit as analyze, plus skills" | `99d71ad` | `code` read as a bare interpreter |
-| `evidence_summary` guidance paragraph | `1044afb` | a second search round that returns the first round's documents |
-| `map_layer_delivered` rule | `25c3e1e` | routing to `code` to redo a delivered layer |
-| `this_turn` + `this_turn_note` in the decision payload | `25c3e1e` | the general case of the above |
+| `8fe0dcb` | optional parameters rejected an explicit `null` | **141 parameters across 62 of 80 tools**. Not fixable in the function body: pydantic validates against the schema LangChain infers from the signature, so the call dies before any code runs. The wrapper rewrites the signature |
+| `ae862b5` | a GeoTIFF was neither vector nor image | four calls to draw one DEM. `add_raster_layer` now reads the extent **from the file**, which wins even when bounds are passed — a caller restating the box can only agree or be wrong |
+| `ae862b5` | `session_context_json` refused a dict | the identical search issued twice, the first call wasted |
+| `5a10a58`, `aaac2c3` | `area` held the place name but read like the kind of place; `name` meant the output filename | four calls, and the model had the right answer in `name` from the first. `name` now means the place; the filename moved to `output_name` |
+
+`0` and `False` are deliberately **not** treated as null — they are answers, and substituting a
+default for them would silently ignore the caller.
+
+After these, a re-run sweep showed zero failed calls on boundary, tracts, geocode, DEM, slope,
+buffer, OSM and raster. Two cases got slower, which is single-run variance and not claimed as a
+regression either way.
 
 ---
 
-## Stage 2 — The tool surface absorbs how models actually call tools
+## Stage 7 — Who the caller is {#stage-7}
 
-Commits `8fe0dcb`, `ae862b5`, `5a10a58`.
+*Branch `claude/jwt-identity`, 10 commits off `9e35950`. Unmerged, independent of stage 6.*
 
-Four separate live failures with one shape: the model's call was reasonable, the tool refused it, and
-the error message was accurate but useless. The position taken across all four is that **the fix
-belongs to the tool, not the model** — a parameter whose name invites the wrong value is a tool
-defect, and no amount of prompt engineering fixes a schema that rejects a call before any of our code
-runs. A tool's docstring and its error strings are LLM-facing prompts too; the rewrites below are
-listed with the tool they belong to rather than with Stage 1's decider prompt.
+### 7.1 Named deployment modes (`152a537`, `f9b7081`)
 
-### 2.1 An explicit `null` means "use the default" (`8fe0dcb`)
+`AGENT_MODE=dev|demo|token` replaces three booleans whose eight combinations included five
+nonsensical ones (*"settings hidden AND a key required"* is a page demanding a credential it gives
+you no way to enter). `PLATFORM_TIER=dev|prod` does the same for four platform URLs that must
+agree. Both raise on an unknown value rather than falling back: this selects security behaviour,
+and a typo silently resolving to a working mode is the failure nobody notices.
 
-**The measurement.** A sweep of the deployed agent over ten spatial prompts with `gpt-oss:120b`:
+Deliberately, **the mode does not decide the API key** — that would make `AGENT_MODE=dev` mean one
+thing on a laptop and something else on the public dev tier.
 
-```
-embed_region({..., 'buffer_m': None, 'lon': None, 'lat': None,
-              'bbox': None, 'start': None, 'end': None})
-ValidationError: 3 validation errors for embed_region
-```
+### 7.2 Identity (`69863b8`, `95a48de`, `c59a69d`)
 
-Nothing was wrong with that call. A model writing tool arguments fills every slot the schema offers
-and puts `null` in the ones it does not need; `start=None` means "no opinion about the date window",
-which is precisely what the default expresses. The tool had a good answer and refused to use it over
-a type annotation.
+The agent is served from `agent.i-guide.io`, same origin as the map UI and same registrable domain
+as the platform, and `JWT_TARGET_DOMAIN` is `.i-guide.io` — so the cookie arrives on its own,
+including on the `<img>` request for an inline artifact. **No token exchange, and no signed
+download URLs.**
 
-**Why this could not be a few patches.** A scan of the surface found **141 such parameters across 62
-of the 80 exposed tools**. Nor can it be fixed inside the function bodies: pydantic validates against
-the *schema*, which LangChain infers from the signature, so the call dies before any of our code
-runs. The signature itself has to say nullable.
+Four choices, each a way this fails open if reversed: `algorithms=["HS256"]` pinned (a decoder
+trusting the token's own `alg` accepts the `none` forgery); `exp` required; a missing or
+non-numeric `role` **refused, never defaulted** (0 would be the most privileged caller); and
+expiry raising separately from invalidity, so the endpoint answers **401 = refresh and retry** vs
+**403 = stop**.
 
-**Structural.** New module `agent_runtime/tool_args.py`, one function
-`accept_null_defaults(func)`. It rewrites `func.__signature__` and `func.__annotations__` so every
-defaulted parameter becomes `Optional[...]`, and wraps the call so a `None` arriving for one of those
-is replaced by its original default. Setting those two attributes *is* the fix rather than a cosmetic
-touch-up, because they are what LangChain reads.
+`95a48de` adds introspection — forwarding the cookie to the platform's own `/api/check-tokens` —
+because against **production** the reasoning inverts: the HS256 secret mints a token for any
+account, and this host runs LLM-generated code in a Docker-socket sandbox.
 
-Applied at every `StructuredTool.from_function(func=...)` call site across 15 modules in
-`agent_runtime/` — the analysis, geo, terrain, rs-embed, file, exec, MCP, quality, skill and
-granular toolsets.
+`c59a69d` is a defect found live: token mode ran the API-key gate **before** identity, so a
+signed-in visitor with no key was refused by the key check — and token mode hides the settings
+panel, so they could not supply one. *"Sign in, then: You are not signed in."*
 
-**What it deliberately does not do.** This widens what is *accepted* and changes nothing about what a
-tool then does:
+### 7.3 Ownership (`d934cbe`, `e067055`, `1f880d3`)
 
-- a real value still wins;
-- an omitted parameter behaves exactly as before;
-- a parameter with **no** default stays required, because there a `null` genuinely is an error;
-- a parameter already defaulting to `None` is untouched, and an unannotated one has nothing to widen;
-- `0` and `False` are **not** treated as null. They are answers, and substituting the default for
-  them would silently ignore the caller — a worse bug than the one being fixed.
+`GET /agent/files/<id>/download` had never checked anything, and every answer publishes file ids
+as links — so each was effectively a permanent public URL. A mismatch answers **404, not 403**,
+because a 403 confirms the id exists and makes the endpoint an enumeration oracle.
 
-**Guards.** `rag_pipeline/tests/test_null_tool_args.py` asserts that no exposed tool refuses a null
-optional, so the 141 cannot quietly come back; a second test guards the *premise* by checking the
-unwrapped function still raises. If that ever stops being true, the wrapper is solving nothing and
-should be removed rather than carried.
+`get_or_create_memory` fetched by bare UUID with no owner check; worse, the create half would have
+**indexed over** a document it had just refused to read. That is why ownership is asserted at the
+edge rather than guarded at each call.
 
-### 2.2 A GeoTIFF reaches the map on the first call (`ae862b5`)
+`1f880d3` stores the client's own `StoredSession` rather than rebuilding it server-side, because
+`sessionStore.ts` was written server-shaped on purpose and rebuilding would duplicate its
+layer-descriptor rules in a second place where they would drift.
 
-**The measurement.** From a live trace, a DEM took **four calls** to draw:
+### 7.4 The browser stops owning the session (`84c60b2`, `4daf2e1`)
 
-| call | result |
+Refresh is the **browser's** job: it calls the platform's refresh endpoint, and the agent never
+holds a refresh token. Every retry is bounded at one attempt, and only an expired token retries at
+all.
+
+**Revised during the work:** signing out left the history list fully populated, because IndexedDB
+is per-origin and signing out of the platform does not touch it. The first fix filtered the local
+store by owner. That was the wrong fix — conversations belong to the *user* and should follow them
+to another browser — so in token mode the server owns history and IndexedDB became a cache. The
+owner filter survives for a narrower reason: a cache should not serve another user's data.
+
+A failed fetch returns `null`, not `[]` — *"could not ask"* and *"you have none"* are different,
+and rendering an empty history because the server blinked reads as data loss.
+
+---
+
+## What is deployed
+
+| | state |
 |---|---|
-| `add_map_layer(.tif)` | "unreadable vector/tabular source", hinted at shapefile sidecars |
-| `add_raster_layer(.tif)` | "not an image" |
-| `add_map_layer(.png)` | "an image has no geometry" |
-| `add_raster_layer(.png)` | worked |
+| `prototype` through `9e35950` | live; the base both branches were cut from |
+| `claude/evidence-summary` through `8fe0dcb` | live on the dev VM |
+| `claude/evidence-summary` `25c3e1e`, `aaac2c3` | **not deployed** |
+| `claude/jwt-identity` (all 10) | **not deployed**; token mode has never run outside a test |
 
-Every message was accurate and none was useful, because a GeoTIFF is neither of the two things these
-tools knew about. This is **the same capability, callable now** — nothing new can be drawn that could
-not be drawn before; it now takes one call instead of four.
-
-**Structural.** In `agent_runtime/langchain_geo_tools.py`:
-
-- a `_GEOTIFF_EXTS = {".tif", ".tiff"}` class alongside the existing `_IMAGE_EXTS` /
-  `_MAPPABLE_EXTS`, so the two tools stop having to force a GeoTIFF into one of the other two;
-- `_geotiff_to_drapable(path, name_on_disk)` renders the raster to a PNG and reads its true extent
-  out of the file, reprojecting to lon/lat with `rasterio.warp.transform_bounds` when the source is
-  projected. It reuses `terrain_tools._render` rather than a matplotlib figure on purpose: axes,
-  margins and a colorbar would become part of the image, and a draped layer is positioned solely by
-  its bounds, so the pixels would stop lining up with the ground. Missing `rasterio` returns a tool
-  error naming the alternative, not an exception.
-
-**Signature change.** `add_raster_layer(file_id, bounds, name, opacity)` →
-`add_raster_layer(file_id, bounds=None, name=None, opacity=0.85)`. `bounds` becomes optional.
-
-**The precedence rule and why it is not "caller wins".** For a georeferenced file the FILE wins even
-when `bounds` were passed. A caller restating that box can only agree or be wrong, and a wrong box
-draws a plausible layer in the wrong place that nothing downstream can detect — that misregistration
-already cost three rounds of debugging once, when a DEM was draped over the requested bbox instead of
-the one actually served. The single exception is a GeoTIFF carrying no CRS: there the file knows
-nothing and the caller's box is all there is, so `bounds or drawn["bounds"]` applies.
-
-**Error message rewrite.** `add_map_layer` on a `.tif` no longer sends the model looking for a `.shx`
-that does not exist. It now names the other tool and pre-empts the next failure:
-
-> Drape it with add_raster_layer, passing this same file_id — it reads the bounds out of the GeoTIFF,
-> so you do not need to supply them.
-
-### 2.3 `session_context_json` takes the object as readily as the string (`ae862b5`)
-
-**The measurement.** The parameter says "json", and a model that took that at face value sent the
-**object**, which pydantic rejected before the tool ran. Observed live: the identical search issued
-twice, once as a dict and once stringified, the first call wasted entirely.
-
-**Signature change.** In `agent_runtime/langchain_granular_tools.py`:
-`opengeodata_search_tool(query, limit=8, session_context_json: Optional[str])` →
-`Optional[Union[str, Dict[str, Any]]]`. A `Mapping` is copied directly; a string still goes through
-`json.loads`, now also catching `TypeError`. Nothing is gained by demanding the caller serialise
-something parsed on the next line.
-
-### 2.4 `admin_boundary` reads inverted arguments instead of failing four times (`5a10a58`)
-
-**The measurement.** Live with `gpt-oss:120b`, asked for the DEM of Urbana:
-
-```
-admin_boundary({'state':'Illinois','level':'city','name':'Urbana','area':'city'})  failed
-admin_boundary({'name':'Urbana','area':'city','state':'Illinois','level':'city'})  failed
-admin_boundary({'area':'city','state':'Illinois'})                                 failed
-admin_boundary({'area':'Urbana','state':'Illinois','level':'city'})                worked
-```
-
-`area` holds the place NAME but reads like the KIND of place, so the model put `"city"` in it — and
-had the right answer sitting in `name` from the very first call, because `name` is the *output
-filename stem*. It had the two slots exactly inverted, three times.
-
-**Structural.** `agent_runtime/admin_boundary_tools.py` gains `_LEVEL_WORDS` (city, county, state,
-place, town, municipality, cdp, tract, block_group and plurals). When `area` holds one of them:
-
-- if `name` holds something that is *not* a level word, that is the place. The tool swaps them,
-  keeps the level word as `level`, and **says so** in a `note` on the successful result — a silent
-  correction teaches the caller nothing, and the next call repeats the mistake. The recovery is safe
-  precisely because `level` already carries the kind of place, so an `area` holding a level word has
-  exactly one sensible reading;
-- if nothing can be recovered (`area='city'` with no usable `name`, which is what three of those four
-  calls looked like), it refuses — but the error now describes the **fix** rather than the symptom.
-
-**Error message rewrite.** `"no incorporated place named 'city'"` was accurate and told the model
-nothing about which argument was wrong. It is now:
-
-> `area` is the place NAME, not the kind of place — 'city' is a level.
-> hint: Call it as admin_boundary(area='Urbana', level='city', state='Illinois'). `level` takes
-> city/county/state/cdp; `name` is only the output filename.
-
-**Docstring revision** (the model's primary source for this): the summary now opens with `` `area` is
-the PLACE NAME — "Urbana", "Champaign County", "Illinois". It is NOT the kind of place `` and
-disambiguates `name` in the same breath.
-
-### New capability vs. same capability, callable now
-
-| change | which |
-|---|---|
-| `accept_null_defaults` across 62 tools | same capability, callable now |
-| `add_raster_layer` accepting a GeoTIFF and deriving bounds | **new capability** — it renders and reprojects, which no tool did before |
-| `add_raster_layer(bounds=None)` | same capability, callable now |
-| `session_context_json` accepting a dict | same capability, callable now |
-| `admin_boundary` argument recovery | same capability, callable now |
-| the three error/docstring rewrites | same capability, findable now |
+Neither branch is merged, and the VM can only run one at a time.
 
 ---
 
-## Stage 3 — Deployment configuration becomes named, not inferred
+## Known gaps in this record
 
-Commits `152a537`, `f9b7081`. Two applications of one rule: when N independent knobs have to agree,
-replace them with one name that sets them all, and make an unrecognised name *raise* rather than fall
-back.
-
-### 3.1 `AGENT_MODE` (`152a537`)
-
-**The reason.** Three independent flags have eight combinations and **five of them are nonsense** —
-"settings hidden AND a key required" is a page that demands a credential it gives you no way to
-enter. `AGENT_MODE=dev|demo|token` has three states and each sets every axis coherently.
-
-New module `agent_runtime/deployment_mode.py`: `current_mode()`, `is_dev()`, `is_demo()`,
-`is_token()`, `boot_warning()`. `api/server.py`'s `_demo_mode()` becomes a one-line delegate, kept as
-a named helper only because a dozen call sites read it.
-
-**Behaviour-preserving by construction.** `DEMO_MODE=true` with no `AGENT_MODE` still selects demo,
-which is how the deployed server is configured, so its behaviour is unchanged — a refactor that
-quietly changes what a live server does is not a refactor. `/agent/ui-config` gains `mode` and
-**keeps** `demo_mode`, because dropping it would blank the settings panel on every page still holding
-a pre-mode bundle.
-
-**What the mode deliberately does not decide: the API key.** Letting it would make `AGENT_MODE=dev`
-mean one thing on a laptop (harmless) and something else on the deployed dev tier, which is public.
-`AGENT_CHAT_API_KEY` keeps governing service access on its own, in every mode.
-
-**An unknown `AGENT_MODE` raises.** This selects security behaviour, and a typo that silently
-resolves to a working mode is the failure nobody notices on a public host. A container that refuses to
-boot is noticed immediately.
-
-Boot logging moves from "warn only in demo" to "state the mode on every boot, plus a warning when the
-mode is open" — the mode an operator *thinks* is set is the one thing worth saying out loud.
-
-`docs/jwt-user-scoping-plan.md` (360 lines) lands in this commit as the design for the rest of the
-branch.
-
-### 3.2 `PLATFORM_TIER` (`f9b7081`)
-
-**The reason.** The same shape one level down. Three URLs — where the browser refreshes, where an
-unsigned-in visitor goes, where the agent asks who a caller is — were being set one at a time, which
-invites exactly the state this prevents: two pointing at dev, one left on prod, and a verification
-that fails for a reason nobody can see from the outside.
-
-**Revised during the work.** `84c60b2` had introduced `refresh_url` / `signin_url` on
-`/agent/ui-config` read straight from `PLATFORM_REFRESH_URL` / `PLATFORM_SIGNIN_URL`; `95a48de` then
-added a third, `PLATFORM_CHECK_TOKENS_URL`, read independently inside `identity.py`. Three
-independently-set URLs that must agree is the problem `AGENT_MODE` had already solved once, so
-`f9b7081` replaces the reads with a resolver.
-
-New module `agent_runtime/platform_endpoints.py`: a `_TIERS` table (`dev` →
-`backend-dev.i-guide.io` / `dev.i-guide.io`; `prod` → `backend.i-guide.io` /
-`platform.i-guide.io`) and `refresh_url()`, `signin_url()`, `check_tokens_url()`. Each explicit
-`PLATFORM_*_URL` still wins, because a tier table cannot anticipate a staging host somebody stands up
-next month. An unrecognised tier raises: picking the wrong platform silently verifies tokens against
-a backend that never minted them, and the resulting "invalid token" explains nothing.
-
-The pairings are **verified, not assumed** — each backend answers `/api/refresh-token` with its 401
-"no refresh cookie" reply, and each frontend answers `/auth/login` with a 302 to CILogon.
-
-**The one half-switched state that remains is named rather than guessed at.** The cookie NAME is the
-platform's own setting (`JWT_ACCESS_TOKEN_NAME`), differs between tiers, and does not move with
-`PLATFORM_TIER`. Mismatched, every request fails and looks like a rejected token rather than a
-misconfiguration. `consistency_warning()` says so at boot — and does **not** invent the right name,
-because prod's is not known.
+- **Reasons that were never written down are gone.** Stages 0–2 have many: the deletion of the
+  declarative router, the orphaning of `search_agents.py`, the prompt downgrade at `0e0435d`, the
+  `top_k` 8→100 change, why branch B was started or discarded. Reading the diff does not recover
+  them. This is the whole argument for the rule below.
+- **Part of the system is not in this repo.** The rs-embed service's webapp half was vendored at
+  `096efbf` because upstream `.gitignore`s `examples/**` — *"It existed only on the VM."* Other
+  commits flag further service-side halves still untracked.
+- **Two mislabelled commits.** `91b6f4b` ("Add docker-out-of-docker") contains only file renames;
+  the actual work is in `af1ead0`. `8dc7f25` ("Add prototype MCP") contains no MCP change.
+- **`analyze` vs `code` is unsettled.** They share 14 of 18 toolsets including the sandbox, so the
+  toolset does not distinguish them; what does is that `AGENT_CODE_PEER` can swap the code peer
+  for an external CLI runtime. Measured: *"7 of 7 turns reported peer=analysis"*. No commit
+  resolves whether the split should remain.
+- **A capability taxonomy was added and never consumed** (`722e4ed`, stage 2.6).
+- `175fed8` ("Lower-case the rs-embed demo tab") has **no reason recorded at all**.
 
 ---
 
-## Stage 4 — A request gains a caller
-
-Commits `69863b8`, `95a48de`, `c59a69d`. New module `agent_runtime/identity.py` plus enforcement in
-`api/server.py`.
-
-Before: every agent endpoint was gated, at most, by a shared secret — `_require_agent_chat_api_key()`
-answers "does this caller hold the key", which carries no identity. After: identity is a second,
-orthogonal axis, and in token mode it is the *stronger* credential.
-
-### 4.1 Verifying the platform's JWT (`69863b8`)
-
-**Why verify rather than exchange.** The agent is served from `agent.i-guide.io`: same origin as the
-map UI, same registrable domain as the platform, so the `.i-guide.io` access cookie arrives here on
-its own — including on the `<img>` request for an inline map artifact. That is why downloads need no
-signed URL.
-
-**Why locally.** Calling the backend's `/api/check-tokens` per request would buy only "the agent does
-not hold the signing secret", and the secret is already in this deployment's `.env`.
-
-**Four choices, each of which is a way this fails open if reversed.**
-
-| choice | what reversing it does |
-|---|---|
-| `algorithms=["HS256"]` pinned | a decoder that trusts the token's own `alg` accepts the `none` forgery the caller wrote |
-| `options={"require": ["exp"]}` | a token issued once is valid forever |
-| missing / non-numeric `role` refused, never defaulted | `0` would make a broken token the most privileged caller on the system |
-| `TokenExpired` raised separately from `TokenInvalid`; 401 vs 403 | the client cannot tell "refresh and retry" from "give up", so the UI either never refreshes or refreshes forever against a token that will never validate |
-
-`_coerce_role` also rejects a boolean explicitly, since `bool` is an `int` in Python and a boolean
-role is nonsense. `_LEEWAY_SECONDS = 30` absorbs clock drift without meaningfully extending a
-one-hour token.
-
-**The role gate** is `role <= 4` (`UNRESTRICTED_CONTRIBUTOR`), matching the platform's own backwards
-scale where lower is more privileged. This **excludes** an ordinary `TRUSTED_USER` (8): the agent
-spends LLM budget and runs generated code, so access starts narrow and widens by raising one
-constant, `DEFAULT_MIN_ROLE`. `AGENT_MIN_ROLE` can override it, and a non-numeric value raises rather
-than guessing in either direction.
-
-**Identity is carried in a `ContextVar`**, for the same reason the file store uses one: threading a
-`User` through every call site would touch every tool. The module carries an explicit warning that a
-`ContextVar` does not cross threads — the bug that already made the file-store session stamp come out
-`None` once. The streaming path is safe because `graph_runtime` already does
-`contextvars.copy_context()` + `ctx.run()` around its worker; identity rides along on the mechanism
-that fix installed.
-
-**Service callers keep working.** The eval harness has no browser, presents the API key, gets no user
-identity, and falls back to session scoping. The rule that must not be broken: "no identity" resolves
-to **session** scoping, never to one shared owner every anonymous caller lands in and can read each
-other's files through. `_extract_user_token()` accepts `Authorization: Bearer` only when the value is
-structurally a JWT (`value.count(".") == 2`), because `Bearer` is also how a service caller presents
-the API key, and treating that key as a token turns a valid service request into a confusing 403
-about signatures.
-
-`PyJWT>=2.8` is pinned in `requirements.txt` although it already arrives transitively: identity must
-not break because something else drops its dependency.
-
-### 4.2 Verifying without holding the signing secret (`95a48de`)
-
-**This reverses a decision the plan document records as settled**, and the reason it does is worth
-keeping. `docs/jwt-user-scoping-plan.md` states that introspection "was considered and rejected: its
-only real advantage is not holding the secret, which is already moot." That reasoning is correct for
-the dev tier and **inverts against production**: this host runs LLM-generated code in a sandbox with
-a Docker socket, and a sandbox escape that found the *production* HS256 secret would be equivalent to
-minting tokens for every account on the platform.
-
-**Structural.** `identity.py` gains a second verification path selected by
-`AGENT_TOKEN_VERIFY=local|introspect`, behind one new entry point `identify(token)` that all callers
-use. `introspect_token()` forwards the received cookie to the backend's own `/api/check-tokens`,
-which reads it with its own secret and its own cookie name and answers `{id, role}`. Nothing secret
-lives here — and the production cookie name stops mattering too. `_require_user` was changed from
-`decode_token` to `identify` in the same commit. Default stays `local`, so nothing changes for the
-dev tier.
-
-**Fails CLOSED in every direction that matters.** An unreachable backend, an unexpected status, a
-non-JSON reply and an unset URL all raise `IdentityNotConfigured` rather than returning `None` —
-"cannot verify" must never resolve to "nobody is signed in", which would silently degrade a token
-deployment to anonymous access. A reply with no `id`, or no usable `role`, is refused rather than
-defaulted.
-
-**The cache collapses a burst and nothing more.** `_INTROSPECT_TTL_SECONDS = 60`,
-`_INTROSPECT_MAX_ENTRIES = 512`, `_INTROSPECT_TIMEOUT = 8`. Failures are never cached — a cached
-rejection keeps refusing someone who has since signed in again. Eviction drops the soonest-to-expire
-rather than an arbitrary entry, so a burst of new tokens cannot evict the ones still in use. Keys are
-`sha256` of the token, never the token: this dict is exactly the thing that ends up in a heap dump or
-a debug print.
-
-### 4.3 A signed-in visitor is not also required to hold the API key (`c59a69d`)
-
-**The measurement.** Found live: sign in at the platform, then get "You are not signed in".
-
-**The bug, and why it was structural.** Token mode ran the API-key gate **before** identity, so a
-visitor with a valid JWT and no key was refused by the key check before anything asked who they
-were — and token mode hides the settings panel precisely because there is nothing to paste, so they
-could not supply one. In an incognito window, where `localStorage` starts empty, that is every user.
-
-**Revised ordering.** `_require_user()` now runs first on `/agent/chat` and `/agent/chat/stream`, and
-`_require_agent_chat_api_key(user)` returns immediately when a user was identified. A verified user
-*is* a credential, and the stronger one: the key says only "someone who has the key", the JWT says
-who. The two are **alternatives**, never a pair; the key remains how a caller with no browser gets
-in.
-
-**New endpoint: `GET /agent/whoami`.** Reports mode, verify path, the caller, their role, the
-required role, the platform tier, the resolved check-tokens URL, and — when it thinks nobody is
-signed in — why. It reports the cookie **names** it received and the one it expects, never values, so
-a tier using an unexpected cookie name is something the server states rather than something we guess
-at. **Always 200**, including for anonymous and refused callers: an endpoint that exists to explain a
-refusal cannot answer with one.
-
-The client half of this fix is in Stage 6.2.
-
----
-
-## Stage 5 — Records gain an owner
-
-Commits `d934cbe`, `e067055`, `1f880d3`.
-
-`owner_id` is a **second axis, not a replacement** for the conversation stamp. A user has many
-conversations, and in dev/demo there is no user at all — outside token mode `owner_id` is `None` on
-every record and scoping stays exactly the per-conversation behaviour it is today.
-
-### 5.1 Files (`d934cbe`)
-
-**The hole.** `GET /agent/files/<id>/download` had never checked anything. Every answer publishes
-file ids as download links, so each one was effectively a permanent public URL: any id, no
-credential, any file.
-
-**Structural.** `agent_runtime/file_store.py` gains `current_owner()` (reading the identity
-`ContextVar` rather than a second one of its own, so there is one place a caller is established and
-one place it can be wrong), `record_owner()`, and `may_read(record, *, allow_unowned=True)`.
-`owner_id` is stamped in `save_uploaded_file`, `create_output_file` and
-`create_output_file_from_path`. `find_files` filters through `may_read`.
-
-**A mismatch answers 404, not 403.** A 403 confirms the id exists, which turns the endpoint into an
-oracle for enumerating other people's files. The same rule is used for conversations.
-
-**`allow_unowned` is a parameter rather than a decision**, because the two callers genuinely want
-different answers for the 1,325 records that predate ownership:
-
-| caller | `allow_unowned` | why |
-|---|---|---|
-| `find_files` (server-side reuse) | `True` | those files were written by a deployment that identified nobody; hiding them breaks the reuse the lookup exists for |
-| `download_agent_file` (browser) | `not _token_strict()` | once strict, a file nobody owns is a file nobody downloads — that is the exposure being closed |
-
-Note this is a **refinement of the plan**, which said flatly "deny unowned rather than defaulting them
-public".
-
-**There is no honest backfill.** Ownership did not exist when those records were written and their
-conversation stamp was never mapped to a user, so no rule can attribute them after the fact; inventing
-an owner would be worse than leaving them unowned. `scripts/file_ownership_report.py` prints the size
-of the problem instead — totals, per-owner counts, recent-window counts, and optionally the most
-recent unowned filenames — so `AGENT_TOKEN_STRICT=1` gets flipped on evidence rather than on hope.
-
-### 5.2 Conversations (`e067055`)
-
-**The hole.** `get_or_create_memory(memory_id)` fetched by bare UUID with no owner check: anyone
-holding an id read that transcript. Worse, the *create* half would have indexed over a document it had
-just refused to read, replacing the owner's conversation with an empty one.
-
-**Ownership is asserted at the edge.** `rag_pipeline/memory_module.py` gains
-`assert_owner(memory_id, *, allow_unowned=None)`, called from `api/server.py` on `/agent/chat`,
-`/agent/chat/stream` and both `/agent/conversations/<id>` methods — rather than guarded inside each
-read and write. The reason is that specific get-or-create failure: refusing at the door removes the
-whole class of mistake instead of patching each door. On `/agent/chat` the assertion is placed
-*inside* the identity binding, because `assert_owner` reads the caller from the same `ContextVar`
-everything else does and before that line would see nobody and wave every conversation through. On
-the streaming path the refusal travels as an SSE `error` frame, since headers are long gone by then.
-
-**A write attributes a conversation only when it has no owner yet**, so a write can never move one
-between users — the second half of the guarantee `assert_owner` makes at the door, not a repeat of
-it. `update_memory` also stamps `updatedAt`, without which every conversation sorts equal and the
-user's list is arbitrary.
-
-**New endpoint: `GET /agent/conversations`.** Returns summaries, never transcripts, via
-`list_memories()` — a `term: {owner_id}` query sorted by `updatedAt` desc. The summary is built from
-**named keys** rather than spread from `_source`: `_source` in a query is a request, not a guarantee,
-and the field it must never leak is `chat_history`, the whole transcript. A test caught exactly that.
-Outside token mode the endpoint returns `{"conversations": []}` with 200 rather than an error — a
-client that shows a history pane should render it empty, not break.
-
-### 5.3 The conversation, not a transcript of it (`1f880d3`)
-
-**The reason.** `chat_history` is the AGENT's memory: what was asked and answered, used to give the
-next turn context. The user's conversation also has the layers on the map, every file uploaded across
-the session, a region and a model. Restored from `chat_history` alone it comes back as a text shell
-whose answers say "you can see these features on the map" beside an empty map — the transcript lies.
-
-**Structural, and the shape was not invented here.** The client already models it correctly, and
-`map-ui-prototype/src/sessionStore.ts` was written server-shaped on purpose ("moving it behind a
-per-user endpoint later means swapping the transport, not the record"). So the server **stores that
-record** rather than rebuilding it from tool output — which would duplicate the client's
-layer-descriptor rules (which geometry is small enough to inline, which layer re-fetches by url) in a
-second place where they would drift.
-
-`save_session_snapshot` / `get_session_snapshot` land on `memory_module`, behind
-`GET|PUT /agent/conversations/<memory_id>`.
-
-**Client-supplied, therefore treated as data.** `_SNAPSHOT_RESERVED = {owner_id, chat_history,
-createdAt, updatedAt, _id}` is stripped before storage: a snapshot cannot claim an `owner_id` and
-cannot rewrite `chat_history`. Both have tests, because "hand yourself someone else's conversation by
-saying you own it" is the obvious attack. Ownership is never re-derived from the snapshot — it is
-asserted by the caller before the write, and the document's own `owner_id` is left untouched.
-
-**Oversize is refused (413), not truncated.** Default 5 MB. A conversation that came back missing half
-its layers would look like data loss with no explanation.
-
-`messageCount` / `layerCount` / `fileCount` are written onto the **document**, not into the snapshot,
-so a history list can say "12 messages, 3 layers" without fetching twelve messages to count them.
-
-**Two bugs the tests caught, both worth recording:**
-
-- the size cap was a module-level constant frozen at import, so no deployment could change it without
-  a restart. It is now `_snapshot_max_bytes()`, read at call time — a limit that needs a restart to
-  change is a limit nobody adjusts when a real conversation turns out to sit just over it;
-- the test double's `update()` quietly created missing documents, hiding the create path entirely.
-  Real OpenSearch raises `NotFoundError` there. `FakeOpenSearch.update` now raises too.
-
----
-
-## Stage 6 — The browser stops owning the session
-
-Commits `84c60b2`, `4daf2e1`. `map-ui-prototype/src/`.
-
-### 6.1 Refresh once, and say what a refusal means (`84c60b2`)
-
-**Who refreshes: the browser, not the agent.** The agent stays a pure verifier. The client calls the
-platform's own refresh endpoint, which validates the refresh cookie and re-mints the `.i-guide.io`
-access cookie. Nothing in the client ever sees a token value — both cookies are httpOnly, which is
-also why none of this reads `document.cookie`.
-
-**Structural.** New `auth.ts` (`AuthError`, `AuthReason`, `authErrorFrom`, `authMessage`,
-`refreshAccessToken`, `withTokenRetry`) and new `auth.check.ts`, wired as `npm run check:auth`.
-`agentClient.ts` routes `streamChat`, `uploadFiles`, `listConversations`, `putConversation` and
-`getConversation` through `withTokenRetry`, and every agent call now sends
-`credentials: 'include'` — same-origin would send the cookie anyway, but a developer running `npm run
-dev` against the deployed API is cross-origin, where the default omits it and every request looks
-unauthenticated for no visible reason.
-
-**Every retry is bounded at exactly one attempt, and only an expired token retries at all.**
-`not_signed_in`, `token_invalid`, `insufficient_role` and `not_your_conversation` are rethrown
-untouched: no number of refreshes fixes any of them, and retrying is how a loop against the auth
-backend starts. A failed refresh is a sign-in, not another try. `run` is a thunk rather than a
-Promise because a retry has to *issue* a new request.
-
-**`check:auth` counts the calls, because none of this is visible in a screenshot — and it caught a
-real bug inside the same commit.** The shared in-flight refresh was cleared on a timer, so a 401
-arriving after a refresh had finished reused that stale result. A stale `true` is the bad one: it
-retries against a cookie that was never actually replaced. It is now cleared the moment the refresh
-settles, which still lets a burst of four parallel 401s share a single refresh rather than
-stampeding the auth backend.
-
-**Message rewrite.** An auth refusal is not a failed request and no longer reads like one.
-`App.tsx`'s catch previously rendered `Request failed: ${e.message}` for everything; an `AuthError`
-now renders `authMessage(e)`. Since the role gate starts at contributor, `insufficient_role` is what
-most platform accounts will actually hit, so that message names the role required and says signing in
-again will not help:
-
-> Your I-GUIDE account is signed in, but does not have access to the agent — it needs the contributor
-> role (4) or above […] Signing in again will not change this; ask an I-GUIDE administrator for
-> access.
-
-`refresh_url` and `signin_url` come from `/agent/ui-config` rather than the bundle, so one build runs
-against either tier. (Superseded by `PLATFORM_TIER` on the server side — Stage 3.2.)
-
-### 6.2 The server owns the history in token mode (`4daf2e1`)
-
-**The measurement.** Two things observed live with the same root cause: signing out left the history
-list fully populated, and a signed-out visitor was told "Forbidden: invalid API key" instead of being
-asked to sign in.
-
-**Revised during the work: a local filter became a server-owned store.** IndexedDB is
-per-**origin**, not per-user. Signing out of the platform does not touch it, so the next person to
-open the page gets the previous person's conversations. The first fix — filtering the local store by
-owner — *hides* that, and it is the wrong fix: conversations belong to the user, and the whole point
-of per-user history is that it follows them to another browser. A local filter cannot do that.
-
-So in token mode `GET`/`PUT /agent/conversations` is the source of truth and IndexedDB is a cache;
-`dev` and `demo` identify nobody and keep using it alone, exactly as before.
-
-**The filter is kept anyway**, for a narrower reason than it was first written for: a cache with
-someone else's data in it should not serve it. `StoredSession` gains `ownerId`, and
-`listSessions(viewer)` / `loadSession(id, viewer)` take the viewer. The rule is deliberately
-asymmetric — with no viewer everything is listed (dev and demo unchanged); with a viewer, their own
-records **and unowned ones**, so a conversation started before signing in is not orphaned by signing
-in. Another user's records are hidden, never deleted: that is their data and their browser too.
-
-`App.tsx` gains `refreshSessions()` as the single path to the history list, plus `tokenMode`,
-`viewer` and `viewerRef` state. `viewer` comes from `GET /agent/whoami` — the access cookie is
-httpOnly, so the page cannot answer "who am I" itself and has to ask. `restoreSession` tries the local
-cache first (a hit avoids a round trip) and falls back to `getConversation` for a conversation opened
-on another browser.
-
-**A failed fetch returns `null`, not `[]`.** "Could not ask" and "you have none" are different, and
-showing an empty history because the server blinked reads as data loss; `refreshSessions` keeps
-whatever is on screen.
-
-**`AGENT_TOKEN_STRICT=0` no longer swallows "who are you".** As written in `69863b8`, `_require_user`
-caught every `IdentityError` and returned `None` when non-strict. That dropped a signed-out visitor
-through to the API-key gate, to be refused for lacking a credential token mode gives them no way to
-enter — the second half of the live bug fixed in Stage 4.3. The flag relaxes **ownership** of records
-written before ownership existed, which is what a backfill needs; it never needed to relax sign-in.
-The clause is now `if not _token_strict() and _service_key_presented()`: a caller holding the service
-key is still the exception, because that is a real credential belonging to something without a
-browser.
-
-`TopNav` hides the connection settings in token mode as well as demo — for a different reason, which
-the code says out loud: there *is* a credential, it is just not one you paste.
-
----
-
-## Changes that were revised mid-work
-
-| what was tried first | what it became | where |
-|---|---|---|
-| expose `map_layer_delivered` to the decider | expose the whole `this_turn` ledger; keep the boolean as an unmissable signal for the one question the prompt asks directly | 1.3 |
-| filter the local IndexedDB history by `ownerId` | make the server the source of truth in token mode; keep the filter, but only so a cache does not serve another user's data | 6.2 |
-| `AGENT_TOKEN_STRICT=0` relaxes all identity errors | it relaxes record ownership only; a service key is the sole exception for sign-in | 6.2 |
-| API-key gate, then identity | identity first; a verified user satisfies the credential check on its own | 4.3 |
-| `refresh_url`, `signin_url`, `check_tokens_url` set independently | `PLATFORM_TIER` resolves all three, explicit URLs still win | 3.2 |
-| local HS256 verification only (and the plan recorded introspection as rejected) | `AGENT_TOKEN_VERIFY=local\|introspect`; local stays the default, introspect exists for production | 4.2 |
-| in-flight refresh cleared on a timer | cleared the moment it settles, so a later 401 does not reuse a stale `true` — caught by `npm run check:auth`, added in the same commit | 6.1 |
-
----
-
-## Deployment state
-
-| | deployed to the dev VM? |
-|---|---|
-| `claude/evidence-summary` through `8fe0dcb` (`1044afb`, `99d71ad`, `ae862b5`, `5a10a58`, `8fe0dcb`) | **yes** |
-| `claude/evidence-summary` `25c3e1e` (the `this_turn` ledger) | **no** |
-| `claude/jwt-identity`, all 10 commits | **no** |
-
-So on the running dev deployment: the evidence summary, the generated capability inventory, the null-
-argument wrapper, GeoTIFF routing and the `admin_boundary` recovery are live. The decider is **not**
-yet reading this turn's ledger, and none of the identity, ownership or mode work is running — the
-deployed server is still configured with the legacy `DEMO_MODE=true`, which `deployment_mode`
-deliberately continues to resolve to `demo`.
-
-**Neither branch is merged**, into `prototype` or into each other.
-
----
-
-## Not verified, and worth knowing before either branch merges
-
-- **`/agent/files/upload` never binds identity.** `upload_agent_files` in `api/server.py` does not
-  call `_require_user()`, so `save_uploaded_file`'s `owner_id: current_owner()` always reads `None`
-  for uploads. Generated outputs get an owner (they are created inside a chat request, which does
-  bind it); uploads do not. That makes `AGENT_TOKEN_STRICT=1` unreachable in practice for uploaded
-  files, since they would all be unowned and undownloadable. Not addressed in any of the ten commits.
-- **`agent_runtime/session_memory.py` was not given an owner key**, although the plan's Step 3 lists
-  it. It is a process-local cache rather than the source of truth, so it does not enforce the
-  boundary — but the plan item is open, not done.
-- **The plan document was not updated** for the two decisions the branch reversed or refined:
-  introspection (recorded as "considered and rejected"; now `AGENT_TOKEN_VERIFY=introspect` exists)
-  and unowned records (recorded as "deny unowned"; now `may_read(allow_unowned=...)` lets the two
-  callers differ).
-- **The backend CORS prerequisite is still someone else's deploy.** The plan states
-  `https://agent.i-guide.io` is not in `ALLOWED_DOMAIN_LIST`, so the credentialed refresh XHR in
-  `auth.ts` will be blocked by the browser until it is added. Nothing in these commits could change
-  that, and `refreshAccessToken` returning `false` on a CORS block is handled — it degrades to a
-  sign-in prompt — but the refresh path is untested against the real backend.
-- **Production `JWT_ACCESS_TOKEN_NAME` / `JWT_ACCESS_TOKEN_SECRET` are unknown.**
-  `platform_endpoints.consistency_warning()` deliberately does not guess prod's cookie name.
-- The `1,325` legacy-file figure in `file_store.may_read`'s docstring is carried over from
-  pre-existing comments in the same file, not re-measured in this branch.
-- **Section 2.4's account of `5a10a58` is superseded by a 17th commit.** `5a10a58` recovered
-  only the first inversion — `area` holding a level word, with the place sitting in `name`. A
-  re-run of the sweep caught the second and more natural one:
-
-      admin_boundary({'state':'IL','level':'county','name':'Champaign','subdivide':'tracts'})
-      ValidationError: area — Field required
-
-  `area` omitted, place in `name`. This dies inside pydantic before any in-body recovery can see
-  it, so no amount of the earlier fix could have caught it. A parameter a model reaches for twice
-  is not carelessness: `name` was simply the wrong word for a filename. So `area` is no longer
-  required, `name` is now a second spelling of the PLACE, and the output filename stem moves to a
-  new `output_name`. A caller passing both `area` and `name` keeps the old meaning, so nothing
-  that worked before changes.
+## Adding to this document
+
+**Every architectural change is documented here with its reason, in the same commit that makes
+it.** This is a project rule, recorded in `AGENTS.md`. It exists because the alternative was
+tried: this document was reconstructed by five parallel agents reading 408 commits, and they could
+recover only the reasons somebody had happened to write down.
+
+A **stage** is a coherent shift, not a commit. Thirty commits and one structural change is one
+entry. A new change either extends the last stage or opens a new one — it should not require
+restructuring what is already here.
+
+An entry needs:
+
+- **The reason, and the measurement with it.** *"266 s and 16 iterations"*, *"141 parameters
+  across 62 of 80 tools"*, *"four calls before one worked"*. A reason without its number is an
+  opinion. Every strong entry above has a number; every weak one does not.
+- **Why the first attempt was wrong**, when a change revises an earlier one. Two examples are
+  marked *"Revised during the work"* above, and in both the correction is more instructive than
+  the change.
+- **"Reason not recorded"** where it genuinely is not. An honest gap beats a plausible
+  reconstruction, which is indistinguishable from fact once written down.
+- **Prompt revisions and tool signatures count as architectural.** The supervisor's capability
+  paragraph drifted behind its peers until a DEM request became a knowledge-base search. A prompt
+  is part of the architecture, not commentary on it.
+
+The same drift is what `docs/spatial-toolkit.html` (the capability atlas) exists to prevent, and
+it has fallen behind twice.
