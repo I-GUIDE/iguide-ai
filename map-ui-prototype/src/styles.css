@@ -102,6 +102,30 @@ img.iglogo { height: 26px; width: auto; display: block; }
 .grow { flex: 1; }
 .navbtn { font-size: 12px; padding: 5px 11px; }
 .navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
+
+/* Account badge — who the server says you are, in token mode only.
+   Three states, three colours, because they are three different things to do about it: sign in
+   (accent, it is an action), no access (amber, nothing to click will fix it), signed in (quiet,
+   it is only a statement). The amber is a WARNING and not an error: the account is perfectly
+   valid, it simply is not permitted here. */
+.acctwrap { position: relative; display: inline-flex; }
+.acct { font-size: 12px; padding: 5px 11px; max-width: 170px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+a.acct { display: inline-flex; align-items: center; text-decoration: none; border: 1px solid var(--line);
+  border-radius: 999px; background: #fff; box-shadow: var(--shadow); color: #3b4046; line-height: 1.6; }
+.acct-out { color: var(--link); border-color: #cfe3d7; font-weight: 600; }
+.acct-ok { color: #3b4046; }
+.acct-blocked { color: #8a5b00; border-color: #e8d8ae; background: #fffaf0; }
+.acctcard { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: 286px;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 10px 12px; }
+.acctrow { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 12px; }
+.acctkey { color: var(--muted); width: 66px; flex: none; }
+.acctval { color: var(--ink); overflow-wrap: anywhere; }
+code.acctval { font-size: 11px; background: var(--soft); border-radius: 6px; padding: 1px 5px; }
+.acctnote { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 12px; line-height: 1.5; color: #8a5b00; }
+.acctnote-quiet { color: var(--muted); }
 /* .top now holds the platform back-link, so it stays visible when narrow. */
 
 /* left panel: layer manager + feature inspector — floats over the map so it never

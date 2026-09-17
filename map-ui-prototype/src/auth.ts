@@ -28,18 +28,25 @@ export type AuthReason =
 export class AuthError extends Error {
   readonly status: number;
   readonly reason: AuthReason | null;
-  /** Present on insufficient_role, so the page can say what is actually required. */
+  /** Present on insufficient_role, so the page can say what is actually required. The NAMES
+   *  come from the server too: the scale is the platform's, lower is more privileged, and a
+   *  copy of it here would be a copy that stops matching the day a tier is added. */
   readonly role?: number;
   readonly requiredRole?: number;
+  readonly roleName?: string;
+  readonly requiredRoleName?: string;
 
   constructor(status: number, reason: AuthReason | null, message: string,
-              extra?: { role?: number; requiredRole?: number }) {
+              extra?: { role?: number; requiredRole?: number;
+                        roleName?: string; requiredRoleName?: string }) {
     super(message);
     this.name = 'AuthError';
     this.status = status;
     this.reason = reason;
     this.role = extra?.role;
     this.requiredRole = extra?.requiredRole;
+    this.roleName = extra?.roleName;
+    this.requiredRoleName = extra?.requiredRoleName;
   }
 
   /** Recoverable by refreshing — the ONLY case worth retrying. */
@@ -57,6 +64,8 @@ export async function authErrorFrom(res: Response): Promise<AuthError> {
   return new AuthError(res.status, reason, message, {
     role: typeof body.role === 'number' ? body.role : undefined,
     requiredRole: typeof body.requiredRole === 'number' ? body.requiredRole : undefined,
+    roleName: typeof body.roleName === 'string' ? body.roleName : undefined,
+    requiredRoleName: typeof body.requiredRoleName === 'string' ? body.requiredRoleName : undefined,
   });
 }
 
@@ -77,6 +86,25 @@ export function setSigninUrl(url: string | undefined | null): void {
 }
 
 /**
+ * "the contributor role (4)", or just "role 6" when the platform's scale does not name it.
+ *
+ * The scale is SPARSE — 6, 7 and 9 are not roles — so an unnamed number is a real possibility
+ * and must read as a number rather than being rounded to the nearest tier it is not.
+ */
+export function describeRole(role: number | undefined, name?: string): string {
+  if (role === undefined) return name ? `the ${name.toLowerCase()} role` : 'a different role';
+  return name ? `the ${name.toLowerCase()} role (${role})` : `role ${role}`;
+}
+
+/** The same fact as a LABEL rather than a clause: "Contributor (4)".
+ *  describeRole reads correctly inside a sentence and badly in a key/value row, which is
+ *  where it first went — "Role: the contributor role (4)". */
+export function roleLabel(role: number | undefined, name?: string): string {
+  if (role === undefined) return name || 'Unknown';
+  return name ? `${name} (${role})` : `Role ${role}`;
+}
+
+/**
  * What to tell the person. Each case is a DIFFERENT thing to do about it, which is the reason
  * the server labels refusals instead of just refusing:
  *
@@ -94,8 +122,9 @@ export function authMessage(err: AuthError): string {
     case 'insufficient_role':
       return 'Your I-GUIDE account is signed in, but does not have access to the agent'
         + (err.requiredRole !== undefined
-          ? ` — it needs the contributor role (${err.requiredRole}) or above${
-            err.role !== undefined ? `, and this account is role ${err.role}` : ''}.`
+          ? ` — it needs ${describeRole(err.requiredRole, err.requiredRoleName)} or above${
+            err.role !== undefined
+              ? `, and this account is ${describeRole(err.role, err.roleName)}` : ''}.`
           : '.')
         + ' Signing in again will not change this; ask an I-GUIDE administrator for access.';
     case 'not_your_conversation':

@@ -16,7 +16,8 @@ import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
-import { fetchWhoAmI, listConversations, putConversation, getConversation } from './agentClient';
+import { fetchWhoAmI, listConversations, putConversation, getConversation,
+  type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
 import type { AppTab } from './uiVariant';
 import {
@@ -168,6 +169,11 @@ export default function App() {
   const [tokenMode, setTokenMode] = useState(false);
   // Who the SERVER says we are. The access cookie is httpOnly, so the page cannot answer this
   // itself. Null means "nobody", which lists nothing rather than everything.
+  //
+  // The whole answer is kept, not just the id: the id is what scopes stored conversations, but
+  // the role, the permitted flag and the reason are what the account badge needs to say where
+  // someone stands BEFORE they spend a question finding out.
+  const [me, setMe] = useState<WhoAmI | null>(null);
   const [viewer, setViewer] = useState<string | null>(null);
   const viewerRef = useRef<string | null>(null);
   useEffect(() => { viewerRef.current = viewer; }, [viewer]);
@@ -180,10 +186,14 @@ export default function App() {
       setDemoMode(demo);
       setTokenMode(c?.mode === 'token');
       if (c?.mode === 'token') {
-        void fetchWhoAmI(asAgentConfig()).then((me) => {
-          if (live) setViewer(me?.user?.id ?? null);
+        void fetchWhoAmI(asAgentConfig()).then((who) => {
+          if (!live) return;
+          setMe(who);
+          setViewer(who?.user?.id ?? null);
         });
       } else {
+        // Dev and demo identify nobody, so there is no badge and no owner to scope by.
+        setMe(null);
         setViewer(null);
       }
       if (!demo) return;
@@ -723,7 +733,8 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
-      <TopNav demoMode={demoMode || tokenMode} onToggleSettings={() => setShowSettings((s) => !s)}
+      <TopNav demoMode={demoMode || tokenMode} me={tokenMode ? me : null}
+        onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void refreshSessions(); }}
         sessionCount={sessions.length}
         tab={tab}

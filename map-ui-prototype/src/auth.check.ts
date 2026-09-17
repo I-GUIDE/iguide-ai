@@ -6,7 +6,8 @@
  * a burst of parallel 401s that each refresh is a thundering herd on the auth backend. None of
  * those are visible until they are in production, so they get counted here.
  */
-import { AuthError, authErrorFrom, authMessage, isAuthStatus, setRefreshUrl, withTokenRetry } from './auth';
+import { AuthError, authErrorFrom, authMessage, describeRole, isAuthStatus, setRefreshUrl,
+  withTokenRetry } from './auth';
 
 let bad = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
@@ -146,6 +147,32 @@ await (async () => {
   const real = await authErrorFrom({ status: 403,
     clone: () => ({ json: async () => ({ reason: 'not_signed_in', error: 'Please sign in.' }) }) } as unknown as Response);
   eq('a real identity refusal still says so', authMessage(real).includes('not signed in'), true);
+})();
+
+// --- roles are NAMED by the server, never by a copy of the scale kept here -----------
+await (async () => {
+  // The platform's scale runs backwards and is sparse: 1 is the most privileged and 6, 7 and 9
+  // are not roles at all. The client cannot derive any of that, so the names ride along with
+  // the numbers on the refusal — and an unnamed number has to read as a number rather than be
+  // rounded to a tier it is not.
+  eq('a named role reads as a name and a number', describeRole(4, 'Contributor'),
+     'the contributor role (4)');
+  eq('an unnamed role reads as a bare number', describeRole(6), 'role 6');
+
+  const named = await authErrorFrom(refused(403, 'insufficient_role',
+    { role: 8, requiredRole: 4, roleName: 'Trusted user', requiredRoleName: 'Contributor' }));
+  eq('the refusal carries both names', [named.roleName, named.requiredRoleName],
+     ['Trusted user', 'Contributor']);
+  const message = authMessage(named);
+  eq('  ...and the message names what is required', message.includes('the contributor role (4)'), true);
+  eq('  ...and what this account is', message.includes('the trusted user role (8)'), true);
+  eq('  ...and says signing in again will not help',
+     message.includes('Signing in again will not change this'), true);
+
+  // A server that has not been updated yet sends numbers only. The message must still work.
+  const unnamed = await authErrorFrom(refused(403, 'insufficient_role', { role: 8, requiredRole: 4 }));
+  eq('numbers alone still produce a usable message',
+     authMessage(unnamed).includes('it needs role 4 or above'), true);
 })();
 
 console.log(bad ? `\n${bad} FAILED` : '\nall passed');

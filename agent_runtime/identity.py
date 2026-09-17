@@ -45,6 +45,29 @@ import requests
 # sandbox, so access starts narrow. Widening it is this one number.
 DEFAULT_MIN_ROLE = 4
 
+# The platform's own names for the scale above, so a profile can say "Contributor" instead of
+# "4". It lives HERE, next to the scale it names, rather than in the client: the numbers are
+# the platform's and the client already has no way to learn them, so a second copy in
+# TypeScript is a copy that drifts the first time the platform adds a tier.
+#
+# The scale is SPARSE — 6, 7 and 9 are not roles. An unknown number therefore maps to None
+# and the caller shows the raw value, because the alternative (rounding to the nearest known
+# tier) would print a privilege level the platform never granted.
+ROLE_NAMES: Dict[int, str] = {
+    1: "Super admin",
+    2: "Admin",
+    3: "Content moderator",
+    4: "Contributor",
+    5: "Trusted user plus",
+    8: "Trusted user",
+    10: "Untrusted user",
+}
+
+
+def role_name(role: Any) -> Optional[str]:
+    """The platform's label for a role number, or None when it names no tier."""
+    return ROLE_NAMES.get(role) if isinstance(role, int) and not isinstance(role, bool) else None
+
 # Clocks drift between the minting host and this one. Thirty seconds is small enough that it
 # cannot meaningfully extend a one-hour token and large enough to absorb ordinary skew.
 _LEEWAY_SECONDS = 30
@@ -89,7 +112,10 @@ class User:
     role: int
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "role": self.role}
+        # ``roleName`` is absent, not null, for a number the scale does not name — so a client
+        # rendering `user.roleName ?? user.role` shows the number rather than the word "null".
+        name = role_name(self.role)
+        return {"id": self.id, "role": self.role, **({"roleName": name} if name else {})}
 
 
 def cookie_name() -> str:

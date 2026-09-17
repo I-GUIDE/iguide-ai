@@ -94,15 +94,21 @@ export async function fetchUiConfig(cfg: AgentConfig): Promise<UiConfig | null> 
 export interface WhoAmI {
   mode: string;
   signedIn: boolean;
-  user: { id: string; role: number } | null;
+  user: { id: string; role: number; roleName?: string } | null;
   permitted: boolean;
   reason: string | null;
-  requiredRole?: number;
+  requiredRole?: number | null;
+  requiredRoleName?: string | null;
+  /** Where to send someone who is not signed in. Carried HERE as well as on /agent/ui-config
+   *  because the profile renders from this response alone, and the signed-out state is the
+   *  one that needs the link. */
+  signinUrl?: string | null;
+  platformTier?: string | null;
 }
 
 /** Who the SERVER thinks we are. The cookie is httpOnly, so the browser cannot answer this
- *  itself — it has to ask. Used to scope stored conversations to their owner and, later, to
- *  render a profile. Degrades to "nobody", which lists nothing rather than everything. */
+ *  itself — it has to ask. Scopes stored conversations to their owner and renders the account
+ *  badge. Degrades to "nobody", which lists nothing rather than everything. */
 export async function fetchWhoAmI(cfg: AgentConfig): Promise<WhoAmI | null> {
   try {
     const r = await fetch(absoluteUrl('/agent/whoami', cfg), { credentials: CREDENTIALS });

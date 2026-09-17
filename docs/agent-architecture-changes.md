@@ -25,8 +25,10 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 
-Stages 8 and 9 are **unmerged branches**, independent of each other. Deployment state is at the
-end; do not infer it from the commits.
+Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
+(identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
+gap afterwards. Deployment state is at the end; do not infer it from the commits — at the time of
+writing the deployment runs `AGENT_MODE=dev`, so stage 9 is shipped but not switched on.
 
 A stage is a coherent shift, not a time slice, so two can overlap: stage 4 (the extraction into
 `agent_runtime/`) happened *while* stage 3 was the operating model, and changed nothing about how
@@ -736,7 +738,8 @@ regression either way.
 
 ## Stage 9 — Who the caller is {#stage-9}
 
-*Branch `claude/jwt-identity`, 10 commits off `9e35950`. Unmerged, independent of stage 8.*
+*Branch `claude/jwt-identity`, off `9e35950`. Merged to `prototype` at `e0e1f92`; the branch
+continues to carry later identity work.*
 
 ### Stage S9.1 Named deployment modes (`152a537`, `f9b7081`)
 
@@ -798,6 +801,47 @@ owner filter survives for a narrower reason: a cache should not serve another us
 
 A failed fetch returns `null`, not `[]` — *"could not ask"* and *"you have none"* are different,
 and rendering an empty history because the server blinked reads as data loss.
+
+### Stage S9.5 Telling someone where they stand before it costs them a question
+
+Everything above answers *"is this caller allowed?"* at the moment a request arrives, and answers
+it well — the 401/403 split, the machine-readable `reason`, a refusal that names what is required.
+But every one of those answers is a **reply to something the person already did**. In token mode a
+signed-out visitor and a signed-in one rendered identically: an empty history, an open composer,
+no indication either way. You discovered your access by spending a question on it.
+
+So `/agent/whoami`, which already knew all of this, became the thing the page renders rather than
+just a call it makes to learn an owner id. Three changes, each closing a different half of that:
+
+**The scale gets names, server-side.** The platform's roles run backwards and are *sparse* —
+1 is the most privileged, and 6, 7 and 9 are not roles at all. The client cannot derive that, so
+`identity.ROLE_NAMES` lives next to the scale it names and the names travel with the numbers, on
+`whoami` and on the `insufficient_role` refusal. A copy of the scale in TypeScript would be a copy
+that stops matching the day the platform adds a tier; `authMessage` had already hardcoded
+"contributor" for exactly that reason, and now reads the name off the response. An unnamed number
+stays a number — rounding 6 to the nearest tier would print a privilege nobody granted.
+
+**`whoami` stops being able to 500.** Two of the fields it reports come from configuration that
+deliberately *refuses to guess*: an unrecognised `PLATFORM_TIER` raises rather than silently
+picking a platform, and an unparseable `AGENT_MIN_ROLE` raises rather than widening access. Both
+are right, and both turned the one endpoint whose whole job is to explain a refusal into a 500 in
+precisely the situation it exists for. Each field is now read independently; a failure nulls that
+field and becomes the `reason`.
+
+**The badge.** A header control in token mode only — dev and demo identify nobody, and an account
+control for an account that cannot exist is worse than none. Signed out it is a sign-in link, with
+the URL carried on `whoami` itself so the state that most needs a link does not have to make a
+second call for it. Signed in but under the threshold it says *No access* in warning amber, not
+error red: the account is entirely valid, it simply is not permitted here, and the popover says so
+along with what would be required and that signing in again will not change it. Signed in and
+permitted it is quiet — the id, the role, the tier, and the one fact worth knowing about this
+deployment, which is that your conversations and files belong to the account and follow it to
+another browser.
+
+Both header variants get it. `TopNav.platform.tsx` is kept as a verbatim copy of the pre-issue-#20
+chrome, and its placeholder avatar stands down when there is a real account to show — the same
+reasoning that gave that file a `demoMode` condition on the gear: the two headers must not
+disagree about identity.
 
 ---
 

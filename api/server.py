@@ -209,9 +209,14 @@ def _identity_error_response(exc: Exception):
         return jsonify({"error": "Your session has expired.",
                         "reason": "token_expired"}), 401
     if isinstance(exc, identity.InsufficientRole):
+        # The NAMES travel with the numbers. The threshold is the platform's scale, which the
+        # client has no way to learn; without these it can only say "role 8 needs 4 or lower",
+        # or hardcode a copy of the scale that stops matching the day a tier is added.
         return jsonify({"error": "This account is not permitted to use the agent.",
                         "reason": "insufficient_role",
-                        "role": exc.role, "requiredRole": exc.required}), 403
+                        "role": exc.role, "requiredRole": exc.required,
+                        "roleName": identity.role_name(exc.role),
+                        "requiredRoleName": identity.role_name(exc.required)}), 403
     if isinstance(exc, identity.TokenMissing):
         return jsonify({"error": "Please sign in to use the agent.",
                         "reason": "not_signed_in"}), 403
@@ -786,9 +791,11 @@ def agent_whoami():
     responses:
       200:
         description: >-
-          `{ mode, verify, signedIn, user: {id, role}|null, permitted, reason, cookiesSeen }`.
-          Always 200, even when the caller is anonymous or refused: this endpoint exists to
-          EXPLAIN a refusal, so answering with one would defeat it.
+          `{ mode, verify, signedIn, user: {id, role, roleName?}|null, permitted, reason,
+          cookiesSeen, expectedCookie, platformTier, checkTokensUrl, signinUrl, requiredRole,
+          requiredRoleName }`. Always 200, even when the caller is anonymous or refused: this
+          endpoint exists to EXPLAIN a refusal, so answering with one would defeat it.
+          Everything the profile renders comes from here, including where to sign in.
     """
     body = {
         "mode": deployment_mode.current_mode(),
@@ -801,9 +808,30 @@ def agent_whoami():
         # and no amount of guessing beats the server saying what arrived.
         "cookiesSeen": sorted(request.cookies.keys()),
         "expectedCookie": identity.cookie_name(),
-        "platformTier": platform_endpoints.current_tier(),
-        "checkTokensUrl": platform_endpoints.check_tokens_url(),
     }
+    # Every field below reads configuration that REFUSES TO GUESS: an unrecognised
+    # PLATFORM_TIER raises rather than picking a platform, and an unparseable AGENT_MIN_ROLE
+    # raises rather than widening access. Both are right — and both would turn this endpoint
+    # into a 500 in precisely the situation it exists to explain. So each is reported when it
+    # can be read, left null when it cannot, and the misconfiguration itself becomes the
+    # `reason`, which is the one place a human is going to look.
+    #
+    # `signinUrl` is here, and not only on /agent/ui-config, because the profile renders from
+    # this response alone: the state that most needs a sign-in link is the signed-out one,
+    # where whoami already knows everything else.
+    for key, read in (
+        ("platformTier", platform_endpoints.current_tier),
+        ("checkTokensUrl", platform_endpoints.check_tokens_url),
+        ("signinUrl", platform_endpoints.signin_url),
+        ("requiredRole", identity.min_role),
+    ):
+        try:
+            body[key] = read()
+        except (identity.IdentityError, ValueError) as exc:
+            body[key] = None
+            body["reason"] = f"{type(exc).__name__}: {exc}"
+    body["requiredRoleName"] = identity.role_name(body.get("requiredRole"))
+
     try:
         body["verify"] = identity.verify_mode()
     except identity.IdentityError as exc:
@@ -827,7 +855,6 @@ def agent_whoami():
 
     body["signedIn"] = True
     body["user"] = user.to_dict()
-    body["requiredRole"] = identity.min_role()
     try:
         identity.authorize(user)
         body["permitted"] = True

@@ -289,3 +289,79 @@ def test_strict_is_the_default(monkeypatch):
     with server.app.test_request_context("/agent/chat"):
         with pytest.raises(idm.IdentityError):
             server._require_user()
+
+
+# --- role names, and the profile reading whoami -----------------------------------
+
+def test_role_names_cover_the_platform_scale():
+    """Every tier the platform defines has a label; nothing else acquires one."""
+    assert idm.role_name(4) == "Contributor"
+    assert idm.role_name(1) == "Super admin"
+    assert idm.role_name(10) == "Untrusted user"
+    # The scale is sparse. 6, 7 and 9 are not roles, and must not be rounded to a neighbour:
+    # naming 6 "Trusted user plus" would print a privilege the platform never granted.
+    for absent in (0, 6, 7, 9, 11, -1):
+        assert idm.role_name(absent) is None
+    assert idm.role_name(None) is None
+    assert idm.role_name("4") is None
+    assert idm.role_name(True) is None          # bools are ints; a bool role is nonsense
+
+
+def test_user_carries_its_role_name_and_omits_an_unknown_one():
+    assert idm.User(id="u-1", role=4).to_dict() == {
+        "id": "u-1", "role": 4, "roleName": "Contributor"}
+    # ABSENT, not null, so a client rendering `roleName ?? role` shows 6 and not "null".
+    assert idm.User(id="u-1", role=6).to_dict() == {"id": "u-1", "role": 6}
+
+
+def _whoami(monkeypatch, cookie=None):
+    monkeypatch.setenv("AGENT_MODE", "token")
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    client = server.app.test_client()
+    # set_cookie, not a Cookie header: the test client keeps its own cookie jar and rewrites
+    # that header, so a hand-set one arrives as no cookie at all.
+    if cookie:
+        client.set_cookie(COOKIE, cookie)
+    return client.get("/agent/whoami").get_json()
+
+
+def test_whoami_tells_a_signed_out_visitor_where_to_sign_in(monkeypatch):
+    """The signed-out state is the one that most needs a link, and it has no other source."""
+    body = _whoami(monkeypatch)
+    assert body["signedIn"] is False
+    assert body["signinUrl"]
+    assert body["requiredRole"] == 4
+    assert body["requiredRoleName"] == "Contributor"
+
+
+def test_whoami_names_the_signed_in_role(monkeypatch):
+    body = _whoami(monkeypatch, cookie=token(role=2))
+    assert body["signedIn"] is True
+    assert body["permitted"] is True
+    assert body["user"]["roleName"] == "Admin"
+
+
+def test_whoami_explains_an_under_privileged_account_without_refusing(monkeypatch):
+    body = _whoami(monkeypatch, cookie=token(role=8))
+    assert body["signedIn"] is True and body["permitted"] is False
+    assert body["user"]["roleName"] == "Trusted user"
+    assert body["requiredRoleName"] == "Contributor"
+    assert "role 8" in body["reason"]
+
+
+def test_whoami_survives_a_misconfigured_deployment(monkeypatch):
+    """The endpoint that explains refusals must not 500 on the refusal it exists to explain.
+
+    Both of these RAISE by design -- an unrecognised tier must never resolve to a platform,
+    and an unparseable threshold must never widen access -- so whoami has to report the
+    misconfiguration rather than propagate it.
+    """
+    monkeypatch.setenv("AGENT_MODE", "token")
+    monkeypatch.setenv("PLATFORM_TIER", "staging")      # not a tier
+    monkeypatch.setenv("AGENT_MIN_ROLE", "contributor")  # not a number
+    response = server.app.test_client().get("/agent/whoami")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["platformTier"] is None and body["requiredRole"] is None
+    assert body["requiredRoleName"] is None
+    assert body["reason"]

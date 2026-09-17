@@ -1,12 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
+import { AccountBadge } from './AccountBadge';
 import { IGuideMark } from './IGuideMark';
 import { TopNavPlatform } from './TopNav.platform';
 import { isPlatformVariant, type AppTab } from '../uiVariant';
+import type { WhoAmI } from '../agentClient';
 
 export interface TopNavProps {
   /** Server-side DEMO_MODE: the deployment needs no key, so there is nothing to configure. */
   demoMode?: boolean;
+  /** Who the server says we are, in TOKEN mode only — null in dev and demo, which identify
+   *  nobody, and null until the answer lands. */
+  me?: WhoAmI | null;
   onToggleSettings: () => void;
   onToggleHistory: () => void;
   sessionCount: number;
@@ -104,6 +109,7 @@ function TopNavRsEmbed(p: TopNavProps) {
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
+        <AccountBadge me={p.me ?? null} />
         {/* In demo mode there is no key to enter and no endpoint worth changing, and the one
             control the dialog still offered — the mock/live switch — is not what an audience
             should find first. Hidden rather than disabled: a greyed gear invites a click that
