@@ -198,14 +198,16 @@ def make_admin_boundary_tools() -> List[Any]:
                     "town", "towns", "municipality", "cdp", "tract", "tracts", "block_group",
                     "block_groups"}
 
-    def admin_boundary(area: str, state: Optional[str] = None, level: str = "county",
-                       subdivide: Optional[str] = None, name: Optional[str] = None) -> str:
+    def admin_boundary(area: Optional[str] = None, state: Optional[str] = None,
+                       level: str = "county", subdivide: Optional[str] = None,
+                       name: Optional[str] = None,
+                       output_name: Optional[str] = None) -> str:
         """Look up a US state, county or city BY NAME, draw it on the map, and return it as a
         polygon file other tools can use — no upload required.
 
-        `area` is the PLACE NAME — "Urbana", "Champaign County", "Illinois". It is NOT the kind
-        of place: that is `level`, and passing "city" as the area finds nothing. (`name` is
-        something else again — the stem for the output filename.)
+        `area` is the PLACE NAME — "Urbana", "Champaign County", "Illinois". `name` means the
+        same thing and either will do. The KIND of place goes in `level`, never in `area`.
+        The output filename stem is `output_name`.
 
         This is how to answer "the embeddings for Champaign County" or "show me Cook County"
         when the user has attached nothing. `level`: "county" (default), "state", "city"
@@ -220,28 +222,50 @@ def make_admin_boundary_tools() -> List[Any]:
 
         US only; it reads the Census TIGERweb service.
         """
-        # `area` holds the place NAME but reads like the KIND of place, and a model reading it
-        # that way puts "city" in it. Observed live with gpt-oss:120b: four calls, three of them
-        # area='city', before it stumbled onto area='Urbana'. `level` already carries the kind,
-        # so an `area` holding a level word is unambiguous — recover instead of refusing, and
-        # say so, because a silent correction teaches the caller nothing.
+        # `area` is the place NAME but reads like the KIND of place, and `name` — which used to
+        # mean the output filename — reads like exactly what a caller is trying to say. Both
+        # mistakes were measured live with gpt-oss:120b:
+        #
+        #   area='city', name='Urbana'                      -> 3 failures before it guessed right
+        #   area omitted, name='Champaign', level='county'  -> ValidationError, area required
+        #
+        # The second is the more natural error and the harder one: it fails in pydantic before
+        # any of this runs, so no amount of in-body recovery could have caught it. A parameter
+        # a model reaches for twice is not the model being careless — `name` was the wrong word
+        # for a filename. It now means the PLACE, `output_name` means the file, and `area` is
+        # no longer required so an otherwise-correct call reaches this code at all.
         swap_note = None
-        if str(area or "").strip().lower() in _LEVEL_WORDS:
-            candidate = str(name or "").strip()
-            if candidate and candidate.lower() not in _LEVEL_WORDS:
-                swap_note = (f"`area` was {area!r}, which is a kind of place rather than a name; "
-                             f"used {candidate!r} as the place and kept it as the level. `area` "
-                             f"takes the NAME.")
-                level = level or area
-                area, name = candidate, None
+        place = str(area or "").strip()
+        given = str(name or "").strip()
+
+        if place.lower() in _LEVEL_WORDS:
+            if given and given.lower() not in _LEVEL_WORDS:
+                swap_note = (f"`area` was {area!r}, a kind of place rather than a name; used "
+                             f"{given!r} as the place and {area!r} as the level.")
+                level = area
+                place, given = given, ""
             else:
                 return json.dumps({
                     "ok": False,
                     "error": f"`area` is the place NAME, not the kind of place — {area!r} is a "
                              f"level.",
                     "hint": "Call it as admin_boundary(area='Urbana', level='city', "
-                            "state='Illinois'). `level` takes city/county/state/cdp; `name` is "
-                            "only the output filename."})
+                            "state='Illinois'). `level` takes city/county/state/cdp."})
+        elif not place and given:
+            # `name` alone. Not an error worth reporting — it is the same request, said the
+            # other way round, and both words mean the place now.
+            place, given = given, ""
+
+        if not place:
+            return json.dumps({
+                "ok": False, "error": "no place named",
+                "hint": "Pass the place as `area` (or `name`): admin_boundary(area='Champaign "
+                        "County', state='IL'). `level` takes the kind of place; `output_name` "
+                        "names the output file."})
+
+        area = place
+        # Whatever is LEFT in `name` was meant as a filename, which is what it used to mean.
+        output_name = output_name or (given or None)
 
         lvl = str(level or "county").strip().lower()
         if lvl in {"place", "town", "municipality"}:
@@ -250,10 +274,7 @@ def make_admin_boundary_tools() -> List[Any]:
             return json.dumps({"ok": False,
                                "error": f"unknown level {level!r}",
                                "hint": f"use one of: {', '.join(sorted(_LEVELS))}"})
-        area_text = str(area or "").strip()
-        if not area_text:
-            return json.dumps({"ok": False, "error": "no area named",
-                               "hint": "pass the name of a state, county or city"})
+        area_text = area
 
         # --- resolve the state qualifier ------------------------------------------------
         state_fips = None
@@ -359,7 +380,7 @@ def make_admin_boundary_tools() -> List[Any]:
             feats = inner["features"][:MAX_FEATURES]
             zone_note = f"{len(feats)} {sub}s inside {matched[0]['name']}"
 
-        stem = name or (zone_note and f"{matched[0]['name']}_{subdivide}") or \
+        stem = output_name or (zone_note and f"{matched[0]['name']}_{subdivide}") or \
             (matched[0]["name"] if len(matched) == 1 else f"{area_text}_{lvl}")
         try:
             rec = _write_layer(feats, str(stem))

@@ -63,7 +63,7 @@ def test_an_unrecoverable_swap_says_exactly_what_to_do(boundary):
     assert out["ok"] is False
     assert "place NAME" in out["error"] and "city" in out["error"]
     assert "area='Urbana'" in out["hint"]           # shows the shape of a correct call
-    assert "level" in out["hint"] and "filename" in out["hint"]
+    assert "level" in out["hint"]
 
 
 @pytest.mark.parametrize("word", ["city", "County", "STATE", "cdp", "town", "tracts"])
@@ -88,3 +88,59 @@ def test_a_place_actually_named_like_a_level_still_needs_care(boundary):
     out = call(boundary, area="town", state="Illinois")
     assert out["ok"] is False          # refused, with instructions, not silently mis-resolved
     assert "hint" in out
+
+
+# --- the second inversion, which validation refused before any code ran ------------
+
+def test_the_call_the_sweep_caught(boundary):
+    """area omitted, place in `name`:
+
+        admin_boundary({'state':'IL','level':'county','name':'Champaign','subdivide':'tracts'})
+        ValidationError: area — Field required
+
+    The more natural mistake of the two, and the harder one: it fails inside pydantic before
+    any in-body recovery can see it, which is why `area` had to stop being required.
+    """
+    out = call(boundary, state="IL", level="county", name="Champaign")
+    assert "validation" not in json.dumps(out).lower()
+    assert "no place named" not in json.dumps(out)
+
+
+def test_name_alone_is_not_reported_as_a_correction(boundary):
+    """It is the same request said the other way round — both words mean the place now, so
+    there is nothing to warn about."""
+    out = call(boundary, name="Champaign", state="IL")
+    assert out.get("note") is None
+
+
+def test_neither_given_says_what_to_pass(boundary):
+    out = call(boundary, state="IL")
+    assert out["ok"] is False and out["error"] == "no place named"
+    assert "area='Champaign County'" in out["hint"] and "output_name" in out["hint"]
+
+
+# --- and the filename still works, by its new name --------------------------------
+
+def _capture_stem(monkeypatch):
+    written = {}
+
+    def fake_write(feats, stem):
+        written["stem"] = stem
+        return {"file_id": "f", "download_url": "u", "filename": f"{stem}.geojson"}
+
+    monkeypatch.setattr("agent_runtime.admin_boundary_tools._write_layer", fake_write,
+                        raising=False)
+    return written
+
+
+def test_output_name_sets_the_file_stem(boundary, monkeypatch):
+    written = _capture_stem(monkeypatch)
+    call(boundary, area="Champaign", state="IL", output_name="my_county")
+    assert written.get("stem") in (None, "my_county")     # None if the lookup failed first
+
+
+def test_name_still_means_the_filename_when_area_is_given(boundary, monkeypatch):
+    """Backwards compatible: a caller passing BOTH meant `name` the old way."""
+    written = _capture_stem(monkeypatch)
+    call(boundary, area="Champaign", state="IL", name="legacy_stem")
+    assert written.get("stem") in (None, "legacy_stem")
