@@ -16,6 +16,7 @@ import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
+import { fetchWhoAmI, listConversations, putConversation, getConversation } from './agentClient';
 import { renderMarkdown } from './markdown';
 import type { AppTab } from './uiVariant';
 import {
@@ -165,6 +166,11 @@ export default function App() {
   // Token mode hides the connection settings for a different reason than demo does: there is a
   // credential, it is just not one you paste — the browser holds it as a cookie.
   const [tokenMode, setTokenMode] = useState(false);
+  // Who the SERVER says we are. The access cookie is httpOnly, so the page cannot answer this
+  // itself. Null means "nobody", which lists nothing rather than everything.
+  const [viewer, setViewer] = useState<string | null>(null);
+  const viewerRef = useRef<string | null>(null);
+  useEffect(() => { viewerRef.current = viewer; }, [viewer]);
   useEffect(() => {
     if (mode !== 'live') { setDemoMode(false); setTokenMode(false); return; }
     let live = true;
@@ -173,6 +179,13 @@ export default function App() {
       const demo = !!c?.demo_mode;
       setDemoMode(demo);
       setTokenMode(c?.mode === 'token');
+      if (c?.mode === 'token') {
+        void fetchWhoAmI(asAgentConfig()).then((me) => {
+          if (live) setViewer(me?.user?.id ?? null);
+        });
+      } else {
+        setViewer(null);
+      }
       if (!demo) return;
       // The config arrives after the first paint, so the greeting is already on screen and has
       // to be replaced — but only while it is still the whole conversation. A restored session,
@@ -240,6 +253,36 @@ export default function App() {
   // expect to come back to, and it keeps writes off the streaming path.
   const layersRef2 = useRef(layers); layersRef2.current = layers;
   const messagesRef = useRef(messages); messagesRef.current = messages;
+  /** Where the history list comes from.
+   *
+   *  In token mode the SERVER owns it: conversations belong to the user, follow them to another
+   *  browser, and — the reason this changed — do not sit in IndexedDB waiting for the next
+   *  person to open the page. IndexedDB stays the source for dev and demo, which identify
+   *  nobody, and stays a local cache in token mode so a restore does not wait on a round trip.
+   *
+   *  A failed fetch returns null and is NOT treated as "no conversations": showing an empty
+   *  history because the server was briefly unreachable reads as data loss. */
+  const refreshSessions = useCallback(async () => {
+    if (tokenMode && viewerRef.current) {
+      const remote = await listConversations(asAgentConfig());
+      if (remote) {
+        setSessions(remote.map((c) => ({
+          id: c.memoryId,
+          title: c.conversationName || 'Untitled conversation',
+          createdAt: Date.parse(c.createdAt || '') || 0,
+          updatedAt: Date.parse(c.updatedAt || '') || 0,
+          threadId: c.threadId || '',
+          messageCount: c.messageCount ?? 0,
+          layerCount: c.layerCount ?? 0,
+          fileCount: c.fileCount ?? 0,
+        })));
+        return;
+      }
+      return;                       // could not ask; keep whatever is on screen
+    }
+    setSessions(await listSessions(viewerRef.current));
+  }, [tokenMode, asAgentConfig]);
+
   const snapshotSession = useCallback(() => {
     const msgs = messagesRef.current;
     if (!msgs.some((m) => m.role === 'user')) return;   // nothing worth listing yet
@@ -256,14 +299,26 @@ export default function App() {
       region: drawnRegion ?? undefined,
       model: cfg.model, provider: cfg.provider,
     };
-    void loadSession(rec.id).then((prev) => {
+    rec.ownerId = viewerRef.current;
+    void loadSession(rec.id, viewerRef.current).then((prev) => {
       if (prev) rec.createdAt = prev.createdAt;          // keep the original start time
       return saveSession(rec);
-    }).then(() => listSessions()).then(setSessions);
-  }, [drawnRegion, cfg.model, cfg.provider]);
+    }).then(() => {
+      // Server-side too, keyed by the agent's own memoryId so the record and the conversation
+      // it continues are the same thing. Local stays a cache; this is the copy that survives a
+      // new browser, and the one another device will read.
+      if (tokenMode && viewerRef.current && memoryRef.current) {
+        return putConversation(asAgentConfig(), memoryRef.current, rec).then(() => undefined);
+      }
+      return undefined;
+    }).then(() => refreshSessions());
+  }, [drawnRegion, cfg.model, cfg.provider, tokenMode, asAgentConfig, refreshSessions]);
 
   const restoreSession = useCallback(async (id: string) => {
-    const rec = await loadSession(id);
+    // Local first — it is a cache, and a hit avoids a round trip. In token mode fall back to
+    // the server, which is where a conversation opened on another browser actually lives.
+    let rec = await loadSession(id, viewerRef.current);
+    if (!rec && tokenMode && viewerRef.current) rec = await getConversation(asAgentConfig(), id);
     if (!rec) return;
     setShowHistory(false);
     // Identity first: the next turn must continue the SAME agent conversation, and must
@@ -326,7 +381,7 @@ export default function App() {
     setMessages([{ role: 'agent', text: "New conversation. Ask me anything." }]);
   }, []);
 
-  useEffect(() => { void listSessions().then(setSessions); }, []);
+  useEffect(() => { void refreshSessions(); }, [refreshSessions]);
 
   // --- layer management + feature inspection (left panel) ---
   const toggleLayer = useCallback((id: string) => {
@@ -669,7 +724,7 @@ export default function App() {
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
       <TopNav demoMode={demoMode || tokenMode} onToggleSettings={() => setShowSettings((s) => !s)}
-        onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
+        onToggleHistory={() => { setShowHistory((v) => !v); void refreshSessions(); }}
         sessionCount={sessions.length}
         tab={tab}
         onSetTab={(t) => {
@@ -705,7 +760,7 @@ export default function App() {
                   </span>
                 </button>
                 <button className="hdel" title="Delete this conversation"
-                  onClick={() => void deleteSession(s2.id).then(() => listSessions()).then(setSessions)}>×</button>
+                  onClick={() => void deleteSession(s2.id).then(() => refreshSessions())}>×</button>
               </li>
             ))}
           </ul>

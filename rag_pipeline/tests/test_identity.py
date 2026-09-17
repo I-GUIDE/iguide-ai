@@ -255,15 +255,33 @@ def test_other_modes_identify_nobody(monkeypatch, mode):
         assert server._require_user() is None
 
 
-def test_non_strict_token_mode_lets_the_migration_run(monkeypatch):
-    """AGENT_TOKEN_STRICT=0: identity flows, nothing is yet refused."""
+def test_non_strict_still_asks_a_browser_to_sign_in(monkeypatch):
+    """Non-strict relaxes OWNERSHIP of pre-ownership records, not "who are you".
+
+    Swallowing the identity error here dropped a signed-out visitor through to the API-key gate,
+    which answered "Forbidden: invalid API key" — a message about a credential token mode gives
+    them no way to enter, for a problem that is really "please sign in". Observed live.
+    """
     monkeypatch.setenv("AGENT_MODE", "token")
     monkeypatch.setenv("AGENT_TOKEN_STRICT", "0")
     with server.app.test_request_context("/agent/chat"):
-        assert server._require_user() is None          # no token, no rejection
+        with pytest.raises(idm.TokenMissing):
+            server._require_user()
     with server.app.test_request_context(
             "/agent/chat", headers={"Cookie": f"{COOKIE}={token(role=10)}"}):
-        assert server._require_user() is None          # under-privileged, still not rejected
+        with pytest.raises(idm.InsufficientRole):
+            server._require_user()
+
+
+def test_non_strict_still_lets_a_service_caller_through(monkeypatch):
+    """The one exception: a real credential belonging to something with no browser."""
+    monkeypatch.setenv("AGENT_MODE", "token")
+    monkeypatch.setenv("AGENT_TOKEN_STRICT", "0")
+    monkeypatch.setenv("AGENT_CHAT_API_KEY", SERVICE_KEY)
+    with server.app.test_request_context(
+            "/agent/chat", headers={"X-API-KEY": SERVICE_KEY,
+                                    "Cookie": f"{COOKIE}={token(role=10)}"}):
+        assert server._require_user() is None
 
 
 def test_strict_is_the_default(monkeypatch):

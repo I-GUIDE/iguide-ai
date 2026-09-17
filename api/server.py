@@ -182,7 +182,15 @@ def _require_user():
         user = identity.identify(token)
         identity.authorize(user)
     except identity.IdentityError:
-        if not _token_strict():
+        # Non-strict relaxes OWNERSHIP of records written before ownership existed. It does not
+        # relax "who are you", and it never did anyone a favour by trying: a signed-out visitor
+        # whose identity error was swallowed here fell through to the API-key gate and was told
+        # "Forbidden: invalid API key" — a message about a credential token mode gives them no
+        # way to enter, for a problem that is actually "please sign in". Observed live.
+        #
+        # A caller holding the service key is the one exception, because it is a real credential
+        # and belongs to something without a browser.
+        if not _token_strict() and _service_key_presented():
             return None
         raise
     return user

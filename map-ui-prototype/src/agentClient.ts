@@ -91,6 +91,88 @@ export async function fetchUiConfig(cfg: AgentConfig): Promise<UiConfig | null> 
   }
 }
 
+export interface WhoAmI {
+  mode: string;
+  signedIn: boolean;
+  user: { id: string; role: number } | null;
+  permitted: boolean;
+  reason: string | null;
+  requiredRole?: number;
+}
+
+/** Who the SERVER thinks we are. The cookie is httpOnly, so the browser cannot answer this
+ *  itself — it has to ask. Used to scope stored conversations to their owner and, later, to
+ *  render a profile. Degrades to "nobody", which lists nothing rather than everything. */
+export async function fetchWhoAmI(cfg: AgentConfig): Promise<WhoAmI | null> {
+  try {
+    const r = await fetch(absoluteUrl('/agent/whoami', cfg), { credentials: CREDENTIALS });
+    if (!r.ok) return null;
+    return (await r.json()) as WhoAmI;
+  } catch {
+    return null;
+  }
+}
+
+export interface ConversationSummary {
+  memoryId: string;
+  conversationName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  threadId?: string;
+  messageCount?: number;
+  layerCount?: number;
+  fileCount?: number;
+}
+
+/** THIS USER's conversations, from the server. Summaries only — never transcripts. */
+export async function listConversations(cfg: AgentConfig): Promise<ConversationSummary[] | null> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl('/agent/conversations', cfg), { credentials: CREDENTIALS });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      if (!r.ok) return null;
+      const body = await r.json();
+      return (body?.conversations || []) as ConversationSummary[];
+    });
+  } catch {
+    // null, NOT []: "could not ask" and "you have none" look identical to a caller otherwise,
+    // and the first must not silently present as an empty history.
+    return null;
+  }
+}
+
+/** Store this conversation server-side, so it follows the user rather than the browser. */
+export async function putConversation(cfg: AgentConfig, memoryId: string,
+                                      record: unknown): Promise<boolean> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl(`/agent/conversations/${encodeURIComponent(memoryId)}`, cfg), {
+        method: 'PUT', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
+        body: JSON.stringify(record),
+      });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      return r.ok;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Read one conversation back. */
+export async function getConversation(cfg: AgentConfig, memoryId: string): Promise<any | null> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl(`/agent/conversations/${encodeURIComponent(memoryId)}`, cfg),
+                            { credentials: CREDENTIALS });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      if (!r.ok) return null;
+      return await r.json();
+    });
+  } catch {
+    return null;
+  }
+}
+
 /** Ask the agent which models a request may select. */
 export async function fetchModels(cfg: AgentConfig): Promise<ModelCatalogue | null> {
   try {

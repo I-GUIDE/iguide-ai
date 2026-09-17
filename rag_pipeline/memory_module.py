@@ -202,7 +202,8 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
                 "size": max(1, int(limit)),
                 "query": {"term": {"owner_id": owner}},
                 "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
-                "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId"],
+                "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                            "messageCount", "layerCount", "fileCount"],
             },
         )
     except Exception as err:  # noqa: BLE001
@@ -211,7 +212,8 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
     # Projected EXPLICITLY rather than spread from _source. `_source` in the query is a request,
     # not a guarantee, and the field this must never leak — chat_history — is the whole
     # transcript. Naming the summary keys means a new field cannot leak by simply existing.
-    summary_keys = ("conversationName", "owner_id", "createdAt", "updatedAt", "threadId")
+    summary_keys = ("conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                    "messageCount", "layerCount", "fileCount")
     out: List[Dict[str, Any]] = []
     for hit in (response.get("hits", {}) or {}).get("hits", []) or []:
         source = hit.get("_source") or {}
@@ -285,6 +287,12 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
     thread_id = clean.get("threadId")
     if isinstance(thread_id, str) and thread_id.strip():
         patch["threadId"] = thread_id.strip()
+    # Counts live on the DOCUMENT, not inside the snapshot, so a history list can show "12
+    # messages, 3 layers" without fetching twelve messages and three layers to count them.
+    for field, key in (("messageCount", "messages"), ("layerCount", "layers"),
+                       ("fileCount", "fileIds")):
+        value = clean.get(key)
+        patch[field] = len(value) if isinstance(value, (list, tuple)) else 0
     try:
         client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
     except NotFoundError:
