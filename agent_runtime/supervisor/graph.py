@@ -115,6 +115,7 @@ class SupervisorState(TypedDict, total=False):
     actions: List[str]             # supervisor decision history
     next_action: str
     step: int
+    evidence_summary: Optional[str]
     max_steps: int
     final_answer: str
     distilled: Dict[str, Any]
@@ -227,6 +228,76 @@ def _min_coverage() -> float:
         return min(1.0, max(0.0, float(os.getenv("AGENT_SEARCH_MIN_COVERAGE", "0.34"))))
     except (TypeError, ValueError):
         return 0.34
+
+
+# ---------------------------------------------------------------------------
+# What the evidence SAYS, not just how much of it there is
+# ---------------------------------------------------------------------------
+# The decider sees titles, per-source counts, a top score and `topical_coverage`. Those are
+# cheap, deterministic and cannot be talked into anything — but they are all LEXICAL. They can
+# say "8 documents, 0.75 of them mention your subject terms" and still leave the decider unable
+# to tell a set of PySAL accessibility notebooks from a set of DEM sources, because both mention
+# "elevation". Measured live on a self-hosted model: two full search rounds where the second
+# added nothing the first had not, because "is this enough?" was being answered from counts.
+#
+# So the model that just read the documents writes a few lines about what is actually in them.
+#
+# Two rules keep this from making things worse:
+#
+#  * It DESCRIBES, and names gaps. It does not rule on sufficiency. That judgement belongs to
+#    the decider, which also sees the deterministic signals and the action history; a summary
+#    that announced "this is enough" would collapse two independent checks into one and give a
+#    weak model's opinion the final word.
+#  * It never REPLACES the lexical signals — it sits beside them. If the summary is wrong, the
+#    decider still has coverage, scores and titles to disagree with.
+#
+# Failure is always None: a summary is an aid to a decision, never a precondition for one.
+
+_EVIDENCE_SUMMARY_MAX_CHARS = 700
+_EVIDENCE_SUMMARY_DOCS = 8
+_EVIDENCE_SUMMARY_SNIPPET = 400
+
+
+def _evidence_summary_enabled() -> bool:
+    return str(os.getenv("AGENT_EVIDENCE_SUMMARY", "1")).strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+_EVIDENCE_SUMMARY_PROMPT = (
+    "You are helping an agent decide what to do next. Below are search results retrieved for a "
+    "user's request.\n\n"
+    "Write at most four sentences covering:\n"
+    "1. What these results actually contain — the kinds of things, not their titles restated.\n"
+    "2. Which parts of the request they DO address.\n"
+    "3. Which parts they do NOT address, or say 'they address the request directly' if nothing "
+    "is missing.\n\n"
+    "Describe only. Do NOT recommend an action, do not say whether to search again, and do not "
+    "say whether the evidence is sufficient — another step decides that and needs your "
+    "description, not your verdict. If the results are off-topic, say so plainly.\n\n"
+    "REQUEST: {query}\n\nRESULTS:\n{docs}"
+)
+
+
+def _summarize_evidence(llm: Any, query: str, docs: List[Any]) -> Optional[str]:
+    """A few lines on what the retrieved evidence contains. None if unavailable."""
+    if not llm or not docs or not _evidence_summary_enabled():
+        return None
+    lines: List[str] = []
+    for i, d in enumerate(docs[:_EVIDENCE_SUMMARY_DOCS], 1):
+        title = _doc_field(d, "title", "name", default="Untitled")
+        body = _doc_field(d, "contents", "content", "text", "abstract", "description", default="")
+        lines.append(f"[{i}] {title}\n{str(body)[:_EVIDENCE_SUMMARY_SNIPPET]}")
+    prompt = _EVIDENCE_SUMMARY_PROMPT.format(query=query, docs="\n\n".join(lines))
+    try:
+        resp = llm.invoke(prompt)
+    except Exception as exc:  # noqa: BLE001 - an aid to a decision, never a precondition
+        logger.warning("evidence summary failed, continuing without it: %s", exc)
+        return None
+    text = getattr(resp, "content", resp)
+    text = str(text or "").strip()
+    if not text:
+        return None
+    return text[:_EVIDENCE_SUMMARY_MAX_CHARS]
 
 
 def _results_are_poor(docs: List[Any], query: str) -> bool:
@@ -1100,6 +1171,10 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "evidence_titles": titles,
         "evidence_sources": sources,
         "topical_coverage": _term_coverage(docs, query),
+        # What the evidence SAYS. Written by the model that read it; descriptive, never a
+        # verdict on sufficiency. Sits beside the lexical signals so a wrong summary can be
+        # disagreed with rather than obeyed.
+        "evidence_summary": state.get("evidence_summary"),
         "top_score": round(max(scores), 3) if scores else None,
         "queries_searched": list(state.get("searched_queries") or []),
         "has_analysis": state.get("analysis_results") is not None,
@@ -1833,7 +1908,15 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "find'), the answer is composed from that conversation, so 'done' is enough unless "
             "genuinely new external information is needed.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
-            "requests are fulfilled automatically before you are consulted again.\n\n"
+            "requests are fulfilled automatically before you are consulted again.\n"
+            "`evidence_summary` in Progress is a DESCRIPTION of what was retrieved, written by "
+            "the model that read it. It deliberately does not say whether the evidence is "
+            "sufficient — that is your call. Search again only when it names a specific gap a "
+            "DIFFERENT query could fill; repeating a search because the count looks small "
+            "returns the same documents and wastes the step. And when the request is work for a "
+            "tool rather than a question about the literature — computing a DEM, buffering, "
+            "embedding a region — retrieval cannot help at all, however thin the evidence "
+            "looks.\n\n"
             "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
@@ -4170,6 +4253,7 @@ def build_supervisor_graph(
         prev_streak = state.get("search_empty_streak", 0)
         update: Dict[str, Any] = {
             "evidence": merged,
+            "evidence_summary": _summarize_evidence(llm, q, merged) or state.get("evidence_summary"),
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
             "searched_queries": tried,
