@@ -25,6 +25,7 @@ KEY = "s3cret-key"
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    monkeypatch.delenv("AGENT_MODE", raising=False)
     monkeypatch.delenv("DEMO_MODE", raising=False)
     monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)
 
@@ -92,13 +93,13 @@ def test_no_key_configured_is_open_with_or_without_demo_mode(monkeypatch):
 # --- what it tells the browser --------------------------------------------------
 def test_ui_config_says_a_key_is_required_when_one_is_enforced(monkeypatch):
     monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
-    assert _ui_config() == {"demo_mode": False, "api_key_required": True}
+    assert _ui_config() == {"mode": "dev", "demo_mode": False, "api_key_required": True}
 
 
 def test_ui_config_stops_asking_for_a_key_in_demo_mode(monkeypatch):
     monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
     monkeypatch.setenv("DEMO_MODE", "true")
-    assert _ui_config() == {"demo_mode": True, "api_key_required": False}
+    assert _ui_config() == {"mode": "demo", "demo_mode": True, "api_key_required": False}
 
 
 def test_ui_config_needs_no_key_of_its_own(monkeypatch):

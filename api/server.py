@@ -13,6 +13,7 @@ from rag_pipeline.agent_file_store import (require_file_record, reset_session as
                                            resolve_file_id, save_uploaded_file,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
+from agent_runtime import deployment_mode
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -44,15 +45,18 @@ def _coalesce(*values):
 
 
 def _demo_mode() -> bool:
-    """DEMO_MODE opens the deployment to anyone who has the link.
+    """True when this deployment is in demo mode — see ``agent_runtime.deployment_mode``.
 
-    It turns OFF the API-key check on every agent endpoint and tells the UI to hide its
+    Demo turns OFF the API-key check on every agent endpoint and tells the UI to hide its
     connection settings, so a page can be handed to an audience without also handing them a
-    credential to paste. That is the whole point of it, and it is also exactly why it defaults
-    to off: with it on, anyone who finds the URL can run turns that spend this deployment's
+    credential to paste. That is the whole point of it, and it is also exactly why it is not the
+    default: with it on, anyone who finds the URL can run turns that spend this deployment's
     Earth Engine quota and LLM budget. Set it only on a deployment you are willing to have used.
+
+    Kept as a named helper rather than inlined: it is read from a dozen places here, and the
+    legacy ``DEMO_MODE=true`` env still selects it when ``AGENT_MODE`` is unset.
     """
-    return str(os.getenv("DEMO_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return deployment_mode.is_demo()
 
 
 # Which model answers in demo mode. Configurable, but with a real default rather than falling
@@ -72,12 +76,13 @@ def _get_agent_chat_api_key() -> str:
     return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
 
 
-if _demo_mode():
-    # At import, so it appears once in the container log rather than per request. An open
-    # deployment should never be a thing someone discovers from its behaviour.
-    logger.warning(
-        "DEMO_MODE is ON: the API key is NOT enforced and the UI hides its connection "
-        "settings. Every agent endpoint is open to anyone who can reach this server.")
+# At import, so it appears once in the container log rather than per request. An open
+# deployment should never be a thing someone discovers from its behaviour, and the mode an
+# operator THINKS is set is the one thing worth stating out loud on every boot.
+logger.info("Agent deployment mode: %s (api key %s)", deployment_mode.current_mode(),
+            "configured" if _get_agent_chat_api_key() else "NOT configured")
+if deployment_mode.boot_warning():
+    logger.warning("%s", deployment_mode.boot_warning())
 
 
 def _extract_presented_api_key() -> str:
@@ -643,6 +648,9 @@ def agent_ui_config():
     """
     demo = _demo_mode()
     return jsonify({
+        # `mode` is the field to read. `demo_mode` stays for clients built before modes existed:
+        # dropping it would blank the settings panel on every page still holding an old bundle.
+        "mode": deployment_mode.current_mode(),
         "demo_mode": demo,
         "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
     })
