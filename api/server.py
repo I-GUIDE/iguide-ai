@@ -737,13 +737,21 @@ def agent_ui_config():
     else about the configuration.
     """
     demo = _demo_mode()
-    return jsonify({
+    body = {
         # `mode` is the field to read. `demo_mode` stays for clients built before modes existed:
         # dropping it would blank the settings panel on every page still holding an old bundle.
         "mode": deployment_mode.current_mode(),
         "demo_mode": demo,
         "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
-    })
+    }
+    if deployment_mode.is_token():
+        # Where the CLIENT refreshes an expired token. The agent never handles refresh tokens:
+        # the browser calls the platform directly, which re-mints the .i-guide.io cookie. Sent
+        # from here rather than compiled into the bundle so the same build runs against any
+        # tier — the dev and production backends are different hosts.
+        body["refresh_url"] = str(os.getenv("PLATFORM_REFRESH_URL") or "").strip()
+        body["signin_url"] = str(os.getenv("PLATFORM_SIGNIN_URL") or "").strip()
+    return jsonify(body)
 
 
 @app.route('/agent/conversations', methods=['GET'])

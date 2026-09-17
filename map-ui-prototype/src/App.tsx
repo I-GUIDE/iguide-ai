@@ -15,6 +15,7 @@ import { bboxToFC } from './mapFit';
 import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
+import { AuthError, authMessage } from './auth';
 import { renderMarkdown } from './markdown';
 import type { AppTab } from './uiVariant';
 import {
@@ -161,13 +162,17 @@ export default function App() {
   // Unreachable or unknown means NOT a demo, which keeps the settings available: a page that
   // hides the key field on a deployment that turns out to need one cannot be recovered from.
   const [demoMode, setDemoMode] = useState(false);
+  // Token mode hides the connection settings for a different reason than demo does: there is a
+  // credential, it is just not one you paste — the browser holds it as a cookie.
+  const [tokenMode, setTokenMode] = useState(false);
   useEffect(() => {
-    if (mode !== 'live') { setDemoMode(false); return; }
+    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); return; }
     let live = true;
     void fetchUiConfig(asAgentConfig()).then((c) => {
       if (!live) return;
       const demo = !!c?.demo_mode;
       setDemoMode(demo);
+      setTokenMode(c?.mode === 'token');
       if (!demo) return;
       // The config arrives after the first paint, so the greeting is already on screen and has
       // to be replaced — but only while it is still the whole conversation. A restored session,
@@ -547,9 +552,13 @@ export default function App() {
       if (!mapLayerDelivered.current) await loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
-      patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
-                            : `Request failed: ${e.message}`,
-              streaming: false });
+      // An auth refusal is not a failed request and must not read like one: "Request failed:
+      // Forbidden" tells someone nothing about what to do, and with the role gate starting at
+      // contributor this is the message most accounts will actually see.
+      const text = stopped
+        ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
+        : e instanceof AuthError ? authMessage(e) : `Request failed: ${e.message}`;
+      patch({ text, streaming: false });
     } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
   }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
@@ -659,7 +668,7 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
-      <TopNav demoMode={demoMode} onToggleSettings={() => setShowSettings((s) => !s)}
+      <TopNav demoMode={demoMode || tokenMode} onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
         sessionCount={sessions.length}
         tab={tab}
@@ -761,7 +770,7 @@ export default function App() {
           messages={messages} busy={busy} tab={tab} hasRegion={!!drawnRegion} layers={layers}
           mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
           models={models}
-          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode} resolveUrl={resolveUrl}
+          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode && !tokenMode} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}

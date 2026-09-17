@@ -7,7 +7,8 @@
     "dev": "vite --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "preview": "vite preview --port 5173 --strictPort",
-    "check:fold": "esbuild src/components/foldTrace.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/foldcheck.mjs --define:import.meta.env='{\"VITE_UI_VARIANT\":\"prototype\"}' && node node_modules/.cache/foldcheck.mjs"
+    "check:fold": "esbuild src/components/foldTrace.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/foldcheck.mjs --define:import.meta.env='{\"VITE_UI_VARIANT\":\"prototype\"}' && node node_modules/.cache/foldcheck.mjs",
+    "check:auth": "esbuild src/auth.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/authcheck.mjs && node node_modules/.cache/authcheck.mjs"
   },
   "dependencies": {
     "@deck.gl/aggregation-layers": "^9.0.33",

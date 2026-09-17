@@ -69,3 +69,4 @@ outputs/
 .env.local
 *.env.local
 TODO.md
+map-ui-prototype/node_modules/
