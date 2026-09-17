@@ -928,6 +928,18 @@ won. That is why a signed-in page settled on 27 local rows and why signing out l
 not a wrong branch, a lost race. Every write is now generation-guarded, which covers all three
 callers rather than just the mount effect.
 
+**The map came back empty.** With the list finally clickable, restoring the DEM conversation
+brought back its transcript, its downloads and both layers — and drew the county boundary over a
+blank basemap, with the raster missing. The stored descriptor was perfect (`kind: raster`, a URL
+that serves 200 `image/png`, correct bounds), the file downloaded, the layer was listed in the
+panel. It simply was not painted. `map.triggerRepaint()` on its own was enough to make it appear,
+which is the whole diagnosis: a raster's image loads **asynchronously**, and in interleaved mode
+nothing repaints when it lands. Live delivery hides this because the map is being fitted or
+panned while the image loads, so a frame gets drawn anyway; a restore settles first and then
+nothing ever asks for another frame. The fix repaints at the one moment that matters — preload
+each raster image and `triggerRepaint()` on its `load` — rather than polling for it. One repaint
+per image, nothing on a timer.
+
 *Still open:* one conversation produced **two** memory documents — the agent's own
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
 the orphan rather than explaining it, and why the two ids diverge is not yet understood.

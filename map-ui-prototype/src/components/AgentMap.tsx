@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Map, Source, Layer, useControl } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
@@ -166,10 +166,44 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
     };
   }, [onResize]);
 
+  // Rebuilt when the map finishes loading as well as when `layers` changes, for the case where
+  // the map mounts with layers already in props. deck layers are immutable descriptors, so new
+  // instances are what make the overlay draw them again.
+  const [mapReady, setMapReady] = useState(false);
   const deckLayers = useMemo(
     () => layers.map((a) => toDeckLayer(a)),
-    [layers],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mapReady is a redraw trigger
+    [layers, mapReady],
   );
+
+  // A raster's image loads ASYNCHRONOUSLY, and in interleaved mode nothing repaints when it
+  // lands, so the layer is in deck's list with its image ready and simply never drawn.
+  //
+  // Live delivery hides this: the map is being panned or fitted while the image loads, so a
+  // frame gets drawn anyway. RESTORING a conversation does not — the map settles before the
+  // image arrives, and the conversation came back with its boundary over an empty basemap and
+  // the DEM missing. Any stray resize made it appear, which is what gave the cause away:
+  // `map.triggerRepaint()` on its own was enough to paint it.
+  //
+  // So repaint at the one moment that matters rather than polling for it: preload each raster
+  // image and repaint when it loads. The browser serves deck the cached copy, so the two
+  // resolve together. One repaint per image, nothing on a timer.
+  useEffect(() => {
+    const map = mapRef.current?.getMap?.();
+    if (!map) return;
+    map.triggerRepaint();
+    const urls = layers
+      .filter((l) => l.kind === 'raster' && (l as any).url)
+      .map((l) => (l as any).url as string);
+    if (!urls.length) return;
+    let live = true;
+    for (const url of urls) {
+      const img = new Image();
+      img.onload = () => { if (live) map.triggerRepaint(); };
+      img.src = url;
+    }
+    return () => { live = false; };
+  }, [deckLayers, layers]);
 
   const regionFeature: Feature | null = useMemo(() => {
     if (!drawnRegion) return null;
@@ -201,7 +235,9 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
           else { m.once?.('idle', announce); setTimeout(announce, 3000); }
         }
       }}
-      onLoad={(e: any) => { (window as any).__map = e.target; bindRegionDrag(e.target); onReady?.(); }}
+      onLoad={(e: any) => {
+        (window as any).__map = e.target; bindRegionDrag(e.target); setMapReady(true); onReady?.();
+      }}
       interactiveLayerIds={[]}
       onMouseMove={() => {}}
       style={{ position: 'absolute', inset: 0 }}
