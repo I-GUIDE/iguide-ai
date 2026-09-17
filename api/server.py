@@ -9,7 +9,8 @@ from flask import Flask, Response, jsonify, request, send_file, stream_with_cont
 from flask_cors import CORS
 from flasgger import Swagger
 
-from rag_pipeline.agent_file_store import (require_file_record, reset_session as reset_file_store_session,
+from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
+                                           require_file_record, reset_session as reset_file_store_session,
                                            resolve_file_id, save_uploaded_file,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
@@ -891,8 +892,26 @@ def download_agent_file(file_id):
         description: Internal server error.
     """
     try:
-        record = require_file_record(file_id)
-        path = resolve_file_id(file_id)
+        # Identity matters here as much as on /agent/chat, and for a while it was missing: this
+        # endpoint served ANY file to ANYONE who could guess or be handed an id, which also made
+        # every download_url in an answer a permanent public link.
+        try:
+            _download_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        _download_token = identity.set_user(_download_user)
+        try:
+            record = require_file_record(file_id)
+            # Unowned records are readable only while the backfill is still running
+            # (AGENT_TOKEN_STRICT=0). Once strict, a file nobody owns is a file nobody reads.
+            if not file_store_may_read(record, allow_unowned=not _token_strict()):
+                # 404 rather than 403: a 403 would confirm that this id exists, turning the
+                # endpoint into an oracle for enumerating other people's files.
+                logger.info("Download refused: %s does not belong to this caller", file_id)
+                return jsonify({"error": f"No file found for id {file_id}"}), 404
+            path = resolve_file_id(file_id)
+        finally:
+            identity.reset_user(_download_token)
         mimetype = None
         suffix = Path(record.get("filename", "")).suffix.lower()
         image_types = {

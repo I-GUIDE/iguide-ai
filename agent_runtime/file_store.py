@@ -287,6 +287,52 @@ def current_session() -> Optional[str]:
     return _SESSION.get()
 
 
+# ---------------------------------------------------------------------------
+# WHOSE file this is (token mode), as distinct from WHICH CONVERSATION wrote it
+# ---------------------------------------------------------------------------
+# Two independent axes, and conflating them loses one of them: a user has many conversations,
+# and in dev/demo there is no user at all. `session` keeps answering "which conversation", and
+# `owner_id` answers "whose". Outside token mode `owner_id` is None on every new record and
+# nothing changes — scoping stays exactly the per-conversation behaviour it is today.
+#
+# The value comes from the identity ContextVar rather than a second one of our own, so there is
+# one place a caller is established and one place it can be wrong.
+
+
+def current_owner() -> Optional[str]:
+    """The signed-in user's id, or None when this deployment does not identify anyone."""
+    try:
+        from agent_runtime import identity
+    except Exception:  # noqa: BLE001 - identity is optional; the store predates it
+        return None
+    return identity.current_user_id()
+
+
+def record_owner(record: Dict[str, Any]) -> Optional[str]:
+    value = (record or {}).get("owner_id")
+    return str(value).strip() or None if value else None
+
+
+def may_read(record: Dict[str, Any], *, allow_unowned: bool = True) -> bool:
+    """Whether the CURRENT caller may read this record.
+
+    With no caller — dev, demo, or a service request — this is always True and the store behaves
+    exactly as it did before ownership existed.
+
+    ``allow_unowned`` decides the one genuinely awkward case: 1,325 records predate ownership
+    and cannot be attributed to anyone. Treating them as readable keeps every existing reuse
+    working; treating them as denied is the safe reading for a browser download. The two callers
+    want different answers, so neither is hardcoded here.
+    """
+    caller = current_owner()
+    if not caller:
+        return True
+    owner = record_owner(record)
+    if owner is None:
+        return allow_unowned
+    return owner == caller
+
+
 def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
                kind: Optional[str] = None, limit: int = 20,
                session: Any = _UNSET,
@@ -334,6 +380,11 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
         if want_session and owner and owner != want_session:
             continue
         if want_session and not owner and not include_unowned:
+            continue
+        # Another user's file is never a candidate, in any conversation. Unowned records stay
+        # visible: they are the legacy reuse pool, they were created by a deployment that
+        # identified nobody, and hiding them would break the reuse this lookup exists for.
+        if not may_read(record, allow_unowned=True):
             continue
         try:
             path = _record_path(record)
@@ -421,6 +472,7 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
         "filename": original_name,
         "kind": "upload",
         "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -461,6 +513,7 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         # and find_files treats that absence as "visible to all" so the demo's existing 1,325
         # files stay reachable rather than vanishing.
         "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -509,6 +562,7 @@ def create_output_file_from_path(
         # and find_files treats that absence as "visible to all" so the demo's existing 1,325
         # files stay reachable rather than vanishing.
         "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
