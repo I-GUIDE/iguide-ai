@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Mapping, Optional
 
 from rag_pipeline.pipeline import run_pipeline
+from agent_runtime.tool_args import accept_null_defaults
 
 
 def rag_tool(
@@ -80,8 +81,7 @@ def make_langchain_rag_tool() -> Any:
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
-    return StructuredTool.from_function(
-        func=rag_tool_json,
+    return StructuredTool.from_function(func=accept_null_defaults(rag_tool_json),
         name="rag_tool",
         description=(
             "Run the full RAG pipeline for a user query. "

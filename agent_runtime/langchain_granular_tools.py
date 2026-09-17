@@ -27,6 +27,7 @@ from rag_pipeline.qgis_headless_tools import (
     qgis_processing_help_tool,
     qgis_processing_run_tool,
 )
+from agent_runtime.tool_args import accept_null_defaults
 
 
 def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100) -> int:
@@ -321,8 +322,7 @@ def make_langchain_geocode_tools() -> List[Any]:
     except Exception:  # pragma: no cover - optional dependency
         return []
     return [
-        StructuredTool.from_function(
-            func=geocode_places_tool,
+        StructuredTool.from_function(func=accept_null_defaults(geocode_places_tool),
             name="geocode_places",
             description=(
                 "Geocode place or institution names to coordinates (Nominatim). Input: a JSON "
@@ -429,8 +429,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
     tools: List[Any] = []
     if have_cli:  # qgis_process CLI: processing + metric buffer
         tools += [
-            StructuredTool.from_function(
-                func=qgis_processing_help_tool,
+            StructuredTool.from_function(func=accept_null_defaults(qgis_processing_help_tool),
                 name="qgis_processing_help",
                 description=(
                     "Inspect a QGIS Processing algorithm's JSON help by id, such as native:buffer. "
@@ -438,8 +437,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
-            StructuredTool.from_function(
-                func=qgis_processing_run,
+            StructuredTool.from_function(func=accept_null_defaults(qgis_processing_run),
                 name="qgis_processing_run",
                 description=(
                     "Run one QGIS Processing algorithm headlessly in an isolated per-session job directory. "
@@ -450,8 +448,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
-            StructuredTool.from_function(
-                func=qgis_metric_buffer,
+            StructuredTool.from_function(func=accept_null_defaults(qgis_metric_buffer),
                 name="qgis_metric_buffer",
                 description=(
                     "Create a meter-based buffer safely with QGIS. This resolves uploaded file ids, reprojects "
@@ -464,8 +461,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
         ]
     if have_pyqgis:  # standalone PyQGIS: layer summary + map rendering
         tools += [
-            StructuredTool.from_function(
-                func=pyqgis_layer_summary,
+            StructuredTool.from_function(func=accept_null_defaults(pyqgis_layer_summary),
                 name="pyqgis_layer_summary",
                 description=(
                     "Inspect one vector or raster layer with standalone headless PyQGIS. "
@@ -473,8 +469,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
-            StructuredTool.from_function(
-                func=qgis_map_image,
+            StructuredTool.from_function(func=accept_null_defaults(qgis_map_image),
                 name="qgis_map_image",
                 description=(
                     "Draw layer FILES into a STATIC PNG PICTURE with QGIS — the only renderer here that "
@@ -504,44 +499,37 @@ def make_langchain_granular_tools(
         ) from exc
 
     retrieval_tools = [
-        StructuredTool.from_function(
-            func=keyword_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(keyword_search_tool),
             name="keyword_search",
             description="Keyword/BM25 search of the I-GUIDE knowledge base. USE FOR: exact terms, names, acronyms, titles, IDs, or rare jargon the user typed verbatim. Complements semantic_search (which misses exact tokens) — for a topical query call BOTH. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=semantic_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(semantic_search_tool),
             name="semantic_search",
             description="Meaning-based (vector) search of the I-GUIDE knowledge base. USE FOR: concepts, paraphrases, and 'about X' questions where the user's wording differs from the documents'. Complements keyword_search (which misses paraphrases) — for a topical query call BOTH. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=neo4j_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(neo4j_search_tool),
             name="neo4j_search",
             description="Knowledge-GRAPH search. USE FOR: questions keyed on relationships or metadata rather than text — work BY an author or organization, items with a given tag, a specific resource type, members of a collection, and POPULARITY ('most popular/viewed/clicked', 'trending', ranked by real usage counts). Prefer it over semantic_search for those; do not use it for free-text topical questions. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=neo4j_get_element_by_id_tool,
+        StructuredTool.from_function(func=accept_null_defaults(neo4j_get_element_by_id_tool),
             name="neo4j_get_element_by_id",
             description="Fetch one public I-GUIDE knowledge element by exact Neo4j id. Use when the user provides an element id. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=neo4j_explore_related_nodes_tool,
+        StructuredTool.from_function(func=accept_null_defaults(neo4j_explore_related_nodes_tool),
             name="neo4j_explore_related_nodes",
             description="Explore public RELATED nodes from an exact I-GUIDE knowledge element id. Returns JSON with seed, related documents, edges, and citation_ids.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=spatial_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(spatial_search_tool),
             name="spatial_search",
             description="Place-aware search of the I-GUIDE knowledge base: infers the location in the query and biases results to it. USE WHENEVER the request names a place (city, state, county, river, basin, region, country) — e.g. 'flood data for Illinois', 'wildfires in California'. Call it IN ADDITION to keyword/semantic search, not instead. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=opengeodata_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(opengeodata_search_tool),
             name="opengeodata_search",
             description=(
                 "Federated search of EXTERNAL open-data catalogs (NASA CMR, Data.gov, Socrata) — data "
@@ -554,8 +542,7 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_external"},
         ),
-        StructuredTool.from_function(
-            func=overpass_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(overpass_search_tool),
             name="overpass_search",
             description=(
                 "Query LIVE OpenStreetMap and return real-world features WITH geometry "
@@ -582,8 +569,7 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_external"},
         ),
-        StructuredTool.from_function(
-            func=web_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(web_search_tool),
             name="web_search",
             description=(
                 "Search the OPEN WEB (live internet) and get back METADATA ONLY: title, url and a "
@@ -600,8 +586,7 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_external"},
         ),
-        StructuredTool.from_function(
-            func=web_fetch_tool,
+        StructuredTool.from_function(func=accept_null_defaults(web_fetch_tool),
             name="web_fetch",
             description=(
                 "READ one web page whose url came from web_search, and get back the passages that "
@@ -618,8 +603,7 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_external"},
         ),
-        StructuredTool.from_function(
-            func=agent_kb_search_tool,
+        StructuredTool.from_function(func=accept_null_defaults(agent_kb_search_tool),
             name="agent_kb_search",
             description=(
                 "Search the agent knowledge base: fine-grained, runnable-aware evidence extracted from "
@@ -630,8 +614,7 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_internal"},
         ),
-        StructuredTool.from_function(
-            func=get_kb_block_tool,
+        StructuredTool.from_function(func=accept_null_defaults(get_kb_block_tool),
             name="get_kb_block",
             description=(
                 "Fetch the FULL agent-KB block by its doc_id (returned by agent_kb_search). "

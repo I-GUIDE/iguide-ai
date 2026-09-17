@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_runtime.map_layers import boundary_layer_id
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -413,8 +414,7 @@ def make_admin_boundary_tools() -> List[Any]:
                               "are included")
         return json.dumps(result, default=str)
 
-    return [StructuredTool.from_function(
-        func=admin_boundary, name="admin_boundary", metadata=meta,
+    return [StructuredTool.from_function(func=accept_null_defaults(admin_boundary), name="admin_boundary", metadata=meta,
         description=(
             "THE tool for the boundary of a named US state, county or city — 'show me "
             "Champaign County on the map', 'the outline of Cook County, Illinois', 'the "

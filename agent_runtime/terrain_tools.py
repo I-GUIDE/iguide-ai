@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional
 # would be a second copy to keep in sync with the client's whitelist.
 from agent_runtime.rs_embed_tools import (_layer_id, _layer_label, _raster_layer, _region_tag,
                                           _resolve_bbox, _round_bbox, _slug)
+from agent_runtime.tool_args import accept_null_defaults
 
 _3DEP_URL = ("https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation"
              "/ImageServer/exportImage")
@@ -886,14 +887,14 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]})
 
     meta = {"category": "analysis"}
-    return [StructuredTool.from_function(func=dem_for_region, name="dem_for_region",
+    return [StructuredTool.from_function(func=accept_null_defaults(dem_for_region), name="dem_for_region",
                                          metadata=meta),
-            StructuredTool.from_function(func=zonal_stats_for_raster,
+            StructuredTool.from_function(func=accept_null_defaults(zonal_stats_for_raster),
                                          name="zonal_stats_for_raster",
                                          metadata=meta),
-            StructuredTool.from_function(func=terrain_derivative,
+            StructuredTool.from_function(func=accept_null_defaults(terrain_derivative),
                                          name="terrain_derivative", metadata=meta),
-            StructuredTool.from_function(func=inundation_at_level,
+            StructuredTool.from_function(func=accept_null_defaults(inundation_at_level),
                                          name="inundation_at_level", metadata=meta)]
 
 

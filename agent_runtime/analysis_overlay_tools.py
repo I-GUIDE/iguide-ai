@@ -39,6 +39,7 @@ from agent_runtime.langchain_geo_tools import (
     artifact_name,
     read_vector,
 )
+from agent_runtime.tool_args import accept_null_defaults
 
 # Metres per unit. Degrees are deliberately absent — see _distance_meters.
 _UNITS_M: Dict[str, float] = {
@@ -784,8 +785,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=clip_layer, name="clip_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(clip_layer), name="clip_layer", metadata=meta,
             description=("CLIP: cookie-cut one layer with another. Keeps only the parts of "
                          "`target_file_id` that lie inside the boundary of `clip_file_id`, "
                          "cutting geometry where it crosses the edge (e.g. 'keep only the roads "
@@ -795,8 +795,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                          "you can see how much of each feature fell inside. CRS is aligned "
                          "automatically. Returns a downloadable GeoJSON + .csv table and puts "
                          "the result on the user's interactive map. " + _SIB)),
-        StructuredTool.from_function(
-            func=dissolve_layer, name="dissolve_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(dissolve_layer), name="dissolve_layer", metadata=meta,
             description=("DISSOLVE / group: merge features into bigger ones. Features sharing the "
                          "same value in column `by` become a single feature (all features become "
                          "one when `by` is omitted), numeric columns are rolled up with "
@@ -806,16 +805,14 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                          "as a choropleth on the interactive map, and the aggregated table is "
                          "also returned as a .csv. If `by` names a column that does not exist, "
                          "the error lists every candidate column. " + _SIB)),
-        StructuredTool.from_function(
-            func=intersect_layers, name="intersect_layers", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(intersect_layers), name="intersect_layers", metadata=meta,
             description=("INTERSECT: keep only the geometry where two layers overlap, and give "
                          "each resulting piece the attributes of BOTH inputs plus its measured "
                          "`area_km2` (computed in a projected CRS). Use it to answer 'how much of "
                          "each tract is inside the floodplain'. `how` can also be union, identity, "
                          "symmetric_difference or difference for the other overlay flavours. "
                          "Returns a downloadable GeoJSON + .csv table and maps the result. " + _SIB)),
-        StructuredTool.from_function(
-            func=erase_layer, name="erase_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(erase_layer), name="erase_layer", metadata=meta,
             description=("ERASE / difference: subtract one layer from another. Removes from "
                          "`target_file_id` everything covered by `erase_file_id` and keeps the "
                          "remainder with the target's own attributes (e.g. 'land area minus "
@@ -823,8 +820,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                          "and polygons, and the surviving pieces carry their recomputed "
                          "`area_km2` / `length_km`. Returns a downloadable GeoJSON + .csv table "
                          "and maps the result. " + _SIB)),
-        StructuredTool.from_function(
-            func=buffer_layer, name="buffer_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(buffer_layer), name="buffer_layer", metadata=meta,
             description=("BUFFER: draw a zone of a given GROUND distance around every feature — "
                          "'everything within 500 m of a school'. `distance` with `units` "
                          "(km|m|mi|ft|yd|nmi, default 1 km) is measured in a projected UTM CRS "
@@ -833,8 +829,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                          "merges overlapping zones into one continuous area. Each zone carries "
                          "its `area_km2`. Returns a downloadable GeoJSON + .csv and maps the "
                          "result. " + _SIB)),
-        StructuredTool.from_function(
-            func=simplify_layer, name="simplify_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(simplify_layer), name="simplify_layer", metadata=meta,
             description=("SIMPLIFY / generalize: thin out vertices so a heavy boundary layer "
                          "draws fast and looks the same. `tolerance_m` is a real distance in "
                          "METRES (default 50), applied in a projected CRS. keep_topology=True "
@@ -842,8 +837,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                          "polygons keep their shared edges and no slivers or gaps appear. Reports "
                          "vertex counts before/after. Returns a downloadable GeoJSON and maps the "
                          "result. " + _SIB)),
-        StructuredTool.from_function(
-            func=geometry_summary, name="geometry_summary", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(geometry_summary), name="geometry_summary", metadata=meta,
             description=("GEOMETRY SUMMARY: derive simple shapes from a layer — `output`="
                          "'centroids' (one point per feature, the default, mapped as points), "
                          "'convex_hull' (tightest containing outline) or 'bbox' (bounding box). "

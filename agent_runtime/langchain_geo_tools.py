@@ -28,6 +28,7 @@ import tempfile
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from agent_runtime.tool_args import accept_null_defaults
 
 # Above this, a GeoJSON is too bulky to ship and parquet is written instead.
 _GEOJSON_MAX_FEATURES = int(os.getenv("AGENT_GEOJSON_MAX_FEATURES", "60000"))
@@ -927,7 +928,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 shutil.rmtree(tmp, ignore_errors=True)
 
     return [
-        StructuredTool.from_function(func=add_map_layer, name="add_map_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(add_map_layer), name="add_map_layer", metadata=meta,
             description=("Put a dataset on the user's INTERACTIVE MAP as a styled layer they can pan, "
                          "zoom and click — this is how a map is delivered here, and it is what to use "
                          "when the user asks to see/plot/visualize data on the map. `render`: "
@@ -937,7 +938,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download.")),
-        StructuredTool.from_function(func=add_raster_layer, name="add_raster_layer", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(add_raster_layer), name="add_raster_layer", metadata=meta,
             description=("Drape a georeferenced IMAGE over the user's map, for pixels that ARE the "
                          "result: a k-means cluster mask over an embedding grid, a per-pixel change "
                          "or similarity surface, a rendering you computed in code. Takes the image "
@@ -945,25 +946,25 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "an embedding package's region_bbox is exactly that. Rows are north-up. "
                          "Use add_map_layer instead whenever the result has geometry: a raster "
                          "cannot be clicked and carries no legend.")),
-        StructuredTool.from_function(func=inspect_vector, name="inspect_vector", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(inspect_vector), name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
                          "shapefile .zip, a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet by "
                          "file_id. " + _SIB)),
-        StructuredTool.from_function(func=render_map_image, name="render_map_image", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(render_map_image), name="render_map_image", metadata=meta,
             description=("Draw a vector dataset into a STATIC PNG PICTURE (optionally shaded by "
                          "`column`) and return a downloadable file_id. The picture cannot be "
                          "panned, zoomed or clicked, so choose it when someone wants an IMAGE to "
                          "download, embed in a document or print. To show data on the user's "
                          "interactive map instead, use add_map_layer. Large layers auto-downsample. "
                          + _SIB)),
-        StructuredTool.from_function(func=vector_to_geojson, name="vector_to_geojson", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(vector_to_geojson), name="vector_to_geojson", metadata=meta,
             description=("Convert a vector dataset to GeoJSON (reprojected to WGS84 by default) and "
                          "return a downloadable file_id, e.g. for web mapping. " + _SIB)),
-        StructuredTool.from_function(func=reproject_vector, name="reproject_vector", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(reproject_vector), name="reproject_vector", metadata=meta,
             description=("Reproject a vector dataset to a target CRS (e.g. EPSG:5070 for equal-area "
                          "US analysis) and return a downloadable GeoParquet file_id. " + _SIB)),
-        StructuredTool.from_function(func=vector_spatial_join, name="vector_spatial_join", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(vector_spatial_join), name="vector_spatial_join", metadata=meta,
             description=("Spatial-join two vector datasets (e.g. assign points to the TIGER polygon "
                          "they fall in). CRS is aligned automatically. Returns a downloadable "
                          "GeoParquet file_id.")),

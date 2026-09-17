@@ -30,6 +30,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -1400,16 +1401,16 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         return json.dumps(out)
 
     return [
-        StructuredTool.from_function(func=list_embedding_models, name="list_embedding_models", metadata=meta),
-        StructuredTool.from_function(func=embed_region, name="embed_region", metadata=meta),
-        StructuredTool.from_function(func=segment_region, name="segment_region", metadata=meta),
-        StructuredTool.from_function(func=embedding_change, name="embedding_change", metadata=meta),
-        StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
-        StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
-        StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
-        StructuredTool.from_function(func=list_embedding_packages, name="list_embedding_packages", metadata=meta),
-        StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
-        StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_embedding_models), name="list_embedding_models", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(embed_region), name="embed_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(segment_region), name="segment_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(embedding_change), name="embedding_change", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(compare_regions), name="compare_regions", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(align_embedding_colors), name="align_embedding_colors", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_prediction_heads), name="list_prediction_heads", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_embedding_packages), name="list_embedding_packages", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(predict_for_region), name="predict_for_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(predict_from_package), name="predict_from_package", metadata=meta),
     ]
 
 
@@ -2163,8 +2164,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 import shutil
                 shutil.rmtree(tmp, ignore_errors=True)
 
-    return [StructuredTool.from_function(func=embed_zones, name="embed_zones", metadata=meta),
-            StructuredTool.from_function(func=fit_zone_model, name="fit_zone_model", metadata=meta)]
+    return [StructuredTool.from_function(func=accept_null_defaults(embed_zones), name="embed_zones", metadata=meta),
+            StructuredTool.from_function(func=accept_null_defaults(fit_zone_model), name="fit_zone_model", metadata=meta)]
 
 
 __all__ = ["make_rs_embed_tools", "make_rs_embed_zonal_tools", "run_zonal_worker", "RS_EMBED_URL"]

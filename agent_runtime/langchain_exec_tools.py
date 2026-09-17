@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from agent_runtime.tool_args import accept_null_defaults
 
 # Bounds on how much gets auto-staged into a sandbox run (conversation files +
 # explicitly requested files). Keeps a large session from blowing up disk/time.
@@ -316,8 +317,7 @@ def make_code_execution_tools(
             return _workspace_error(exc)
         return json.dumps({"ok": True, "path": path, "replacements": 1}, ensure_ascii=True)
 
-    tool = StructuredTool.from_function(
-        func=execute_code,
+    tool = StructuredTool.from_function(func=accept_null_defaults(execute_code),
         name="execute_code",
         description=(
             "Execute code in an isolated, sandboxed container and return JSON with "
@@ -349,8 +349,7 @@ def make_code_execution_tools(
         # Only useful with a durable working directory to act on; without one they could
         # never do anything but explain that there is no workspace.
         tools += [
-            StructuredTool.from_function(
-                func=write_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(write_workspace_file),
                 name="write_workspace_file",
                 description=(
                     "Create or overwrite a file in this conversation's working directory — the "
@@ -360,8 +359,7 @@ def make_code_execution_tools(
                     "it in place. Also fine for data or config the code reads."
                 ),
             ),
-            StructuredTool.from_function(
-                func=read_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(read_workspace_file),
                 name="read_workspace_file",
                 description=(
                     "Read a file from this conversation's working directory, with line numbers. "
@@ -369,8 +367,7 @@ def make_code_execution_tools(
                     "at what a line says wastes the call. `offset`/`limit` window a long file."
                 ),
             ),
-            StructuredTool.from_function(
-                func=edit_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(edit_workspace_file),
                 name="edit_workspace_file",
                 description=(
                     "Replace an exact snippet in a file in this conversation's working directory "

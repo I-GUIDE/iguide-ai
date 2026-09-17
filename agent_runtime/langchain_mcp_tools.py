@@ -16,6 +16,7 @@ import requests
 from pydantic import create_model
 
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -452,8 +453,7 @@ def _make_remote_mcp_tools(url: str) -> List[Any]:
 
         try:
             tools.append(
-                StructuredTool.from_function(
-                    func=remote_tool_runner_sync,
+                StructuredTool.from_function(func=accept_null_defaults(remote_tool_runner_sync),
                     coroutine=remote_tool_runner_async,
                     name=tool_name,
                     description=description,
@@ -630,8 +630,7 @@ def make_langchain_mcp_tools(
             tool_name = f"mcp_{func.__name__}"
             try:
                 tools.append(
-                    StructuredTool.from_function(
-                        func=func,
+                    StructuredTool.from_function(func=accept_null_defaults(func),
                         name=tool_name,
                         description=_tool_description(func),
                         metadata=_tool_metadata(func),

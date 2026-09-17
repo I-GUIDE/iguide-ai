@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .file_store import (create_output_file, current_session, find_files, get_file_record,
                          resolve_file_id, storage_root)
+from agent_runtime.tool_args import accept_null_defaults
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -276,8 +277,7 @@ def make_langchain_file_tools() -> List[Any]:
         ) from exc
 
     return [
-        StructuredTool.from_function(
-            func=read_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(read_text_file_tool),
             name="read_text_file",
             description=(
                 "Read a UTF-8 text-like file from an allowed local path and return its contents. "
@@ -286,8 +286,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=inspect_file_for_analysis_tool,
+        StructuredTool.from_function(func=accept_null_defaults(inspect_file_for_analysis_tool),
             name="inspect_file_for_analysis",
             description=(
                 "Load a local file or uploaded file_id into an LLM-friendly JSON payload for interpretation. "
@@ -296,8 +295,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_text_file_tool),
             name="write_text_file",
             description=(
                 "Write text output to a local file under an allowed root. "
@@ -305,8 +303,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_output_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_output_file_tool),
             name="write_output_file",
             description=(
                 "Write downloadable output for the user into managed agent storage using only a filename. "
@@ -314,8 +311,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=list_conversation_files_tool,
+        StructuredTool.from_function(func=accept_null_defaults(list_conversation_files_tool),
             name="list_conversation_files",
             description=(
                 "List the files THIS conversation has produced or been given, newest first, with "
