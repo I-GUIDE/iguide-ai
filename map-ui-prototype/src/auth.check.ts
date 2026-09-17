@@ -8,6 +8,7 @@
  */
 import { AuthError, authErrorFrom, authMessage, describeRole, isAuthStatus, setRefreshUrl,
   withTokenRetry } from './auth';
+import { visibleTo } from './sessionStore';
 
 let bad = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
@@ -173,6 +174,23 @@ await (async () => {
   const unnamed = await authErrorFrom(refused(403, 'insufficient_role', { role: 8, requiredRole: 4 }));
   eq('numbers alone still produce a usable message',
      authMessage(unnamed).includes('it needs role 4 or above'), true);
+})();
+
+// --- a cache must not serve the last user's conversations ---------------------------
+await (async () => {
+  // `null` viewer means two different things and the filter used to conflate them: "this
+  // deployment identifies nobody" (dev/demo, where nothing is stamped) versus "nobody is
+  // signed in yet" (token mode, where records ARE stamped). Found live — History (27) sat
+  // beside a Sign in button on the deployment's first minutes in token mode.
+  const mine = { ownerId: 'u-1' };
+  const theirs = { ownerId: 'u-2' };
+  const unowned = { ownerId: null };
+  eq('my own record is mine', visibleTo(mine, 'u-1'), true);
+  eq('someone else\'s is not', visibleTo(theirs, 'u-1'), false);
+  eq('an unowned record is shared', visibleTo(unowned, 'u-1'), true);
+  eq('  ...including in dev, where there is no viewer at all', visibleTo(unowned, null), true);
+  eq('an OWNED record is hidden from a signed-out viewer', visibleTo(mine, null), false);
+  eq('  ...and from an undefined one', visibleTo(mine, undefined), false);
 })();
 
 console.log(bad ? `\n${bad} FAILED` : '\nall passed');

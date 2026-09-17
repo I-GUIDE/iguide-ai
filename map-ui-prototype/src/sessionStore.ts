@@ -130,21 +130,35 @@ export async function saveSession(s: StoredSession): Promise<void> {
 }
 
 /**
- * Conversations this viewer may see.
+ * Whether one stored conversation belongs to this viewer.
  *
- * `viewer` is the signed-in user's id, or null when the deployment identifies nobody. The rule
- * is deliberately asymmetric: with no viewer, everything is listed (dev and demo behave exactly
- * as they always have); with a viewer, only their own records AND unowned ones, so a
- * conversation started before sign-in is not orphaned by signing in.
+ * Two rules, and they are the whole of it:
  *
- * Another user's records are never listed — and are not deleted either. They are that person's
- * data, this is their browser too, and quietly destroying it would be worse than hiding it.
+ *   an OWNED record   -> only its owner, and nobody when nobody is signed in
+ *   an UNOWNED record -> anyone, so a conversation started before sign-in is not orphaned
+ *                        by signing in, and dev/demo (which stamp no owner) are unchanged
+ *
+ * The second half of the first rule is the correction. This used to read
+ * `!viewer || !record.ownerId || record.ownerId === viewer`, which let a null viewer through
+ * unconditionally — and `null` means two different things: "this deployment identifies nobody"
+ * in dev and demo, but "nobody is signed in *yet*" in token mode. On a browser where someone
+ * had been signed in, opening the page signed out listed their conversation titles back. Found
+ * live, on the deployment's first minutes in token mode: `History (27)` beside a `Sign in`
+ * button.
+ *
+ * Another person's records are hidden, never deleted. They are that person's data, this is
+ * their browser too, and quietly destroying it would be worse than hiding it.
  */
+export function visibleTo(record: { ownerId?: string | null }, viewer?: string | null): boolean {
+  return !record.ownerId || record.ownerId === viewer;
+}
+
+/** Conversations this viewer may see, newest first. */
 export async function listSessions(viewer?: string | null): Promise<SessionSummary[]> {
   try {
     const all = await tx<StoredSession[]>('readonly', (store) => store.getAll() as IDBRequest<StoredSession[]>);
     return (all || [])
-      .filter((s) => !viewer || !s.ownerId || s.ownerId === viewer)
+      .filter((s) => visibleTo(s, viewer))
       .map((s) => ({
         id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt,
         threadId: s.threadId,
@@ -166,8 +180,9 @@ export async function loadSession(id: string, viewer?: string | null): Promise<S
     const found = (await tx<StoredSession>('readonly',
       (store) => store.get(id) as IDBRequest<StoredSession>)) || null;
     if (!found) return null;
-    // Same rule as the list: unowned is shared, owned belongs to one person.
-    if (viewer && found.ownerId && found.ownerId !== viewer) return null;
+    // Same rule as the list, and the same correction: a signed-out viewer must not open an
+    // owned transcript either, or a stale id in React state reopens the last user's session.
+    if (!visibleTo(found, viewer)) return null;
     return found;
   } catch (err) {
     console.warn('[sessions] load failed', err);

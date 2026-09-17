@@ -843,6 +843,22 @@ chrome, and its placeholder avatar stands down when there is a real account to s
 reasoning that gave that file a `demoMode` condition on the gear: the two headers must not
 disagree about identity.
 
+**Found by the badge, within minutes of the deployment reaching token mode:** `History (27)` sat
+next to a `Sign in` button. The local owner filter read
+`!viewer || !record.ownerId || record.ownerId === viewer`, and that first clause conflates two
+meanings of `null` — *"this deployment identifies nobody"* in dev and demo, where nothing is ever
+stamped, against *"nobody is signed in yet"* in token mode, where records **are** stamped. So on a
+browser someone had used signed-in, opening the page signed out listed their conversation titles
+back. The rule is now just the two halves that were always intended: an owned record is its
+owner's alone, an unowned one is shared. Extracted as `visibleTo()` so it is a pure function with
+a check rather than a clause buried in an IndexedDB callback, and applied to single-record reads
+too — otherwise a stale id in React state reopens the last user's transcript.
+
+Worth noting what this does *not* hide: records created before the switch carry no owner, so they
+stay visible. They are unattributable by construction and they are this browser's own history;
+hiding them would lose it for no gain. Verified live — 28 records in the store, 27 listed, the one
+stamped with another owner absent.
+
 ---
 
 ---
