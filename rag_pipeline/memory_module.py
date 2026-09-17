@@ -220,6 +220,96 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
     return out
 
 
+# ---------------------------------------------------------------------------
+# The client's view of a conversation
+# ---------------------------------------------------------------------------
+# `chat_history` is the AGENT's memory: what was asked and answered, used to give the next turn
+# context. It is not what the user sees. The map UI additionally holds the layers drawn on the
+# map, every file uploaded across the session, the selected region and the model used — and a
+# conversation restored from `chat_history` alone comes back as a text shell whose answers say
+# "you can see these features on the map" beside an empty map.
+#
+# The client already models this correctly (`map-ui-prototype/src/sessionStore.ts`, written
+# server-shaped on purpose), so the server STORES that record rather than reconstructing it from
+# tool output. Rebuilding it here would duplicate the client's layer-descriptor rules — which
+# geometry is small enough to inline, which layer re-fetches by url — in a second place, where
+# they would drift.
+#
+# The snapshot is client-supplied, so it is treated as data: capped in size, and stripped of the
+# fields the server owns. Nothing in it is ever executed or trusted to name its own owner.
+_SNAPSHOT_MAX_BYTES_DEFAULT = 5_000_000
+
+
+def _snapshot_max_bytes() -> int:
+    """Read at call time, not frozen at import: a limit that needs a restart to change is a
+    limit nobody adjusts when a real conversation turns out to sit just over it."""
+    raw = str(os.getenv("AGENT_SESSION_SNAPSHOT_MAX_BYTES") or "").strip()
+    try:
+        return int(raw) if raw else _SNAPSHOT_MAX_BYTES_DEFAULT
+    except ValueError:
+        return _SNAPSHOT_MAX_BYTES_DEFAULT
+
+# Server-owned: a client that sends these is ignored, not obeyed.
+_SNAPSHOT_RESERVED = {"owner_id", "chat_history", "createdAt", "updatedAt", "_id"}
+
+
+class SnapshotTooLarge(Exception):
+    """The client's conversation record exceeds what this store will hold."""
+
+
+def _snapshot_size(snapshot: Mapping[str, Any]) -> int:
+    import json as _json
+    return len(_json.dumps(snapshot, default=str).encode("utf-8"))
+
+
+def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Store the client's view of this conversation. Caller must already own it.
+
+    Ownership is NOT re-derived from the snapshot: it is asserted by the caller before this runs
+    and the document's own ``owner_id`` is left untouched, so a snapshot cannot hand a
+    conversation to someone else by claiming to.
+    """
+    clean = {k: v for k, v in dict(snapshot or {}).items() if k not in _SNAPSHOT_RESERVED}
+    size = _snapshot_size(clean)
+    limit = _snapshot_max_bytes()
+    if size > limit:
+        raise SnapshotTooLarge(
+            f"conversation record is {size} bytes, over the {limit} limit")
+    client = _get_opensearch_client()
+    patch: Dict[str, Any] = {"session_snapshot": clean, "updatedAt": _now()}
+    # A rename in the client should show up in the conversation list, which sorts and labels on
+    # the document's own fields rather than reaching into the snapshot.
+    title = clean.get("title")
+    if isinstance(title, str) and title.strip():
+        patch["conversationName"] = title.strip()
+    thread_id = clean.get("threadId")
+    if isinstance(thread_id, str) and thread_id.strip():
+        patch["threadId"] = thread_id.strip()
+    try:
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
+    except NotFoundError:
+        owner = _current_owner()
+        client.index(index=MEMORY_INDEX, id=memory_id,
+                     body={"conversationName": patch.get("conversationName")
+                           or f"conversation-{memory_id}",
+                           "chat_history": [], "owner_id": owner,
+                           "createdAt": patch["updatedAt"], **patch})
+    return {"memoryId": memory_id, "bytes": size}
+
+
+def get_session_snapshot(memory_id: str) -> Optional[Dict[str, Any]]:
+    """The client's stored view of this conversation, or None. Caller must already own it."""
+    doc = get_memory(memory_id)
+    if not doc:
+        return None
+    snapshot = doc.get("session_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    return {**dict(snapshot), "memoryId": memory_id,
+            "title": doc.get("conversationName") or dict(snapshot).get("title"),
+            "createdAt": doc.get("createdAt"), "updatedAt": doc.get("updatedAt")}
+
+
 def create_memory(conversation_name: str, owner_id: Optional[str] = None) -> str:
     memory_id = str(uuid.uuid4())
     stamp = _now()

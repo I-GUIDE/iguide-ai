@@ -34,7 +34,12 @@ class FakeOpenSearch:
         return {"_source": dict(self.docs[id])}
 
     def update(self, *, index, id, body):
-        self.docs.setdefault(id, {}).update(body["doc"])
+        # Real OpenSearch refuses to update a document that does not exist; a fake that quietly
+        # creates one hides every code path that depends on the difference.
+        if id not in self.docs:
+            from opensearchpy import NotFoundError
+            raise NotFoundError(404, "not found", {})
+        self.docs[id].update(body["doc"])
 
     def search(self, *, index, body):
         want = body["query"]["term"]["owner_id"]

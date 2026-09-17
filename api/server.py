@@ -15,8 +15,10 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity
-from rag_pipeline.memory_module import (MemoryAccessDenied, assert_owner as assert_memory_owner,
-                                        list_memories)
+from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
+                                        assert_owner as assert_memory_owner,
+                                        get_session_snapshot, list_memories,
+                                        save_session_snapshot)
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -780,6 +782,80 @@ def agent_conversations():
             identity.reset_user(token)
     except Exception as exc:  # noqa: BLE001
         logger.error("Error listing conversations: %s", exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/conversations/<memory_id>', methods=['GET', 'PUT'])
+def agent_conversation(memory_id):
+    """
+    Read or write the client's view of one conversation.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: memory_id
+        type: string
+        required: true
+      - in: body
+        name: body
+        required: false
+        description: >-
+          On PUT, the client's own conversation record — the `StoredSession` shape from
+          `map-ui-prototype/src/sessionStore.ts`: messages, layer DESCRIPTORS (a sourceUrl to
+          re-fetch, or small inline geometry), every fileId used across the session, region,
+          model and provider. `owner_id`, `chat_history` and the timestamps are server-owned and
+          ignored if sent.
+        schema:
+          type: object
+    responses:
+      200:
+        description: The stored record (GET), or what was written (PUT).
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in, or not permitted.
+      404:
+        description: No such conversation, or it belongs to someone else.
+      413:
+        description: The record is larger than this store will hold.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        token = identity.set_user(user)
+        try:
+            try:
+                assert_memory_owner(memory_id)
+            except MemoryAccessDenied:
+                # Same 404-not-403 rule as everywhere else: a 403 confirms the id exists.
+                logger.info("Conversation refused: %s is not this caller's", memory_id)
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
+
+            if request.method == 'GET':
+                snapshot = get_session_snapshot(memory_id)
+                if snapshot is None:
+                    return jsonify({"error": "No conversation found for that id."}), 404
+                return jsonify(snapshot)
+
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                return jsonify({"error": "Body must be a conversation object."}), 400
+            try:
+                return jsonify(save_session_snapshot(memory_id, body))
+            except SnapshotTooLarge as exc:
+                # A real ceiling rather than a silent truncation: a conversation that came back
+                # missing half its layers would look like data loss with no explanation.
+                return jsonify({"error": str(exc), "reason": "conversation_too_large"}), 413
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
