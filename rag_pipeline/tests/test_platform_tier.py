@@ -115,3 +115,51 @@ def test_a_matching_pair_is_quiet(monkeypatch):
 def test_no_tier_no_warning(monkeypatch):
     monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", "jwt-access-token-dev")
     assert pe.consistency_warning() is None
+
+
+# --- the tier names its OpenSearch too --------------------------------------------
+
+def test_the_dev_tier_names_its_cluster(monkeypatch):
+    """Dev's OpenSearch moved hosts; the tier is where that fact belongs.
+
+    It used to live only in OPENSEARCH_NODE, so when the cluster moved the variable stayed
+    pinned to the old host — which kept answering, and kept accepting writes, while everything
+    else in the tier had moved on. Nothing failed loudly.
+    """
+    monkeypatch.delenv("OPENSEARCH_NODE", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    assert pe.opensearch_url() == "https://149.165.155.135:9200"
+
+
+def test_prod_inherits_nothing(monkeypatch):
+    """The worst thing this table could do is point production at dev's cluster."""
+    monkeypatch.delenv("OPENSEARCH_NODE", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    assert pe.opensearch_url() == ""
+
+
+def test_an_explicit_host_still_wins(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_NODE", "https://one-off:9200")
+    assert pe.opensearch_url() == "https://one-off:9200"
+
+
+def test_drift_is_said_out_loud(monkeypatch):
+    """Winning quietly is the failure mode. It may win, but it has to announce itself."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_NODE", "https://149.165.155.195:9200")
+    warning = pe.opensearch_drift_warning()
+    assert warning and "149.165.155.195" in warning and "149.165.155.135" in warning
+
+
+@pytest.mark.parametrize("node", ["https://149.165.155.135:9200", "https://149.165.155.135:9200/"])
+def test_agreeing_with_the_tier_is_silent(monkeypatch, node):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_NODE", node)
+    assert pe.opensearch_drift_warning() is None
+
+
+def test_no_tier_means_no_opinion(monkeypatch):
+    monkeypatch.delenv("PLATFORM_TIER", raising=False)
+    monkeypatch.setenv("OPENSEARCH_NODE", "https://anything:9200")
+    assert pe.opensearch_drift_warning() is None

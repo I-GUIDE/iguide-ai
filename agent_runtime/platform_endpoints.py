@@ -1,10 +1,18 @@
-"""Which I-GUIDE tier this agent talks to, as one switch instead of four URLs.
+"""Which I-GUIDE tier this agent talks to, as one switch instead of several hosts.
 
-The platform comes in pairs — a frontend and the backend that mints its cookies — and the agent
-needs three endpoints from them: where the browser refreshes, where an unsigned-in visitor goes,
-and (in introspect mode) where the agent asks who a caller is. Setting those one at a time
+The platform comes in sets — a frontend, the backend that mints its cookies, and the OpenSearch
+the backend stores state in — and the agent needs four things from them: where the browser
+refreshes, where an unsigned-in visitor goes, where (in introspect mode) the agent asks who a
+caller is, and which search cluster holds its own conversations. Setting those one at a time
 invites the state this is meant to prevent: two pointing at dev, one left on prod, and a
 verification that fails for a reason nobody can see.
+
+The fourth is here because of exactly that. Dev's OpenSearch moved to a new host while
+``OPENSEARCH_NODE`` stayed pinned to the old one, so the agent kept reading and writing a
+cluster nobody maintained any more — still answering, still accepting writes, and by then out
+of disk and unable to allocate a shard for a new index. Nothing failed loudly; it simply went
+on talking to yesterday's machine. A tier that names the cluster makes that a single fact to
+change instead of a variable somebody forgets.
 
     PLATFORM_TIER=dev | prod
 
@@ -28,8 +36,15 @@ DEV = "dev"
 PROD = "prod"
 
 _TIERS: Dict[str, Dict[str, str]] = {
-    DEV: {"backend": "https://backend-dev.i-guide.io", "frontend": "https://dev.i-guide.io"},
-    PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io"},
+    DEV: {"backend": "https://backend-dev.i-guide.io", "frontend": "https://dev.i-guide.io",
+          # Dev's cluster, moved here from 149.165.155.195 on 2026-09-18.
+          "opensearch": "https://149.165.155.135:9200"},
+    # No OpenSearch for prod until someone confirms which host it is. An empty string means
+    # "this tier does not supply one", so a prod deployment keeps needing an explicit
+    # OPENSEARCH_NODE rather than silently inheriting dev's cluster — which is the single worst
+    # thing this table could do.
+    PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
+           "opensearch": ""},
 }
 
 _REFRESH_PATH = "/api/refresh-token"
@@ -55,7 +70,10 @@ def current_tier() -> Optional[str]:
 
 def _from_tier(part: str, path: str) -> str:
     tier = current_tier()
-    return f"{_TIERS[tier][part]}{path}" if tier else ""
+    if not tier:
+        return ""
+    base = _TIERS[tier].get(part) or ""
+    return f"{base}{path}" if base else ""
 
 
 def _resolve(explicit_var: str, part: str, path: str) -> str:
@@ -76,6 +94,41 @@ def signin_url() -> str:
 def check_tokens_url() -> str:
     """Where the AGENT asks the platform who a caller is, in introspect mode."""
     return _resolve("PLATFORM_CHECK_TOKENS_URL", "backend", _CHECK_PATH)
+
+
+def opensearch_url() -> str:
+    """The search cluster for this tier, or "" when the tier does not name one.
+
+    ``OPENSEARCH_NODE`` still wins, as every explicit setting here does — a deployment pointing
+    at a one-off cluster must not be overruled by a table. This is the default for a deployment
+    that has only said which tier it is.
+    """
+    explicit = str(os.getenv("OPENSEARCH_NODE") or "").strip()
+    if explicit:
+        return explicit
+    tier = current_tier()
+    return (_TIERS[tier].get("opensearch") or "") if tier else ""
+
+
+def opensearch_drift_warning() -> Optional[str]:
+    """Said out loud when OPENSEARCH_NODE disagrees with the tier's own cluster.
+
+    An explicit setting is allowed to win, but silently talking to a different cluster from the
+    one the tier names is how the agent spent a day reading a decommissioned host: still
+    reachable, still answering, and no longer the place anything else was writing to.
+    """
+    explicit = str(os.getenv("OPENSEARCH_NODE") or "").strip()
+    if not explicit:
+        return None
+    try:
+        tier = current_tier()
+    except ValueError:
+        return None
+    expected = (_TIERS[tier].get("opensearch") or "") if tier else ""
+    if expected and explicit.rstrip("/") != expected.rstrip("/"):
+        return (f"OPENSEARCH_NODE={explicit} but PLATFORM_TIER={tier} names {expected}. "
+                "The explicit setting wins; check it is deliberate.")
+    return None
 
 
 def consistency_warning() -> Optional[str]:

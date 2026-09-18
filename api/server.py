@@ -91,6 +91,10 @@ logger.info("Agent deployment mode: %s (api key %s, platform tier %s)",
             platform_endpoints.current_tier() or "unset")
 if platform_endpoints.consistency_warning():
     logger.warning("%s", platform_endpoints.consistency_warning())
+# Said at boot for the same reason as the tier/cookie mismatch above: an agent quietly talking
+# to a cluster the rest of the tier has moved off is not a state anyone goes looking for.
+if platform_endpoints.opensearch_drift_warning():
+    logger.warning("%s", platform_endpoints.opensearch_drift_warning())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
 

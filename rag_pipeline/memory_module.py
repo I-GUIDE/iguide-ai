@@ -84,9 +84,20 @@ def _get_opensearch_client() -> OpenSearch:
     if _OPENSEARCH_CLIENT is not None:
         return _OPENSEARCH_CLIENT
 
+    # Explicit setting first, then the tier's own cluster. A deployment that has said which
+    # PLATFORM_TIER it is has already said which OpenSearch that tier uses, and making it repeat
+    # itself is how the two drifted apart: dev's cluster moved hosts and OPENSEARCH_NODE stayed
+    # pinned to the old one, which kept answering.
     node = os.getenv("OPENSEARCH_NODE")
     if not node:
-        raise RuntimeError("OPENSEARCH_NODE must be set before using the memory module.")
+        try:
+            from agent_runtime import platform_endpoints
+            node = platform_endpoints.opensearch_url()
+        except Exception:  # noqa: BLE001 - memory predates the tier table; never hard-depend
+            node = None
+    if not node:
+        raise RuntimeError(
+            "No OpenSearch host: set OPENSEARCH_NODE, or PLATFORM_TIER to a tier that names one.")
 
     user = os.getenv("OPENSEARCH_USERNAME", "")
     pwd = os.getenv("OPENSEARCH_PASSWORD", "")

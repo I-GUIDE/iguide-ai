@@ -25,8 +25,17 @@ Two of these grow without bound by design; see [Nothing reclaims](#nothing-recla
 
 ## 1. Conversations — OpenSearch
 
-**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`), on `OPENSEARCH_NODE`. One document per
-conversation, document id = the `memoryId` the client and the agent share.
+**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`). The host comes from `OPENSEARCH_NODE` when
+set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and prod names none, so a
+production deployment cannot silently inherit dev's. One document per conversation, document id =
+the `memoryId` the client and the agent share.
+
+> **Which cluster, and why it is a tier fact.** Dev's OpenSearch moved from `149.165.155.195` to
+> `149.165.155.135` on 2026-09-18, and `OPENSEARCH_NODE` stayed pinned to the old host. That host
+> kept answering and kept accepting writes, so nothing failed — the agent simply went on reading
+> and writing a cluster nobody maintained, by then at 95% disk with 1,054 unassigned shards and
+> unable to allocate a shard for a new index. The tier now names the cluster, and an explicit
+> `OPENSEARCH_NODE` that disagrees with it is logged at boot rather than obeyed in silence.
 
 ```
 chat_history        the AGENT's memory: what was asked and answered, context for the next turn
