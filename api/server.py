@@ -18,8 +18,8 @@ from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_ev
 from agent_runtime import deployment_mode, identity, platform_endpoints
 from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
-                                        get_session_snapshot, list_memories,
-                                        save_session_snapshot)
+                                        get_session_snapshot, get_turn_trace, list_memories,
+                                        list_turn_traces, save_session_snapshot)
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -1001,6 +1001,70 @@ def agent_conversation(memory_id):
             identity.reset_user(token)
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/conversations/<memory_id>/traces', methods=['GET'])
+def agent_conversation_traces(memory_id):
+    """
+    The raw trace of every recorded turn in this conversation.
+    ---
+    tags:
+      - agent
+    parameters:
+      - in: path
+        name: memory_id
+        required: true
+        type: string
+      - in: query
+        name: traceId
+        type: string
+        description: >-
+          Return this one turn with its full event list. Without it, a summary per turn and no
+          events -- a conversation's traces are large, and a caller choosing which turn to look
+          at should not have to download all of them to choose.
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ traces: [ { traceId, query, answer, model, provider, eventCount, createdAt } ] }`,
+          or a single `{ traceId, events: [...] }` when `traceId` is given.
+      404:
+        description: No such conversation or trace, or it belongs to someone else.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        token = identity.set_user(user)
+        try:
+            try:
+                # Ownership is asserted on the CONVERSATION, not on the trace: the trace is a
+                # property of the conversation and inherits its access, and checking the parent
+                # means a trace can never be reachable by an id its conversation would refuse.
+                assert_memory_owner(memory_id)
+            except MemoryAccessDenied:
+                logger.info("Traces refused: %s is not this caller's", memory_id)
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
+
+            trace_id = (request.args.get("traceId") or "").strip()
+            if trace_id:
+                trace = get_turn_trace(trace_id)
+                # The id embeds its conversation, but that is a convenience and not a check:
+                # confirm the trace really belongs to the conversation just authorised.
+                if not trace or trace.get("memory_id") != memory_id:
+                    return jsonify({"error": "No trace found for that id."}), 404
+                return jsonify(trace)
+
+            limit = request.args.get("limit", type=int) or 20
+            return jsonify({"traces": list_turn_traces(memory_id, limit=limit)})
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on traces for %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 

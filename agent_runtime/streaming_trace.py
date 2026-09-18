@@ -74,6 +74,12 @@ class _TraceState:
     # Per-request override for detail-tier verbosity. None -> fall back to the
     # AGENT_DEV env var; True/False -> force on/off for this stream.
     agent_dev: Optional[bool] = None
+    # A second sink that receives EVERY event, before the detail-tier filter below. The client's
+    # stream and the durable record answer different questions: a viewer asked for a readable
+    # trace, while a record exists to reproduce the turn later, and a record that only holds what
+    # someone happened to switch on is not a record. Everything the client sees, the recorder
+    # also sees; the reverse is not true.
+    recorder: Optional[TraceSink] = None
 
 
 _TRACE_STATE: ContextVar[Optional[_TraceState]] = ContextVar("agent_stream_trace_state", default=None)
@@ -241,10 +247,6 @@ def _emit_with_state(
         return
     # Detail-tier events are suppressed unless dev mode is enabled. The
     # per-request flag on the trace state wins; otherwise fall back to AGENT_DEV.
-    dev_enabled = state.agent_dev if state.agent_dev is not None else is_agent_dev()
-    if not is_status_tier_event(event) and not dev_enabled:
-        return
-
     payload: Dict[str, Any] = dict(data or {})
     context_role = current_agent_role()
     role = agent_role or payload.get("agent") or (context_role if context_role != "agent" else state.agent_role)
@@ -259,6 +261,18 @@ def _emit_with_state(
         item["agent_role"] = role
     if node:
         item["node"] = node
+
+    # The recorder runs FIRST and unfiltered. Sequence numbers are assigned above, so both sinks
+    # agree on ordering even though the client sees a subset.
+    if state.recorder is not None:
+        try:
+            state.recorder(item)
+        except Exception:
+            logger.debug("Trace recorder rejected event %s", event, exc_info=True)
+
+    dev_enabled = state.agent_dev if state.agent_dev is not None else is_agent_dev()
+    if not is_status_tier_event(event) and not dev_enabled:
+        return
 
     try:
         state.sink(item)
@@ -514,14 +528,17 @@ def trace_context(
     *,
     agent_role: str = "orchestrator_agent",
     agent_dev: Optional[bool] = None,
+    recorder: Optional[TraceSink] = None,
 ) -> Iterator[None]:
     """Enable streamed trace emission for the current thread/context.
 
     ``agent_dev`` overrides detail-tier verbosity for this stream (None falls
-    back to the ``AGENT_DEV`` env var).
+    back to the ``AGENT_DEV`` env var). ``recorder``, when given, receives every
+    event regardless of that setting -- see ``_TraceState.recorder``.
     """
     handler = StreamingTraceCallbackHandler()
-    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role, agent_dev=agent_dev)
+    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role, agent_dev=agent_dev,
+                        recorder=recorder)
     handler._state = state
     state_token = _TRACE_STATE.set(state)
     agent_token = _TRACE_AGENT.set(agent_role)

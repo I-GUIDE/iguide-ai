@@ -14,6 +14,7 @@ kept current. The layout is the durable part.
 | Store | Where | Holds | Owner check | Reclaimed by |
 | --- | --- | --- | --- | --- |
 | Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | nothing |
+| Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | nothing |
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
@@ -90,11 +91,57 @@ region         the drawn AOI, if any
 model provider the model that answered
 ```
 
-The trace survives, at **display fidelity**: tool names with their arguments *truncated at the
-render cap*, and results as headlines — `1 feature · 0.4s`, `1 layer on the map · 2.67s` — rather
-than payloads. LLM steps record only `Asking <model>`. So a past session shows what happened and
-what it produced; it is not a replay log. See
-[Reproducing a session](#reproducing-a-session).
+The trace here survives at **display fidelity**: tool names with their arguments *truncated at
+the render cap*, and results as headlines — `1 feature · 0.4s`, `1 layer on the map · 2.67s` —
+rather than payloads. LLM steps record only `Asking <model>`. It is what a person reads, not what
+a turn is reproduced from; the raw events live in their own index, below.
+
+---
+
+## 1b. Raw turn traces — OpenSearch index `chat_traces`
+
+**Index** `chat_traces` (`OPENSEARCH_TRACE_INDEX`). One document per **turn**, not per
+conversation — a conversation has many, and they are large.
+
+```
+memory_id  thread_id  owner_id      the conversation this turn belongs to
+query  answer  model  provider      what was asked, what came back, by what
+events[]                            the events AS EMITTED: full tool arguments, full outcomes
+event_count  dropped_count          how many were kept, and how many the cap removed
+createdAt
+```
+
+### Recorded unfiltered, on purpose
+
+`agent_dev` decides what the *client* sees: without it, detail-tier events — tool I/O, LLM steps,
+routing detail — are never streamed. The recorder sits **before** that filter, so the record is
+the same whether or not anyone was watching closely. The alternative inverts the value: the turns
+most worth studying are the ones nobody had dev mode on for.
+
+The two sinks are independent in both directions. A client that disconnects cannot cost the
+record, and a recorder that throws cannot break the stream.
+
+### It cannot fail a turn
+
+`save_turn_trace` swallows its own errors and reports them in its return value. Diagnostics are
+the least important thing happening during a turn, and losing an answer because the trace could
+not be written would invert that.
+
+### Two ceilings
+
+`AGENT_TRACE_MAX_EVENTS` (default 4,000) bounds the list *in memory* during a turn — a runaway
+loop is a memory problem long before it is a storage one. `AGENT_TRACE_MAX_BYTES` (default 2 MB)
+bounds the stored document, and trims **from the middle**: the head holds the question and the
+tail holds the outcome, while a turn that blew the limit did so in between, usually a retry loop
+repeating itself. `dropped_count` records how much went, so a trimmed trace never reads as
+complete.
+
+### Reading them back
+
+`GET /agent/conversations/<memory_id>/traces` lists a summary per turn **without** the events —
+choosing which turn to open should not mean downloading all of them. `?traceId=<id>` returns one
+turn with its full event list. Ownership is asserted on the *conversation*, so a trace can never
+be reachable by an id its conversation would refuse.
 
 ---
 
@@ -184,26 +231,24 @@ layer descriptors, the tool sequence with truncated arguments, and the model tha
 
 | Missing | Why |
 | --- | --- |
-| Full tool arguments | the trace stores the *rendered* line, truncated at the display cap |
-| Tool result payloads | results are stored as headlines; the artifacts often stand in for them |
 | Prompts and LLM responses | never persisted; `chat_history` holds turn text, not system prompts |
-| Token usage / cost | emitted through `turn_instrumentation` to logs, not into the snapshot |
+| Token usage / cost | emitted through `turn_instrumentation` to logs, not into either store |
 | Reasoning effort, code peer, orchestration | `model` and `provider` are stored; the rest of `AgentCfg` is not |
 | The code the sandbox ran | lives in the workspace, gone after 72 hours |
 
+Full tool arguments and outcomes *were* on this list. They are now in `chat_traces`, which is
+what that index exists for.
+
 That makes past sessions a good basis for **building benchmark cases** — a real question, the
 files it produced and an expected answer is exactly the shape an EarthVerse-style task takes —
-and a weaker basis for **reproducing a specific failure**, where the truncated arguments and the
-expired workspace are what you most need.
+and, with the raw events, a workable basis for **reproducing a failure** for as long as the
+workspace survives. Past 72 hours the arguments are still there but the code that ran is not, so
+the remaining gap is the workspace: either a longer TTL or copying it into the file store at the
+end of a turn.
 
-Closing that gap means persisting the raw trace events rather than the rendered ones (the
-`tool_call` / `tool_result` events already carry full arguments and outcomes server-side; they are
-simply not stored), and either lengthening the workspace TTL or copying the workspace into the
-file store at the end of a turn. Both push against the 5 MB snapshot cap, so raw traces probably
-belong beside the snapshot rather than inside it.
-
-Note the corpus is young: **3 of 1,264 documents carry a snapshot**, because client-side
-persistence only began working on 2026-09-17.
+Note the corpus is young: **3 of 1,264 documents carry a snapshot** and trace recording began on
+2026-09-18, so the traces start from zero. That is an argument for deciding what to capture
+before a few hundred sessions accumulate without it.
 
 ---
 

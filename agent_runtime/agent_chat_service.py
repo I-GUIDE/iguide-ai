@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
@@ -14,7 +15,8 @@ from .session_memory import (
     build_session_memory_doc,
     get_session_files,
 )
-from rag_pipeline.memory_module import create_memory, get_or_create_memory, update_memory
+from rag_pipeline.memory_module import (create_memory, get_or_create_memory, save_turn_trace,
+                                        update_memory)
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +374,20 @@ def run_agent_chat(
     return response
 
 
+def _trace_event_cap() -> int:
+    """How many raw events one turn may record, from ``AGENT_TRACE_MAX_EVENTS``.
+
+    A separate limit from the store's byte cap and earlier in the pipeline: this one stops an
+    unbounded list growing in memory during a runaway turn, which is a problem well before the
+    bytes would be.
+    """
+    raw = str(os.getenv("AGENT_TRACE_MAX_EVENTS") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else 4000
+    except ValueError:
+        return 4000
+
+
 def stream_agent_chat_events(
     *,
     user_input: str,
@@ -470,6 +486,17 @@ def stream_agent_chat_events(
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
     effective_input = _augment_user_input_with_file_ids(effective_input, effective_file_ids)
     completed_response: Optional[Dict[str, Any]] = None
+    # The durable record of this turn. Collected unfiltered — `agent_dev` decides what the
+    # VIEWER sees, and a record that only holds what someone happened to switch on is not a
+    # record. Bounded here as well as at the store, because an unbounded list on a runaway turn
+    # is a memory problem long before it is a storage one.
+    trace_events: List[Dict[str, Any]] = []
+    trace_cap = _trace_event_cap()
+
+    def _record(event: Dict[str, Any]) -> None:
+        if len(trace_events) < trace_cap:
+            trace_events.append(event)
+
     for event in stream_agent_query_events(
         effective_input,
         llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
@@ -490,6 +517,7 @@ def stream_agent_chat_events(
         code_peer_model=code_peer_model,
         unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
+        trace_recorder=_record,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
@@ -500,6 +528,17 @@ def stream_agent_chat_events(
     effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
     # Track this turn's uploads in the session so later turns can still use them.
     append_session_files(effective_thread_id, normalized_file_ids)
+
+    # Beside the conversation, not inside it: the snapshot has a 5 MB cap and is fetched to
+    # render a sidebar. Deliberately unable to fail the turn — save_turn_trace swallows its own
+    # errors, because diagnostics are the least important thing happening here.
+    if use_persistent_memory and effective_memory_id and trace_events:
+        stored = save_turn_trace(
+            effective_memory_id, thread_id=effective_thread_id, query=user_input,
+            events=trace_events, answer=answer, model=llm_model, provider=llm_provider)
+        if stored.get("stored"):
+            yield {"event": "trace_saved", "data": stored}
+
     persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:

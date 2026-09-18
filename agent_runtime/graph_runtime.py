@@ -184,12 +184,16 @@ def stream_agent_query_events(
     code_peer_model: Optional[str] = None,
     unified_peer: Optional[bool] = None,
     input_file_ids: Optional[List[str]] = None,
+    trace_recorder: Optional[Any] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
     ``agent_dev`` controls whether detail-tier events (tool I/O, LLM
     interactions, routing detail) are streamed in addition to the always-on
     execution-state status events.  None falls back to the ``AGENT_DEV`` env var.
+
+    ``trace_recorder`` is a callable receiving EVERY event regardless of ``agent_dev`` -- the
+    durable record of the turn, as opposed to what this particular viewer asked to watch.
     """
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
     dev_enabled = agent_dev if agent_dev is not None else is_agent_dev()
@@ -231,7 +235,8 @@ def stream_agent_query_events(
             # this thread, and it has to happen at all: a gunicorn sync worker reuses its thread
             # across requests, so without a reset the previous turn's spend would starve this one.
             web_utils.begin_turn()
-            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev):
+            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev,
+                               recorder=trace_recorder):
                 graph = build_orchestrator_graph(
                     llm=llm,
                     verbose=verbose,

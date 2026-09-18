@@ -23,6 +23,13 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 MEMORY_INDEX = os.getenv("OPENSEARCH_MEMORY_INDEX", "chat_memory")
+# Raw trace events, one document per TURN — beside the conversation, not inside it. Three
+# reasons it is its own index rather than another field on `chat_memory`:
+#   * a trace belongs to a turn, and a conversation has many;
+#   * the conversation document is fetched to render a sidebar, and traces are large;
+#   * the questions asked of a trace are searches ("every turn where execute_code failed"),
+#     which wants documents of its own rather than nested objects.
+TRACE_INDEX = os.getenv("OPENSEARCH_TRACE_INDEX", "chat_traces")
 EMBEDDING_MODEL = os.getenv("MEMORY_EMBEDDER_MODEL", "all-MiniLM-L6-v2")
 DEFAULT_STATE_PARAMS: Dict[str, Any] = {"top_k": 8, "max_context_tokens": 6000}
 
@@ -329,6 +336,126 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
                            "chat_history": [], "owner_id": owner,
                            "createdAt": patch["updatedAt"], **patch})
     return {"memoryId": memory_id, "bytes": size}
+
+
+# ---------------------------------------------------------------------------
+# Raw trace events
+# ---------------------------------------------------------------------------
+# The client's snapshot stores a RENDERED trace: tool names with arguments truncated at the
+# display cap, results as headlines ("1 feature · 0.4s"). That is the right thing to show a
+# person and the wrong thing to reproduce a turn from. These are the events as emitted --
+# full arguments, full outcomes -- which is what a failure needs to be re-run and what a
+# benchmark case needs to be built from.
+
+_TRACE_MAX_BYTES_DEFAULT = 2_000_000
+
+
+def _trace_max_bytes() -> int:
+    raw = str(os.getenv("AGENT_TRACE_MAX_BYTES") or "").strip()
+    try:
+        return int(raw) if raw else _TRACE_MAX_BYTES_DEFAULT
+    except ValueError:
+        return _TRACE_MAX_BYTES_DEFAULT
+
+
+def _fit_events(events: List[Any], limit: int) -> tuple:
+    """Trim from the MIDDLE until the batch fits, and say how much went.
+
+    Dropping the tail would lose the outcome and dropping the head would lose the question;
+    a turn that blew the limit did so in its middle, which is usually a retry loop repeating
+    itself. Returns ``(kept, dropped)``.
+    """
+    import json as _json
+
+    def size(items: List[Any]) -> int:
+        return len(_json.dumps(items, default=str).encode("utf-8"))
+
+    if size(events) <= limit:
+        return events, 0
+    head, tail, dropped = 20, 20, 0
+    while len(events) > head + tail:
+        cut = max(1, (len(events) - head - tail) // 2)
+        events = events[:head] + events[head + cut:]
+        dropped += cut
+        if size(events) <= limit:
+            return events, dropped
+    # Still over with only head+tail left: the individual events are the problem, not the count.
+    while events and size(events) > limit:
+        events = events[:-1]
+        dropped += 1
+    return events, dropped
+
+
+def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
+                    events: List[Any], answer: Optional[str] = None,
+                    model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+    """Store one turn's raw events. Caller must already own the conversation.
+
+    Never raises: a trace is diagnostic, and losing the answer because the diagnostics could not
+    be written would invert the priority. Failures are logged and reported in the return value.
+    """
+    doc_id = f"{memory_id}:{uuid.uuid4().hex[:12]}"
+    kept, dropped = _fit_events(list(events or []), _trace_max_bytes())
+    body = {
+        "memory_id": memory_id,
+        "thread_id": thread_id,
+        "owner_id": _current_owner(),
+        "query": query,
+        "answer": answer,
+        "model": model,
+        "provider": provider,
+        "event_count": len(kept),
+        "dropped_count": dropped,
+        "events": kept,
+        "createdAt": _now(),
+    }
+    try:
+        _get_opensearch_client().index(index=TRACE_INDEX, id=doc_id, body=body, refresh="wait_for")
+    except Exception as err:  # noqa: BLE001 - diagnostics must not break a turn
+        logger.warning("Failed to store trace for %s: %s", memory_id, err)
+        return {"stored": False, "error": str(err)}
+    return {"stored": True, "traceId": doc_id, "eventCount": len(kept), "dropped": dropped}
+
+
+def list_turn_traces(memory_id: str, *, limit: int = 20,
+                     include_events: bool = False) -> List[Dict[str, Any]]:
+    """Every recorded turn of one conversation, newest first. Caller must already own it."""
+    source = ["memory_id", "thread_id", "query", "answer", "model", "provider",
+              "event_count", "dropped_count", "createdAt"]
+    if include_events:
+        source.append("events")
+    try:
+        response = _get_opensearch_client().search(
+            index=TRACE_INDEX,
+            body={
+                "size": max(1, int(limit)),
+                # `.keyword` for the same reason `list_memories` needs it: these ids are URLs
+                # and slugs, and a term query on an analysed field matches tokens, not values.
+                "query": {"term": {"memory_id.keyword": memory_id}},
+                "sort": [{"createdAt": {"order": "desc", "unmapped_type": "date"}}],
+                "_source": source,
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error listing traces for %s: %s", memory_id, err)
+        return []
+    out: List[Dict[str, Any]] = []
+    for hit in (response.get("hits", {}) or {}).get("hits", []) or []:
+        src = hit.get("_source") or {}
+        out.append({"traceId": hit.get("_id"), **{k: src.get(k) for k in source if k in src}})
+    return out
+
+
+def get_turn_trace(trace_id: str) -> Optional[Dict[str, Any]]:
+    """One recorded turn, events included. Caller must already own the conversation."""
+    try:
+        doc = _get_opensearch_client().get(index=TRACE_INDEX, id=trace_id)["_source"]
+    except NotFoundError:
+        return None
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error reading trace %s: %s", trace_id, err)
+        return None
+    return {"traceId": trace_id, **dict(doc)}
 
 
 def get_session_snapshot(memory_id: str) -> Optional[Dict[str, Any]]:
