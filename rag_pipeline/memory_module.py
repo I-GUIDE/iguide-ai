@@ -312,11 +312,18 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
                        ("fileCount", "fileIds")):
         value = clean.get(key)
         patch[field] = len(value) if isinstance(value, (list, tuple)) else 0
+    # `refresh="wait_for"` because the caller's very next action is to LIST. OpenSearch is
+    # near-real-time: an indexed document is not searchable until the next refresh, a second by
+    # default, so the client saved a conversation, immediately re-listed, and got back the list
+    # without it — the header sat one behind until something re-opened the panel a moment later.
+    # Waiting makes the endpoint's contract true: when this returns, the conversation is
+    # listable. It costs up to one refresh interval, and it is paid after the turn has already
+    # been answered, not on the streaming path.
     try:
-        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch}, refresh="wait_for")
     except NotFoundError:
         owner = _current_owner()
-        client.index(index=MEMORY_INDEX, id=memory_id,
+        client.index(index=MEMORY_INDEX, id=memory_id, refresh="wait_for",
                      body={"conversationName": patch.get("conversationName")
                            or f"conversation-{memory_id}",
                            "chat_history": [], "owner_id": owner,

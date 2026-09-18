@@ -23,9 +23,23 @@ class FakeOpenSearch:
 
     def __init__(self):
         self.docs: dict[str, dict] = {}
+        # OpenSearch is NEAR-REAL-TIME: an indexed document is not searchable until the next
+        # refresh. A fake that makes every write instantly searchable cannot reproduce the bug
+        # where the client saved a conversation, immediately re-listed, and got the list back
+        # without it. So visibility is tracked separately and a write earns it only by asking
+        # (`refresh=...`) or by a later settle().
+        self.visible: set[str] = set()
 
-    def index(self, *, index, id, body):
+    def settle(self):
+        """The periodic refresh that eventually makes every write searchable."""
+        self.visible |= set(self.docs)
+
+    def index(self, *, index, id, body, refresh=None):
         self.docs[id] = dict(body)
+        if refresh:
+            self.visible.add(id)
+        else:
+            self.visible.discard(id)
 
     def get(self, *, index, id):
         if id not in self.docs:
@@ -33,13 +47,15 @@ class FakeOpenSearch:
             raise NotFoundError(404, "not found", {})
         return {"_source": dict(self.docs[id])}
 
-    def update(self, *, index, id, body):
+    def update(self, *, index, id, body, refresh=None):
         # Real OpenSearch refuses to update a document that does not exist; a fake that quietly
         # creates one hides every code path that depends on the difference.
         if id not in self.docs:
             from opensearchpy import NotFoundError
             raise NotFoundError(404, "not found", {})
         self.docs[id].update(body["doc"])
+        if refresh:
+            self.visible.add(id)
 
     def search(self, *, index, body):
         # Analysis is modelled, not assumed. The previous fake read `term.owner_id` and
@@ -69,7 +85,7 @@ class FakeOpenSearch:
             owned = stored == want and (not tokenised or len(_tokens(want)) == 1)
             return owned and all(doc.get(f) is not None for f in must_exist)
         hits = [{"_id": k, "_source": project(v)} for k, v in self.docs.items()
-                if matches(v)]
+                if k in self.visible and matches(v)]
         hits.sort(key=lambda h: self.docs[h["_id"]].get("updatedAt") or "", reverse=True)
         return {"hits": {"hits": hits[:body.get("size", 10)]}}
 
@@ -248,8 +264,25 @@ def test_a_memory_with_no_client_snapshot_is_not_offered(store):
     """
     conversation("openable", "alice")
     as_user("alice", lambda: mm.create_memory("agent-side only"))     # no snapshot ever stored
+    store.settle()   # both searchable, so this tests the FILTER and not indexing latency
     names = as_user("alice", lambda: [c["conversationName"] for c in mm.list_memories()])
     assert names == ["openable"]
     # And the reason it must not be listed: there is nothing to give back.
     mid = as_user("alice", lambda: mm.create_memory("still nothing"))
     assert as_user("alice", lambda: mm.get_session_snapshot(mid)) is None
+
+
+def test_a_saved_conversation_is_immediately_listable(store):
+    """Save then list is the client's actual sequence, and it used to lose the new one.
+
+    OpenSearch will not return a document to a search until its next refresh, about a second
+    away, so a conversation saved at the end of a turn was absent from the list fetched
+    milliseconds later: the header sat one behind until something re-opened the panel. The save
+    asks to be searchable before it returns, which makes the endpoint's contract true.
+    """
+    conversation("first", PLATFORM_ID)
+    before = as_user(PLATFORM_ID, lambda: len(mm.list_memories()))
+    conversation("second", PLATFORM_ID)          # no settle() — exactly what the client does
+    after = as_user(PLATFORM_ID, lambda: [c["conversationName"] for c in mm.list_memories()])
+    assert before == 1
+    assert sorted(after) == ["first", "second"]

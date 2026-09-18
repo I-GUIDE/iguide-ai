@@ -963,6 +963,46 @@ is it declared? Not a general exhaustive-deps implementation, and no new depende
 shape as `check:auth` and `check:fold`. Verified the only way a regression check can be: with the
 fix reverted it fails, with it applied it passes.
 
+### Stage S9.7 Save-then-list, and a suite that was reading the wrong file
+
+**The count sat one behind.** With conversations finally persisting on their own, the header
+still read `History (2)` against a server holding 3 until something re-opened the panel.
+OpenSearch is **near-real-time**: an indexed document is not searchable until the next refresh,
+about a second, and `snapshotSession` saves and then re-lists within milliseconds. The write
+landed; the search issued immediately after could not see it. `save_session_snapshot` now writes
+with `refresh="wait_for"`, so the endpoint's contract is true — when the save returns, the
+conversation is listable. It costs up to one refresh interval and is paid after the turn has
+already been answered, off the streaming path.
+
+The fake in `test_memory_ownership.py` learned to model this, the same way it learned to model
+analysis earlier: a write is searchable only if it asked to be, or after an explicit `settle()`.
+Remove the `wait_for` and four tests fail, including a save-then-list one that reproduces the
+client's actual sequence.
+
+**And the suite had stopped meaning anything.** Thirty tests failed and the run went from two and
+a half minutes to twenty-five — with no relevant change in the repository. Four modules call a
+bare `load_dotenv()`, which does not read "the repo's `.env`": it walks *upwards* from the
+working directory. From a worktree under `.claude/worktrees/<name>/` that walk leaves the tree
+and lands on the main checkout's file — the developer's own, tracking whatever was last deployed.
+It had grown `AGENT_TOKEN_VERIFY=introspect`, `AGENT_MODE=token` and `PLATFORM_TIER=dev` during
+the token-mode rollout, so every identity check became a real HTTPS call to the dev backend,
+which answers 403 to an unauthenticated caller. The same checkout passed or failed depending on a
+file outside it.
+
+`rag_pipeline/tests/conftest.py` replaces the loader with a no-op before any test module imports.
+Pinning the variables was the first attempt and it is not enough: `test_demo_mode` calls
+`importlib.reload(api.server)`, and a test that had just `delenv`'d `AGENT_MODE` leaves the name
+genuinely absent, so `override=False` stops protecting it and dotenv refills it. Any pinned value
+loses to delete-then-reload; the mechanism had to go rather than its output.
+
+Three live-backend tests were running against real OpenSearch and AnvilGPT purely because that
+stray file configured them. They self-skip when unconfigured, so they now skip by default and
+`RUN_LIVE_BACKEND_TESTS=1` opts back in — the same shape as the existing
+`RUN_REAL_OPEN_GEODATA_TEST=1`. Offline and deterministic by default, live when asked for.
+**1597 passed, 4 skipped, 86 seconds** — the twenty-five minutes was the network, not the work.
+
+---
+
 *Still open:* one conversation produced **two** memory documents — the agent's own
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
 the orphan rather than explaining it, and why the two ids diverge is not yet understood.
