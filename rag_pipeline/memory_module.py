@@ -358,6 +358,15 @@ def _trace_max_bytes() -> int:
         return _TRACE_MAX_BYTES_DEFAULT
 
 
+def _trace_timeout_seconds() -> float:
+    """How long a trace write may hold the turn, from ``AGENT_TRACE_TIMEOUT_SECONDS``."""
+    raw = str(os.getenv("AGENT_TRACE_TIMEOUT_SECONDS") or "").strip()
+    try:
+        return max(0.5, float(raw)) if raw else 5.0
+    except ValueError:
+        return 5.0
+
+
 def _fit_events(events: List[Any], limit: int) -> tuple:
     """Trim from the MIDDLE until the batch fits, and say how much went.
 
@@ -410,7 +419,18 @@ def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
         "createdAt": _now(),
     }
     try:
-        _get_opensearch_client().index(index=TRACE_INDEX, id=doc_id, body=body, refresh="wait_for")
+        # NO `refresh="wait_for"` here, unlike the snapshot. That flag exists for save-then-list,
+        # and the client re-lists conversations the instant a turn ends; nothing lists traces —
+        # they are read later, by someone debugging. Waiting buys nothing and costs everything
+        # when the index is unhealthy: measured against a RED `chat_traces` (the cluster was out
+        # of disk and could not allocate its shard), `wait_for` blocked until the 30-second
+        # client timeout, once per turn, after the answer had already been delivered.
+        #
+        # The short `request_timeout` is the second half of that lesson. Diagnostics must fail
+        # FAST as well as fail alone: a sick cluster should cost a turn a few seconds, not
+        # thirty, and the trace is the thing worth giving up.
+        _get_opensearch_client().index(index=TRACE_INDEX, id=doc_id, body=body,
+                                       request_timeout=_trace_timeout_seconds())
     except Exception as err:  # noqa: BLE001 - diagnostics must not break a turn
         logger.warning("Failed to store trace for %s: %s", memory_id, err)
         return {"stored": False, "error": str(err)}

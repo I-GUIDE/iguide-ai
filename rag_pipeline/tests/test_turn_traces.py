@@ -28,8 +28,12 @@ from rag_pipeline import memory_module as mm  # noqa: E402
 class FakeOpenSearch:
     def __init__(self):
         self.docs: dict[str, dict] = {}
+        self.calls: list[dict] = []
 
-    def index(self, *, index, id, body, refresh=None):
+    def index(self, *, index, id, body, refresh=None, request_timeout=None, **_kw):
+        # Both recorded, because both are assertions the tests make: a trace must NOT ask the
+        # cluster to make it searchable, and must NOT be allowed to block indefinitely.
+        self.calls.append({"refresh": refresh, "request_timeout": request_timeout})
         self.docs[id] = dict(body)
 
     def get(self, *, index, id):
@@ -192,3 +196,41 @@ def test_a_turn_within_the_limit_is_untouched():
                                                       events=_events(5)))
     assert res["dropped"] == 0
     assert len(as_user("alice", lambda: mm.get_turn_trace(res["traceId"]))["events"]) == 5
+
+
+# --- failing fast is part of failing alone -----------------------------------------
+
+def test_a_trace_write_does_not_wait_to_be_searchable(store):
+    """`refresh="wait_for"` is right for the snapshot and wrong here.
+
+    The client re-lists conversations the instant a turn ends, so a snapshot has to be
+    searchable before its save returns. Nothing lists traces — they are read later, by someone
+    debugging — so waiting buys nothing. It costs, though: measured against a RED `chat_traces`
+    index on a cluster that had run out of disk, `wait_for` blocked until the 30-second client
+    timeout, once per turn, after the answer had already gone out.
+    """
+    as_user("alice", lambda: mm.save_turn_trace("mem-1", thread_id="t", query="q",
+                                                events=_events()))
+    assert store.calls[-1]["refresh"] is None
+
+
+def test_a_trace_write_is_time_bounded(store, monkeypatch):
+    """A sick cluster should cost a turn seconds, not the client default."""
+    as_user("alice", lambda: mm.save_turn_trace("mem-1", thread_id="t", query="q",
+                                                events=_events()))
+    assert store.calls[-1]["request_timeout"] == 5.0
+
+    monkeypatch.setenv("AGENT_TRACE_TIMEOUT_SECONDS", "1.5")
+    as_user("alice", lambda: mm.save_turn_trace("mem-2", thread_id="t", query="q",
+                                                events=_events()))
+    assert store.calls[-1]["request_timeout"] == 1.5
+
+
+def test_a_slow_store_does_not_propagate(store, monkeypatch):
+    """The turn is already answered by the time this runs; a timeout must stay contained."""
+    def slow(**_kw):
+        raise TimeoutError("read timed out")
+    monkeypatch.setattr(store, "index", slow)
+    res = as_user("alice", lambda: mm.save_turn_trace("mem-1", thread_id="t", query="q",
+                                                      events=_events()))
+    assert res["stored"] is False and "timed out" in res["error"]
