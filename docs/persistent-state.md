@@ -166,6 +166,34 @@ be reachable by an id its conversation would refuse.
 
 ---
 
+## 1c. Which tier, and the two switches
+
+`PLATFORM_TIER=dev|prod` selects the things that must agree about **identity and this agent's own
+state**: the backend that mints tokens, the frontend a visitor signs in at, the check-tokens
+endpoint, the OpenSearch cluster holding `chat_memory`, and — via `OPENSEARCH_USERNAME_<TIER>` /
+`OPENSEARCH_PASSWORD_<TIER>` — the credential for it.
+
+`SEARCH_TIER=dev|prod` selects **which knowledge base to search**, and falls back to
+`PLATFORM_TIER` when unset. They are separate because they answer different questions: running
+the dev platform against the prod knowledge base is an ordinary thing to want, and before this it
+meant editing index names by hand and remembering to put them back. A split is logged at boot, so
+it is never something to deduce from surprising results.
+
+Any setting can be tiered by adding `_DEV` / `_PROD` to its name — `tiered_env()` is the general
+rule, and every search read goes through it. In practice that is the index names:
+
+```
+OPENSEARCH_INDEX          new-opensearch-index              (untiered fallback)
+OPENSEARCH_INDEX_DEV      iguide-platform-embeddings-dev    (dev's knowledge base)
+```
+
+An **empty** tiered value counts as unset, so a half-written `FOO_PROD=` cannot blank out a
+working `FOO`. An **unrecognised** tier raises rather than falling back, in both switches: a
+wrong cluster fails loudly, but a wrong *index* fails silently — the query succeeds and simply
+returns nothing, and the agent answers confidently from the wrong corpus.
+
+---
+
 ## 2. Files — a Docker volume
 
 **`/app/agent_chat_files`** (`AGENT_FILE_STORAGE_ROOT`), backed by

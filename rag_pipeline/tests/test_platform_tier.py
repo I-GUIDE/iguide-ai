@@ -232,3 +232,58 @@ def test_no_credential_at_all_is_not_a_warning(monkeypatch):
                  "OPENSEARCH_USERNAME_DEV", "OPENSEARCH_PASSWORD_DEV"):
         monkeypatch.delenv(name, raising=False)
     assert pe.opensearch_credential_warning() is None
+
+
+# --- SEARCH_TIER: which corpus, independent of which platform ----------------------
+
+def test_search_follows_the_platform_tier_by_default(monkeypatch):
+    """One switch still moves everything unless someone deliberately splits them."""
+    monkeypatch.delenv("SEARCH_TIER", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_INDEX", "new-opensearch-index")
+    monkeypatch.setenv("OPENSEARCH_INDEX_DEV", "iguide-platform-embeddings-dev")
+    assert pe.search_tier() == "dev"
+    assert pe.search_index() == "iguide-platform-embeddings-dev"
+
+
+def test_search_can_be_pointed_at_the_other_tier(monkeypatch):
+    """The dev platform against the prod knowledge base is an ordinary thing to want."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("SEARCH_TIER", "prod")
+    monkeypatch.setenv("OPENSEARCH_INDEX", "new-opensearch-index")
+    monkeypatch.setenv("OPENSEARCH_INDEX_DEV", "iguide-platform-embeddings-dev")
+    assert pe.search_index() == "new-opensearch-index", "must NOT pick up the dev index"
+    # ...and identity is untouched by it.
+    assert pe.current_tier() == "dev"
+    assert pe.check_tokens_url().startswith("https://backend-dev.i-guide.io")
+
+
+def test_a_split_is_said_out_loud(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("SEARCH_TIER", "prod")
+    note = pe.search_tier_note()
+    assert note and "SEARCH_TIER=prod" in note and "PLATFORM_TIER=dev" in note
+
+
+def test_no_split_is_silent(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("SEARCH_TIER", "dev")
+    assert pe.search_tier_note() is None
+
+
+def test_an_unknown_search_tier_refuses_rather_than_guessing(monkeypatch):
+    """Falling back would search the wrong corpus and answer confidently from it."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("SEARCH_TIER", "staging")
+    monkeypatch.setenv("OPENSEARCH_INDEX", "new-opensearch-index")
+    with pytest.raises(ValueError):
+        pe.search_index()
+
+
+def test_an_empty_tiered_value_does_not_blank_a_working_one(monkeypatch):
+    """A half-written FOO_PROD= must not erase FOO."""
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    monkeypatch.delenv("SEARCH_TIER", raising=False)
+    monkeypatch.setenv("OPENSEARCH_INDEX", "new-opensearch-index")
+    monkeypatch.setenv("OPENSEARCH_INDEX_PROD", "")
+    assert pe.search_index() == "new-opensearch-index"

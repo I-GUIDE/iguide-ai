@@ -16,7 +16,24 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def getenv(name: str, required: bool = True, default: Optional[str] = None) -> str:
-    value = os.getenv(name, default)
+    """Read a setting, preferring this tier's own value.
+
+    ``PLATFORM_TIER=dev`` makes ``FOO_DEV`` win over ``FOO``. Every search read comes through
+    here, which is how one switch moves the index names too: dev's knowledge base is
+    ``iguide-platform-embeddings-dev`` while the bare ``OPENSEARCH_INDEX`` still says
+    ``new-opensearch-index``, and querying the wrong one fails silently — the cluster answers,
+    the query succeeds, and there are simply no results.
+    """
+    value = None
+    try:
+        from agent_runtime import platform_endpoints
+        # SEARCH_TIER, not PLATFORM_TIER: which knowledge base to query is a different question
+        # from which platform mints the tokens, and pointing one at dev and the other at prod is
+        # an ordinary thing to want.
+        value = platform_endpoints.tiered_env(name, default,
+                                              tier=platform_endpoints.search_tier())
+    except Exception:  # noqa: BLE001 - search predates the tier table; never hard-depend on it
+        value = os.getenv(name, default)
     if required and (value is None or value == ""):
         raise RuntimeError(f"Missing required environment variable: {name}")
     if value and len(value) >= 2 and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")):

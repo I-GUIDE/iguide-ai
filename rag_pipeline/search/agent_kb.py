@@ -131,7 +131,10 @@ def resolve_parent_elements(docs: List[Dict[str, Any]], client) -> Dict[str, Dic
     parent_ids = sorted({d["parent_doc_id"] for d in docs if d.get("parent_doc_id")})
     if not parent_ids:
         return {}
-    general = os.getenv("OPENSEARCH_INDEX", "")
+    # Through the shared helper so it follows SEARCH_TIER like every other index read; a
+    # direct os.getenv here would have been the one module still querying the other tier.
+    from .utils import getenv as _tiered
+    general = _tiered("OPENSEARCH_INDEX", required=False, default="")
     if not general:
         return {}
     try:

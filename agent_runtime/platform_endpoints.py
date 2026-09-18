@@ -110,6 +110,80 @@ def opensearch_url() -> str:
     return (_TIERS[tier].get("opensearch") or "") if tier else ""
 
 
+def search_tier() -> Optional[str]:
+    """Which tier's SEARCH indices to use — ``SEARCH_TIER``, falling back to ``PLATFORM_TIER``.
+
+    Separate from the platform tier because they answer different questions. ``PLATFORM_TIER``
+    says which platform mints and verifies the tokens, and where this agent's own conversations
+    live. ``SEARCH_TIER`` says which knowledge base to search. Wanting the dev platform against
+    the prod knowledge base is an ordinary thing to want, and before this it meant editing index
+    names by hand and remembering to put them back.
+
+    Unset means "same tier as the platform", which is the safe default: one switch still moves
+    everything unless someone deliberately splits them. An unrecognised value RAISES, for the
+    same reason ``PLATFORM_TIER`` does — silently searching the wrong corpus produces confident
+    answers from the wrong data, which is worse than an error.
+    """
+    raw = str(os.getenv("SEARCH_TIER") or "").strip().lower()
+    if not raw:
+        return current_tier()
+    if raw not in _TIERS:
+        raise ValueError(
+            f"SEARCH_TIER={raw!r} is not a tier. Expected one of: {', '.join(sorted(_TIERS))}.")
+    return raw
+
+
+def tiered_env(name: str, default: Optional[str] = None,
+               tier: Optional[str] = None) -> Optional[str]:
+    """``<NAME>_<TIER>`` when the tier names one, otherwise ``<NAME>``.
+
+    The general form of the rule the credential already follows, so a deployment that switches
+    tiers switches everything the tier owns — hosts, credentials and INDEX NAMES — from one
+    variable. Dev and prod do not agree on index names (dev's knowledge base is
+    ``iguide-platform-embeddings-dev``, and the bare ``OPENSEARCH_INDEX`` still says
+    ``new-opensearch-index``), and a wrong index is the quietest failure of the three: the
+    cluster answers, the query succeeds, and search simply returns nothing.
+
+    Only consulted when ``PLATFORM_TIER`` is set, and an empty tiered value counts as unset, so
+    a half-written ``FOO_PROD=`` cannot blank out a working ``FOO``.
+    """
+    if tier is None:
+        try:
+            tier = current_tier()
+        except ValueError:
+            tier = None
+    if tier:
+        specific = os.getenv(f"{name}_{tier.upper()}")
+        if specific:
+            return specific
+    return os.getenv(name, default)
+
+
+def search_index() -> str:
+    """The knowledge-base index for the SEARCH tier. See :func:`search_tier`.
+
+    A bad ``SEARCH_TIER`` propagates rather than degrading to the untiered index: falling back
+    would search the wrong corpus and answer confidently from it, which is the failure this
+    whole switch exists to avoid.
+    """
+    return (tiered_env("OPENSEARCH_INDEX", tier=search_tier()) or "").strip()
+
+
+def search_tier_note() -> Optional[str]:
+    """Said at boot when search has been pointed at a different tier from the platform.
+
+    Deliberate and supported, but not a thing to discover from surprising results.
+    """
+    try:
+        platform, search = current_tier(), search_tier()
+    except ValueError:
+        return None
+    if search and platform and search != platform:
+        return (f"SEARCH_TIER={search} while PLATFORM_TIER={platform}: knowledge-base searches "
+                f"use the {search} indices, identity and conversations use {platform}.")
+    return None
+
+
 def opensearch_credentials() -> tuple:
     """``(username, password)`` for this tier's cluster. Values are never logged.
 

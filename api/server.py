@@ -98,6 +98,9 @@ if platform_endpoints.opensearch_drift_warning():
 # Names only, never values — the same rule /agent/whoami follows for cookies.
 if platform_endpoints.opensearch_credential_warning():
     logger.warning("%s", platform_endpoints.opensearch_credential_warning())
+# Supported and deliberate, but not a thing to discover from surprising search results.
+if platform_endpoints.search_tier_note():
+    logger.info("%s", platform_endpoints.search_tier_note())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
 
