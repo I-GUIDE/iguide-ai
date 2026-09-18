@@ -163,3 +163,72 @@ def test_no_tier_means_no_opinion(monkeypatch):
     monkeypatch.delenv("PLATFORM_TIER", raising=False)
     monkeypatch.setenv("OPENSEARCH_NODE", "https://anything:9200")
     assert pe.opensearch_drift_warning() is None
+
+
+# --- the credential moves with the tier -------------------------------------------
+
+def test_a_tiered_credential_beats_the_bare_one(monkeypatch):
+    """The REVERSE of the URL rule, and deliberately.
+
+    For a URL the tier supplies a value and the explicit variable overrides it. For a
+    credential the tier supplies no value at all — secrets are not in this repository — so the
+    tiered name is merely the more specific one. Getting it backwards would let an old bare
+    OPENSEARCH_PASSWORD silently pin every tier to one account, which is the half-switched
+    state this module exists to prevent.
+    """
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "shared")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD", "shared-pw")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "dev-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "dev-pw")
+    assert pe.opensearch_credentials() == ("dev-user", "dev-pw")
+
+
+def test_flipping_the_tier_flips_the_credential(monkeypatch):
+    """The whole point on a host that switches tiers."""
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "dev-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "dev-pw")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_PROD", "prod-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_PROD", "prod-pw")
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    assert pe.opensearch_credentials() == ("dev-user", "dev-pw")
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    assert pe.opensearch_credentials() == ("prod-user", "prod-pw")
+
+
+def test_half_a_tiered_pair_does_not_mix_accounts(monkeypatch):
+    """A username for the tier and a password from the bare variable would be two accounts."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "shared")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD", "shared-pw")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "dev-user")
+    monkeypatch.delenv("OPENSEARCH_PASSWORD_DEV", raising=False)
+    user, pwd = pe.opensearch_credentials()
+    assert user == "dev-user" and pwd == "", "the tiered pair is selected whole, or not at all"
+
+
+def test_the_bare_credential_still_works_untiered(monkeypatch):
+    monkeypatch.delenv("PLATFORM_TIER", raising=False)
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "shared")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD", "shared-pw")
+    assert pe.opensearch_credentials() == ("shared", "shared-pw")
+    assert pe.opensearch_credential_warning() is None
+
+
+def test_an_untiered_credential_under_a_tier_is_flagged(monkeypatch):
+    """Not an error — one host, one tier, forever is fine. A trap only when the host flips."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "shared")
+    monkeypatch.delenv("OPENSEARCH_USERNAME_DEV", raising=False)
+    monkeypatch.delenv("OPENSEARCH_PASSWORD_DEV", raising=False)
+    warning = pe.opensearch_credential_warning()
+    assert warning and "OPENSEARCH_USERNAME_DEV" in warning
+
+
+def test_no_credential_at_all_is_not_a_warning(monkeypatch):
+    """Nothing configured is a different problem, and the client's own error says it better."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    for name in ("OPENSEARCH_USERNAME", "OPENSEARCH_PASSWORD",
+                 "OPENSEARCH_USERNAME_DEV", "OPENSEARCH_PASSWORD_DEV"):
+        monkeypatch.delenv(name, raising=False)
+    assert pe.opensearch_credential_warning() is None

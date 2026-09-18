@@ -30,6 +30,18 @@ set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and pr
 production deployment cannot silently inherit dev's. One document per conversation, document id =
 the `memoryId` the client and the agent share.
 
+> **Host and credential both come from the tier**, so flipping `PLATFORM_TIER` moves them
+> together. Set `OPENSEARCH_USERNAME_DEV` / `OPENSEARCH_PASSWORD_DEV` (and the `_PROD` pair);
+> the bare `OPENSEARCH_USERNAME` / `OPENSEARCH_PASSWORD` remain as an un-tiered fallback and are
+> flagged at boot when a tier is set, because on a host that switches tiers they are the trap:
+> the cluster moves and the password does not, and the 401 reads as a network problem.
+>
+> Note the precedence is the **reverse** of the URL rule. For a URL the tier supplies a value and
+> `PLATFORM_*_URL` overrides it; for a credential the tier supplies no value at all — secrets are
+> never in this repository — so the tiered name is simply the more specific one. A tiered pair is
+> selected whole or not at all, so a username for the tier and a password from the bare variable
+> can never combine into two different accounts.
+>
 > **Which cluster, and why it is a tier fact.** Dev's OpenSearch moved from `149.165.155.195` to
 > `149.165.155.135` on 2026-09-18, and `OPENSEARCH_NODE` stayed pinned to the old host. That host
 > kept answering and kept accepting writes, so nothing failed — the agent simply went on reading

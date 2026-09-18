@@ -110,6 +110,57 @@ def opensearch_url() -> str:
     return (_TIERS[tier].get("opensearch") or "") if tier else ""
 
 
+def opensearch_credentials() -> tuple:
+    """``(username, password)`` for this tier's cluster. Values are never logged.
+
+    Precedence here is the REVERSE of the URL rule above, and deliberately so. For a URL the
+    tier supplies a value and ``PLATFORM_*_URL`` overrides it, because a table cannot anticipate
+    a staging host. For a credential the tier supplies no value at all — secrets do not live in
+    this repository — so the tiered variable is simply the more specific name, and the bare
+    ``OPENSEARCH_USERNAME`` / ``OPENSEARCH_PASSWORD`` are the un-tiered fallback.
+
+    Getting that backwards would reintroduce the bug this is for: someone sets up per-tier
+    credentials, an old bare ``OPENSEARCH_PASSWORD`` is still sitting in the file, and it
+    silently pins every tier to one credential — which is exactly the half-switched state that
+    let the agent keep talking to a decommissioned cluster.
+
+    Either half is enough to select the tiered pair, so a username set for one tier and a
+    password left in the bare variable does not silently mix two accounts.
+    """
+    try:
+        tier = current_tier()
+    except ValueError:
+        tier = None
+    if tier:
+        user = os.getenv(f"OPENSEARCH_USERNAME_{tier.upper()}")
+        pwd = os.getenv(f"OPENSEARCH_PASSWORD_{tier.upper()}")
+        if user or pwd:
+            return (user or "").strip(), (pwd or "")
+    return (os.getenv("OPENSEARCH_USERNAME") or "").strip(), (os.getenv("OPENSEARCH_PASSWORD") or "")
+
+
+def opensearch_credential_warning() -> Optional[str]:
+    """Said at boot when a tier is set but its credential is not tier-specific.
+
+    Not an error — one host serving one tier forever is a perfectly good arrangement. But on a
+    host that FLIPS tiers it is the trap: ``PLATFORM_TIER`` moves the cluster and leaves the
+    password behind, and the 401 that follows reads as a network problem.
+    """
+    try:
+        tier = current_tier()
+    except ValueError:
+        return None
+    if not tier:
+        return None
+    if os.getenv(f"OPENSEARCH_USERNAME_{tier.upper()}") or os.getenv(f"OPENSEARCH_PASSWORD_{tier.upper()}"):
+        return None
+    if not (os.getenv("OPENSEARCH_USERNAME") or os.getenv("OPENSEARCH_PASSWORD")):
+        return None
+    return (f"PLATFORM_TIER={tier} but the OpenSearch credential is the un-tiered "
+            f"OPENSEARCH_USERNAME/PASSWORD. Set OPENSEARCH_USERNAME_{tier.upper()} and "
+            f"OPENSEARCH_PASSWORD_{tier.upper()} so switching tiers switches the credential too.")
+
+
 def opensearch_drift_warning() -> Optional[str]:
     """Said out loud when OPENSEARCH_NODE disagrees with the tier's own cluster.
 

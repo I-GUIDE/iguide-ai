@@ -99,8 +99,15 @@ def _get_opensearch_client() -> OpenSearch:
         raise RuntimeError(
             "No OpenSearch host: set OPENSEARCH_NODE, or PLATFORM_TIER to a tier that names one.")
 
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+    # Credential from the same place as the host, so flipping PLATFORM_TIER moves both. A tier
+    # that changed cluster but kept the password would fail with a 401 that reads as a network
+    # problem.
+    try:
+        from agent_runtime import platform_endpoints
+        user, pwd = platform_endpoints.opensearch_credentials()
+    except Exception:  # noqa: BLE001 - memory predates the tier table; never hard-depend
+        user = os.getenv("OPENSEARCH_USERNAME", "")
+        pwd = os.getenv("OPENSEARCH_PASSWORD", "")
     use_ssl = node.lower().startswith("https")
 
     _OPENSEARCH_CLIENT = OpenSearch(

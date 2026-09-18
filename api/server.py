@@ -95,6 +95,9 @@ if platform_endpoints.consistency_warning():
 # to a cluster the rest of the tier has moved off is not a state anyone goes looking for.
 if platform_endpoints.opensearch_drift_warning():
     logger.warning("%s", platform_endpoints.opensearch_drift_warning())
+# Names only, never values — the same rule /agent/whoami follows for cookies.
+if platform_endpoints.opensearch_credential_warning():
+    logger.warning("%s", platform_endpoints.opensearch_credential_warning())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
 
