@@ -184,6 +184,19 @@ def search_tier_note() -> Optional[str]:
     return None
 
 
+def _node_overrides_tier() -> bool:
+    """True when OPENSEARCH_NODE names a cluster the tier does not."""
+    explicit = str(os.getenv("OPENSEARCH_NODE") or "").strip()
+    if not explicit:
+        return False
+    try:
+        tier = current_tier()
+    except ValueError:
+        return True
+    expected = (_TIERS[tier].get("opensearch") or "") if tier else ""
+    return bool(expected) and explicit.rstrip("/") != expected.rstrip("/")
+
+
 def opensearch_credentials() -> tuple:
     """``(username, password)`` for this tier's cluster. Values are never logged.
 
@@ -205,7 +218,15 @@ def opensearch_credentials() -> tuple:
         tier = current_tier()
     except ValueError:
         tier = None
-    if tier:
+    # The credential follows the HOST that will actually be used, not the tier in the abstract.
+    # An explicit OPENSEARCH_NODE pointing somewhere other than the tier's cluster means the
+    # tier is not choosing the cluster, so it must not choose the credential either — the
+    # untiered pair is the one that goes with the override.
+    #
+    # Found by testing what a restart would do: OPENSEARCH_NODE pinned the old cluster during a
+    # migration while the tier supplied the NEW cluster's credential, and the container was one
+    # restart away from a 401 that would have stopped conversations saving.
+    if tier and not _node_overrides_tier():
         user = os.getenv(f"OPENSEARCH_USERNAME_{tier.upper()}")
         pwd = os.getenv(f"OPENSEARCH_PASSWORD_{tier.upper()}")
         if user or pwd:
@@ -252,7 +273,8 @@ def opensearch_drift_warning() -> Optional[str]:
     expected = (_TIERS[tier].get("opensearch") or "") if tier else ""
     if expected and explicit.rstrip("/") != expected.rstrip("/"):
         return (f"OPENSEARCH_NODE={explicit} but PLATFORM_TIER={tier} names {expected}. "
-                "The explicit setting wins; check it is deliberate.")
+                "The explicit setting wins, and the UNTIERED credential is used with it, "
+                "because the tier's credential belongs to the tier's cluster.")
     return None
 
 

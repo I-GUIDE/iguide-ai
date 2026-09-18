@@ -287,3 +287,37 @@ def test_an_empty_tiered_value_does_not_blank_a_working_one(monkeypatch):
     monkeypatch.setenv("OPENSEARCH_INDEX", "new-opensearch-index")
     monkeypatch.setenv("OPENSEARCH_INDEX_PROD", "")
     assert pe.search_index() == "new-opensearch-index"
+
+
+def test_an_overridden_node_takes_the_untiered_credential(monkeypatch):
+    """A credential must never be paired with a host it does not belong to.
+
+    Caught by testing what a restart would do during the cluster migration: OPENSEARCH_NODE
+    pinned the old cluster while the tier supplied the NEW cluster's credential, and the next
+    restart would have 401'd and stopped conversations saving.
+    """
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_NODE", "https://149.165.155.195:9200")   # not the tier's
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "old-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD", "old-pw")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "new-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "new-pw")
+    assert pe.opensearch_credentials() == ("old-user", "old-pw")
+
+
+def test_a_node_agreeing_with_its_tier_uses_the_tiered_credential(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_NODE", "https://149.165.155.135:9200")   # IS the tier's
+    monkeypatch.setenv("OPENSEARCH_USERNAME", "old-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD", "old-pw")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "new-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "new-pw")
+    assert pe.opensearch_credentials() == ("new-user", "new-pw")
+
+
+def test_no_explicit_node_uses_the_tiered_credential(monkeypatch):
+    monkeypatch.delenv("OPENSEARCH_NODE", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "new-user")
+    monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "new-pw")
+    assert pe.opensearch_credentials() == ("new-user", "new-pw")
