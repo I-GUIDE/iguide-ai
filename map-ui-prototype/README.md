@@ -20,6 +20,11 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
+Claude Code sessions can start this dev server directly via the Browser preview
+tool instead of a manual terminal command — `.claude/launch.json` (repo root)
+declares it as the `map-ui-prototype` launch configuration (`npm run dev` in
+this directory, port 5173).
+
 ## Try it (chat)
 
 - `find flood risk datasets` — semantic KB search
