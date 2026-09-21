@@ -521,6 +521,18 @@ It goes stale silently — it sat for eleven days missing `admin_boundary`, `emb
 `admin_boundary` had made false. Re-enumerate and update it whenever the tool surface, the
 delivery contract or the stated limits change. `docs/README.md` says how.
 
+## Where the pieces are, and where they might go
+
+`docs/system-components.md` maps the running system — frontend, HTTP surface, agent runtime,
+tools, sandbox, storage, external services — and then proposes (but does not build) a middleware
+between the frontend and the agent, with what would move into it and what must not.
+
+Read it before moving anything across that boundary. Two of its conclusions are easy to get
+wrong from first principles: `api/server.py` is **already** a middleware fused into the agent's
+process, so the work is mostly extraction; and `thread_id` is not a label — it hashes to the
+sandbox workspace directory, so minting a fresh one per request silently hands every turn an
+empty `/work`.
+
 ## Verifying UI and delivery changes
 
 For anything the browser renders, load the running prototype and drive the real gesture before
