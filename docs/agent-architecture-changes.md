@@ -1402,3 +1402,36 @@ the **untiered** credential, and that pair returns 401 against the dev cluster. 
 node across tiers gets a cluster that authenticates for reads at boot and stops saving
 conversations. The credential should select by *which tier owns the host being used*, not by
 "does this host match my tier, yes or no".
+
+### Stage S12.7 What the tier owns, and what quietly did not move
+
+The switch to prod exposed one fault three times in an afternoon: **a value the platform sets
+per tier, stored anywhere other than the tier table, does not move when the tier does.** Each
+instance failed silently, and each looked like a different bug.
+
+| value | where it lived | what the switch did |
+| --- | --- | --- |
+| OpenSearch host | table, but PROD's entry empty | refused to start — the only one that failed LOUDLY, by design |
+| access-cookie name | `JWT_ACCESS_TOKEN_NAME` in `.env` | kept reading a cookie prod never sets; every signed-in visitor told to sign in |
+| redirect-domain-id | `PLATFORM_REDIRECT_DOMAIN_ID` in `.env` | carried dev's `006` to prod, which numbers this agent `003`; sign-in stopped returning here |
+
+The cookie name compounded it: prod is **not** the suffix-less form. The platform suffixes both
+tiers — a browser signed in to prod holds `jwt-access-token-prod` beside dev's
+`jwt-access-token-dev` — and `consistency_warning()` missed it because it only asked whether the
+name ended in `-dev`. A check that recognises one specific wrong answer certifies every other
+wrong answer as correct; it now requires the tier's own suffix, so it is closed rather than open.
+
+The redirect id is now in `_TIERS` alongside the backend, frontend and cluster, with
+`PLATFORM_REDIRECT_DOMAIN_ID` still winning when explicitly set. Its failure mode is the reason
+it had to move rather than just be corrected: an unknown id is **not** an error at the far end —
+the frontend logs it and falls back to the profile page — so sign-in keeps working and merely
+stops coming back, and the only signal is a person noticing they landed somewhere else.
+
+The general rule this leaves: when adding anything the platform assigns per tier, put it in
+`_TIERS` and give it a resolver with the same precedence as the rest (explicit env wins, table
+is the default). An env var holding a per-tier value is a switch someone has to remember, and
+the evidence of one afternoon is that they will not.
+
+Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
+table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
+credential-selection fix in S12.6 first.

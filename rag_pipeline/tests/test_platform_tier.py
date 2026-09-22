@@ -37,14 +37,16 @@ def test_dev_resolves_the_whole_set(monkeypatch):
     monkeypatch.setenv("PLATFORM_TIER", "dev")
     assert pe.refresh_url() == "https://backend-dev.i-guide.io/api/refresh-token"
     assert pe.check_tokens_url() == "https://backend-dev.i-guide.io/api/check-tokens"
-    assert pe.signin_url() == "https://dev.i-guide.io/auth/login"
+    assert pe.signin_url() == (
+        "https://dev.i-guide.io/auth/login?redirect-domain-id=006&redirect-path=%2F")
 
 
 def test_prod_resolves_the_whole_set(monkeypatch):
     monkeypatch.setenv("PLATFORM_TIER", "prod")
     assert pe.refresh_url() == "https://backend.i-guide.io/api/refresh-token"
     assert pe.check_tokens_url() == "https://backend.i-guide.io/api/check-tokens"
-    assert pe.signin_url() == "https://platform.i-guide.io/auth/login"
+    assert pe.signin_url() == (
+        "https://platform.i-guide.io/auth/login?redirect-domain-id=003&redirect-path=%2F")
 
 
 def test_one_switch_moves_every_endpoint(monkeypatch):
@@ -353,15 +355,37 @@ def test_no_explicit_node_uses_the_tiered_credential(monkeypatch):
 
 # --- coming back here after signing in ---------------------------------------------
 
-def test_signin_url_is_unchanged_until_a_domain_id_is_configured(monkeypatch):
-    """OFF by default, because the far end has to know the id before it means anything.
+def test_the_redirect_id_switches_with_the_tier(monkeypatch):
+    """The regression test for a live bug, 2026-09-22.
 
-    The frontend resolves `redirect-domain-id` against its own redirect-whitelist.json. Until
-    that file names the agent, sending the parameter achieves nothing — so this stays exactly
-    as it was rather than emitting a parameter that only shows up in someone's warning log.
+    The id is each frontend's own whitelist key and the two do NOT agree: dev numbers this
+    agent 006, prod numbers it 003. It used to be a standalone PLATFORM_REDIRECT_DOMAIN_ID, so
+    switching PLATFORM_TIER to prod carried dev's 006 across and sign-in stopped returning
+    here. Nothing failed loudly — an unknown id just falls back to the profile page — so the
+    only signal was a person noticing they had been dumped somewhere else.
     """
-    monkeypatch.setenv("PLATFORM_TIER", "dev")
     monkeypatch.delenv("PLATFORM_REDIRECT_DOMAIN_ID", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    assert pe.redirect_domain_id() == "006"
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    assert pe.redirect_domain_id() == "003"
+
+
+def test_an_explicit_redirect_id_still_wins(monkeypatch):
+    """Same precedence as every other value here: the table is the default, not a mandate."""
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    monkeypatch.setenv("PLATFORM_REDIRECT_DOMAIN_ID", "042")
+    assert pe.redirect_domain_id() == "042"
+    assert "redirect-domain-id=042" in pe.signin_url()
+
+
+def test_a_tier_naming_no_redirect_id_stays_off(monkeypatch):
+    """Unchanged where the table has nothing to say: no id, no parameter — rather than sending
+    one the far end would only log and ignore."""
+    monkeypatch.delenv("PLATFORM_REDIRECT_DOMAIN_ID", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setitem(pe._TIERS["dev"], "redirect_domain_id", "")
+    assert pe.redirect_domain_id() == ""
     assert pe.signin_url() == "https://dev.i-guide.io/auth/login"
 
 
@@ -387,6 +411,8 @@ def test_prod_signs_in_at_the_platform_not_dev(monkeypatch):
     monkeypatch.delenv("PLATFORM_SIGNIN_URL", raising=False)
     monkeypatch.delenv("PLATFORM_REDIRECT_DOMAIN_ID", raising=False)
     monkeypatch.setenv("PLATFORM_TIER", "prod")
-    assert pe.signin_url() == "https://platform.i-guide.io/auth/login"
+    assert pe.signin_url().startswith("https://platform.i-guide.io/auth/login?")
+    assert "redirect-domain-id=003" in pe.signin_url()
     monkeypatch.setenv("PLATFORM_TIER", "dev")
-    assert pe.signin_url() == "https://dev.i-guide.io/auth/login"
+    assert pe.signin_url().startswith("https://dev.i-guide.io/auth/login?")
+    assert "redirect-domain-id=006" in pe.signin_url()

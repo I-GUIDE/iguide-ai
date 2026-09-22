@@ -39,7 +39,9 @@ PROD = "prod"
 _TIERS: Dict[str, Dict[str, str]] = {
     DEV: {"backend": "https://backend-dev.i-guide.io", "frontend": "https://dev.i-guide.io",
           # Dev's cluster, moved here from 149.165.155.195 on 2026-09-18.
-          "opensearch": "https://149.165.155.135:9200"},
+          "opensearch": "https://149.165.155.135:9200",
+          # This agent's entry in dev's redirect-whitelist.json. See redirect_domain_id().
+          "redirect_domain_id": "006"},
     # Prod's cluster IS known — 149.165.155.195:9200, confirmed by the maintainer 2026-09-22 —
     # and is deliberately still not written here, because filling it in would arm two traps
     # that an empty string keeps disarmed. Measured the same day:
@@ -80,7 +82,7 @@ _TIERS: Dict[str, Dict[str, str]] = {
     #
     # Prod's redirect-whitelist.json is UNVERIFIED: it is not served as a static file (both
     # frontends answer that path with the Next.js app shell), so it could not be read from
-    # outside. Dev's entry is reached via PLATFORM_REDIRECT_DOMAIN_ID=006.
+    # outside. The ids differ per tier — dev 006, prod 003 — and both now live in this table.
     #
     # Both are platform-side config, not this repository's. Prod also needs
     # JWT_ACCESS_TOKEN_NAME=jwt-access-token-prod: the platform suffixes BOTH tiers, so prod is
@@ -109,11 +111,15 @@ _TIERS: Dict[str, Dict[str, str]] = {
     # seven written since the migration are not visible from prod. The tier owns the
     # conversation store, and moving tiers is not a migration.
     #
-    # STILL UNVERIFIED: whether redirect-domain-id 006 is registered in PROD's
-    # redirect-whitelist.json. If it is not, sign-in completes and lands on the platform profile
-    # instead of returning here — the behaviour this id was introduced to fix on dev.
+    # The redirect id was the third thing that should have moved with the tier and did not:
+    # prod numbers this agent 003, not dev's 006, so the switch sent people to an id prod's
+    # whitelist does not know. It now lives in this table like everything else the tier owns.
     PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
-           "opensearch": ""},
+           "opensearch": "",
+           # Prod's whitelist numbers this agent differently from dev's. The ids are per-tier
+           # and assigned by whoever maintains each frontend's redirect-whitelist.json, so they
+           # do NOT match across tiers and there is no rule for deriving one from the other.
+           "redirect_domain_id": "003"},
 }
 
 _REFRESH_PATH = "/api/refresh-token"
@@ -155,6 +161,31 @@ def refresh_url() -> str:
     return _resolve("PLATFORM_REFRESH_URL", "backend", _REFRESH_PATH)
 
 
+def redirect_domain_id() -> str:
+    """This agent's id in the target frontend's ``redirect-whitelist.json``.
+
+    Per-tier and NOT derivable: dev numbers this agent 006 and prod numbers it 003. The ids are
+    assigned independently by whoever maintains each frontend's whitelist, so there is no rule
+    that turns one into the other — which is exactly why this moved into the tier table. It was
+    a standalone ``PLATFORM_REDIRECT_DOMAIN_ID``, and the switch to prod carried dev's 006
+    across because nothing tied the id to the tier that owns it. Everything else the platform
+    supplies — backend, frontend, cluster, credential — already moves with ``PLATFORM_TIER``;
+    this was the one that did not, so it silently kept pointing at the other platform's entry.
+
+    ``PLATFORM_REDIRECT_DOMAIN_ID`` still wins when set, like every explicit setting here, for a
+    deployment whose whitelist entry differs from the table's. Leave it UNSET to let the tier
+    decide, which is what a deployment that has only said which tier it is should do.
+    """
+    explicit = str(os.getenv("PLATFORM_REDIRECT_DOMAIN_ID") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        tier = current_tier()
+    except ValueError:
+        return ""
+    return (_TIERS[tier].get("redirect_domain_id") or "") if tier else ""
+
+
 def signin_url() -> str:
     """Where an unsigned-in visitor is sent, and where they come back to.
 
@@ -165,14 +196,14 @@ def signin_url() -> str:
 
     The domain id is NOT a URL: the frontend resolves it against its own
     ``redirect-whitelist.json``, so only hosts that file names can ever be redirect targets.
-    That means the id is assigned by whoever maintains that file, which is why it is
-    configuration here rather than a constant — and why this stays OFF until
-    ``PLATFORM_REDIRECT_DOMAIN_ID`` is set. An unrecognised id is not an error at the far end;
-    the frontend logs it and falls back to the profile page, so a wrong value degrades to
-    today's behaviour rather than breaking sign-in.
+    That means the id is assigned by whoever maintains that file, and it DIFFERS BY TIER — see
+    redirect_domain_id(), which is where it is resolved. An unrecognised id is not an error at
+    the far end; the frontend logs it and falls back to the profile page, so a wrong value
+    degrades to the old behaviour rather than breaking sign-in — which is also why a wrong id
+    is so easy to miss: sign-in still works, it just stops coming back here.
     """
     base = _resolve("PLATFORM_SIGNIN_URL", "frontend", _SIGNIN_PATH)
-    domain_id = str(os.getenv("PLATFORM_REDIRECT_DOMAIN_ID") or "").strip()
+    domain_id = redirect_domain_id()
     if not base or not domain_id:
         return base
     # The frontend decodeURIComponent()s the path and requires it to start with "/" — anything
