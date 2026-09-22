@@ -44,12 +44,15 @@ _TIERS: Dict[str, Dict[str, str]] = {
     # and is deliberately still not written here, because filling it in would arm two traps
     # that an empty string keeps disarmed. Measured the same day:
     #
-    #   1. That cluster cannot accept a write. 55.3gb of 57.9gb used (95.5%), past the 95%
-    #      flood-stage watermark, so 914 indices carry `read_only_allow_delete` and an index
-    #      creation times out. READS still succeed, which is what makes it quiet: search keeps
-    #      working while every conversation silently fails to save. Only 3.7gb of that disk is
-    #      OpenSearch — the other ~51.6gb is something else on the box, so this is not a
-    #      problem the agent can fix by deleting indices.
+    #   1. RESOLVED the same afternoon — kept here because the failure mode is worth knowing.
+    #      At 16:29 UTC that cluster could not accept a write: 55.3gb of 57.9gb used (95.5%),
+    #      past the 95% flood-stage watermark, 914 indices carrying `read_only_allow_delete`,
+    #      and an index creation that timed out. READS still succeeded, which is what makes it
+    #      quiet — search keeps working while every conversation silently fails to save. By
+    #      17:00 UTC someone had freed space: status red -> yellow, 88% used with 6.6gb free,
+    #      zero blocked indices, and a real write returning 201. Note that only 3.7gb of that
+    #      disk was ever OpenSearch; the other ~51.6gb is something else on the box, so the
+    #      headroom is somebody's housekeeping and not a property of this cluster.
     #   2. Working around (1) by pinning OPENSEARCH_NODE to the dev cluster does not work
     #      either. An explicit node that disagrees with the tier makes opensearch_credentials()
     #      fall back to the UNTIERED pair, and that pair returns 401 against the dev cluster —
@@ -81,7 +84,16 @@ _TIERS: Dict[str, Dict[str, str]] = {
     #
     # Both are platform-side config, not this repository's, and prod would also need a
     # JWT_ACCESS_TOKEN_NAME without the -dev suffix (consistency_warning() says so at boot).
-    # Deployment stays on PLATFORM_TIER=dev until the refresh origin is added on prod.
+    #
+    # So as of 2026-09-22 17:00 UTC the MEMORY half is clear and the TOKEN half is not, and the
+    # token half is the one that decides: prod mode today would persist conversations perfectly
+    # and drop every signed-in user at their first five-minute expiry. Deployment stays on
+    # PLATFORM_TIER=dev until `https://agent.i-guide.io` appears in prod's allowed origins —
+    # re-probe with the OPTIONS request above, it is a one-line check.
+    #
+    # One more cost of switching, easy to miss: the two clusters hold DIFFERENT conversations.
+    # 135 had 1281 chat_memory documents and 195 had 1274, so moving tiers also moves which
+    # history users can see. The tier owns the conversation store, and that is not a migration.
     PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
            "opensearch": ""},
 }
