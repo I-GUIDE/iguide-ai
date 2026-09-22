@@ -82,8 +82,10 @@ _TIERS: Dict[str, Dict[str, str]] = {
     # frontends answer that path with the Next.js app shell), so it could not be read from
     # outside. Dev's entry is reached via PLATFORM_REDIRECT_DOMAIN_ID=006.
     #
-    # Both are platform-side config, not this repository's, and prod would also need a
-    # JWT_ACCESS_TOKEN_NAME without the -dev suffix (consistency_warning() says so at boot).
+    # Both are platform-side config, not this repository's. Prod also needs
+    # JWT_ACCESS_TOKEN_NAME=jwt-access-token-prod: the platform suffixes BOTH tiers, so prod is
+    # NOT the suffix-less form. Assuming it was cost a live outage on the day of the switch —
+    # the agent read a cookie nobody sets and told every signed-in visitor to sign in.
     #
     # **The deployment was switched to PLATFORM_TIER=prod at 2026-09-22 17:01 UTC**, knowingly,
     # while the refresh origin was still missing. The allowlist entry had been added on the
@@ -375,9 +377,22 @@ def consistency_warning() -> Optional[str]:
 
     The cookie NAME is the platform's own setting (``JWT_ACCESS_TOKEN_NAME``) and differs
     between tiers, so it does not move with ``PLATFORM_TIER``. A deployment pointed at prod
-    while still expecting the dev cookie fails on every request, and the failure looks like a
-    rejected token rather than a misconfiguration. This does not guess the right name — only
-    names the disagreement.
+    while still expecting a cookie prod does not mint fails on every request, and the failure
+    looks like a rejected token rather than a misconfiguration. This does not guess the right
+    name — only names the disagreement.
+
+    **The platform suffixes BOTH tiers**: dev serves ``jwt-access-token-dev`` and prod serves
+    ``jwt-access-token-prod`` (the browser holds all four, access and refresh, side by side).
+    The earlier version of this check only asked whether the name ended in ``-dev``, which made
+    it blind to the obvious mistake of assuming prod is the suffix-less form. It was: the
+    deployment was switched to prod with ``JWT_ACCESS_TOKEN_NAME=jwt-access-token``, this
+    function stayed silent because that is not a dev-looking name, and every signed-in visitor
+    was told to sign in again while nothing in the logs said why. A check that only recognises
+    one specific wrong answer certifies every other wrong answer as correct.
+
+    So it now requires the name to END WITH this tier's own suffix, which makes the check
+    closed rather than open: anything that is not right is reported, instead of everything that
+    is not one known kind of wrong being accepted.
     """
     tier = current_tier()
     if not tier:
@@ -385,11 +400,13 @@ def consistency_warning() -> Optional[str]:
     cookie = str(os.getenv("JWT_ACCESS_TOKEN_NAME") or "").strip().strip('"')
     if not cookie:
         return None
-    looks_dev = cookie.endswith("-dev")
-    if tier == PROD and looks_dev:
-        return (f"PLATFORM_TIER=prod but JWT_ACCESS_TOKEN_NAME={cookie!r} looks like the dev "
-                "tier's cookie. Every sign-in will be rejected until they agree.")
-    if tier == DEV and not looks_dev:
-        return (f"PLATFORM_TIER=dev but JWT_ACCESS_TOKEN_NAME={cookie!r} does not look like the "
-                "dev tier's cookie. Check which platform actually mints it.")
-    return None
+    suffix = f"-{tier}"
+    if cookie.endswith(suffix):
+        return None
+    other = DEV if tier == PROD else PROD
+    mistaken_for = (f" It looks like the {other} tier's cookie."
+                    if cookie.endswith(f"-{other}") else "")
+    return (f"PLATFORM_TIER={tier} but JWT_ACCESS_TOKEN_NAME={cookie!r} does not end in "
+            f"{suffix!r}.{mistaken_for} The platform suffixes both tiers, so this deployment is "
+            "reading a cookie the platform never sets: every visitor will be told to sign in, "
+            "however recently they signed in.")

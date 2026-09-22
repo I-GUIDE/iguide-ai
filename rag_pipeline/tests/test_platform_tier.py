@@ -97,10 +97,31 @@ def test_prod_tier_with_a_dev_cookie_warns(monkeypatch):
     monkeypatch.setenv("PLATFORM_TIER", "prod")
     monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", "jwt-access-token-dev")
     warning = pe.consistency_warning()
-    assert warning and "dev" in warning and "rejected" in warning
+    assert warning and "dev" in warning and "-prod" in warning
+
+
+def test_prod_tier_with_the_suffixless_cookie_warns(monkeypatch):
+    """The mistake that actually shipped, 2026-09-22.
+
+    The platform suffixes BOTH tiers — the browser holds jwt-access-token-dev AND
+    jwt-access-token-prod. Switching to prod with the suffix-less name looked reasonable and was
+    silently wrong: the old check only asked whether the name ended in "-dev", so it passed, and
+    every signed-in visitor was told to sign in again with nothing in the logs saying why. A
+    check that recognises one specific wrong answer certifies every other wrong answer.
+    """
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", "jwt-access-token")
+    warning = pe.consistency_warning()
+    assert warning and "-prod" in warning
 
 
 def test_dev_tier_with_a_prod_cookie_warns(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", "jwt-access-token-prod")
+    assert pe.consistency_warning() is not None
+
+
+def test_dev_tier_with_the_suffixless_cookie_warns(monkeypatch):
     monkeypatch.setenv("PLATFORM_TIER", "dev")
     monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", "jwt-access-token")
     assert pe.consistency_warning() is not None
@@ -109,6 +130,13 @@ def test_dev_tier_with_a_prod_cookie_warns(monkeypatch):
 def test_a_matching_pair_is_quiet(monkeypatch):
     monkeypatch.setenv("PLATFORM_TIER", "dev")
     monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", '"jwt-access-token-dev"')   # quoted, as in .env
+    assert pe.consistency_warning() is None
+
+
+def test_a_matching_prod_pair_is_quiet(monkeypatch):
+    """The configuration now running: both halves say prod, so nothing is said."""
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    monkeypatch.setenv("JWT_ACCESS_TOKEN_NAME", '"jwt-access-token-prod"')
     assert pe.consistency_warning() is None
 
 
