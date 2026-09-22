@@ -279,3 +279,50 @@ def test_it_does_not_fall_through_to_the_deployment_default(monkeypatch):
     monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-4o-2024-11-20")
     got = _extract(monkeypatch, {}, demo=True)
     assert got["llm_model"] == "gpt-5.6-luna"
+
+
+# --- token mode hides the same panel, and must not honour a stale model -------------
+
+def _extract_mode(monkeypatch, body, mode):
+    """Same as _extract, but selecting AGENT_MODE rather than the legacy DEMO_MODE flag."""
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    monkeypatch.setenv("AGENT_MODE", mode)
+    import importlib
+
+    import api.server as srv
+    importlib.reload(srv)
+    with srv.app.test_request_context(json={"userQuery": "hi", **body}):
+        return srv._normalize_agent_chat_request(srv.request.get_json())
+
+
+def test_token_mode_drops_a_model_the_client_still_sends(monkeypatch):
+    """The trap demo mode already guards against, reached through the other hidden panel.
+
+    The only control that can change the model is the settings panel, and token mode hides it
+    too — the credential is a cookie, so there is nothing to paste. A value left in a returning
+    visitor's localStorage then pins them to a model they can neither see nor change. Observed
+    live: token mode was switched on while browsers still held `gpt-oss:120b`, the deployment
+    default moved to gpt-5.6-luna, and every request from the map UI kept asking for the old one.
+    """
+    got = _extract_mode(monkeypatch, {"model": "gpt-oss:120b", "provider": "anvilgpt"}, "token")
+    assert got["llm_model"] is None, "the stale client model must be dropped"
+    assert got["llm_provider"] is None
+
+
+def test_token_mode_defers_to_the_deployment_rather_than_naming_a_model(monkeypatch):
+    """Dropped, NOT forced to a fixed id — unlike demo.
+
+    Demo names its own model because "whatever this deployment happens to be set to" is not a
+    demo decision. Token mode passes None so the agent uses its configured default, which is
+    what makes changing the deployment's model actually change what signed-in users get.
+    """
+    monkeypatch.setenv("DEMO_MODEL", "gpt-5.6-sol")
+    got = _extract_mode(monkeypatch, {}, "token")
+    assert got["llm_model"] is None, "token mode must not inherit the DEMO_MODEL choice"
+
+
+def test_dev_mode_still_honours_the_clients_choice(monkeypatch):
+    """Dev shows the settings panel, so a model named by the request is a live choice."""
+    got = _extract_mode(monkeypatch, {"model": "claude-sonnet-5", "provider": "anthropic"}, "dev")
+    assert got["llm_model"] == "claude-sonnet-5"
+    assert got["llm_provider"] == "anthropic"

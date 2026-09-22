@@ -78,6 +78,22 @@ def _demo_model() -> tuple:
             str(os.getenv("DEMO_MODEL") or DEMO_MODEL_DEFAULT).strip())
 
 
+def _client_may_choose_the_model() -> bool:
+    """Whether a model named by the request is honoured, or dropped for the deployment's own.
+
+    The only control that can change the model is the settings panel, and BOTH demo and token
+    mode hide it — demo because there is nothing to configure, token because the credential is a
+    cookie rather than something you paste. A value left in a returning visitor's localStorage
+    then pins them to a model they can neither see nor change.
+
+    That is not hypothetical. Token mode was switched on while browsers still held
+    `gpt-oss:120b`; the deployment default moved to gpt-5.6-luna and every request from the map
+    UI kept asking for the old one, with no picker to correct it. Demo mode already had this
+    guard for exactly this reason; token mode hid the same panel without it.
+    """
+    return not (_demo_mode() or deployment_mode.is_token())
+
+
 def _get_agent_chat_api_key() -> str:
     return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
 
@@ -336,15 +352,22 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
         "unified_peer": (str(unified_peer).strip().lower() in {"1", "true", "yes", "on"}
                          if unified_peer is not None else None),
-        # FORCED in demo mode, not merely defaulted. The control that would let anyone change
-        # the model is the settings panel, and demo mode hides it — so a value left in a
-        # returning visitor's localStorage would pin them to a model they can neither see nor
-        # change. That is the same trap the spatial-tools toggle had. It also bounds what an
-        # unauthenticated endpoint can be made to spend.
+        # FORCED in demo mode and DROPPED in token mode, neither of them merely defaulted. The
+        # control that would let anyone change the model is the settings panel, and both modes
+        # hide it — so a value left in a returning visitor's localStorage would pin them to a
+        # model they can neither see nor change. That is the same trap the spatial-tools toggle
+        # had. In demo it also bounds what an unauthenticated endpoint can be made to spend.
+        #
+        # The two differ in what replaces the client's choice. Demo names its own model, because
+        # "whatever this deployment happens to be set to" is not a demo decision. Token mode
+        # passes None, which means the agent uses its configured default — so changing the
+        # deployment's model actually changes what signed-in users get.
         "llm_provider": _demo_model()[0] if _demo_mode() else (
-            (str(llm_provider).strip() or None) if llm_provider else None),
+            (str(llm_provider).strip() or None)
+            if (llm_provider and _client_may_choose_the_model()) else None),
         "llm_model": _demo_model()[1] if _demo_mode() else (
-            (str(llm_model).strip() or None) if llm_model else None),
+            (str(llm_model).strip() or None)
+            if (llm_model and _client_may_choose_the_model()) else None),
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
     }
 
