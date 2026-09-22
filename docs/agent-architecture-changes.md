@@ -24,6 +24,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 8 | [What the decider reads](#stage-8) | `claude/evidence-summary` | evidence described, capabilities generated, the ledger shared |
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
+| 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1173,3 +1174,89 @@ An entry needs:
 
 The same drift is what `docs/spatial-toolkit.html` (the capability atlas) exists to prevent, and
 it has fallen behind twice.
+
+---
+
+## Stage 11 — Where state lives, and who decides {#stage-11}
+
+Stage 9 gave the agent an identity. This stage is about everything that identity writes to, and
+it began because a feature would not start: `chat_traces` (the raw-trace store, S9.6) could not
+allocate a shard. Chasing that found the agent talking to a cluster the rest of the platform had
+left behind.
+
+### Stage S11.1 The tier owns the cluster, the credential and the index
+
+`PLATFORM_TIER` already existed to stop half-switched states — *"two pointing at dev, one left on
+prod, and a verification that fails for a reason nobody can see"*. It named the frontend and
+backend. It did not name the **search cluster**, so when dev's OpenSearch moved hosts,
+`OPENSEARCH_NODE` stayed pinned to the old one. Nothing failed: the old host kept answering and
+kept accepting writes, and the agent went on reading and writing a machine nobody maintained.
+
+The cluster is now the fourth thing a tier names, and three refinements followed from using it:
+
+* **The credential follows the host, not the tier.** Found by testing what a *restart* would do,
+  not by a test failing: during the migration `OPENSEARCH_NODE` pinned the old host while the tier
+  supplied the new host's credential, leaving the deployment one `docker compose up` from a 401
+  that would have stopped conversations saving. A credential must never be paired with a host it
+  does not belong to.
+* **Any setting can be tiered** (`tiered_env`), because dev and prod disagree about index names
+  too. Precedence here is the *reverse* of the URL rule, deliberately: for a URL the tier supplies
+  a value and the explicit variable overrides it, but for a credential or an index the tier
+  supplies no value at all — secrets and deployment names are not in this repository — so the
+  tiered name is simply the more specific one.
+* **`SEARCH_TIER` splits from `PLATFORM_TIER`**, because which platform mints your tokens and
+  which corpus you search are different questions. Running the dev platform against the prod
+  knowledge base is ordinary, and it used to mean editing index names by hand.
+
+Disagreement is now said out loud at boot rather than obeyed in silence — the failure mode was
+never the wrong value, it was the wrong value applied quietly.
+
+### Stage S11.2 A write path that failed silently for four days
+
+On 2026-09-22 the old cluster crossed the 95% flood-stage watermark and OpenSearch set
+`read_only_allow_delete` on `chat_memory`. **Reads kept working.** Turns streamed complete
+answers, the history list rendered the old conversations, and every new one was lost. The only
+trace was one `429 cluster_block_exception` per turn, caught on purpose so that a storage failure
+never costs someone their answer.
+
+That deliberate catch is right, and it is also what made this invisible. Four days of
+conversations went missing before anyone asked a question that happened to surface it.
+
+The fix was the migration the tier work had already made possible: 1,274 documents copied to the
+new cluster with ids preserved (`memoryId` *is* the `_id`), verified for the `owner_id.keyword`
+subfield the list query depends on, then `OPENSEARCH_NODE` removed so the tier supplies the host.
+Copy first, switch second — the destination's `chat_memory` was empty, and flipping first would
+have emptied the history UI.
+
+**The lesson is not about disk.** A write path that fails while the read path succeeds is
+indistinguishable from a working system from the outside: no error reached a user, a log anyone
+watched, or the health check. If a storage failure is survivable by design, it has to be *visible*
+by design too — a `warning` event to the client, or a health check that attempts a write, would
+have turned four silent days into a first-turn complaint.
+
+### Stage S11.3 Two more places a hidden control left a stale value
+
+* **The model.** Demo mode had always *forced* its model, with the reason written down: the
+  settings panel is the only control that can change it, demo hides it, so a value left in a
+  returning visitor's `localStorage` pins them to a model they can neither see nor change. Token
+  mode hides the same panel and had no such guard — so browsers kept asking for `gpt-oss:120b`
+  after the deployment moved to `gpt-5.6-luna`. The condition is now *the panel is hidden*, not
+  *this is demo*. The two still differ in what replaces the choice: demo names a model, token mode
+  passes `None` so the deployment's own default applies.
+* **Sign-in.** Someone sent from the agent to sign in landed on the platform's `/user-profile`,
+  having lost what they were doing. The platform's `/auth/login` already accepted
+  `redirect-domain-id` and `redirect-path`; the id is a key into the frontend's
+  `redirect-whitelist.json`, not a URL, so only hosts that file names can be targets. Off until
+  `PLATFORM_REDIRECT_DOMAIN_ID` is set, and an unrecognised id degrades at the far end to exactly
+  the old behaviour rather than breaking sign-in.
+
+### Stage S11.4 What this stage did not fix
+
+The agent hung for three days and nothing noticed. It stayed `Up`, so `restart: unless-stopped`
+never fired; gunicorn's `--timeout 600` does not kill a threaded worker whose threads are stuck in
+I/O; and the health check failed **2,092 consecutive times** while taking no action. One worker
+with four threads means four hung calls is the whole service.
+
+The LLM client still sends no request timeout, which is the most likely way those threads were
+consumed — though that remains unproven, because the container was force-recreated before its logs
+were captured. Both the timeout and something that acts on a failing health check are open.

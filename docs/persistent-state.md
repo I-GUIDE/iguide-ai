@@ -25,8 +25,8 @@ Two of these grow without bound by design; see [Nothing reclaims](#nothing-recla
 
 ## 1. Conversations — OpenSearch
 
-**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`). The host comes from `OPENSEARCH_NODE` when
-set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and prod names none, so a
+**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`), on `149.165.155.135` since 2026-09-22. The
+host comes from `OPENSEARCH_NODE` when set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and prod names none, so a
 production deployment cannot silently inherit dev's. One document per conversation, document id =
 the `memoryId` the client and the agent share.
 
@@ -45,9 +45,25 @@ the `memoryId` the client and the agent share.
 > **Which cluster, and why it is a tier fact.** Dev's OpenSearch moved from `149.165.155.195` to
 > `149.165.155.135` on 2026-09-18, and `OPENSEARCH_NODE` stayed pinned to the old host. That host
 > kept answering and kept accepting writes, so nothing failed — the agent simply went on reading
-> and writing a cluster nobody maintained, by then at 95% disk with 1,054 unassigned shards and
-> unable to allocate a shard for a new index. The tier now names the cluster, and an explicit
+> and writing a cluster nobody maintained. The tier now names the cluster, and an explicit
 > `OPENSEARCH_NODE` that disagrees with it is logged at boot rather than obeyed in silence.
+>
+> **Then it stopped accepting writes.** On 2026-09-22 the old cluster crossed the 95% flood-stage
+> watermark and OpenSearch set `read_only_allow_delete` on `chat_memory`. Reads kept working, so
+> nothing looked broken: turns streamed complete answers, the history list rendered, and every new
+> conversation was silently lost. The only trace was one `429 cluster_block_exception` per turn,
+> caught on purpose so a storage failure never costs someone their answer. **Four days of
+> conversations were lost this way before anyone asked.**
+>
+> The 1,274 existing documents were copied to `149.165.155.135` (ids preserved — `memoryId` *is*
+> the `_id`), verified for the `owner_id.keyword` subfield the list query needs, and
+> `OPENSEARCH_NODE` was removed so `PLATFORM_TIER=dev` supplies the host. Copy first, switch
+> second: dev's `chat_memory` was empty, so flipping first would have emptied the history UI.
+>
+> The lesson worth keeping is not about disk. A write path that fails silently while the read path
+> succeeds is indistinguishable from a working system from the outside — no error reached a user,
+> a log anyone watched, or the health check. If storage failure is survivable by design, it has to
+> be *visible* by design too.
 
 ```
 chat_history        the AGENT's memory: what was asked and answered, context for the next turn
