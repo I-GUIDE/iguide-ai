@@ -17,11 +17,27 @@ import type { WhoAmI } from '../agentClient';
  *
  *   signed out          -> sign in; one click, and the link comes from the server
  *   signed in, refused  -> signing in again will not help; ask an administrator
- *   signed in, allowed  -> nothing to do; just say who the server thinks you are
+ *   signed in, allowed  -> NOTHING. The badge is gone.
+ *
+ * That last state used to render the role name — a chip reading "Super admin" sat in the header
+ * for the whole session. It was removed because it is the one state with nothing to do about
+ * it: the person knows who they are, and the popover behind it held an account id and a tier
+ * that nobody needs mid-task. What it did do was put the viewer's role on screen permanently,
+ * in every screen share and screenshot. So the badge now appears only when the account state is
+ * something the person must ACT on, and a working session carries no chrome at all.
  *
  * Rendered only in token mode. Dev and demo deployments identify nobody, so a badge there
  * would be an account control for an account that does not exist.
  */
+/**
+ * Whether the badge will render anything at all — i.e. whether the account state needs the
+ * person's attention. Exported because TopNav.platform falls back to its decorative avatar
+ * when it does not, and two copies of this rule would drift the moment one changed.
+ */
+export function accountNeedsAttention(me: WhoAmI | null | undefined): boolean {
+  return !!me && (!me.signedIn || !me.permitted);
+}
+
 export function AccountBadge({ me }: { me: WhoAmI | null }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
@@ -54,16 +70,18 @@ export function AccountBadge({ me }: { me: WhoAmI | null }) {
       : <span className="navbtn acct acct-out" title={me.reason || undefined}>Not signed in</span>;
   }
 
+  // Signed in and allowed: say nothing. See the note above.
+  if (me.permitted) return null;
+
   const label = roleLabel(me.user?.role, me.user?.roleName ?? undefined);
-  const inSentence = describeRole(me.user?.role, me.user?.roleName ?? undefined);
 
   return (
     <div className="acctwrap" ref={wrap}>
       <button type="button" aria-expanded={open} aria-haspopup="dialog"
-        className={`navbtn acct ${me.permitted ? 'acct-ok' : 'acct-blocked'}`}
-        title={me.permitted ? `Signed in as ${inSentence}` : 'Signed in, but without access to the agent'}
+        className="navbtn acct acct-blocked"
+        title="Signed in, but without access to the agent"
         onClick={() => setOpen((v) => !v)}>
-        {me.permitted ? (me.user?.roleName || label) : 'No access'}
+        No access
       </button>
       {open && (
         <div className="acctcard" role="dialog" aria-label="Account">
@@ -84,7 +102,7 @@ export function AccountBadge({ me }: { me: WhoAmI | null }) {
               <span className="acctval">{me.platformTier}</span>
             </div>
           )}
-          {!me.permitted && (
+          {(
             <p className="acctnote">
               This account is signed in but cannot use the agent
               {me.requiredRole != null

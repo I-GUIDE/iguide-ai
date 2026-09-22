@@ -40,10 +40,48 @@ _TIERS: Dict[str, Dict[str, str]] = {
     DEV: {"backend": "https://backend-dev.i-guide.io", "frontend": "https://dev.i-guide.io",
           # Dev's cluster, moved here from 149.165.155.195 on 2026-09-18.
           "opensearch": "https://149.165.155.135:9200"},
-    # No OpenSearch for prod until someone confirms which host it is. An empty string means
-    # "this tier does not supply one", so a prod deployment keeps needing an explicit
-    # OPENSEARCH_NODE rather than silently inheriting dev's cluster — which is the single worst
-    # thing this table could do.
+    # Prod's cluster IS known — 149.165.155.195:9200, confirmed by the maintainer 2026-09-22 —
+    # and is deliberately still not written here, because filling it in would arm two traps
+    # that an empty string keeps disarmed. Measured the same day:
+    #
+    #   1. That cluster cannot accept a write. 55.3gb of 57.9gb used (95.5%), past the 95%
+    #      flood-stage watermark, so 914 indices carry `read_only_allow_delete` and an index
+    #      creation times out. READS still succeed, which is what makes it quiet: search keeps
+    #      working while every conversation silently fails to save. Only 3.7gb of that disk is
+    #      OpenSearch — the other ~51.6gb is something else on the box, so this is not a
+    #      problem the agent can fix by deleting indices.
+    #   2. Working around (1) by pinning OPENSEARCH_NODE to the dev cluster does not work
+    #      either. An explicit node that disagrees with the tier makes opensearch_credentials()
+    #      fall back to the UNTIERED pair, and that pair returns 401 against the dev cluster —
+    #      so conversations would stop saving for a second, different reason.
+    #
+    # An empty string means "this tier does not supply one", so PLATFORM_TIER=prod still fails
+    # loudly and demands an explicit OPENSEARCH_NODE. That is the right forcing function while
+    # the above holds: better a deployment that refuses to start than one that answers
+    # perfectly and remembers nothing. Fill this in once 195 has disk, and fix (2) first.
+    #
+    # The TOKEN side is only PARTLY blocked, and the halves are easy to get backwards.
+    # Identity VERIFICATION is server-to-server — the agent forwards the cookie it received to
+    # the backend's own /api/check-tokens (identity.py) — so no browser and no CORS is involved
+    # and it would work against prod today. What is blocked is the browser's REFRESH.
+    #
+    # Measured 2026-09-22, OPTIONS /api/refresh-token with `Origin: https://agent.i-guide.io`:
+    #
+    #     backend-dev.i-guide.io -> Access-Control-Allow-Origin: https://agent.i-guide.io
+    #     backend.i-guide.io     -> Access-Control-Allow-Origin: https://platform.i-guide.io
+    #
+    # Prod pins one origin and it is not this one, so the browser may not refresh an aged-out
+    # access cookie from here. That failure is badly shaped: sign-in succeeds, the agent works,
+    # and the session dies five minutes later at the first refusal — an expiry, not an error,
+    # so nothing says why. Dev needed exactly this entry added before sign-in held there.
+    #
+    # Prod's redirect-whitelist.json is UNVERIFIED: it is not served as a static file (both
+    # frontends answer that path with the Next.js app shell), so it could not be read from
+    # outside. Dev's entry is reached via PLATFORM_REDIRECT_DOMAIN_ID=006.
+    #
+    # Both are platform-side config, not this repository's, and prod would also need a
+    # JWT_ACCESS_TOKEN_NAME without the -dev suffix (consistency_warning() says so at boot).
+    # Deployment stays on PLATFORM_TIER=dev until the refresh origin is added on prod.
     PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
            "opensearch": ""},
 }

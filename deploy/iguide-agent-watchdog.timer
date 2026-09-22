@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the I-GUIDE agent watchdog every minute
+Documentation=file:///opt/iguide-agent/deploy/agent-watchdog.sh
+
+[Timer]
+# First run shortly after boot, so a container that came up wedged is noticed without waiting
+# for the wall clock. Docker's own start_period already covers normal slow starts.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=iguide-agent-watchdog.service
+
+[Install]
+WantedBy=timers.target

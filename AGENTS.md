@@ -549,4 +549,19 @@ Runs as four Docker Compose services behind nginx, which terminates TLS and need
 detail — addresses, the satellite-embedding service unit, dependency pins — is operational and
 deliberately not in this file; ask the maintainer.
 
+**Read logs from the journal, not from the container.** All services log with the `journald`
+driver, so history survives the recreation that every `up -d --build` performs — which the old
+`json-file` driver did not, and that is how the evidence for a three-day hang was lost. Use
+`journalctl CONTAINER_NAME=agent-api --since "2 days ago"`; `docker logs` still works but only
+reaches back to the current container.
+
+**A container stuck unhealthy gets restarted, and searched first.** `restart: unless-stopped`
+only restarts a container that EXITS, so a wedged one stays up forever — it did, for three days,
+while its health check failed 2,092 times. `deploy/agent-watchdog.sh` (systemd timer, installed
+by `deploy/install-watchdog.sh`) restarts one that has been unhealthy for ten minutes, but
+captures an incident bundle into `/var/log/iguide-agent/incidents/` first — logs, `inspect`, host
+state, and `py-spy` stacks for every thread. If you are debugging a hang, look there before
+restarting anything, and never recover with `--force-recreate`: it deletes the container and the
+evidence with it. `journalctl -u iguide-agent-watchdog` is every decision it has made.
+
 Never commit `.env`, API keys, or Earth Engine credentials.

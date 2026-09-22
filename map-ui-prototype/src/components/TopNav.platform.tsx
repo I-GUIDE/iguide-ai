@@ -6,7 +6,7 @@
 // I-GUIDE platform chrome so the chat matched the platform when the map was hidden.
 //
 // Selected by VITE_UI_VARIANT=platform — see TopNav.tsx.
-import { AccountBadge } from './AccountBadge';
+import { AccountBadge, accountNeedsAttention } from './AccountBadge';
 import type { TopNavProps } from './TopNav';
 // The reference I-GUIDE platform chrome. Nav items / search / account are PLACEHOLDERS
 // (non-functional) so the chat matches the platform look when the map isn't shown.
@@ -42,10 +42,12 @@ export function TopNavPlatform(p: TopNavProps) {
         <span className="jpy" title="Jupyter (placeholder)">jpy</span>
         {/* The real account control, added for the same reason the gear gained a condition
             above: the two headers must not disagree about identity. The placeholder avatar
-            stands down when there IS an account to show — a real badge beside a fake one is
-            worse than either, and this variant's value as a verbatim copy does not extend to
-            showing a signed-in user a decorative circle instead of their own role. */}
-        {p.me ? <AccountBadge me={p.me} /> : <span className="avatar" title="Account (placeholder)" />}
+            stands down only when the badge has something to say — since the badge stopped
+            rendering for a working account, asking `p.me` here would blank the avatar out of
+            this header for everyone signed in, which is not a removal anybody asked for. */}
+        {accountNeedsAttention(p.me)
+          ? <AccountBadge me={p.me ?? null} />
+          : <span className="avatar" title="Account (placeholder)" />}
       </div>
     </header>
   );
