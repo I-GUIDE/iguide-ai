@@ -1260,3 +1260,178 @@ with four threads means four hung calls is the whole service.
 The LLM client still sends no request timeout, which is the most likely way those threads were
 consumed — though that remains unproven, because the container was force-recreated before its logs
 were captured. Both the timeout and something that acts on a failing health check are open.
+
+---
+
+## Stage 12 — Staying up, and keeping the evidence {#stage-12}
+
+Stage S11.4 ended with two things open: an LLM request timeout, and *something that acts on a
+failing health check*. This stage closes the second, and closes the reason the first is still
+unproven — the evidence was thrown away.
+
+### Stage S12.1 The signal existed; nothing was listening
+
+The three-day hang was not a monitoring gap. Docker knew: the container reported
+`Up 3 days (unhealthy)` with a failing streak of 2,092. Every layer that could have acted had a
+reason not to.
+
+* `restart: unless-stopped` restarts a container that **exits**. A wedged container never exits.
+* gunicorn's `--timeout 600` kills a worker stuck in a **request**, not one whose threads are
+  stuck in I/O. With `WEB_CONCURRENCY=1 --threads 4`, four hung calls are the whole service.
+* Docker records health status and takes no action on it. That is deliberate; acting is
+  somebody else's job, and nobody was doing it.
+
+`deploy/agent-watchdog.sh` is that somebody: a systemd timer on the host, every minute, reading
+`.State.Health` for each watched container. Host-side rather than a sidecar because the obvious
+alternative — an autoheal container — wants the Docker socket, and adding a second image with
+root-equivalent control of the daemon to a public repo buys nothing a 200-line shell script
+does not.
+
+Two numbers carry the design:
+
+* **Ten minutes of continuous failure before acting.** A streaming turn can hold a worker thread
+  for minutes, so with four threads a genuinely healthy agent under load can look unresponsive.
+  Restarting then would kill live turns to fix nothing. Ten minutes is pathological; two is a
+  busy afternoon. The threshold is computed from the container's *own* configured interval
+  (read as `{{json .Config.Healthcheck.Interval}}` — the plain form renders a Go duration as
+  `"30s"`, which is not arithmetic, and the first version of this script died on exactly that),
+  so changing the interval in compose does not silently change the threshold.
+* **Three restarts per hour, then stop.** If restarting did not fix it, restarting again will
+  not either. Past the budget the watchdog refuses and says so loudly, leaving the service down
+  for a human. A service that is down and loud beats one that is restarting every ten minutes
+  and silent.
+
+It deliberately does **not** restart on a dependency outage. The container health check is a
+liveness probe — "can this process still answer?" — and that is the only question whose answer
+is "restart me". If OpenSearch or the LLM upstream is down the agent still answers `/health`,
+and the watchdog stays out of the way, because a restart loop against somebody else's outage is
+worse than the outage.
+
+### Stage S12.2 Capture before restart
+
+The rule that shapes the script, and the one that came from getting it wrong: **restarting a
+hung service destroys the only copy of why it hung.**
+
+When the hang was found, the recovery was `docker compose up -d --force-recreate`. That deleted
+the container, and its logs went with it. Nobody ever ran `docker logs agent-api > hang.log`. So
+the most likely cause — an LLM call with no timeout consuming all four threads — is still a
+hypothesis rather than a finding, and will stay one.
+
+The watchdog therefore captures first and restarts second, into
+`/var/log/iguide-agent/incidents/<utc>-<container>-<reason>/`: full `inspect`, the health log,
+20,000 lines of container output, the host-side process table, `docker stats`, host disk and
+memory, the kernel ring buffer, and six hours of this container's journal. Then it restarts —
+with `docker restart`, never `up --force-recreate`, because the first keeps the container and
+its log history and the second is precisely what destroyed them.
+
+`py-spy` is installed in the image for the one artefact that says *where* it is stuck rather
+than *that* it is: a Python stack for every thread, read from outside the process. That matters
+specifically here, because a process wedged holding the GIL cannot run its own signal handlers,
+so it cannot be asked to dump its own state — it has to be read. `cap_add: [SYS_PTRACE]` makes
+that deterministic, which is negligible beside the Docker socket the container already mounts.
+When py-spy is absent the bundle records that fact instead of failing, so the watchdog works
+against an image that predates it.
+
+### Stage S12.3 Logs that outlive the container
+
+Container logs were on the default `json-file` driver, which stores them inside the container's
+own directory. `docker rm` deletes them — and every deploy runs `up -d --build`, which recreates.
+So the system's log history was, structurally, never older than the last deploy.
+
+All four services now use the `journald` driver. The host journal is persistent here
+(`/var/log/journal` exists), independent of container lifetime, and indexed by container name:
+
+```
+journalctl CONTAINER_NAME=agent-api --since "2 days ago"
+```
+
+`docker logs` still works. Two settings in `deploy/install-watchdog.sh` make it trustworthy
+rather than nominal. `Storage=persistent` is set explicitly, because the default `auto` keeps
+logs only if `/var/log/journal` already exists — a reinstalled host would silently fall back to
+a memory-only journal that dies on reboot. And `LogRateLimitIntervalSec=0` on `docker.service`
+removes journald's per-unit rate limit, which would otherwise apply to every container at once:
+a failing service is exactly when logging bursts, and exactly when dropped lines cost most.
+Volume is bounded by size instead — `SystemMaxUse=3G`, `SystemKeepFree=5G` — which is the right
+axis, and keeps container logging from growing into the kind of disk pressure that took an
+OpenSearch cluster read-only at 95%.
+
+### Stage S12.4 The health check now reads the answer
+
+Every health check was `requests.get(url, timeout=5)` with the result discarded. `requests` does
+not raise on a 500, so a service answering nothing but errors passed. The probe detected total
+unresponsiveness and nothing else. It now calls `.raise_for_status()`. (`mcp-server` used
+`urllib.request.urlopen`, which already raises on non-2xx, and needed no change.)
+
+### Stage S12.5 In the same change, unrelated: the badge, and why prod is still not an option
+
+The header's role chip is gone. It was the one account state with nothing to do about it — the
+person already knows who they are — while putting their role on screen permanently, in every
+screen share and screenshot. `AccountBadge` now renders only when the state needs action: *Sign
+in* when signed out, *No access* when signed in and refused, nothing at all when working.
+`accountNeedsAttention()` is exported so the platform-variant header can restore its decorative
+avatar in that empty space rather than losing it.
+
+Switching the deployment to `PLATFORM_TIER=prod` was investigated and **rejected**, with the
+measurements recorded in the tier table itself. Both halves fail, and both fail quietly:
+
+* **Memory.** Prod's cluster (149.165.155.195) is at 95.5% disk, past the flood-stage watermark,
+  with 914 indices carrying `read_only_allow_delete`; an index creation times out. Reads still
+  succeed, so search would keep working while every conversation silently failed to save. Only
+  3.7 GB of that 55.3 GB is OpenSearch — the rest is something else on the box, so it is not a
+  problem this repository can fix by deleting indices.
+* **Token.** Only partly, and the halves are easy to get backwards. Identity *verification* is
+  server-to-server, so CORS never applies and prod would verify fine. The browser's *refresh* is
+  blocked: prod answers a preflight from `agent.i-guide.io` with
+  `Access-Control-Allow-Origin: https://platform.i-guide.io`. Sign-in would succeed and the
+  session would die five minutes later at the first refusal — an expiry, not an error.
+
+Prod's OpenSearch host is deliberately still empty in `_TIERS` rather than filled in with the
+now-known address, so `PLATFORM_TIER=prod` fails loudly and demands an explicit
+`OPENSEARCH_NODE` instead of quietly writing nowhere.
+
+### Stage S12.6 What this stage did not fix
+
+The LLM client still has no request timeout, so the failure this watchdog now recovers from can
+still happen — recovery in ten minutes instead of three days is the improvement, not prevention.
+The next hang will produce a thread-stack bundle, which is what the timeout work needs to stop
+being guesswork.
+
+`opensearch_credentials()` has a live trap that was found but not fixed, because nothing is
+currently on that path: an explicit `OPENSEARCH_NODE` that disagrees with the tier falls back to
+the **untiered** credential, and that pair returns 401 against the dev cluster. Anyone pinning a
+node across tiers gets a cluster that authenticates for reads at boot and stops saving
+conversations. The credential should select by *which tier owns the host being used*, not by
+"does this host match my tier, yes or no".
+
+### Stage S12.7 What the tier owns, and what quietly did not move
+
+The switch to prod exposed one fault three times in an afternoon: **a value the platform sets
+per tier, stored anywhere other than the tier table, does not move when the tier does.** Each
+instance failed silently, and each looked like a different bug.
+
+| value | where it lived | what the switch did |
+| --- | --- | --- |
+| OpenSearch host | table, but PROD's entry empty | refused to start — the only one that failed LOUDLY, by design |
+| access-cookie name | `JWT_ACCESS_TOKEN_NAME` in `.env` | kept reading a cookie prod never sets; every signed-in visitor told to sign in |
+| redirect-domain-id | `PLATFORM_REDIRECT_DOMAIN_ID` in `.env` | carried dev's `006` to prod, which numbers this agent `003`; sign-in stopped returning here |
+
+The cookie name compounded it: prod is **not** the suffix-less form. The platform suffixes both
+tiers — a browser signed in to prod holds `jwt-access-token-prod` beside dev's
+`jwt-access-token-dev` — and `consistency_warning()` missed it because it only asked whether the
+name ended in `-dev`. A check that recognises one specific wrong answer certifies every other
+wrong answer as correct; it now requires the tier's own suffix, so it is closed rather than open.
+
+The redirect id is now in `_TIERS` alongside the backend, frontend and cluster, with
+`PLATFORM_REDIRECT_DOMAIN_ID` still winning when explicitly set. Its failure mode is the reason
+it had to move rather than just be corrected: an unknown id is **not** an error at the far end —
+the frontend logs it and falls back to the profile page — so sign-in keeps working and merely
+stops coming back, and the only signal is a person noticing they landed somewhere else.
+
+The general rule this leaves: when adding anything the platform assigns per tier, put it in
+`_TIERS` and give it a resolver with the same precedence as the rest (explicit env wins, table
+is the default). An env var holding a per-tier value is a switch someone has to remember, and
+the evidence of one afternoon is that they will not.
+
+Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
+table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
+credential-selection fix in S12.6 first.

@@ -10,19 +10,35 @@
 # are passed unchanged. (Do NOT reference secrets with ${VAR} in this file: Compose
 # would try to interpolate a `$` inside the value and silently corrupt it.)
 
+# Container logs must outlive the container. The default json-file driver keeps them inside
+# the container's own directory, so `docker rm` — and therefore every `up -d --force-recreate`
+# — deletes them. On 2026-09-18 that is how the evidence for a three-day agent hang was lost:
+# the container was recreated before anyone ran `docker logs`. The journald driver hands each
+# line to the HOST journal instead, which is persistent here (/var/log/journal) and indexed by
+# container name, so history survives recreation, rebuild, and reboot:
+#
+#     journalctl CONTAINER_NAME=agent-api --since "2 days ago"
+#
+# `docker logs` still works. Journal size is capped in deploy/install-watchdog.sh.
+x-logging: &journald-logging
+  driver: journald
+  options:
+    tag: "{{.Name}}"
+
 services:
   embedding-server:
     build:
       context: .
       dockerfile: embedding-server/Dockerfile
     container_name: embedding-server
+    logging: *journald-logging
     ports:
       - "5000:5000"
     env_file:
       - .env
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -35,6 +51,7 @@ services:
       context: .
       dockerfile: MCP_server/Dockerfile
     container_name: mcp-server
+    logging: *journald-logging
     ports:
       - "8000:8000"
     environment:
@@ -61,6 +78,7 @@ services:
       context: .
       dockerfile: rag_pipeline/Dockerfile
     container_name: agent-api
+    logging: *journald-logging
     ports:
       - "3500:5002"   # host:container — agent reachable on http://localhost:3500
     # Secrets + backend config (OPENSEARCH_*, NEO4J_*, ANVILGPT_*, VLLM_*/OPENAI_*) are
@@ -115,6 +133,13 @@ services:
     # this container root-equivalent control of the host daemon — acceptable for local
     # dev; do NOT use this socket mount on a shared/production host.
     user: root
+    # Lets deploy/agent-watchdog.sh run `py-spy dump` inside this container while it is wedged,
+    # producing a stack for every thread before the restart throws that state away. A process
+    # stuck holding the GIL cannot run its own signal handlers, so it has to be read from
+    # outside. Negligible next to the Docker socket mounted below, which is already
+    # root-equivalent on the host.
+    cap_add:
+      - SYS_PTRACE
     volumes:
       - agent_chat_files:/app/agent_chat_files
       # Docker-out-of-Docker for code execution:
@@ -129,7 +154,7 @@ services:
       mcp-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5002/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5002/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -145,13 +170,14 @@ services:
       context: .
       dockerfile: metadata-extraction-server/Dockerfile
     container_name: metadata-extraction-server
+    logging: *journald-logging
     ports:
       - "5001:5001"
     env_file:
       - .env
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/health', timeout=5).raise_for_status()"]
       interval: 30s
       timeout: 10s
       retries: 3

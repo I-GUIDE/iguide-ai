@@ -39,13 +39,87 @@ PROD = "prod"
 _TIERS: Dict[str, Dict[str, str]] = {
     DEV: {"backend": "https://backend-dev.i-guide.io", "frontend": "https://dev.i-guide.io",
           # Dev's cluster, moved here from 149.165.155.195 on 2026-09-18.
-          "opensearch": "https://149.165.155.135:9200"},
-    # No OpenSearch for prod until someone confirms which host it is. An empty string means
-    # "this tier does not supply one", so a prod deployment keeps needing an explicit
-    # OPENSEARCH_NODE rather than silently inheriting dev's cluster — which is the single worst
-    # thing this table could do.
+          "opensearch": "https://149.165.155.135:9200",
+          # This agent's entry in dev's redirect-whitelist.json. See redirect_domain_id().
+          "redirect_domain_id": "006"},
+    # Prod's cluster IS known — 149.165.155.195:9200, confirmed by the maintainer 2026-09-22 —
+    # and is deliberately still not written here, because filling it in would arm two traps
+    # that an empty string keeps disarmed. Measured the same day:
+    #
+    #   1. RESOLVED the same afternoon — kept here because the failure mode is worth knowing.
+    #      At 16:29 UTC that cluster could not accept a write: 55.3gb of 57.9gb used (95.5%),
+    #      past the 95% flood-stage watermark, 914 indices carrying `read_only_allow_delete`,
+    #      and an index creation that timed out. READS still succeeded, which is what makes it
+    #      quiet — search keeps working while every conversation silently fails to save. By
+    #      17:00 UTC someone had freed space: status red -> yellow, 88% used with 6.6gb free,
+    #      zero blocked indices, and a real write returning 201. Note that only 3.7gb of that
+    #      disk was ever OpenSearch; the other ~51.6gb is something else on the box, so the
+    #      headroom is somebody's housekeeping and not a property of this cluster.
+    #   2. Working around (1) by pinning OPENSEARCH_NODE to the dev cluster does not work
+    #      either. An explicit node that disagrees with the tier makes opensearch_credentials()
+    #      fall back to the UNTIERED pair, and that pair returns 401 against the dev cluster —
+    #      so conversations would stop saving for a second, different reason.
+    #
+    # An empty string means "this tier does not supply one", so PLATFORM_TIER=prod still fails
+    # loudly and demands an explicit OPENSEARCH_NODE. That is the right forcing function while
+    # the above holds: better a deployment that refuses to start than one that answers
+    # perfectly and remembers nothing. Fill this in once 195 has disk, and fix (2) first.
+    #
+    # The TOKEN side is only PARTLY blocked, and the halves are easy to get backwards.
+    # Identity VERIFICATION is server-to-server — the agent forwards the cookie it received to
+    # the backend's own /api/check-tokens (identity.py) — so no browser and no CORS is involved
+    # and it would work against prod today. What is blocked is the browser's REFRESH.
+    #
+    # Measured 2026-09-22, OPTIONS /api/refresh-token with `Origin: https://agent.i-guide.io`:
+    #
+    #     backend-dev.i-guide.io -> Access-Control-Allow-Origin: https://agent.i-guide.io
+    #     backend.i-guide.io     -> Access-Control-Allow-Origin: https://platform.i-guide.io
+    #
+    # Prod pins one origin and it is not this one, so the browser may not refresh an aged-out
+    # access cookie from here. That failure is badly shaped: sign-in succeeds, the agent works,
+    # and the session dies five minutes later at the first refusal — an expiry, not an error,
+    # so nothing says why. Dev needed exactly this entry added before sign-in held there.
+    #
+    # Prod's redirect-whitelist.json is UNVERIFIED: it is not served as a static file (both
+    # frontends answer that path with the Next.js app shell), so it could not be read from
+    # outside. The ids differ per tier — dev 006, prod 003 — and both now live in this table.
+    #
+    # Both are platform-side config, not this repository's. Prod also needs
+    # JWT_ACCESS_TOKEN_NAME=jwt-access-token-prod: the platform suffixes BOTH tiers, so prod is
+    # NOT the suffix-less form. Assuming it was cost a live outage on the day of the switch —
+    # the agent read a cookie nobody sets and told every signed-in visitor to sign in.
+    #
+    # **The deployment was switched to PLATFORM_TIER=prod at 2026-09-22 17:01 UTC**, knowingly,
+    # while the refresh origin was still missing. The allowlist entry had been added on the
+    # platform side but its backend not yet restarted, and a failed refresh is self-healing:
+    # neither backend sends `Access-Control-Max-Age`, so a browser's negative preflight cache is
+    # the ~5s default rather than hours; `refreshAccessToken()` (map-ui-prototype/src/auth.ts)
+    # catches the block, returns false and caches nothing, so the next 401 retries cleanly; and
+    # the 30-day refresh cookie is not consumed by attempts that fail. Sessions therefore drop
+    # at each five-minute expiry until that restart and recover by themselves afterwards, with
+    # no redeploy here and no re-login. Re-probe with the OPTIONS request above to confirm.
+    #
+    # Because the table still leaves PROD.opensearch empty, the deployment names the cluster in
+    # its own `OPENSEARCH_NODE=https://149.165.155.195:9200`. That is not a workaround: an
+    # explicit node wins over the table by design, and it still selects the _PROD credential,
+    # because _node_overrides_tier() only reports a conflict when the tier actually names a
+    # cluster to conflict with. Verified in the running container — client on 149.165.155.195,
+    # a real write to chat_memory returning `created`, and all three boot warnings silent.
+    #
+    # One cost that is NOT recoverable by waiting: the two clusters hold DIFFERENT conversations.
+    # 135 had 1281 chat_memory documents at the moment of the switch and 195 had 1274, so the
+    # seven written since the migration are not visible from prod. The tier owns the
+    # conversation store, and moving tiers is not a migration.
+    #
+    # The redirect id was the third thing that should have moved with the tier and did not:
+    # prod numbers this agent 003, not dev's 006, so the switch sent people to an id prod's
+    # whitelist does not know. It now lives in this table like everything else the tier owns.
     PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
-           "opensearch": ""},
+           "opensearch": "",
+           # Prod's whitelist numbers this agent differently from dev's. The ids are per-tier
+           # and assigned by whoever maintains each frontend's redirect-whitelist.json, so they
+           # do NOT match across tiers and there is no rule for deriving one from the other.
+           "redirect_domain_id": "003"},
 }
 
 _REFRESH_PATH = "/api/refresh-token"
@@ -87,6 +161,31 @@ def refresh_url() -> str:
     return _resolve("PLATFORM_REFRESH_URL", "backend", _REFRESH_PATH)
 
 
+def redirect_domain_id() -> str:
+    """This agent's id in the target frontend's ``redirect-whitelist.json``.
+
+    Per-tier and NOT derivable: dev numbers this agent 006 and prod numbers it 003. The ids are
+    assigned independently by whoever maintains each frontend's whitelist, so there is no rule
+    that turns one into the other — which is exactly why this moved into the tier table. It was
+    a standalone ``PLATFORM_REDIRECT_DOMAIN_ID``, and the switch to prod carried dev's 006
+    across because nothing tied the id to the tier that owns it. Everything else the platform
+    supplies — backend, frontend, cluster, credential — already moves with ``PLATFORM_TIER``;
+    this was the one that did not, so it silently kept pointing at the other platform's entry.
+
+    ``PLATFORM_REDIRECT_DOMAIN_ID`` still wins when set, like every explicit setting here, for a
+    deployment whose whitelist entry differs from the table's. Leave it UNSET to let the tier
+    decide, which is what a deployment that has only said which tier it is should do.
+    """
+    explicit = str(os.getenv("PLATFORM_REDIRECT_DOMAIN_ID") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        tier = current_tier()
+    except ValueError:
+        return ""
+    return (_TIERS[tier].get("redirect_domain_id") or "") if tier else ""
+
+
 def signin_url() -> str:
     """Where an unsigned-in visitor is sent, and where they come back to.
 
@@ -97,14 +196,14 @@ def signin_url() -> str:
 
     The domain id is NOT a URL: the frontend resolves it against its own
     ``redirect-whitelist.json``, so only hosts that file names can ever be redirect targets.
-    That means the id is assigned by whoever maintains that file, which is why it is
-    configuration here rather than a constant — and why this stays OFF until
-    ``PLATFORM_REDIRECT_DOMAIN_ID`` is set. An unrecognised id is not an error at the far end;
-    the frontend logs it and falls back to the profile page, so a wrong value degrades to
-    today's behaviour rather than breaking sign-in.
+    That means the id is assigned by whoever maintains that file, and it DIFFERS BY TIER — see
+    redirect_domain_id(), which is where it is resolved. An unrecognised id is not an error at
+    the far end; the frontend logs it and falls back to the profile page, so a wrong value
+    degrades to the old behaviour rather than breaking sign-in — which is also why a wrong id
+    is so easy to miss: sign-in still works, it just stops coming back here.
     """
     base = _resolve("PLATFORM_SIGNIN_URL", "frontend", _SIGNIN_PATH)
-    domain_id = str(os.getenv("PLATFORM_REDIRECT_DOMAIN_ID") or "").strip()
+    domain_id = redirect_domain_id()
     if not base or not domain_id:
         return base
     # The frontend decodeURIComponent()s the path and requires it to start with "/" — anything
@@ -309,9 +408,22 @@ def consistency_warning() -> Optional[str]:
 
     The cookie NAME is the platform's own setting (``JWT_ACCESS_TOKEN_NAME``) and differs
     between tiers, so it does not move with ``PLATFORM_TIER``. A deployment pointed at prod
-    while still expecting the dev cookie fails on every request, and the failure looks like a
-    rejected token rather than a misconfiguration. This does not guess the right name — only
-    names the disagreement.
+    while still expecting a cookie prod does not mint fails on every request, and the failure
+    looks like a rejected token rather than a misconfiguration. This does not guess the right
+    name — only names the disagreement.
+
+    **The platform suffixes BOTH tiers**: dev serves ``jwt-access-token-dev`` and prod serves
+    ``jwt-access-token-prod`` (the browser holds all four, access and refresh, side by side).
+    The earlier version of this check only asked whether the name ended in ``-dev``, which made
+    it blind to the obvious mistake of assuming prod is the suffix-less form. It was: the
+    deployment was switched to prod with ``JWT_ACCESS_TOKEN_NAME=jwt-access-token``, this
+    function stayed silent because that is not a dev-looking name, and every signed-in visitor
+    was told to sign in again while nothing in the logs said why. A check that only recognises
+    one specific wrong answer certifies every other wrong answer as correct.
+
+    So it now requires the name to END WITH this tier's own suffix, which makes the check
+    closed rather than open: anything that is not right is reported, instead of everything that
+    is not one known kind of wrong being accepted.
     """
     tier = current_tier()
     if not tier:
@@ -319,11 +431,13 @@ def consistency_warning() -> Optional[str]:
     cookie = str(os.getenv("JWT_ACCESS_TOKEN_NAME") or "").strip().strip('"')
     if not cookie:
         return None
-    looks_dev = cookie.endswith("-dev")
-    if tier == PROD and looks_dev:
-        return (f"PLATFORM_TIER=prod but JWT_ACCESS_TOKEN_NAME={cookie!r} looks like the dev "
-                "tier's cookie. Every sign-in will be rejected until they agree.")
-    if tier == DEV and not looks_dev:
-        return (f"PLATFORM_TIER=dev but JWT_ACCESS_TOKEN_NAME={cookie!r} does not look like the "
-                "dev tier's cookie. Check which platform actually mints it.")
-    return None
+    suffix = f"-{tier}"
+    if cookie.endswith(suffix):
+        return None
+    other = DEV if tier == PROD else PROD
+    mistaken_for = (f" It looks like the {other} tier's cookie."
+                    if cookie.endswith(f"-{other}") else "")
+    return (f"PLATFORM_TIER={tier} but JWT_ACCESS_TOKEN_NAME={cookie!r} does not end in "
+            f"{suffix!r}.{mistaken_for} The platform suffixes both tiers, so this deployment is "
+            "reading a cookie the platform never sets: every visitor will be told to sign in, "
+            "however recently they signed in.")

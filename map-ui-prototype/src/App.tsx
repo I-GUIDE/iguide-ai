@@ -658,10 +658,21 @@ export default function App() {
       // An auth refusal is not a failed request and must not read like one: "Request failed:
       // Forbidden" tells someone nothing about what to do, and with the role gate starting at
       // contributor this is the message most accounts will actually see.
+      const isAuth = !stopped && e instanceof AuthError;
       const text = stopped
         ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
-        : e instanceof AuthError ? authMessage(e) : `Request failed: ${e.message}`;
-      patch({ text, streaming: false });
+        : isAuth ? authMessage(e) : `Request failed: ${e.message}`;
+      // The auth refusal is the ONE message here that carries a link — "[Sign in](…)" — so it
+      // goes through the markdown renderer. `patch({ text })` renders verbatim (ChatPanel puts
+      // it in a bare <p>), which showed people the literal "[Sign in](https://…)" and left
+      // nothing to click on the single message whose entire job is to be clicked.
+      //
+      // Only this branch. The others interpolate `e.message`, which is somebody else's string,
+      // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
+      // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
+      patch(isAuth
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false }
+        : { text, streaming: false });
     } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
     // `snapshotSession` MUST be in these deps. It was not, and that single omission is the
     // whole of "after I ask a question the wrong history shows up" — plus two things that
