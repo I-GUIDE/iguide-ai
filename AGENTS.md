@@ -42,7 +42,7 @@ panel. Node 18+ required.
 python3 -m pytest rag_pipeline/tests/ -q
 ```
 
-Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
+Baseline is **1645 passed, 4 skipped, 0 failed** (22 Sep 2026). If something fails, it is yours.
 
 That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
 is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
@@ -224,21 +224,48 @@ check rather than making it wrong — the map-denial check needs no catalog and 
 
 ## The tool surface
 
-36 tools in six families, plus `execute_code` and four file tools. Enumerate them from the
-factories rather than trusting a list — that is the only trustworthy inventory:
+**53 analysis tools in nine families**, plus four code-execution/workspace tools, five file
+tools, and the search/granular surface. Enumerate them from the factories rather than trusting
+that count — that is the only trustworthy inventory, and this paragraph is the proof: it said
+"36 tools in six families" long enough for a capability review to repeat it, while
+`make_spatial_stats_tools`, `make_terrain_tools`, `make_admin_boundary_tools` and
+`make_rs_embed_zonal_tools` had all shipped underneath it, and `make_geo_analysis_tools` was
+never listed at all.
 
-`make_overlay_tools` · `make_aggregate_tools` · `make_temporal_tools` ·
-`make_langchain_geo_tools` · `make_rs_embed_tools` · `make_langchain_qgis_tools` ·
-`make_code_execution_tools` · `make_langchain_file_tools`
+`make_overlay_tools` (7) · `make_aggregate_tools` (6) · `make_temporal_tools` (5) ·
+`make_spatial_stats_tools` (7) · `make_langchain_geo_tools` (7) · `make_rs_embed_tools` (10) ·
+`make_rs_embed_zonal_tools` (2) · `make_terrain_tools` (4) · `make_admin_boundary_tools` (1) ·
+`make_geo_analysis_tools` (4)
+
+plus `make_code_execution_tools`, `make_langchain_file_tools` / `make_conversation_file_tools`,
+`make_langchain_granular_tools`, `make_langchain_qgis_tools`, `make_langchain_geocode_tools`,
+`make_skill_tools`, `make_request_tool` and `make_langchain_mcp_tools`.
+
+`make_geo_analysis_tools` is the one that hides: it lives in `extractors/geo_handles.py`, not
+in `agent_runtime/`, so a grep scoped to the runtime package misses `heatmap_image`,
+`choropleth_image`, `kb_run_geofunction` and `kb_select_rows` and concludes they were deleted.
+It is wired at `supervisor/graph.py:3209` like every other family.
 
 The analysis families load **only when files are attached** to the conversation
 (`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), so a bare chat session has none
 of them. `rs_embed_tools` calls an external service at `RS_EMBED_URL` (default
 `http://localhost:8077` — inside a container that means the container itself, not the host).
 
-There is **no raster analysis**: no zonal statistics, band math, reclassify or terrain. Route
-that through `execute_code` (rasterio is available) or a GDAL algorithm via
-`qgis_processing_run`. The map client models vector layers only.
+Raster analysis is **partial, not absent** — this line used to say there was none, and
+`make_terrain_tools` had already shipped. `dem_for_region` fetches USGS 3DEP (no key; US
+coverage only — outside it the server answers 200 with all-NoData rather than failing),
+`terrain_derivative` gives slope/aspect, `inundation_at_level` thresholds a height, and
+`zonal_stats_for_raster` turns ANY single-band raster into per-zone columns on a polygon
+layer — the shape `fit_zone_model` already takes, which is what lets elevation be read beside
+the satellite embeddings. What is still missing is band math, reclassify and multi-band work:
+route those through `execute_code` (rasterio is available) or a GDAL algorithm via
+`qgis_processing_run`.
+
+The map client models vector layers **plus draped rasters**: `add_raster_layer` takes a GeoTIFF
+file_id directly and reads the bounds out of it, and it counts as a delivery in
+`_MAP_LAYER_TOOLS`. Before it did, a DEM took four tool calls to reach the map — `add_map_layer`
+read it as a table and called it an unreadable vector source, `add_raster_layer` said it was not
+an image, and both were true.
 
 ## Why this workload is a poor fit for multiple agents
 
