@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+from urllib.parse import quote
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,33 @@ def refresh_url() -> str:
 
 
 def signin_url() -> str:
-    """Where an unsigned-in visitor is sent."""
-    return _resolve("PLATFORM_SIGNIN_URL", "frontend", _SIGNIN_PATH)
+    """Where an unsigned-in visitor is sent, and where they come back to.
+
+    The platform's ``/auth/login`` takes ``redirect-domain-id`` and ``redirect-path`` and, after
+    CILogon, returns the browser there instead of to the platform's own profile page. Without
+    them someone sent from the agent signs in and lands on the platform, having lost whatever
+    they were doing here.
+
+    The domain id is NOT a URL: the frontend resolves it against its own
+    ``redirect-whitelist.json``, so only hosts that file names can ever be redirect targets.
+    That means the id is assigned by whoever maintains that file, which is why it is
+    configuration here rather than a constant — and why this stays OFF until
+    ``PLATFORM_REDIRECT_DOMAIN_ID`` is set. An unrecognised id is not an error at the far end;
+    the frontend logs it and falls back to the profile page, so a wrong value degrades to
+    today's behaviour rather than breaking sign-in.
+    """
+    base = _resolve("PLATFORM_SIGNIN_URL", "frontend", _SIGNIN_PATH)
+    domain_id = str(os.getenv("PLATFORM_REDIRECT_DOMAIN_ID") or "").strip()
+    if not base or not domain_id:
+        return base
+    # The frontend decodeURIComponent()s the path and requires it to start with "/" — anything
+    # else falls back to the default, so encode it and keep it absolute.
+    path = str(os.getenv("PLATFORM_REDIRECT_PATH") or "/").strip() or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    joiner = "&" if "?" in base else "?"
+    return (f"{base}{joiner}redirect-domain-id={quote(domain_id, safe='')}"
+            f"&redirect-path={quote(path, safe='')}")
 
 
 def check_tokens_url() -> str:

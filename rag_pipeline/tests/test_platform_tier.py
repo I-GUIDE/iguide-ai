@@ -321,3 +321,44 @@ def test_no_explicit_node_uses_the_tiered_credential(monkeypatch):
     monkeypatch.setenv("OPENSEARCH_USERNAME_DEV", "new-user")
     monkeypatch.setenv("OPENSEARCH_PASSWORD_DEV", "new-pw")
     assert pe.opensearch_credentials() == ("new-user", "new-pw")
+
+
+# --- coming back here after signing in ---------------------------------------------
+
+def test_signin_url_is_unchanged_until_a_domain_id_is_configured(monkeypatch):
+    """OFF by default, because the far end has to know the id before it means anything.
+
+    The frontend resolves `redirect-domain-id` against its own redirect-whitelist.json. Until
+    that file names the agent, sending the parameter achieves nothing — so this stays exactly
+    as it was rather than emitting a parameter that only shows up in someone's warning log.
+    """
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.delenv("PLATFORM_REDIRECT_DOMAIN_ID", raising=False)
+    assert pe.signin_url() == "https://dev.i-guide.io/auth/login"
+
+
+def test_signin_url_carries_the_return_trip_when_configured(monkeypatch):
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("PLATFORM_REDIRECT_DOMAIN_ID", "agent")
+    monkeypatch.delenv("PLATFORM_REDIRECT_PATH", raising=False)
+    assert pe.signin_url() == (
+        "https://dev.i-guide.io/auth/login?redirect-domain-id=agent&redirect-path=%2F")
+
+
+def test_the_return_path_is_forced_absolute_and_encoded(monkeypatch):
+    """The frontend decodeURIComponent()s it and requires a leading "/" — a relative path is
+    silently dropped for the platform's own profile page, which is the bug this avoids."""
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    monkeypatch.setenv("PLATFORM_REDIRECT_DOMAIN_ID", "agent")
+    monkeypatch.setenv("PLATFORM_REDIRECT_PATH", "rs")
+    assert pe.signin_url().endswith("redirect-path=%2Frs")
+
+
+def test_prod_signs_in_at_the_platform_not_dev(monkeypatch):
+    """The pairing the tier exists to keep straight."""
+    monkeypatch.delenv("PLATFORM_SIGNIN_URL", raising=False)
+    monkeypatch.delenv("PLATFORM_REDIRECT_DOMAIN_ID", raising=False)
+    monkeypatch.setenv("PLATFORM_TIER", "prod")
+    assert pe.signin_url() == "https://platform.i-guide.io/auth/login"
+    monkeypatch.setenv("PLATFORM_TIER", "dev")
+    assert pe.signin_url() == "https://dev.i-guide.io/auth/login"
