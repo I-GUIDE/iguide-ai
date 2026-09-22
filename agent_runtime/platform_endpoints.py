@@ -85,15 +85,31 @@ _TIERS: Dict[str, Dict[str, str]] = {
     # Both are platform-side config, not this repository's, and prod would also need a
     # JWT_ACCESS_TOKEN_NAME without the -dev suffix (consistency_warning() says so at boot).
     #
-    # So as of 2026-09-22 17:00 UTC the MEMORY half is clear and the TOKEN half is not, and the
-    # token half is the one that decides: prod mode today would persist conversations perfectly
-    # and drop every signed-in user at their first five-minute expiry. Deployment stays on
-    # PLATFORM_TIER=dev until `https://agent.i-guide.io` appears in prod's allowed origins —
-    # re-probe with the OPTIONS request above, it is a one-line check.
+    # **The deployment was switched to PLATFORM_TIER=prod at 2026-09-22 17:01 UTC**, knowingly,
+    # while the refresh origin was still missing. The allowlist entry had been added on the
+    # platform side but its backend not yet restarted, and a failed refresh is self-healing:
+    # neither backend sends `Access-Control-Max-Age`, so a browser's negative preflight cache is
+    # the ~5s default rather than hours; `refreshAccessToken()` (map-ui-prototype/src/auth.ts)
+    # catches the block, returns false and caches nothing, so the next 401 retries cleanly; and
+    # the 30-day refresh cookie is not consumed by attempts that fail. Sessions therefore drop
+    # at each five-minute expiry until that restart and recover by themselves afterwards, with
+    # no redeploy here and no re-login. Re-probe with the OPTIONS request above to confirm.
     #
-    # One more cost of switching, easy to miss: the two clusters hold DIFFERENT conversations.
-    # 135 had 1281 chat_memory documents and 195 had 1274, so moving tiers also moves which
-    # history users can see. The tier owns the conversation store, and that is not a migration.
+    # Because the table still leaves PROD.opensearch empty, the deployment names the cluster in
+    # its own `OPENSEARCH_NODE=https://149.165.155.195:9200`. That is not a workaround: an
+    # explicit node wins over the table by design, and it still selects the _PROD credential,
+    # because _node_overrides_tier() only reports a conflict when the tier actually names a
+    # cluster to conflict with. Verified in the running container — client on 149.165.155.195,
+    # a real write to chat_memory returning `created`, and all three boot warnings silent.
+    #
+    # One cost that is NOT recoverable by waiting: the two clusters hold DIFFERENT conversations.
+    # 135 had 1281 chat_memory documents at the moment of the switch and 195 had 1274, so the
+    # seven written since the migration are not visible from prod. The tier owns the
+    # conversation store, and moving tiers is not a migration.
+    #
+    # STILL UNVERIFIED: whether redirect-domain-id 006 is registered in PROD's
+    # redirect-whitelist.json. If it is not, sign-in completes and lands on the platform profile
+    # instead of returning here — the behaviour this id was introduced to fix on dev.
     PROD: {"backend": "https://backend.i-guide.io", "frontend": "https://platform.i-guide.io",
            "opensearch": ""},
 }
