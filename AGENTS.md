@@ -42,7 +42,20 @@ panel. Node 18+ required.
 python3 -m pytest rag_pipeline/tests/ -q
 ```
 
-Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
+Baseline is **1634 passed, 4 skipped, 0 failed on Linux**. If something fails there, it is
+yours. On a Windows checkout, 11 of those currently fail for reasons that have nothing to do
+with the code: five hit `.read_text()` with no `encoding=` on a file containing a non-ASCII
+byte, which falls back to the OS locale codepage rather than UTF-8 and is exactly the kind of
+thing that passes on every Linux CI box and on most English-locale Windows machines too; three
+assert a forward-slash path fragment against a `WindowsPath`'s backslashes, or that `/etc/passwd`
+reads as absolute (it doesn't, without a drive letter); one tries to delete a file this same
+process still has open, which Windows refuses and POSIX does not; and two
+(`test_csv_with_coordinates_flows_through`,
+`test_distance_band_without_a_threshold_leaves_no_island`) trace to `geopandas`/GDAL's and
+`libpysal`'s own type-inference and threshold heuristics differing by
+installed version — both are unpinned in `requirements.txt`. None of this was chased down to a
+specific GDAL/libpysal version; if one of these two starts failing on Linux too, that is worth
+knowing, not assuming away.
 
 That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
 is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
@@ -60,6 +73,22 @@ herring for this test: with no model, `_extract_place_candidates` falls back to
 `_capitalized_candidates`, which handles the test's query fine. Installing the model is still
 worth doing — production entity extraction runs on a weaker regex path without it — but it
 fixes nothing here.
+
+**The suite must not read anything outside the repository, and for a while it did.** Four
+modules call a bare `load_dotenv()`, which does not mean "the repo's `.env`" — it walks
+*upwards* from the working directory, and from a worktree that walk leaves the tree and lands on
+the main checkout's file: the developer's own, tracking whatever was last deployed. When that
+file grew `AGENT_MODE=token` and `AGENT_TOKEN_VERIFY=introspect` mid-migration, every identity
+check in the suite made a real HTTPS call to the dev backend, which 403s an unauthenticated
+caller — thirty failures, and the run went from two and a half minutes to twenty-five, all of it
+network, with nothing in the repository changed. `rag_pipeline/tests/conftest.py` now replaces
+`dotenv.load_dotenv` with a no-op before any test module imports, and clears the
+deployment-shaped variables outright rather than pinning them — `test_demo_mode` reloads
+`api.server` after `monkeypatch.delenv`, and a reload re-runs `load_dotenv()`, which refills a
+merely-pinned value the instant it goes missing. `RUN_LIVE_BACKEND_TESTS=1` opts back into real
+services for the handful of tests written to want them, the same shape as the existing
+`RUN_REAL_OPEN_GEODATA_TEST=1`. Offline and deterministic by default; if a test's outcome seems
+to depend on which machine runs it, suspect this file before suspecting the test.
 
 ## Which model answers
 
@@ -143,14 +172,20 @@ model from whether a call succeeded.
 
 An analysis result reaches the user as an **interactive map layer**, not a file path in prose:
 
-- `add_map_layer` (`agent_runtime/langchain_geo_tools.py`) is how a map gets delivered —
-  heatmap / choropleth / points / shapes, plus a downloadable GeoJSON.
-- It travels as a `map_layer` SSE event, forwarded verbatim by `api/server.py` (search
+- `add_map_layer` (`agent_runtime/langchain_geo_tools.py`) is how a **vector** result gets
+  delivered — heatmap / choropleth / points / shapes, plus a downloadable GeoJSON.
+- `add_raster_layer` is the sibling route for a **raster** result — a DEM, a slope grid, an
+  inundation depth map — draped as a georeferenced image rather than a vector layer. It reads
+  its bounds from the file itself, not from an argument, because a caller-restated box that
+  disagrees with the pixels draws a plausible layer in the wrong place and nothing downstream
+  can check it (`rag_pipeline/tests/test_raster_routing.py`). Both of these are interactive: the
+  client can pan and zoom them.
+- Both travel as a `map_layer` SSE event, forwarded verbatim by `api/server.py` (search
   `event_name == "map_layer"`). The event is **additive** — no existing SSE event changed —
   so a chat-only client that ignores unknown event types is unaffected.
 - `render_map_image`, `heatmap_image`, `choropleth_image` and `qgis_map_image` are the other,
   separate route: a static PNG that cannot be panned, zoomed or clicked. Do not describe one
-  as being "on the map".
+  as being "on the map" — that phrase means the first two routes specifically.
 - **Geometry never goes into the LLM-visible documents.** Evidence documents carry titles and
   abstracts; footprints and coordinates go to the map on the side channel. Widening the
   documents floods the context and gets truncated.
@@ -198,6 +233,16 @@ returns the nearest real ones; an image passed to `add_map_layer` returns the at
 datasets it *can* read; a filter matching nothing returns the column's actual range instead of
 writing an empty layer.
 
+**An explicit `null` on an optional argument means "use the default," on every tool.** A model
+filling every schema slot puts `null` in the ones it has no opinion about — `start=None` for "no
+date window" — and pydantic validates against the signature LangChain infers, so a plain `str`
+parameter with a default rejects that call before any of our code runs; the model learns nothing
+from the schema error except to retry. Measured: **141 such parameters across 62 of 80 tools**,
+not a handful of signatures to hand-patch. `agent_runtime/tool_args.py`'s `accept_null_defaults`
+rewrites the signature itself — every defaulted parameter becomes `Optional[...]`, and a `null`
+arriving at call time is swapped for the original default before the function runs. `0` and
+`False` are answers, not stand-ins for "unset," and are passed through unchanged.
+
 **Artifacts are named for their purpose.** `artifact_name()` derives a name from what the file
 is for, so a conversation doesn't accumulate `output_1.geojson`. Large outputs are reported
 with their size (`AGENT_LARGE_ARTIFACT_MB`, default 25) because an invisible 89 MB intermediate
@@ -224,21 +269,45 @@ check rather than making it wrong — the map-denial check needs no catalog and 
 
 ## The tool surface
 
-36 tools in six families, plus `execute_code` and four file tools. Enumerate them from the
-factories rather than trusting a list — that is the only trustworthy inventory:
+Do not hand-enumerate the factories — that drifted before and will again.
+`agent_runtime/capability_registry.py` is now the single list of which toolset factory does
+what, and
+`rag_pipeline/tests/test_supervisor_knows_its_peers.py` holds it against the peer builders in
+`agent_runtime/supervisor/graph.py`: bind a new toolset there without adding it to the registry
+and the test fails naming it. Read the registry for the current inventory rather than trusting
+a count in this file — the previous version's "36 tools in six families" had already been wrong
+for weeks by the time anyone noticed, because the registry it should have pointed at did not
+exist yet and nothing enforced the paragraph against reality.
 
-`make_overlay_tools` · `make_aggregate_tools` · `make_temporal_tools` ·
-`make_langchain_geo_tools` · `make_rs_embed_tools` · `make_langchain_qgis_tools` ·
-`make_code_execution_tools` · `make_langchain_file_tools`
+Two peers, `analyze` and `code`, share nearly all of it (`_SHARED` in the registry); each also
+has toolsets the other does not (`_ANALYZE_ONLY`, `_CODE_ONLY`). The shared/analyze-only/
+code-only split in the registry mirrors `supervisor/graph.py`'s actual peer builders — reread
+both together if you touch either.
 
-The analysis families load **only when files are attached** to the conversation
-(`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), so a bare chat session has none
-of them. `rs_embed_tools` calls an external service at `RS_EMBED_URL` (default
-`http://localhost:8077` — inside a container that means the container itself, not the host).
+The analysis toolsets load **only when files are attached** to the conversation
+(`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), with the boundary/geocoding/
+terrain toolsets as the deliberate exception (`agent_runtime/graph_state.py`): they can produce
+their own input (a fetched boundary, a fetched DEM) rather than only consuming an upload, so
+gating them on `input_file_ids` would hide the very tool that fills that gap. `rs_embed_tools`
+calls an external service at `RS_EMBED_URL` (default `http://localhost:8077` — inside a
+container that means the container itself, not the host).
 
-There is **no raster analysis**: no zonal statistics, band math, reclassify or terrain. Route
-that through `execute_code` (rasterio is available) or a GDAL algorithm via
-`qgis_processing_run`. The map client models vector layers only.
+**There IS raster analysis now** — this reversed a claim that stood here for months.
+`agent_runtime/terrain_tools.py` (`make_terrain_tools`) has `dem_for_region` (elevation from
+USGS 3DEP, no credential needed), `terrain_derivative` (slope/aspect/hillshade), a bathtub-fill
+`inundation_at_level`, and `zonal_stats_for_raster`, which is what joins any of the three to a
+polygon layer — `fit_zone_model` (the rs-embed zonal tools) then reads a column it writes, so
+elevation or flood depth can be fit against satellite embeddings with no change to that tool.
+Band math and reclassify still have no dedicated tool; route those through `execute_code`
+(rasterio is available) or a GDAL algorithm via `qgis_processing_run`.
+
+A raster reaches the map as an actual layer, not only as a static picture: `add_raster_layer`
+reads its bounds from the file itself rather than from a caller-restated box, specifically
+because a restated box that disagrees with the pixels draws a plausible layer in the wrong
+place and nothing downstream can catch it (`rag_pipeline/tests/test_raster_routing.py`). Before
+that it took four tool calls to draw one GeoTIFF — `add_map_layer` and `add_raster_layer` each
+rejected it once for being the wrong kind of thing the other one handles — which is the
+practical reason the delivery contract below now names three routes, not two.
 
 ## Why this workload is a poor fit for multiple agents
 
@@ -348,6 +417,12 @@ under a personal Google account); TIGERweb needs no credential; and it has the o
 Engine lacks — incorporated places. `TIGER/*/Places` is not in the EE catalogue at any vintage,
 and GAUL/geoBoundaries stop at district, so a *city* boundary is simply unavailable there
 (geoBoundaries has no ADM2 named "Nairobi" at all — Kenya's ADM2 are sub-counties).
+
+`area` is the place name and `level` is the kind of place — that split used to be one argument
+doing both jobs. `name` was ALSO the output filename, so a model that had just been told the
+place in `name` correctly had nowhere to put it and asked again; `name` is now accepted as an
+alias for `area` (either works) and the filename moved to its own `output_name`. Four wasted
+tool calls on one measured sweep before this split.
 
 Two behaviours are load-bearing. It matches `BASENAME`, not `NAME`: the latter carries the
 suffix ("Champaign County", "Champaign city"), so matching it loses every county a user names
@@ -512,6 +587,25 @@ Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an 
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
 
+## Recording why, not just what
+
+**Every architectural change is documented with its reason, in the same commit that makes it**,
+in `docs/agent-architecture-changes.md`. This is that rule, and this paragraph is what the doc
+itself points back to when it says the rule "is recorded in AGENTS.md" — keep the two in sync if
+either changes. The doc exists because the alternative was tried: it was reconstructed once, by
+five parallel passes over 408 commits, and could only recover the reasons someone had happened
+to write down. Most of this file's own most useful facts — the four env vars that fail silently,
+why `full_pipeline` is gone, why a term query against `owner_id` matched nothing — read exactly
+like entries from it, because that is what they are.
+
+An entry needs the reason **with its measurement** (*"266 s and 16 iterations"*, not "this was
+slow"), and, when it revises an earlier decision, why the first attempt was wrong — the
+correction is usually more instructive than the change. "Reason not recorded" is a legitimate
+entry where it is genuinely true; a plausible-sounding reconstruction is indistinguishable from
+fact once it is written down, and worse than an honest gap. Prompt revisions and tool signatures
+count as architectural — a capability paragraph drifting behind the peers that actually bind a
+toolset is exactly the kind of change this file exists to catch.
+
 ## The published capability atlas
 
 `docs/spatial-toolkit.html` is the tool inventory as a reader-facing page, enumerated from the
@@ -541,6 +635,66 @@ mounted in a `display:none` container never fires `load` and freezes its canvas,
 delivered three times buried a density surface under raw points. `"tests pass"` and `"the SSE
 stream contains the event"` are necessary, not sufficient — count the layers on screen and
 confirm the render mode.
+
+## Who is calling, and which deployment this is
+
+Three named modes, exactly one active (`AGENT_MODE=dev|demo|token`,
+`agent_runtime/deployment_mode.py`), replacing three booleans whose eight combinations included
+five that made no sense (*"settings hidden AND a key required"* demands a credential with no
+field to enter it in). An unrecognised value **raises** rather than falling back — this selects
+security behaviour, and a typo silently resolving to a working mode is the failure that would go
+unnoticed on a public host. `dev` is the team, gated by `AGENT_CHAT_API_KEY` exactly as before.
+`demo` hides connection settings and pins the model to `DEMO_MODEL`, for a link handed to an
+audience. `token` identifies the caller by the I-GUIDE platform's own JWT and scopes
+conversations and files to them. **The mode never decides the API key** — that would make
+`AGENT_MODE=dev` mean "harmless" on a laptop and "wide open" on the public dev tier, which is
+the same value describing two different risks.
+
+**Identity, in token mode.** The agent is served from `agent.i-guide.io`, same registrable
+domain as the platform, so its one-hour HS256 access cookie arrives on its own — no token
+exchange, no signed download URLs (`agent_runtime/identity.py`). Four choices are load-bearing
+because each is a way this fails open if reversed: `algorithms=["HS256"]` is pinned (trusting
+the token's own `alg` accepts a `none`-signed forgery); `exp` is required; a missing or
+non-numeric `role` is refused, never defaulted (0 would be the most-privileged caller); and
+expiry raises separately from invalidity, so a client can tell "refresh and retry" from "stop."
+The platform's role scale runs **backwards** — lower is more privileged — and is sparse (6, 7, 9
+are not roles), so `identity.ROLE_NAMES` lives next to the scale it names rather than as a
+second copy in TypeScript that stops matching the day the platform adds a tier.
+
+**Ownership.** Every file and conversation id is effectively a public link once printed into an
+answer, so both are checked at the edge: `GET /agent/files/<id>/download` and
+`get_or_create_memory` now verify the owner before doing anything else. A mismatch answers
+**404, not 403** — a 403 confirms the id exists and turns the endpoint into an enumeration
+oracle. The one gotcha worth knowing before touching an ownership query: `owner_id` is mapped as
+analysed `text` with a `.keyword` subfield, and a `term` query against the bare field compares
+against **tokens**, not the whole value — `owner_id: "http://cilogon.org/serverE/users/137206"`
+tokenises to `http`, `cilogon.org`, `users`, `137206`, none of which is the id, so a query against
+the bare field silently matches nothing. Query `owner_id.keyword`. The regression test for this
+used a fake OpenSearch that compared the stored value directly and could not have caught it —
+the fake had to learn to model analysis, and the fixtures had to stop being single-token strings
+like `"alice"`, which is exactly why the bug hid in a passing suite.
+
+**Platform tiers.** `PLATFORM_TIER=dev|prod` (`agent_runtime/platform_endpoints.py`) is one
+switch for what would otherwise be four separately-set hosts a deployment can leave
+half-changed — the frontend, the backend, the OpenSearch cluster this agent's own conversations
+live in, and this agent's id in that frontend's redirect allowlist. `SEARCH_TIER` is deliberately
+separate from `PLATFORM_TIER`: which platform mints your tokens and which knowledge base you
+search are different questions, and running the dev platform against the prod corpus is
+ordinary. Any setting can be tiered (`tiered_env`), with the tier as the fallback and an
+explicit env var always winning — except for a credential or an index name, where the tier
+supplies the value outright, because a secret or a deployment-specific name does not belong in
+this repository for an explicit variable to override. **The general rule, paid for by three
+separate silent failures in one afternoon:** anything the platform assigns per tier belongs in
+the `_TIERS` table, not in a standalone env var — a value that lives beside the table but not in
+it does not move when the tier does, and each time it happened it looked like a different bug
+(a stale cookie name, a redirect id from the wrong platform, a credential paired with a host it
+did not belong to).
+
+Host-specific detail — which tier is live, the actual cluster addresses, the redirect ids — is
+operational and changes independently of this file; read `platform_endpoints.py`'s own
+module-level comments for the current, dated state rather than trusting a value copied here.
+`docs/persistent-state.md` is the reference for what each store holds and who reclaims it,
+companion to the history below.
 
 ## Deployment
 
