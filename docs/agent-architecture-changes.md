@@ -1435,3 +1435,63 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+### Stage S12.8 What the image carries, and what quietly did not ship
+
+S12.7's fault has a packaging twin: **a directory the runtime reads, named anywhere other than
+the Dockerfile's copy list, does not reach the container.** `agent_runtime/skills.py` discovers
+skill bundles under `REPO_ROOT/skills` and `REPO_ROOT/.agents/skills`, and `REPO_ROOT` is `/app`
+in the image. `rag_pipeline/Dockerfile` builds `/app` from an explicit list of `COPY`
+instructions, one package added each time one was needed, and no version of it on `prototype`
+has copied either skill root since skills landed on 2026-05-06 (`d51cd25`): 148 days. Discovery
+skips a root that does not exist, by design, so the registry degraded to empty and nothing said
+so.
+
+| image | `/app/skills` | `/app/.agents/skills` | `SkillRegistry.discover()` |
+| --- | --- | --- | --- |
+| deployed `agent-api`, measured 2026-10-01 | absent | absent | 0 skills |
+| `prototype` @ `5ae6d92`, built locally | absent | absent | 0 skills, 0 errors |
+| the same commit with this change | 2 skills | 1 skill | 3 skills, 0 errors |
+
+The deployed agents did not have skill tools that returned nothing; they had no skill tools.
+`make_skill_tools()` returns an empty list for an empty registry, so `list_available_skills` and
+`load_skill` were never offered, and `available_skills` was `[]` in every response and in the
+stream's `initialized` event. The image now copies both roots, and all three skills load in it as
+the image's non-root user.
+
+**The first fix was partial.** `f8f99ef` on `backend_swap` (2026-08-13) copied `.agents/` alone:
+one skill of three, with `/app/skills`, the first root, still missing. The test it added passed,
+because it asked whether *any* root was copied. That is S12.7's lesson again: a check that
+recognises one wrong answer (no root) certifies another (one root of two). The commit is still on
+`backend_swap` and in `claude/extraction-integration`'s merge `b911191`; whichever branch meets
+this change should keep both `COPY` lines and drop that test.
+
+The guard is `rag_pipeline/tests/test_image_skill_roots.py`. It builds the part of `/app` that
+holds the skill roots in a temporary directory by the Dockerfile's own rules (`WORKDIR`, each
+`COPY` of the last stage, then `.dockerignore`), plants a skill in each root, and runs the real
+discovery with no explicit roots, as every production caller does. Eleven cases check that it
+rejects the ways a root can be lost, the partial fix among them. It reads text, so it does not
+replace building the image, but it fails on a checkout before anyone builds one.
+
+`.dockerignore` was checked, not assumed. Its `*.md` reads as though it drops every `SKILL.md`,
+but Docker anchors patterns at the context root, so it drops only the root's own markdown. The
+test's matcher was cross-checked against a real build of this context: of 390 paths on disk it
+predicted exactly the 365 that Docker sent.
+
+`AGENT_SKILL_PATHS` appends roots after the defaults; it does not replace them. A deployment that
+points it at a writable volume for generated skills (`backend_swap` uses
+`/app/agent_chat_files/skills`) keeps the baked-in ones: the built image found four skills with a
+third root mounted, and a test pins the order.
+
+Two of the three skills deserve a look before this is deployed, because deploying it is what
+puts them in front of the model. `example-skill` is a stub whose description says it exists to
+verify skill loading. `ai-agent-for-chicago-crime-analysis` names `mcp_run_nbwf_d01e717421c1b0ff`
+as its tool, and no such tool exists on `prototype`. `allowed-tools` is advisory, so loading that
+skill tells the agent to call a tool it does not have; nothing blocks it.
+
+The rule this leaves, beside S12.7's: **anything the runtime reads relative to `REPO_ROOT` is a
+deployment input, and the copy list is where it has to be named.** The other repository-root
+paths in the copied packages are import paths, `.env` files the image leaves out on purpose, a
+boundary for user-supplied notebook paths, and the skill emitter's output directory. One is a
+real gap and is not fixed here: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+and `examples/` is not in the image either.
