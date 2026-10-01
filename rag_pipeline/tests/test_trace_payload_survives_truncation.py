@@ -63,7 +63,12 @@ def test_the_count_survives_an_arbitrary_cut(cut):
 def test_a_method_row_is_identifiable_by_symbol():
     """The client builds a row from title|name|doc_id|id|symbol. A method unit has only the
     last, so without it every row was skipped and the count fell through to zero."""
-    results = json.loads(_payload())["results"]
+    payload = json.loads(_payload())
+    if not payload["library"]["units"]:
+        # The library is built locally from the corpus and is not committed, so a clean
+        # checkout (CI) has none. Skip rather than fail: no rows means nothing to identify.
+        pytest.skip("no method library has been built in this checkout")
+    results = payload["results"]
     assert results, "the corpus library should match a geometry query"
     assert all(r.get("symbol") for r in results)
     assert not any(r.get("title") or r.get("name") or r.get("doc_id") for r in results), (
@@ -90,5 +95,19 @@ def test_an_empty_library_and_an_unmatched_query_stay_distinguishable():
     # a few hundred units the query stopped being nonsense and started matching. The test was
     # pinning a property of the small corpus, not of the code.
     payload = json.loads(_payload("qqzzxx wgblrt vfnkpd"))
+    if not payload["library"]["units"]:
+        pytest.skip("no method library has been built in this checkout; the empty-library "
+                    "branch is pinned by the next test")
     assert payload["count"] == 0
     assert "note" in payload and "units from" in payload["note"]
+
+
+def test_an_empty_library_says_nothing_was_ingested(monkeypatch, tmp_path):
+    """The other half of the distinction, pinned on its own so it runs everywhere. The test above
+    only ever exercised the populated branch, so on a clean checkout it failed for asserting the
+    wrong one of the two notes, while the branch that checkout actually reaches went untested."""
+    monkeypatch.setenv("AGENT_METHOD_LIBRARY_DIR", str(tmp_path))
+    payload = json.loads(_payload("buffer geometry spatial"))
+    assert payload["count"] == 0 and payload["library"]["units"] == 0
+    assert "No method library has been built" in payload["note"]
+    assert "not evidence that no such method exists" in payload["note"]

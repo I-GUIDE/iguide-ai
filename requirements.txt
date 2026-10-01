@@ -71,6 +71,16 @@ pandas
 matplotlib
 nbformat
 
+# Extraction readers. Each is imported lazily by an extractor and degrades to an explicit note
+# when missing, which is exactly why their absence went unnoticed: in a clean build
+# publication_extractor reports "pypdf is not installed, so no PDF can be read" for EVERY PDF,
+# a .docx reads as nothing, and data_extractor cannot open NetCDF/HDF/GRIB. Dev had all three
+# via ~/.local, so every publication and dataset coverage figure in docs/DEVLOG.md was measured
+# with them. Found by the first CI run (2026-10-01), through test_publication_reader.py.
+pypdf
+python-docx
+xarray
+
 # Graph analysis over the extracted corpus (community detection, connectivity).
 # Declared rather than inherited: it is present today ONLY as a transitive dependency of
 # torch (`pip show networkx` -> Required-by: intake, mapclassify, osmnx, scikit-image,

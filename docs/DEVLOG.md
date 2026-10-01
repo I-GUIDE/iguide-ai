@@ -4205,3 +4205,44 @@ rather than from the previous one.
 **Measured** The exact CI command, locally: **1,947 passed**, 29 deselected, 62 s. That is the
   documented `rag_pipeline/tests/` suite (1,900) plus 47 tests in `MCP_server/` and `tests/` that
   were never in the documented command and all pass.
+
+## 2026-10-01 · M8.55 · What a clean Linux build has that this machine does not, and the reverse
+
+**Change** `pypdf`, `python-docx` and `xarray` declared in `requirements.txt` and pinned in
+  `constraints.txt` at the dev machine's versions. The default distance band in
+  `analysis_spatial_stats_tools.py` is padded by a relative 1e-9. Two trace-payload tests skip
+  without a built library, and a new one pins the empty-library note on its own.
+
+**Why** With collection fixed (M8.54) the suite ran on Linux / 3.11 for the first time: 1,925
+  passed, 4 failed. All four were the gap between this machine and a clean install.
+
+  - **Undeclared readers.** `pypdf` was never in `requirements.txt`; here it comes from
+    `~/.local`. In a clean build `publication_extractor` reports "pypdf is not installed, so no
+    PDF can be read" for every PDF. `python-docx` (DOCX publications) and `xarray`
+    (NetCDF/HDF/GRIB datasets) had the same gap and no test to expose it. Every publication and
+    dataset coverage number in this log was measured with all three present.
+  - **A threshold with zero margin.** The spatial-weights tool promises that its default
+    distance band leaves no island. `min_threshold_distance` returns the critical neighbour
+    distance exactly, and `DistanceBand` recomputes it: on the test lattice the margin is
+    `0.0` m. macOS/arm64 gives 0 islands and Linux/x86-64 gives 1, and reproducing with CI's exact
+    libpysal 4.14.1 / scipy 1.17.1 here still gives 0, so the flip is the platform's rounding, not
+    a library version. The deployed image is Linux/x86-64. This is prototype's tool; the fix is
+    one line and should go there too.
+  - **Tests that assumed local data.** Two tests needed the method library built under
+    `agent_chat_files/`, which is not committed. One of them was meant to pin the difference
+    between "nothing ingested" and "nothing matched" but only ever exercised the second. CI
+    reached the first and failed for asserting the wrong note.
+
+**Measured** 3.11 / manylinux resolve with the readers: every pin held (pypdf 6.6.2,
+  python-docx 1.2.0, xarray 2026.7.0, rasterio 1.4.4). The trace-payload tests in a copy of the
+  tree without the library: 6 passed, 4 skipped with reasons. The full CI command locally:
+  **1,948 passed**.
+
+**Surprised by** Three of the four failures were invisible here for the same reason: this
+  machine has more than the project declares, whether that's packages in the user site, a library
+  built from the corpus, or a CPU that rounds the tie the convenient way. The lock was written to
+  stop that drift, and it could only cover what was declared.
+
+**Not done** libpysal, esda, spreg and pygeoda are in `requirements.txt` but not in the lock, so
+  CI resolves libpysal 4.14.1 / esda 2.9.0 where dev runs 4.15.0 / 2.10.0. Pinning them is a
+  measured step by this file's own rule, not a CI fix.

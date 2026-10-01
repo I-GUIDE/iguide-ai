@@ -99,5 +99,11 @@ lxml==6.0.1
 markdownify==1.2.2
 ddgs==9.5.5
 nbformat==5.10.4
+# Extraction readers, undeclared until 2026-10-01 (see requirements.txt). These are the dev
+# machine's versions, i.e. the ones every publication and dataset coverage figure was measured
+# on. All three support CPython 3.11 and fit the numpy/pandas pins above.
+pypdf==6.6.2
+python-docx==1.2.0
+xarray==2026.7.0
 boto3==1.36.0
 python-dotenv==1.1.0
