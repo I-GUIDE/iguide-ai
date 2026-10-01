@@ -4453,3 +4453,17 @@ rather than from the previous one.
 **Not done** S3 (method tools as citable evidence), S4 (tier routing for extraction's OpenSearch
   reads and staging's backend URL), S5 (null-tolerant wrappers on the new tools), one extraction
   flag defaulting the bundle OFF, and the lock regenerated from the deployed freeze.
+
+## 2026-10-01 · M8.57 · The extraction tools accept an explicit null (S5)
+
+**Change** `stage_element`, `stage_url`, `list_staged_inputs`, `kb_method_search` and
+  `get_method_contract` registered through prototype's `accept_null_defaults`. The null-argument
+  scan in `test_null_tool_args.py` now covers the retrieval and staging FACTORIES.
+
+**Why** Prototype found 141 optional parameters that rejected an explicit `null` — a model that
+  fills every slot could not call them — and wrapped every tool it owned. The tools extraction
+  adds were registered without the wrapper, which a merge cannot show because nothing conflicts.
+  Listing the factories rather than five tool names keeps the next tool added to either inside the
+  scan.
+
+**Measured** The scan covers 54 tools, including all seven extraction tools; 9/9 pass.

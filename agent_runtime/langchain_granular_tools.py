@@ -456,7 +456,7 @@ def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[An
 
     return [
         StructuredTool.from_function(
-            func=_stage_element, name="stage_element",
+            func=accept_null_defaults(_stage_element), name="stage_element",
             description=(
                 "Download a PLATFORM ELEMENT's data file into the sandbox workspace so code can "
                 "open it. Input: the element id from a search result. Returns `staged_path` — the "
@@ -468,7 +468,7 @@ def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[An
             metadata={"category": "data"},
         ),
         StructuredTool.from_function(
-            func=_stage_url, name="stage_url",
+            func=accept_null_defaults(_stage_url), name="stage_url",
             description=(
                 "Download a public http(s) data file into the sandbox workspace. Returns "
                 "`staged_path` for use inside execute_code, with sha256 and size recorded for "
@@ -479,7 +479,7 @@ def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[An
             metadata={"category": "data"},
         ),
         StructuredTool.from_function(
-            func=_list_inputs, name="list_staged_inputs",
+            func=accept_null_defaults(_list_inputs), name="list_staged_inputs",
             description=(
                 "List the files already staged into this session, with their paths and origins. "
                 "Check here before staging again — the workspace persists across execute_code "
@@ -776,7 +776,7 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
-            func=kb_method_search_tool,
+            func=accept_null_defaults(kb_method_search_tool),
             name="kb_method_search",
             description=(
                 "Search the METHOD LIBRARY: real, importable Python functions extracted from "
@@ -791,7 +791,7 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
-            func=get_method_contract_tool,
+            func=accept_null_defaults(get_method_contract_tool),
             name="get_method_contract",
             description=(
                 "Full contract for one method from kb_method_search: parameters with types, "
