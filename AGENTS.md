@@ -81,16 +81,25 @@ Two providers are wired:
   argument is dropped for models that would refuse it, so a UI leaving the control set while
   switching to gpt-4o cannot break the request.
 - **AnvilGPT** (Purdue RCAC, Open WebUI) — set `AGENT_LLM_PROVIDER=anvilgpt` for the
-  process default, or select a model per request. Its ids look like `qwen3.6:27b`, NOT the
-  HuggingFace `Qwen/Qwen3.6-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
+  process default, or select a model per request. Its ids look like `qwen3.8:27b`, NOT the
+  HuggingFace `Qwen/Qwen3.8-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
   `/api/chat/completions`, which `normalize_openai_base_url` reduces to the `/api` base.
 
-**Do not set `max_tokens` for a reasoning model.** qwen3.6:27b and the gpt-5.x line spend
-their first tokens on reasoning and only then write `content`, so a tight ceiling returns
+  **Probe the roster before trusting it.** Purdue's catalogue changes under us and has lied in
+  both directions: `qwen3.6:27b` was listed and "Recommended" while returning zero bytes in 90s,
+  and by 2026-10-01 it had been removed and replaced by `qwen3.8:27b`. A ten-second
+  `GET /api/models` plus one "Say OK" separates "model is dead" from "agent is stuck" instantly,
+  and a benchmark run once sat 2h23m on exactly that confusion. Measured 2026-10-01, qwen3.8:27b
+  answers in 0.7s, emits correct `tool_calls` (`finish_reason: tool_calls`), and completes a
+  tool-result round trip in 2.2s — so unlike its predecessor it is usable as an agent model.
+
+**Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
+spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
 `finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads
 blank as "no answer", so a truncated reasoning model looks like a failed peer rather than a
 cut-off one. Measured on qwen3.6:27b: `max_tokens=20` produced no content at all; unset
-completes normally.
+completes normally. Its successor leans on reasoning even harder — qwen3.8:27b spent 34 of 38
+completion tokens thinking in order to reply "OK" — so the ceiling stays off.
 
 **A reasoning model over an OpenAI-compatible shim loses its own thinking unless we keep
 it.** `gpt-oss:120b` on AnvilGPT answers a tool-calling step with `content: None`,
