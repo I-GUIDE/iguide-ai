@@ -3809,7 +3809,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         )
         q = query
         if evidence:
-            q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
+            q = f"{query}\n\nContext evidence:\n{_format_documents(evidence, consumer='analyze_peer')}"
         # The ledger has to reach the peer that CALLS TOOLS, not only the router and the
         # synthesizer. Measured: with the boundary already fetched and its file_id sitting in
         # the ledger, "now embed those zones" still went geocode_places -> embed_region (a
@@ -4325,7 +4325,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         )
         parts = [query]
         if evidence:
-            parts.append(f"Evidence:\n{_format_documents(evidence)}")
+            parts.append(f"Evidence:\n{_format_documents(evidence, consumer='code_peer')}")
         if state.get("analysis_results"):
             parts.append(
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"

@@ -21,7 +21,7 @@ toolset without describing it and that test fails with its name.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, FrozenSet, Tuple
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,40 @@ class Toolset:
 KB_CODE_PEER_TOOLS: Tuple[str, ...] = (
     "agent_kb_search", "get_kb_block", "kb_method_search", "get_method_contract",
 )
+
+# What each EVIDENCE CONSUMER can do with an extracted method, declared rather than inferred from a
+# peer's name, so the evidence a consumer reads describes only what it can act on
+# (evidence_subgraph._render_extracted and _doc_block). A consumer that gains a capability gets
+# the view that uses it by changing its row here; rag_pipeline/tests/test_evidence_consumers.py
+# holds each peer's row to the tools its builder actually binds.
+RUN_LIBRARY = "run_library"          # imports `iguide_methods`: execute_code, library mounted
+STAGE_INPUTS = "stage_inputs"        # calls stage_element / stage_url
+SEARCH_METHODS = "search_methods"    # calls kb_method_search / get_method_contract
+
+EVIDENCE_CONSUMERS: Dict[str, FrozenSet[str]] = {
+    # The answerer and the evidence subgraph: the view as it was before this table existed. Which
+    # cut the answerer should read is B3's question (the grounding audit reads another today).
+    "answer": frozenset({RUN_LIBRARY, STAGE_INPUTS, SEARCH_METHODS}),
+    # default_code_fn: execute_code (network-none sandbox, library mounted), staging, method tools.
+    "code_peer": frozenset({RUN_LIBRARY, STAGE_INPUTS, SEARCH_METHODS}),
+    # default_analyze_fn: execute_code and the method tools, but NOT the staging tools.
+    "analyze_peer": frozenset({RUN_LIBRARY, SEARCH_METHODS}),
+    # claude_peer / opencode_peer: none, deliberately. Their container keeps network access and the
+    # model credential, a trust tier below the execute_code sandbox, so submitter-authored library
+    # code does not run there (extraction review, D1). They hold none of the agent's tools either.
+    "cli_peer": frozenset(),
+}
+
+
+def consumer_capabilities(consumer: str = "answer") -> FrozenSet[str]:
+    """What *consumer* can do with an extracted method right now: its row, or nothing while the
+    extraction bundle is off. An unknown consumer gets nothing: a view that under-describes costs a
+    reuse, while one that over-describes costs a failed import."""
+    from agent_runtime.extraction_flag import extraction_enabled
+
+    if not extraction_enabled():
+        return frozenset()
+    return EVIDENCE_CONSUMERS.get(consumer, frozenset())
 
 # Both peers bind nearly the same spatial toolkit; ``peers`` records which ones actually get it,
 # so a capability offered by only one is never described as if both had it.

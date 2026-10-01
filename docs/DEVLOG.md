@@ -4643,3 +4643,51 @@ rather than from the previous one.
   fix, because it had only passed BECAUSE of the split. Its fixture set the storage root alone;
   conftest points `AGENT_METHOD_LIBRARY_DIR` at an empty directory; the writers ignored that, so
   the library landed where the test looked. The fixture now names the library path.
+
+## 2026-10-01 · M8.64 · Evidence describes only what its reader can act on
+
+**Change** `capability_registry.EVIDENCE_CONSUMERS` declares what each reader of the evidence can
+  do with an extracted method. There are three capabilities:
+  - run the library (`execute_code` with the mount);
+  - stage inputs (`stage_element` / `stage_url`);
+  - search methods (`kb_method_search` / `get_method_contract`).
+
+  The rows:
+  - `answer` keeps every capability, which is the view as it was;
+  - `code_peer` gets all three;
+  - `analyze_peer` gets library and search, but not staging;
+  - `cli_peer` gets none.
+
+  `consumer_capabilities()` returns nothing while the bundle is off. `_render_extracted`,
+  `_doc_block` and `_format_documents` render for a named consumer:
+  - an import line only for one that can run the library;
+  - a staging instruction only for one that can stage;
+  - a `kb_method_search` pointer only for one that holds it.
+
+  A `MethodUnit` document loses its `import:` line for a reader that cannot run the library. The
+  analyse and code peers now name their rows. The CLI brief (`opencode_peer._build_peer_prompt`)
+  names `cli_peer`, and when the analysis results it carries import `iguide_methods`, it says that
+  package is not available in the container.
+
+**Why** With the bundle on, every reader got one rendering: "the import line works verbatim inside
+  execute_code (the library is mounted read-only)", and for a loader "FIRST call stage_element".
+  Only the LangChain code peer has all of that.
+  - The analyse peer binds no staging tools.
+  - The CLI code peers have no `execute_code`, no staging and no mount, by design. The agent
+    designer's review (D1) keeps submitter-authored library code out of a container that holds
+    network access and the model credential. So the peer users reach by opting into Claude would
+    have been handed imports that fail there.
+
+  The rows are declared rather than read from a peer's name, as the designer asked, so a consumer
+  that gains the mount gets the runnable view by editing its row. A test holds each peer's row to
+  the factories its builder calls.
+
+  There is a second route for the CLI peer, found while answering the designer's "is the evidence
+  path the only one?": `analysis_results` carries the analyse peer's own tool calls verbatim. No
+  skills are seeded into a CLI peer's `/work`.
+
+**Measured** `test_evidence_consumers.py` 11/11, and the flag, join and method-evidence tests
+  still pass (83 in all). The answerer's row keeps every capability, so its text is unchanged by
+  construction. A test pins it equal to the code peer's full view, because which cut the
+  answerer reads is B3's to settle. CI-style suite: **3,033 passed, 1 failed** (prototype's
+  `Beat`).
