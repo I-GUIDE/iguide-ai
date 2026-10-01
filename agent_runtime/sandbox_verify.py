@@ -484,6 +484,17 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
 
 CONTRACTS_GLOBAL = "IGUIDE_CONTRACTS"
 VIOLATIONS_GLOBAL = "_IGUIDE_CONTRACT_VIOLATIONS"
+# Metric operations geopandas ran on a GEOGRAPHIC receiver during the run, recorded by
+# install_operation_tracker; OP_TRACKING_GLOBAL says the tracker was live, which is what lets
+# run_checks trust the ABSENCE of a record.
+GEOGRAPHIC_OPS_GLOBAL = "_IGUIDE_GEOGRAPHIC_OPS"
+OP_TRACKING_GLOBAL = "_IGUIDE_OP_TRACKING"
+# The operations whose result is a distance, length or area, or is built from one. geopandas warns
+# on these (and on `centroid`, which is a location and is not counted). buffer(0), the
+# geometry-repair idiom, does not warn.
+_METRIC_OPS = ("area", "length", "buffer", "distance", "dwithin", "hausdorff_distance",
+               "frechet_distance", "interpolate", "sjoin_nearest")
+_GEOGRAPHIC_WARNING = "Geometry is in a geographic CRS. Results from '"
 
 
 def check_contract_arg(unit: str, invariant: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]:
@@ -686,6 +697,71 @@ def install_contract_guards(namespace: Dict[str, Any], contracts: Dict[str, Any]
     return wrapped
 
 
+def install_operation_tracker(namespace: Dict[str, Any]) -> bool:
+    """Record every metric operation geopandas runs on a GEOGRAPHIC receiver.
+
+    "Projected before measuring" is a property of the CALL, at the moment it runs, not of which
+    frames happen to sit in EPSG:4326 when the run ends. Frame inventory was wrong both ways:
+    - It stamped a correct run FAILED. The map UI, 2026-10-01: Champaign reprojected to 26916,
+      buffered with the library's calculate_buffers, 165.04 km^2 against QGIS's 164.99. The
+      untouched 4326 input was still bound, the measurement was a scalar, and no rescue fired.
+    - A lineage rescue would have forgiven a run that reprojects and then measures the ORIGINAL
+      anyway (the agent designer's counterexample).
+
+    geopandas already names the operation. On a geographic receiver, ``area``, ``length``,
+    ``buffer`` (not ``buffer(0)``), ``distance`` and friends warn "Geometry is in a geographic
+    CRS. Results from '<op>' are likely incorrect", and the same call after ``to_crs`` is silent
+    (verified in the deployed image, geopandas 1.1.4). ``warnings.warn`` is wrapped rather than
+    ``showwarning`` hooked, because a script that does ``filterwarnings("ignore")``, as agents
+    often do, never reaches ``showwarning``. The wrapper records first and then defers to the
+    original, so what the run prints is unchanged.
+
+    Not seen: shapely-level calls (``shapely.area(geoms)``) bypass geopandas. ``pyproj.Geod``
+    measures geodesically in 4326, which is correct, and it never warns. Never raises.
+    """
+    import linecache
+    import sys
+    import warnings as _warnings
+
+    ops = namespace.setdefault(GEOGRAPHIC_OPS_GLOBAL, [])
+    current = _warnings.warn
+    if getattr(current, "_iguide_tracked", False):
+        # Already wrapped (a second gate in one process). Point it at THIS run's record: a
+        # wrapper bound to the first namespace for good would record into a run that has ended.
+        current._iguide_ops = ops
+        namespace[OP_TRACKING_GLOBAL] = True
+        return True
+    original = current
+    marker = _GEOGRAPHIC_WARNING
+
+    def warn(message, category=None, stacklevel=1, source=None, **kwargs):
+        try:
+            text = str(message)
+            ops = warn._iguide_ops
+            if text.startswith(marker) and len(ops) < 50:
+                op = text[len(marker):].split("'", 1)[0]
+                code = ""
+                frame = sys._getframe(1)
+                while frame is not None and ("geopandas" in (frame.f_code.co_filename or "")
+                                             or "pandas" in (frame.f_code.co_filename or "")):
+                    frame = frame.f_back
+                if frame is not None:
+                    code = linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+                ops.append({"op": op, "code": code[:160]})
+        except Exception:
+            pass
+        return original(message, category, stacklevel + 1, source, **kwargs)
+
+    try:
+        warn._iguide_tracked = True
+        warn._iguide_ops = ops
+        _warnings.warn = warn
+        namespace[OP_TRACKING_GLOBAL] = True
+        return True
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
@@ -844,6 +920,43 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                                 f"reprojected before measuring — the measurements live in a "
                                 f"projected frame, so this is an untouched input.")
 
+    # The OPERATION carries the verdict when the prologue's tracker was live: a metric operation
+    # that ran on a geographic receiver is a FAIL, named by the line that ran it. Which frames
+    # happen to sit in EPSG:4326 when the run ends no longer decides anything (see
+    # install_operation_tracker). A geographic frame with no such operation is an input. One that
+    # holds a measurement column no tracked operation produced is SUSPICIOUS, not proven wrong,
+    # and a FAIL the gate cannot tie to a measurement reached the user as "⛔ not verified",
+    # which teaches the reader to ignore ⛔. So it becomes a named cannot_determine.
+    if namespace.get(OP_TRACKING_GLOBAL):
+        metric_ops = [o for o in (namespace.get(GEOGRAPHIC_OPS_GLOBAL) or [])
+                      if isinstance(o, dict) and o.get("op") in _METRIC_OPS]
+        for f in findings:
+            if not (isinstance(f, dict) and f.get("check") == "projected_crs"
+                    and f.get("status") == FAIL and "op" not in f):
+                continue
+            if f.get("metric_column"):
+                f["status"] = UNKNOWN
+                f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds a measurement "
+                                f"column ({f['metric_column']!r}) that no tracked operation "
+                                f"produced in this run, so whether it is in degrees cannot be "
+                                f"determined.")
+            else:
+                f["status"] = PASS
+                f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but no metric "
+                                f"operation ran on a geographic frame in this run: an input.")
+        seen = set()
+        for o in metric_ops:
+            key = (o.get("op"), o.get("code"))
+            if key in seen:
+                continue
+            seen.add(key)
+            where = f" in `{o['code']}`" if o.get("code") else ""
+            findings.append(_finding(
+                "projected_crs", FAIL, o.get("code") or str(o.get("op")),
+                f"'{o.get('op')}' ran on a GEOGRAPHIC CRS{where}, so its result is in degrees, "
+                f"not metres. Reproject (e.g. .to_crs(3857) or a local UTM zone) before this "
+                f"operation.", op=o.get("op")))
+
     # Declared numeric outputs, if the run published any. Checked outside the frame loop
     # because they are scalars the ANSWER will quote, not frames.
     declared = None
@@ -977,6 +1090,12 @@ try:
 except Exception:
     pass
 
+# Before the user's code, so every metric operation it runs is seen (install_operation_tracker).
+try:
+    _iguide_gate_body()['install_operation_tracker'](globals())
+except Exception:
+    pass
+
 '''
 
 
@@ -988,7 +1107,8 @@ def _inlined_helpers() -> str:
                 check_join_cardinality,
                 check_finite, _count_finding, check_declared_units, check_count_population,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
-                _looks_like_frame, _has_geometry, install_contract_guards, run_checks):
+                _looks_like_frame, _has_geometry, install_contract_guards,
+                install_operation_tracker, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))
@@ -997,6 +1117,10 @@ def _inlined_helpers() -> str:
             f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
             f"    _UNIT_ALIASES = {_UNIT_ALIASES!r}\n"
             f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
+            f"    GEOGRAPHIC_OPS_GLOBAL = {GEOGRAPHIC_OPS_GLOBAL!r}\n"
+            f"    OP_TRACKING_GLOBAL = {OP_TRACKING_GLOBAL!r}\n"
+            f"    _METRIC_OPS = {tuple(_METRIC_OPS)!r}\n"
+            f"    _GEOGRAPHIC_WARNING = {_GEOGRAPHIC_WARNING!r}\n"
             f"    _GEO_MODULES = {set(_GEO_MODULES)!r}\n"
             f"    _METRIC_COLUMN_HINTS = {tuple(_METRIC_COLUMN_HINTS)!r}\n"
             "    import math\n"
@@ -1065,7 +1189,8 @@ def epilogue_source() -> str:
 
 __all__ = ["run_checks", "write_checks", "epilogue_source", "capture_environment",
            "prologue_source", "install_contract_guards", "check_contract_arg",
-           "CONTRACTS_GLOBAL", "VIOLATIONS_GLOBAL",
+           "install_operation_tracker", "CONTRACTS_GLOBAL", "VIOLATIONS_GLOBAL",
+           "GEOGRAPHIC_OPS_GLOBAL", "OP_TRACKING_GLOBAL",
            "CHECKS_FILENAME", "ENVIRONMENT_FILENAME", "DECLARED_FILENAME",
            "PASS", "FAIL", "UNKNOWN", "DECLARED_OUTPUTS", "check_projected_crs",
            "check_not_all_nan", "check_join_cardinality", "check_finite",

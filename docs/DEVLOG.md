@@ -4788,3 +4788,64 @@ rather than from the previous one.
   with this branch's emitter writes them, and a model handed an import line writes the import.
 
 **Measured** `test_off_a_fetched_kb_doc_carries_no_import_line` checks both halves, off and on. CI-style suite: **3,057 passed, 1 failed** (prototype's `Beat`).
+
+## 2026-10-01 · M8.68 · The gate judges the operation, not the frames left lying around
+
+**Change**
+  - The prologue now wraps `warnings.warn` on every gated run (`install_operation_tracker`; it
+    imports nothing). It records each metric operation geopandas runs on a GEOGRAPHIC receiver:
+    `area`, `length`, `buffer` (not `buffer(0)`), `distance`, `dwithin`, `hausdorff_distance`,
+    `frechet_distance`, `interpolate`. geopandas itself warns on exactly these, and goes quiet once
+    the frame is reprojected. Each record carries the line that ran it.
+  - With the tracker live, `run_checks` FAILs `projected_crs` once per such operation, naming the
+    line. Which frames happen to sit in EPSG:4326 at the end no longer decides the verdict:
+    - a geographic frame that nothing measured is an input, and passes;
+    - one holding a metric column that no tracked operation produced becomes a named
+      cannot_determine, not a ⛔.
+    Without the tracker (run_checks called on its own) the frame rules are unchanged.
+  - Agent side, `_note_printed_outputs`: if stdout shows `IGUIDE_OUTPUTS` but nothing was assigned,
+    the run gets a named cannot_determine ("printed, not assigned").
+  - `environment.json` and `declared_outputs.json` are no longer offered as downloads. They stay
+    in the workspace and the run record, like `checks.json`.
+  - `execute_code`'s description now says to ASSIGN `IGUIDE_OUTPUTS`, and that printing it checks
+    nothing.
+
+**Why** Driving the map UI with the bundle on:
+  - The agent imported the library's `calculate_buffers`, reprojected Champaign to 26916, and got
+    165.04 km² (QGIS gave 164.99). The answer was stamped "⛔ A deterministic invariant check
+    FAILED".
+  - The untouched 4326 input was still bound, and the measurement was a SCALAR, so the
+    metric-column rescue (added after the same false alarm earlier) never fired.
+  - A failed gate says "fix and re-run", so the agent ran the correct code three times. That gave
+    46 steps, three download sets and four map layers.
+
+  My first fix was to record `to_crs` lineage and forgive frames that had been reprojected. The
+  agent designer pointed out the false negative that keeps: reproject, then measure the ORIGINAL
+  anyway. That is the mistake a model actually makes. Their proposal: projected-before-measuring is
+  a property of the CALL. geopandas already emits the signal, as they verified in the deployed
+  image: one warning each for `.area`, `.length` and `.buffer` on 4326, none after `to_crs`. The
+  lineage draft was removed before commit.
+
+  `warn` is wrapped rather than `showwarning` hooked, because agents routinely start with
+  `filterwarnings("ignore")`, and that would blind a `showwarning` hook.
+
+  Documented blind spots: shapely-level calls (`shapely.area(geoms)`) bypass geopandas, and
+  `pyproj.Geod` measures geodesically in 4326, correctly, without warning.
+
+**Measured** `test_invariant_gate.py` 108/108; CI-style suite **3,067 passed, 1 failed**
+  (prototype's `Beat`).
+  - The UI script passes, both in-process and through the assembled prologue and epilogue.
+  - Measuring the original after reprojecting FAILs and names `boundary.area.sum()`.
+  - A degree buffer FAILs even with warnings silenced.
+  - Neither a centroid nor `buffer(0)` counts as a measurement.
+
+  The exit-path test changed its expectation: a degree buffer inside `main()` used to be
+  invisible (`cannot_determine` with a coverage note), and the tracker now sees it, so the verdict
+  is FAIL. Its `sys.exit(main())` case had only "passed" because the body never imported `sys`,
+  so `main()` never ran.
+
+**Surprised by** An idempotent installer bound its record to the first namespace. A second gate
+  in the same process found `warn` already wrapped, returned early, and recorded into a run that
+  had ended. That is harmless in the sandbox (one gate per process), but in one test process it left
+  the second run's record empty: two degree measurements went unrecorded and their tests failed.
+  The wrapper now looks up its record at call time, and conftest restores `warn` around every test.

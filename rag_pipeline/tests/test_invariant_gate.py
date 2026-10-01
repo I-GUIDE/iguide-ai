@@ -233,12 +233,18 @@ def test_the_injected_gate_is_self_contained(tmp_path, monkeypatch):
             imported.add(node.module.split(".")[0])
     assert not imported & {"agent_runtime", "iguide_methods", "geopandas", "pandas"}, imported
 
+    # The run's own code is what fails it now: a degree buffer, seen as the call happens. A bare
+    # 4326 frame that nothing measures is an input (see the operation-tracker tests below).
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
     monkeypatch.chdir(tmp_path)
     ns = {"gdf": _geo("EPSG:4326"), "__name__": "__main__"}
-    exec(compile(src, "<script>", "exec"), ns)
+    gate = prologue_source(None)
+    exec(compile(gate + "bad = gdf.buffer(0.01)\n" + epilogue_source(), "<script>", "exec"), ns)
     report = json.loads((tmp_path / "checks.json").read_text())
     assert report["verdict"] == FAIL
-    assert _status(report["findings"], "gdf", "projected_crs") == FAIL
+    assert any(f.get("op") == "buffer" and f["status"] == FAIL for f in report["findings"])
 
 
 def test_the_epilogue_writes_checks_even_with_nothing_to_check(tmp_path, monkeypatch):
@@ -476,7 +482,8 @@ def test_every_exit_path_writes_a_report_with_no_internal_error(tmp_path, tail):
     import subprocess
     import sys as _sys
 
-    body = ("import geopandas as gpd\n"
+    body = ("import sys\n"
+            "import geopandas as gpd\n"
             "from shapely.geometry import Point\n"
             "def main():\n"
             "    g = gpd.GeoDataFrame({'a': [1]}, geometry=[Point(0, 0)], crs='EPSG:4326')\n"
@@ -489,10 +496,12 @@ def test_every_exit_path_writes_a_report_with_no_internal_error(tmp_path, tail):
     report = json.loads((tmp_path / "checks.json").read_text())
     assert "error" not in report, f"the gate errored internally: {report.get('error')}"
     assert (tmp_path / "environment.json").is_file(), "no env capture = no reproducibility"
-    # Work done inside main() leaves module scope empty, so the honest verdict is UNKNOWN with
-    # a coverage finding that SAYS SO -- not a pass, and not a bare unexplained unknown.
-    assert report["verdict"] == UNKNOWN
+    # Work done inside main() leaves module scope empty, and the coverage finding still SAYS SO.
+    # But the degree buffer inside it is no longer invisible: the operation tracker sees the
+    # call wherever it runs, so the verdict is the FAIL the code deserves, not an unknown.
     assert any(f["check"] == "coverage" for f in report["findings"])
+    assert report["verdict"] == FAIL
+    assert any(f.get("op") == "buffer" and f["status"] == FAIL for f in report["findings"])
 
 
 def test_a_run_with_no_geospatial_library_can_still_pass(tmp_path, monkeypatch):
@@ -729,6 +738,103 @@ def test_a_measurement_computed_in_degrees_fails_even_beside_a_projected_frame()
     assert _find(report, "bad", "projected_crs")["metric_column"] == "area_km2"
 
 
+# ------------------------------------------- the OPERATION decides, not the frame inventory
+
+@pytest.fixture()
+def tracked(monkeypatch):
+    """The prologue's operation tracker, live for one test; warnings.warn restored after."""
+    import warnings
+
+    from agent_runtime.sandbox_verify import install_operation_tracker
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+    ns = {}
+    assert install_operation_tracker(ns)
+    return ns
+
+
+def _run(ns, tmp_path, code):
+    """From a real file, as the sandbox runs it, so the FAIL can quote the line."""
+    path = tmp_path / "script.py"
+    path.write_text(code, encoding="utf-8")
+    exec(compile(code, str(path), "exec"), ns)
+    return run_checks(ns)
+
+
+def test_a_reprojected_input_measured_into_a_scalar_passes(tracked, tmp_path):
+    """The map UI, 2026-10-01. Champaign reprojected to 26916, buffered by 2 km, 165.04 km^2
+    against QGIS's 164.99, and the answer was stamped ⛔ FAILED. The untouched 4326 input was
+    still bound and the measurement was a scalar, so no frame-level rescue fired."""
+    tracked["boundary"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "projected = boundary.to_crs('EPSG:26916')\n"
+                           "buffered = projected.buffer(2000)\n"
+                           "area_km2 = float(buffered.area.sum() / 1e6)\n")
+    assert report["verdict"] != FAIL, [f for f in report["findings"] if f["status"] == FAIL]
+    assert _status(report["findings"], "boundary", "projected_crs") == PASS
+
+
+def test_measuring_the_original_after_reprojecting_fails(tracked, tmp_path):
+    """The agent designer's counterexample to frame lineage: reproject, then measure the WRONG
+    variable. Seen at the call, it is a degree measurement wherever its result lands."""
+    tracked["boundary"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "projected = boundary.to_crs('EPSG:26916')\n"
+                           "area = float(boundary.area.sum())\n")
+    assert report["verdict"] == FAIL
+    failed = [f for f in report["findings"] if f["status"] == FAIL]
+    assert failed and failed[0]["op"] == "area"
+    assert "boundary.area.sum()" in failed[0]["message"], "the FAIL names the line"
+
+
+def test_a_buffer_in_degrees_fails_even_when_warnings_are_silenced(tracked, tmp_path):
+    """Agents routinely start with filterwarnings('ignore'), and that must not blind the gate."""
+    tracked["gdf"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "import warnings\nwarnings.filterwarnings('ignore')\n"
+                           "bad = gdf.buffer(0.01)\n")
+    assert report["verdict"] == FAIL
+    assert any(f.get("op") == "buffer" and f["status"] == FAIL for f in report["findings"])
+
+
+def test_a_centroid_or_a_zero_buffer_in_4326_is_not_a_measurement(tracked, tmp_path):
+    """A centroid is a location, and buffer(0) is the geometry-repair idiom (geopandas does not
+    even warn on it). Neither is a distance."""
+    tracked["gdf"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "labels = gdf.centroid\nrepaired = gdf.buffer(0)\n")
+    assert report["verdict"] != FAIL, [f for f in report["findings"] if f["status"] == FAIL]
+
+
+def test_an_unexplained_metric_column_in_4326_is_unknown_not_a_failure(tracked, tmp_path):
+    """Suspicious, not proven: no tracked operation produced it, and a FAIL the gate cannot tie
+    to a measurement reaches the user as ⛔."""
+    tracked["gdf"] = _geo("EPSG:4326").assign(area_km2=[0.196, 0.196])
+    report = _run(tracked, tmp_path, "x = 1\n")
+    assert _status(report["findings"], "gdf", "projected_crs") == UNKNOWN
+
+
+def test_without_the_tracker_the_frame_rules_still_apply():
+    """run_checks called on its own (no live tracker) keeps the old semantics."""
+    assert run_checks({"gdf": _geo("EPSG:4326")})["verdict"] == FAIL
+
+
+def test_the_ui_script_passes_through_the_assembled_gate(tmp_path, monkeypatch):
+    """The prologue, the shape of the script the UI run executed, and the epilogue: what the
+    sandbox actually runs."""
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+    monkeypatch.chdir(tmp_path)
+    _geo("EPSG:4326").to_file(tmp_path / "boundary.geojson", driver="GeoJSON")
+    code = ("import geopandas as gpd\n"
+            "boundary = gpd.read_file('boundary.geojson')\n"
+            "projected = boundary.to_crs('EPSG:26916')\n"
+            "buffered = projected.buffer(2000)\n"
+            "area_km2 = float(buffered.area.sum() / 1_000_000)\n"
+            "IGUIDE_OUTPUTS = {'buffered_area': {'value': area_km2, 'unit': 'km2'}}\n")
+    src = prologue_source(None) + code + epilogue_source()
+    exec(compile(src, "<script>", "exec"), {"__name__": "__main__"})
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] != FAIL, report["findings"]
+
+
 def _find(report, target, check):
     return next(f for f in report["findings"]
                 if f["target"] == target and f["check"] == check)
@@ -868,3 +974,48 @@ def test_the_synthesised_message_distinguishes_nothing_checked_from_evidence_los
                                    "counts": {"pass": 2, "fail": 0, "cannot_determine": 1},
                                    "findings": []})
     assert "not retained" in truncated[0]["message"]
+
+
+# ------------------------------------------- agent side: what the run's output can tell us
+
+def _gated_run(tmp_path, monkeypatch, *, stdout, declared):
+    """A run whose sandbox wrote a passing checks.json and the given declared outputs."""
+    from agent_runtime import code_execution as ce
+
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+
+    class Probe(ce.LocalSubprocessExecutor):
+        def _run(self, work, timeout, dependencies=None, deps_cache=None, entrypoint=None):
+            (work / "checks.json").write_text(json.dumps(
+                {"verdict": PASS, "counts": {PASS: 1, FAIL: 0, UNKNOWN: 0}, "findings": []}))
+            (work / "declared_outputs.json").write_text(json.dumps(declared))
+            (work / "environment.json").write_text(json.dumps({"python": "3.11"}))
+            (work / "buffer.geojson").write_text('{"type": "FeatureCollection", "features": []}')
+            return 0, stdout, "", False, None
+
+    return Probe().execute("x = 1")
+
+
+def test_a_printed_iguide_outputs_is_named_not_quietly_unchecked(tmp_path, monkeypatch):
+    """The map UI, 2026-10-01: `print('IGUIDE_OUTPUTS =', {...})`, so declared_outputs.json was
+    {} and nothing was checked, with no word about why."""
+    result = _gated_run(tmp_path, monkeypatch, declared={},
+                        stdout="IGUIDE_OUTPUTS = {'buffered_area': {'value': 165.0, 'unit': 'km2'}}")
+    assert result.verification["verdict"] == UNKNOWN
+    named = [f for f in result.verification["findings"] if f["check"] == "declared_outputs"]
+    assert named and "printed, not assigned" in named[0]["message"]
+
+
+def test_an_assigned_iguide_outputs_is_left_alone(tmp_path, monkeypatch):
+    result = _gated_run(tmp_path, monkeypatch, stdout="IGUIDE_OUTPUTS printed for the log too",
+                        declared={"buffered_area": {"value": 165.0, "unit": "km2"}})
+    assert result.verification["verdict"] == PASS
+
+
+def test_the_gates_own_files_are_not_offered_as_downloads(tmp_path, monkeypatch):
+    """Provenance, not results: the map UI listed environment.json and declared_outputs.json
+    again after every run. They stay in the workspace for the run record."""
+    result = _gated_run(tmp_path, monkeypatch, stdout="", declared={})
+    names = {a.get("filename") or a.get("name") for a in result.artifacts}
+    assert "buffer.geojson" in names, names
+    assert not {"environment.json", "declared_outputs.json", "checks.json"} & names, names

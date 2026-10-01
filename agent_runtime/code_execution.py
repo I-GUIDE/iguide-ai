@@ -406,6 +406,36 @@ def contracts_for_code(code: str) -> Dict[str, Any]:
     return out
 
 
+def _note_printed_outputs(verification: Dict[str, Any], stdout: Any, work: Path) -> Dict[str, Any]:
+    """Name the near-miss: ``print('IGUIDE_OUTPUTS =', {...})`` declares nothing.
+
+    The gate reads the module-level VARIABLE, so a run that printed its numbers instead declared
+    none, and none of them was checked. Seen in the map UI on 2026-10-01: ``declared_outputs.json``
+    was ``{}`` on a run whose stdout carried the dict. Only the agent side sees stdout, so it is
+    detected here and stated as a cannot_determine that says what to do. Never raises.
+    """
+    try:
+        from agent_runtime.sandbox_verify import DECLARED_FILENAME, DECLARED_OUTPUTS, UNKNOWN
+
+        if not verification or DECLARED_OUTPUTS not in str(stdout or ""):
+            return verification
+        path = work / DECLARED_FILENAME
+        declared = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        if declared:
+            return verification
+        finding = {"check": "declared_outputs", "status": UNKNOWN, "target": DECLARED_OUTPUTS,
+                   "message": (f"{DECLARED_OUTPUTS} was printed, not assigned: the gate reads a "
+                               f"module-level variable, so none of the printed numbers was "
+                               f"checked. Assign {DECLARED_OUTPUTS} = {{...}} at module scope.")}
+        counts = dict(verification.get("counts") or {})
+        counts[UNKNOWN] = counts.get(UNKNOWN, 0) + 1
+        verdict = verification.get("verdict")
+        return {**verification, "findings": [*(verification.get("findings") or []), finding],
+                "counts": counts, "verdict": verdict if verdict == "fail" else UNKNOWN}
+    except Exception:
+        return verification
+
+
 def _read_checks(work: Path) -> Dict[str, Any]:
     """Load the invariant gate's report, if it wrote one.
 
@@ -1156,7 +1186,8 @@ class CodeExecutor:
                 os.chmod(work, 0o777)  # let a non-root container user write outputs
             except OSError:
                 pass
-            from agent_runtime.sandbox_verify import CHECKS_FILENAME
+            from agent_runtime.sandbox_verify import (CHECKS_FILENAME, DECLARED_FILENAME,
+                                                      ENVIRONMENT_FILENAME)
             try:
                 (work / CHECKS_FILENAME).unlink()
             except OSError:
@@ -1168,9 +1199,13 @@ class CodeExecutor:
             unchanged = {rel for rel, sig in _stat_map(work).items()
                          if carried.get(rel) == sig}  # carried in and untouched -> not an output
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
+            # The gate's own record (environment.json, declared_outputs.json) is provenance, not a
+            # result. It stays in the workspace and the run record, beside checks.json, but is not
+            # offered as a download: the map UI listed both again after every run.
             artifacts = [*source_artifacts,
-                         *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, *staged, *unchanged})]
-            verification = _read_checks(work)
+                         *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, ENVIRONMENT_FILENAME,
+                                                    DECLARED_FILENAME, *staged, *unchanged})]
+            verification = _note_printed_outputs(_read_checks(work), stdout, work)
             # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
             # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
             # run dir before it is carried back, so it lands in the durable workspace beside the

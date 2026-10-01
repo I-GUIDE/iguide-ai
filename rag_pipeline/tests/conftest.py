@@ -118,6 +118,16 @@ if not _LIVE:
 
 
 @pytest.fixture(autouse=True)
+def _restore_warnings_warn(monkeypatch):
+    """The invariant gate's prologue wraps ``warnings.warn`` to see geographic metric operations
+    (sandbox_verify.install_operation_tracker). In the sandbox that lasts one process; a test
+    that execs the prologue in-process must not hand the wrapper to every later test."""
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_generated_state(tmp_path_factory, monkeypatch):
     """Point the method library and the local agent KB at empty per-test directories."""
     monkeypatch.setenv("AGENT_METHOD_LIBRARY_DIR",
