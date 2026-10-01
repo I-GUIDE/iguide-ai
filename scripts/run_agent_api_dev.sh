@@ -6,8 +6,11 @@
 # contract lives in exactly one place.
 #
 #   AGENT_CHAT_API_KEY        set it -> the prototype must send a matching X-API-KEY.
-#                             unset  -> auth fails CLOSED (500) unless the next var is on.
-#   AGENT_CHAT_AUTH_OPTIONAL  =1 to run with no auth at all (local only).
+#                             This script defaults it to dev-key. (Empty disables the key check
+#                             outside token mode — prototype's semantics since the 2026-10-01
+#                             integration; the server no longer fails closed on it.)
+#   AGENT_CHAT_AUTH_OPTIONAL  =1 to run with no key at all (local only): clears the key.
+#   AGENT_EXTRACTION          =1 to turn the extraction bundle on; off by default, as deployed.
 #   AGENT_CORS_ORIGINS        must include the prototype's origin, e.g.
 #                             http://localhost:8131, or the browser blocks the request.
 #   AGENT_KB_BACKEND          defaults to `local` in agent_kb.py so tests stay offline. This
