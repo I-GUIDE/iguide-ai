@@ -4593,3 +4593,53 @@ rather than from the previous one.
 **Measured** `test_extraction_flag.py` 13/13. Each new test checks its on half too, and the join
   test records calls instead of raising, because the call site swallows exceptions. CI-style
   suite: **3,009 passed, 1 failed** (prototype's `Beat`).
+
+## 2026-10-01 · M8.63 · The library the agent lists is the library the sandbox imports
+
+**Change**
+  - One resolver for the library's location, `code_execution.method_library_root()`. The reader
+    and both writers (`library_emitter.library_root()`, `build_method_library.py`) now use it.
+  - `docker-compose.extraction.yml`, the opt-in override. It sets `AGENT_EXTRACTION=1` and
+    bind-mounts `AGENT_METHOD_LIBRARY_DIR` at the IDENTICAL path, and it requires that path
+    (`:?`). `COMPOSE_FILE` in `.env` is the switch; the main compose file is unchanged.
+  - A failed `import iguide_methods` now names its cause: bundle off, nothing built, or built
+    but invisible to the sandbox. The last one logs the host-path rule once for the operator and
+    tells the model to write the function inline. The note goes FIRST in stderr, because `_clip`
+    keeps the head.
+  - The image copies `build_method_library.py` and `smoke_end_to_end.py`, and the runbook runs
+    both inside agent-api. The smoke script's executor call is fixed: the merge had left it
+    passing `session_id=`/`tier=`, so it raised TypeError. It now reports the flag, forces the
+    bundle on for its own process (a pre-flight), and checks the library path is host-visible.
+  - `DEPLOYMENT.md`: a new step 0 to turn the bundle on, the build and smoke steps moved into
+    agent-api, a rewritten `AGENT_METHOD_LIBRARY_DIR` row, and a note that §6's gate rows need
+    the bundle on.
+
+**Why** Turning the bundle on in the deployed shape would have mounted an EMPTY library.
+  agent-api starts sandboxes through the host's Docker daemon, which resolves `-v` sources on the
+  host. The library's default location is on the `agent_chat_files` named volume, and the host
+  has no such path: the agent designer checked the VM read-only, and `/app` does not exist there.
+  The daemon creates the missing directory and mounts it. `kb_method_search` keeps listing
+  methods with import lines, and every import fails.
+
+  Two more defects blocked the fix:
+  - Setting `AGENT_METHOD_LIBRARY_DIR` did nothing for the writers, which hardcoded the default.
+  - The one check that would have caught it, the smoke script's sandbox import, was broken by the
+    merge. Its runbook step ran `docker run` from the HOST, which passes while every turn fails.
+
+  Rejected: binding the named volume's own `_data/method_library`. It works today, but it couples
+  the deployment to Docker's internal volume layout (data-root, project-name prefix).
+
+**Measured**
+  - `docker compose config`: the main file alone renders. With the override and no path it
+    fails, naming the variable. With the path set, agent-api has the library bind (source ==
+    target) beside the work-root bind.
+  - New tests: 8 in `test_method_library_location.py`, 5 in `test_deployment_contract.py`. The
+    two compose tests drive compose's real merge. CI-style suite: **3,022 passed, 1 failed**
+    (prototype's `Beat`).
+  - Not reproduced live: Docker Desktop is not running here. The empty mount is inferred from
+    bind semantics plus the VM check.
+
+**Surprised by** `test_the_advertised_module_is_a_file_that_exists` failed after the resolver
+  fix, because it had only passed BECAUSE of the split. Its fixture set the storage root alone;
+  conftest points `AGENT_METHOD_LIBRARY_DIR` at an empty directory; the writers ignored that, so
+  the library landed where the test looked. The fixture now names the library path.

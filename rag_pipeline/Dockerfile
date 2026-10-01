@@ -85,6 +85,12 @@ COPY extractors/ ./extractors/
 # SkillRegistry.discover() returned 0.
 COPY skills/ ./skills/
 COPY .agents/ ./.agents/
+# The two scripts a deployer runs INSIDE this container when turning the extraction bundle on
+# (docker-compose.extraction.yml). The build writes where AGENT_METHOD_LIBRARY_DIR points, and the
+# smoke test drives the real executor, so it sees the sandbox's library mount exactly as a turn
+# does. Run from the host instead, it mounted the library from a host path and passed while every
+# turn in the container got an empty one.
+COPY scripts/build_method_library.py scripts/smoke_end_to_end.py ./scripts/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request

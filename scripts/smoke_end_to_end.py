@@ -49,10 +49,29 @@ def check_config(offline: bool) -> None:
     section("1. configuration — the settings whose absence fails quietly")
     from agent_runtime.code_execution import method_library_dir
 
+    from agent_runtime.extraction_flag import extraction_enabled
+
+    # A pre-flight as much as a check: run it BEFORE turning the bundle on for the server. This
+    # process forces the bundle on so sections 2-4 test what a turn would get once it is.
+    on = extraction_enabled()
+    record("extraction bundle", PASS if on else SKIP,
+           "on" if on else "off for the server (AGENT_EXTRACTION unset); forced on for this "
+                           "pre-flight only")
+    os.environ["AGENT_EXTRACTION"] = "1"
+
     lib = method_library_dir()
     record("method library resolves", PASS if lib else FAIL,
            str(lib) if lib else "AGENT_METHOD_LIBRARY_DIR unset and no storage_root copy — "
                                 "kb_method_search will report an empty library")
+    # Docker-out-of-Docker: inside a container, the library mount's source is resolved by the
+    # HOST's daemon, and the default path is on a named volume the host does not have. The sandbox
+    # check in section 4 proves it either way; this says why before it runs.
+    if Path("/.dockerenv").exists() and (os.getenv("AGENT_CODE_EXEC_BACKEND") or "docker") == "docker":
+        explicit = bool((os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip())
+        record("library path visible to the host", PASS if explicit else FAIL,
+               "AGENT_METHOD_LIBRARY_DIR set (it must be bind-mounted at the identical path)"
+               if explicit else "default path is container-local: the sandbox will get an EMPTY "
+                                "library (include docker-compose.extraction.yml)")
 
     backend = (os.getenv("AGENT_KB_BACKEND") or "local").strip()
     cluster = bool(os.getenv("OPENSEARCH_NODE"))
@@ -256,7 +275,7 @@ def check_sandbox() -> None:
     for label, code, want in (("correct run verdicts pass", good, "pass"),
                               ("degrees buffer verdicts fail", BAD.format(imp=imp), "fail")):
         started = time.time()
-        result = executor.execute(code, session_id="smoke", tier="standard", dependencies=[])
+        result = executor.execute(code, session="smoke", dependencies=[])
         report = result.verification or {}
         verdict = report.get("verdict")
         if report.get("error"):

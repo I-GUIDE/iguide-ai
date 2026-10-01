@@ -554,8 +554,9 @@ def main() -> int:
     if args.dry_run:
         print("\n--dry-run: library not written")
     else:
-        from agent_runtime.file_store import storage_root
-        root = Path(storage_root()) / "method_library"
+        # Where the reader looks (AGENT_METHOD_LIBRARY_DIR, else storage_root()/method_library),
+        # not a hardcoded copy of the default — see code_execution.method_library_root.
+        root = library_emitter.library_root()
         out = library_emitter.emit(manifest, root=root)
         print(f"\nlibrary: {root}")
         print(f"  modules written {len(out.get('written') or [])}")

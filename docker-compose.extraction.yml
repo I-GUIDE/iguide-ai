@@ -1,0 +1,38 @@
+# Turns the extraction bundle ON for the agent (agent_runtime/extraction_flag.py).
+#
+# Include it alongside the main file, per command:
+#   docker compose -f docker-compose.yml -f docker-compose.extraction.yml up -d --build
+# or for every command, from .env (this is the switch a deployer actually flips):
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.extraction.yml
+#   AGENT_METHOD_LIBRARY_DIR=/a/persistent/host/directory
+#
+# Why a file and not just AGENT_EXTRACTION=1: the bundle mounts the method library into every
+# sandbox run, and agent-api starts those runs through the HOST's Docker daemon
+# (Docker-out-of-Docker). The daemon resolves a `-v` source on the host, so the library has to sit
+# at the SAME absolute path in this container and on the host, the rule the main file already
+# follows for /tmp/iguide_codeexec. The default location, storage_root()/method_library, is on the
+# agent_chat_files named volume, and the host has no such path (verified on the VM: /app does not
+# exist there). The daemon would create an empty directory, mount THAT, and every
+# `from iguide_methods import ...` would fail while kb_method_search kept listing the methods.
+#
+# Rejected alternative: bind the named volume's own `_data/method_library` directory. It works,
+# but it couples the deployment to Docker's internal volume layout (data-root, project-name
+# prefix). The identical-path bind below mirrors the work root and depends on neither.
+#
+# The path is REQUIRED here (`:?`) and only here. The main file must not require it: compose
+# interpolates a whole file before applying profiles, so a `:?` there fails every service on a host
+# that never turned the bundle on (M8.59). This file is read only when the bundle is being turned
+# on, so a missing path should stop `up` instead of surfacing as the first failed import.
+#
+# Pick a persistent directory: not /tmp, which many hosts clear at boot. On Docker Desktop it must
+# also be under a shared path (/Users/... by default). Then, inside agent-api:
+#   docker compose exec agent-api python scripts/build_method_library.py --type notebook
+#   docker compose exec agent-api python scripts/smoke_end_to_end.py --offline
+# The smoke test drives the real executor, so its sandbox section proves the mount.
+services:
+  agent-api:
+    environment:
+      - AGENT_EXTRACTION=1
+      - AGENT_METHOD_LIBRARY_DIR=${AGENT_METHOD_LIBRARY_DIR:?set AGENT_METHOD_LIBRARY_DIR to a persistent host directory - see docker-compose.extraction.yml}
+    volumes:
+      - ${AGENT_METHOD_LIBRARY_DIR:?set AGENT_METHOD_LIBRARY_DIR}:${AGENT_METHOD_LIBRARY_DIR:?set AGENT_METHOD_LIBRARY_DIR}

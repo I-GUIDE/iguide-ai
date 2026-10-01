@@ -304,20 +304,36 @@ def _clip(text: Any, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s if len(s) <= limit else (s[:limit] + f"\n…[truncated {len(s) - limit} chars]")
 
 
-def method_library_dir() -> Optional[Path]:
-    """Host path of the generated method library, or None when nothing is ingested yet."""
+def method_library_root() -> Optional[Path]:
+    """Where the generated method library lives, built or not: the ONE answer for its reader and
+    its writers.
+
+    They used to disagree. The reader (below) honoured ``AGENT_METHOD_LIBRARY_DIR`` while both
+    writers — ``extractors/emitters/library_emitter.py`` and ``scripts/build_method_library.py``
+    — wrote to ``storage_root()/method_library`` regardless. Setting the variable, which
+    Docker-out-of-Docker requires (docker-compose.extraction.yml), therefore built the library in
+    one place and read it from another, empty one.
+    """
     override = (os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip()
     if override:
-        p = Path(override).expanduser()
-    else:
-        try:
-            from agent_runtime.file_store import storage_root
-            p = Path(storage_root()) / METHOD_LIBRARY_DIRNAME
-        except Exception:
-            return None
+        return Path(override).expanduser()
+    try:
+        from agent_runtime.file_store import storage_root
+        return Path(storage_root()) / METHOD_LIBRARY_DIRNAME
+    except Exception:
+        return None
+
+
+def method_library_dir() -> Optional[Path]:
+    """Path of the generated method library, or None when nothing is ingested yet.
+
+    Under Docker-out-of-Docker this path is also the bind SOURCE of the sandbox's library mount,
+    which the host's daemon resolves, so it must exist at the same absolute path on the host.
+    """
+    p = method_library_root()
     # "Ingested" means the package exists, not merely the directory. An empty directory used to
     # count, so it was mounted and put first on the sandbox PYTHONPATH with nothing in it.
-    return p if (p / "iguide_methods").is_dir() else None
+    return p if (p is not None and (p / "iguide_methods").is_dir()) else None
 
 
 def artifacts_enabled() -> bool:
@@ -548,6 +564,42 @@ def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Option
     if not (stderr or "").strip():
         detail += " No stderr was produced, so nothing was written and no output files exist."
     return detail
+
+
+# The top-level package only. `No module named 'iguide_methods.ke_x'` names a wrong element
+# module, which the traceback already explains; it is not a missing library.
+_LIBRARY_MISSING = "No module named 'iguide_methods'"
+_library_warned: set = set()
+
+
+def _diagnose_library_import(stderr: str, backend: str) -> Optional[str]:
+    """Say WHY ``iguide_methods`` would not import, which the traceback cannot.
+
+    Three causes raise the same ModuleNotFoundError and call for different responses. The one
+    that matters is a library that is built but invisible to the sandbox. Under
+    Docker-out-of-Docker the host's daemon resolves the bind source, and the default location
+    (storage_root()/method_library) sits on a named volume the host does not have at that path,
+    so the daemon creates an empty directory and mounts THAT. Meanwhile the agent side lists the
+    methods, with import lines, and every one of them fails here.
+    """
+    if _LIBRARY_MISSING not in (stderr or ""):
+        return None
+    if not extraction_enabled():
+        return "[`iguide_methods` does not exist in this deployment; write the function inline.]"
+    lib = method_library_dir()
+    if lib is None:
+        return ("[no method library has been built in this deployment, so `iguide_methods` does "
+                "not exist yet; write the function inline.]")
+    if str(lib) not in _library_warned:
+        _library_warned.add(str(lib))
+        _LOG.warning(
+            "method library at %s is built but a %s sandbox could not import it.%s", lib, backend,
+            " Under Docker-out-of-Docker the daemon resolves that path on the HOST, so it must "
+            "exist at the same absolute path there (docker-compose.extraction.yml); otherwise an "
+            "empty directory is mounted." if backend == "docker" else "")
+    return ("[the method library is built in this deployment but is not visible inside the "
+            "sandbox: a mount problem on the server, logged for its operator. No library method "
+            "can be imported until it is fixed; write the function inline.]")
 
 
 def _describe_code(code: str) -> Optional[str]:
@@ -1146,6 +1198,11 @@ class CodeExecutor:
                 stderr = (str(stderr or "") + f"\n[an attached upload was used for {shadowed} "
                           "rather than the file of that name in the working directory; write "
                           "your version under a different name to read it back]").strip()
+            # FIRST rather than appended like the notes above: `_clip` keeps the head, and this
+            # note is the explanation of the failure, not a footnote to it.
+            library_note = _diagnose_library_import(stderr, self.backend)
+            if library_note:
+                stderr = (library_note + "\n" + str(stderr or "")).strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.
             error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,

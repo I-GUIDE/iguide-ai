@@ -361,3 +361,92 @@ def test_the_agent_db_is_behind_a_profile():
     assert compose["services"]["agent-db"].get("profiles"), "agent-db starts by default"
     assert "agent-db" not in (compose["services"]["agent-api"].get("depends_on") or {}), (
         "agent-api must not depend on a service that is off by default")
+
+
+# ------------------------------------------------------------------ turning the extraction on
+#
+# agent-api starts sandbox runs through the HOST's Docker daemon, which resolves every `-v` source
+# on the host. The library's default location is on a named volume that the host does not have at
+# that path (verified on the VM: /app does not exist there), so the daemon mounted an EMPTY
+# directory and every library import failed while kb_method_search kept listing the methods.
+
+EXTRACTION_OVERRIDE = REPO / "docker-compose.extraction.yml"
+_LIBRARY_VAR = r"\$\{AGENT_METHOD_LIBRARY_DIR:\?[^}]*\}"
+
+
+def _override_agent_api() -> dict:
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load(EXTRACTION_OVERRIDE.read_text(encoding="utf-8"))["services"]["agent-api"]
+
+
+def test_the_override_mounts_the_library_at_the_identical_path():
+    """The same rule the main file follows for /tmp/iguide_codeexec."""
+    import re
+
+    svc = _override_agent_api()
+    env = dict(entry.split("=", 1) for entry in svc["environment"])
+    assert env["AGENT_EXTRACTION"] == "1", "including the override is the switch"
+    path = "/srv/iguide/method_library"
+    assert re.sub(_LIBRARY_VAR, path, env["AGENT_METHOD_LIBRARY_DIR"]) == path
+    assert f"{path}:{path}" in [re.sub(_LIBRARY_VAR, path, v) for v in svc["volumes"]]
+
+
+def test_the_override_requires_the_library_path():
+    """`:?` is right HERE and only here: this file is read only when the bundle is being turned
+    on, so a missing path stops `up` instead of surfacing as the first failed import. The main
+    file's rule is test_compose_has_no_required_variable_that_fails_every_service."""
+    import re
+
+    text = EXTRACTION_OVERRIDE.read_text(encoding="utf-8")
+    config = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    uses = re.findall(r"\$\{AGENT_METHOD_LIBRARY_DIR[^}]*\}", config)
+    assert len(uses) == 3 and all(":?" in u for u in uses), uses
+
+
+def test_the_image_carries_the_preflight_scripts():
+    """The pre-flight has to run where turns run. From the host, the smoke test mounted the
+    library from a host path and passed while every turn in the container got an empty one."""
+    copies = [l for l in _dockerfile().splitlines() if l.startswith("COPY ")]
+    for script in ("scripts/build_method_library.py", "scripts/smoke_end_to_end.py"):
+        assert any(script in line for line in copies), f"{script} is not copied into the image"
+
+
+def _compose(tmp_path, *args, env=None):
+    import os
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        pytest.skip("docker CLI not installed")
+    for name in ("docker-compose.yml", "docker-compose.extraction.yml"):
+        shutil.copy(REPO / name, tmp_path / name)
+    (tmp_path / ".env").write_text("")          # env_file: .env must exist to render
+    full_env = {k: v for k, v in os.environ.items() if k != "AGENT_METHOD_LIBRARY_DIR"}
+    full_env.update(env or {})
+    proc = subprocess.run(["docker", "compose", "-f", "docker-compose.yml", "-f",
+                           "docker-compose.extraction.yml", *args],
+                          cwd=tmp_path, env=full_env, capture_output=True, text=True, timeout=60)
+    if "is not a docker command" in proc.stderr:
+        pytest.skip("docker compose plugin not installed")
+    return proc
+
+
+def test_compose_merges_the_override_the_way_this_file_says(tmp_path):
+    """Compose's real merge, not a reading of the YAML: the override's volume and environment
+    entries are ADDED to the main file's, and the work-root mount survives beside the library."""
+    import json
+
+    path = "/srv/iguide/method_library"
+    proc = _compose(tmp_path, "config", "--format", "json", env={"AGENT_METHOD_LIBRARY_DIR": path})
+    assert proc.returncode == 0, proc.stderr
+    svc = json.loads(proc.stdout)["services"]["agent-api"]
+    binds = {(v.get("source"), v.get("target")) for v in svc["volumes"] if v.get("type") == "bind"}
+    assert (path, path) in binds
+    assert ("/tmp/iguide_codeexec", "/tmp/iguide_codeexec") in binds
+    assert svc["environment"]["AGENT_EXTRACTION"] == "1"
+    assert svc["environment"]["AGENT_METHOD_LIBRARY_DIR"] == path
+
+
+def test_compose_refuses_the_override_without_a_library_path(tmp_path):
+    proc = _compose(tmp_path, "config", "--quiet")
+    assert proc.returncode != 0 and "AGENT_METHOD_LIBRARY_DIR" in proc.stderr, proc.stderr

@@ -35,8 +35,14 @@ def isolated(tmp_path, monkeypatch):
 
     The variable is ``AGENT_FILE_STORAGE_ROOT`` (``file_store.storage_root``). Setting the wrong
     name silently writes into the developer's real method library — which is how I learned it.
+
+    The library is pointed at ``tmp_path/method_library`` explicitly. This fixture used to set the
+    storage root alone, and it worked only because the library's WRITERS ignored
+    ``AGENT_METHOD_LIBRARY_DIR`` (conftest sets it to an empty directory) while its reader honoured
+    it. Since M8.63 both ask ``code_execution.method_library_root``, so the test says where.
     """
     monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_METHOD_LIBRARY_DIR", str(tmp_path / "method_library"))
     monkeypatch.setenv("AGENT_KB_BACKEND", "local")
     return tmp_path
 

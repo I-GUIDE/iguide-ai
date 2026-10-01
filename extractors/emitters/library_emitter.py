@@ -46,7 +46,12 @@ def _storage_root() -> Path:
 
 
 def library_root() -> Path:
-    root = _storage_root() / "method_library"
+    # The reader's answer, not a second copy of it: this used to hardcode
+    # storage_root()/method_library, so setting AGENT_METHOD_LIBRARY_DIR — which
+    # Docker-out-of-Docker requires — built the library where nothing read it.
+    from agent_runtime.code_execution import method_library_root
+
+    root = method_library_root() or (_storage_root() / "method_library")
     root.mkdir(parents=True, exist_ok=True)
     return root
 
