@@ -2619,6 +2619,7 @@ def _wants_external_data(query: str) -> bool:
 # will re-implement it. Deliberately independent of the request's enabled_search_methods: this
 # is a capability of those peers, not a per-request search preference.
 from agent_runtime.capability_registry import KB_CODE_PEER_TOOLS  # noqa: E402 - pure module
+from agent_runtime.extraction_flag import extraction_enabled  # noqa: E402 - pure module
 
 _CODE_PEER_KB_TOOLS = set(KB_CODE_PEER_TOOLS)
 
@@ -2797,7 +2798,7 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
                              "citation_ids": [parent] if parent else []})
         except Exception:
             pass
-    if permitted("kb_method_search"):
+    if permitted("kb_method_search") and extraction_enabled():
         # Local registry read — no network, no cluster, sub-millisecond. Unioned rather than
         # left to tool choice for the reason stated at the top of default_search_fn: the model
         # does not reliably reach for a tool it was merely offered. Measured across three runs

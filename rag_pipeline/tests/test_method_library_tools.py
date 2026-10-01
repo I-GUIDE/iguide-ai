@@ -302,17 +302,20 @@ def test_the_search_persona_names_the_method_library():
     answered "adapt this notebook" while `plot_choropleth_map` sat in the library with a
     working import line. The COVERAGE rule lists tools by name and nothing named the library.
     """
-    from agent_runtime.prompts import SEARCH_AGENT_PROMPT as P
+    # The persona is BUILT since the extraction flag (2026-10-01): the method-library rule is
+    # included only while the bundle is on, which conftest turns on for this suite.
+    from agent_runtime.prompts import search_agent_prompt
 
+    P = search_agent_prompt()
     assert "kb_method_search" in P
     assert "agent_kb_search" in P, "sub-document evidence is absent from the coverage fan-out"
     assert "get_method_contract" in P
 
 
 def test_the_code_persona_checks_for_an_existing_method_first():
-    from agent_runtime.prompts import CODE_AGENT_PROMPT as P
+    from agent_runtime.prompts import code_agent_prompt
 
-    assert "kb_method_search" in P
+    assert "kb_method_search" in code_agent_prompt()
 
 
 # ------------------------------------------------------------------ deterministic union

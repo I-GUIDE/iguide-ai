@@ -14,14 +14,15 @@ than just the value.
 | Variable | Value | If unset, the symptom is… |
 |---|---|---|
 | `AGENT_CHAT_API_KEY` | required | The service credential for callers without a browser (scripts, eval). A verified platform user (token mode) or demo mode is an alternative to it. **Unset disables the key check** outside token mode, where identity still refuses anonymous callers (prototype's model, kept by the 2026-10-01 integration); `/query` and `/query/batch` use the same check as the agent routes. |
+| `AGENT_EXTRACTION` | unset (off) until enabled deliberately | **Intended.** Off, the agent behaves as prototype did before the 2026-10-01 integration: no method-library or staging tools, no library mount in the sandbox, no invariant gate, no run artifacts, and no prompt, tool description or capability clause mentions any of them. `1` turns the whole bundle on (`agent_runtime/extraction_flag.py`). |
 | `AGENT_CORS_ORIGINS` | explicit allowlist | Browser blocks every request from the prototype; looks like a dead backend. |
 | `AGENT_KB_BACKEND` | `opensearch` | **Silently reads a local file store.** The symptom is "fewer results", which reads as a retrieval-quality problem, not a config one. The payload now names the backend and warns once, but set it. |
-| `AGENT_METHOD_LIBRARY_DIR` | path to `method_library` | `kb_method_search` reports an empty library and the sandbox mount is missing — the agent concludes no such method exists. |
+| `AGENT_METHOD_LIBRARY_DIR` | path to `method_library` | With `AGENT_EXTRACTION=1`: `kb_method_search` reports an empty library and the sandbox mount is missing — the agent concludes no such method exists. |
 | `OPENSEARCH_NODE` + credentials | cluster | Agent-KB arm returns nothing. |
 | `FLASK_EMBEDDING_URL` | reachable embedder | A *wrong* URL is completely silent; the resolved value is logged once at first use. |
 | `AGENT_SEARCH_TOP_K` | `20` | Retrieval window drops to 8; recall@20 was measured at **34/37**, recall@8 at 22/37. |
-| `AGENT_INVARIANT_GATE` | `1` | No `checks.json`, so no numeric claim is ever verified. |
-| `AGENT_ARTIFACT_EMIT` | `1` | Runs are not reproducible after the fact. |
+| `AGENT_INVARIANT_GATE` | follows `AGENT_EXTRACTION` | Unset, it follows the bundle (off by default). `1` forces it on, `0` off. Off: no `checks.json`, so no numeric claim is verified. |
+| `AGENT_ARTIFACT_EMIT` | follows `AGENT_EXTRACTION` | Unset, it follows the bundle (off by default). Off: runs are not reproducible after the fact. |
 | `AGENT_CODE_EXEC_IMAGE` | `iguide-codeexec@sha256:…` | See §2 — a tag is not a pin. |
 | `LLM_PROVIDER` | `vllm` or `openai` | **Never `claude-cli`.** See §4. |
 | `AGENT_ALLOW_WORKFLOW_EXEC` | unset / `0` | See §4. |

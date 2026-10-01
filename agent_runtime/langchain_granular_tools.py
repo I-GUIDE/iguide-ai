@@ -30,6 +30,7 @@ from rag_pipeline.qgis_headless_tools import (
     qgis_processing_run_tool,
 )
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.extraction_flag import extraction_enabled
 
 
 def _safe_int(value: Any, default: Optional[int] = None, minimum: int = 1, maximum: int = 100) -> int:
@@ -437,7 +438,11 @@ def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[An
     fetch happens here and only the bytes cross the boundary. That is why a dataset the agent
     found can be opened at all — the 44 generated loaders take a ``staged_path`` and, before this,
     nothing could produce one.
+
+    Part of the extraction bundle: returns NO tools while AGENT_EXTRACTION is off.
     """
+    if not extraction_enabled():
+        return []
     try:
         from langchain_core.tools import StructuredTool
     except Exception:  # pragma: no cover - optional dependency
@@ -804,6 +809,13 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_internal"},
         ),
     ]
+    if not extraction_enabled():
+        # Part of the extraction bundle (agent_runtime/extraction_flag.py). Off, the method tools
+        # are not offered at all, rather than offered and empty: a model told about a tool it
+        # cannot use guesses around it.
+        retrieval_tools = [t for t in retrieval_tools
+                           if getattr(t, "name", "") not in {"kb_method_search",
+                                                             "get_method_contract"}]
     if enabled_search_methods is not None:
         enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
         neo4j_companion_tools = {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"}

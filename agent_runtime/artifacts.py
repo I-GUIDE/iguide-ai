@@ -37,14 +37,21 @@ ARTIFACT_SCHEMA = 1
 
 
 def artifacts_enabled() -> bool:
-    """Whether to emit an artifact bundle per substantive run. On by default.
+    """Whether to emit an artifact bundle per substantive run. On whenever the extraction bundle is.
 
-    Cheap — a few small files beside a workspace that already exists — and the thing it buys
-    (a re-runnable record) cannot be reconstructed after the fact, so defaulting it off would
-    mean the artifact is missing exactly when someone wants it.
+    Unset, ``AGENT_ARTIFACT_EMIT`` follows ``AGENT_EXTRACTION`` (off by default), so integrating
+    the bundle changes no deployed run until it is switched on. Inside the bundle it defaults on:
+    it is cheap — a few small files beside a workspace that already exists — and the thing it buys
+    (a re-runnable record) cannot be reconstructed after the fact, so defaulting it off would mean
+    the artifact is missing exactly when someone wants it. An explicit value wins either way.
     """
-    return (os.getenv("AGENT_ARTIFACT_EMIT", "1") or "").strip().lower() not in {
-        "0", "false", "no", "off"}
+    raw = (os.getenv("AGENT_ARTIFACT_EMIT") or "").strip().lower()
+    if not raw:
+        # Unset: follow the extraction bundle, OFF by default (agent_runtime/extraction_flag.py).
+        from agent_runtime.extraction_flag import extraction_enabled
+
+        return extraction_enabled()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def resolve_image_digest(image: str) -> Optional[str]:

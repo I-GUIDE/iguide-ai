@@ -84,6 +84,10 @@ if not _LIVE:
 _TEST_ENV = {
     "AGENT_TOKEN_VERIFY": "local",
     "JWT_ACCESS_TOKEN_NAME": "jwt-access-token-dev",
+    # The extraction bundle is OFF by default in every deployment (agent_runtime/extraction_flag.py)
+    # and ON here, so the suite exercises it. What OFF means is pinned separately, with the flag
+    # monkeypatched off, in test_extraction_flag.py.
+    "AGENT_EXTRACTION": "1",
 }
 
 # Variables with no safe default: a test that needs one sets it. Cleared rather than pinned,

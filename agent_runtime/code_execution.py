@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_runtime.extraction_flag import extraction_enabled
+
 def _num_env(name: str, default: float) -> float:
     """A numeric env var that tolerates being present but blank.
 
@@ -324,16 +326,22 @@ def artifacts_enabled() -> bool:
 
 
 def invariant_gate_enabled() -> bool:
-    """Whether to append the in-sandbox invariant checks. **On by default.**
+    """Whether to append the in-sandbox invariant checks. **On whenever the extraction bundle is.**
 
-    Default-on is deliberate: the failure it catches — a distance computed in a geographic
-    CRS — produces a plausible number and no error, so a gate that is off by default protects
-    nobody. Set ``AGENT_INVARIANT_GATE`` to a falsy value to disable it. The epilogue cannot
-    fail a run (every check is guarded and the writer swallows OSError), so the cost of
+    Unset, ``AGENT_INVARIANT_GATE`` follows ``AGENT_EXTRACTION`` (agent_runtime/extraction_flag.py),
+    which is off by default, so a deployment that has not opted into the bundle runs exactly the
+    code it ran before. Inside the bundle, on-by-default is deliberate: the failure it catches — a
+    distance computed in a geographic CRS — produces a plausible number and no error, so a gate
+    that has to be remembered protects nobody. An explicit value wins either way. The epilogue
+    cannot fail a run (every check is guarded and the writer swallows OSError), so the cost of
     leaving it on is one JSON file.
     """
-    return (os.getenv("AGENT_INVARIANT_GATE", "1") or "").strip().lower() not in {
-        "0", "false", "no", "off"}
+    raw = (os.getenv("AGENT_INVARIANT_GATE") or "").strip().lower()
+    if not raw:
+        # Unset: follow the extraction bundle (agent_runtime/extraction_flag.py), OFF by default,
+        # so integrating it changes no deployed run until it is switched on.
+        return extraction_enabled()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def contracts_for_code(code: str) -> Dict[str, Any]:
@@ -1259,7 +1267,8 @@ class DockerCodeExecutor(CodeExecutor):
             "--env", "HOME=/tmp",
             "-v", f"{work}:/work:rw",       # only writable mount
         ]
-        lib = method_library_dir()
+        # The library mount is part of the extraction bundle: no mount while it is off.
+        lib = method_library_dir() if extraction_enabled() else None
         pythonpath = f"/work/{DEPS_DIRNAME}"
         if lib:
             argv += ["-v", f"{lib}:{METHOD_LIBRARY_MOUNT}:ro"]
@@ -1405,7 +1414,7 @@ class LocalSubprocessExecutor(CodeExecutor):
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(work)}
         # Also when this run installed nothing: an earlier run in the conversation may have.
         paths = []
-        lib = method_library_dir()
+        lib = method_library_dir() if extraction_enabled() else None
         if lib:
             paths.append(str(lib))
         if dependencies or deps_cache is not None:

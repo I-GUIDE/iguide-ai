@@ -36,6 +36,8 @@ from agent_runtime.prompts import (  # noqa: E402  (kept here for back-compat re
     CODE_AGENT_PROMPT,
     DEFAULT_AGENT_PROMPT,
     SEARCH_AGENT_PROMPT,
+    code_agent_prompt,
+    search_agent_prompt,
 )
 
 class BoundedInMemorySaver(InMemorySaver):
@@ -1695,7 +1697,7 @@ def build_search_agent_executor(
         enabled_search_methods=enabled_search_methods,
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=preloaded_tools,
-        system_prompt_override=SEARCH_AGENT_PROMPT,
+        system_prompt_override=search_agent_prompt(),
         agent_name="search_agent",
         checkpointer=checkpointer,
         session_id=session_id,
@@ -1720,7 +1722,7 @@ def build_code_agent_executor(
         include_mcp_tools=False,
         mcp_modules=None,
         preloaded_tools=tools or [],
-        system_prompt_override=CODE_AGENT_PROMPT,
+        system_prompt_override=code_agent_prompt(),
         agent_name="code_agent",
         checkpointer=checkpointer,
         skill_roots=skill_roots,

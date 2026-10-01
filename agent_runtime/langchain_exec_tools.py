@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.extraction_flag import extraction_enabled
 
 # Bounds on how much gets auto-staged into a sandbox run (conversation files +
 # explicitly requested files). Keeps a large session from blowing up disk/time.
@@ -158,6 +159,32 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
                             "filename": entry["filename"], "available_as": names})
 
     return staging, staged_info, errors, skipped
+
+
+# Appended to execute_code's description only while the extraction bundle is on
+# (agent_runtime/extraction_flag.py): it describes the gate and the mounted library, and a
+# model told about a library that is not mounted guesses at it.
+_EXTRACTION_NOTE = (
+    # Stated here because a peer that skips kb_method_search will otherwise GUESS the
+    # package name: one run guessed `from method_library import ...` (the host
+    # directory name) and failed with ModuleNotFoundError. The importable package is
+    # `iguide_methods`, whatever the mount is called.
+    # The gate can only check a UNIT if the run declares one; nothing in a frame
+    # distinguishes 21500 metres from 21500 feet.
+    "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
+    "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
+    "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
+    "failed gate means the reported numbers are not verified and the answer will say "
+    "so. For any number your answer will quote, declare it as "
+    "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\"}} "
+    "(optional \"min\"/\"max\" get range-checked); a null unit blocks verification. "
+    "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
+    "`iguide_methods` — extracted, independently callable functions from platform "
+    "elements, already present with NO install and NO network. Get an exact, "
+    "version-pinned import line from `kb_method_search` / `get_method_contract` "
+    "rather than guessing a module path, and still declare the method's own "
+    "`dependencies` (e.g. geopandas), which are NOT preinstalled."
+)
 
 
 def make_code_execution_tools(
@@ -354,25 +381,7 @@ def make_code_execution_tools(
             "whole thing: write it to a named file with write_workspace_file, then run it with "
             "`entrypoint` (e.g. entrypoint=\"main.py\", no `code`), and fix it with "
             "edit_workspace_file between runs. "
-            # Stated here because a peer that skips kb_method_search will otherwise GUESS the
-            # package name: one run guessed `from method_library import ...` (the host
-            # directory name) and failed with ModuleNotFoundError. The importable package is
-            # `iguide_methods`, whatever the mount is called.
-            # The gate can only check a UNIT if the run declares one; nothing in a frame
-            # distinguishes 21500 metres from 21500 feet.
-            "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
-            "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
-            "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
-            "failed gate means the reported numbers are not verified and the answer will say "
-            "so. For any number your answer will quote, declare it as "
-            "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\"}} "
-            "(optional \"min\"/\"max\" get range-checked); a null unit blocks verification. "
-            "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
-            "`iguide_methods` — extracted, independently callable functions from platform "
-            "elements, already present with NO install and NO network. Get an exact, "
-            "version-pinned import line from `kb_method_search` / `get_method_contract` "
-            "rather than guessing a module path, and still declare the method's own "
-            "`dependencies` (e.g. geopandas), which are NOT preinstalled."
+            + (_EXTRACTION_NOTE if extraction_enabled() else "")
         ),
     )
     tools = [tool]

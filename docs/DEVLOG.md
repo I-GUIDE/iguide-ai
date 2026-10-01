@@ -4534,3 +4534,34 @@ rather than from the previous one.
   The test venv had pyarrow through `backend_swap`'s requirements, so the suite cannot show it; it
   needs a check inside the container. This machine still runs the old stack (networkx 3.4.2), so
   the pin test fails here until the local environment follows the lock.
+
+## 2026-10-01 · M8.61 · One switch for the extraction bundle, off by default
+
+**Change** `AGENT_EXTRACTION` (`agent_runtime/extraction_flag.py`) now gates everything the
+  extraction work adds to the agent, and it is off unless set. Off, the agent has:
+  - no `kb_method_search` / `get_method_contract` in the granular factory, and no staging tools
+    (that factory returns none);
+  - no library mount and no `PYTHONPATH` entry for it, in either executor;
+  - no invariant gate and no artifact emission by default. An explicit `AGENT_INVARIANT_GATE` or
+    `AGENT_ARTIFACT_EMIT` still wins, in both directions;
+  - no method-library arm in the deterministic sweep;
+  - no VERIFICATION / METHOD LIBRARY paragraphs in `execute_code`'s description, and no search
+    rule 12 or code rule 1b. `search_agent_prompt()` and `code_agent_prompt()` add them when on;
+  - no method-library clause and no staging toolset in the capability registry, so the
+    supervisor is not told about either.
+  `DEPLOYMENT.md` and `.env.example` document the switch. The suite runs with it on (conftest).
+  `test_extraction_flag.py` pins the off state surface by surface. Its tool and mount tests also
+  check the on half, so they cannot pass merely because nothing is built.
+
+**Why** Blocker 2 of the agent designer's review: merging the extraction into prototype must
+  change nothing in production until someone opts in. "Nothing" has two halves, and the second is
+  the one that has already bitten. The tools must be absent, AND nothing may describe them. In
+  M2.7 the code peer's prompt told it to call `kb_method_search`, which it did not have. It
+  guessed the package from the host directory, wrote `from method_library import ...`, and got
+  `ModuleNotFoundError`. So each description is gated with the tool it describes. The gate and
+  artifact defaults change meaning with it: on `backend_swap` both defaulted on, and here they
+  follow the bundle.
+
+**Measured** `test_extraction_flag.py` 10/10, `test_method_library_tools.py` 49/49. CI-style suite
+  on the deployed-stack venv: **3,006 passed, 1 failed, 1 skipped**, identical to before the flag.
+  The failure is still prototype's temporal `Beat` bug.

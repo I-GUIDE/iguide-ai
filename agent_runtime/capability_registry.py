@@ -31,6 +31,11 @@ class Toolset:
     factory: str
     #: A clause, not a sentence — these are joined into a list the model reads at speed.
     summary: str
+    #: Appended to `summary` only while the extraction bundle is on (agent_runtime/extraction_flag.py).
+    extraction_summary: str = ""
+    #: The whole toolset is part of the extraction bundle: not described while it is off, because
+    #: its factory then binds nothing and the supervisor must not route work to it.
+    requires_extraction: bool = False
 
 
 # The knowledge-base tools the code-WRITING peers hold, defined ONCE. The peer binding
@@ -70,9 +75,9 @@ _SHARED: Tuple[Toolset, ...] = (
     Toolset("make_rs_embed_zonal_tools",
             "segmenting a region into look-alike zones from those embeddings"),
     Toolset("make_langchain_granular_tools",
-            "retrieving datasets, publications and notebooks, and the extracted method library — "
-            "callable functions from platform elements with their contracts and pinned import "
-            "lines"),
+            "retrieving datasets, publications and notebooks",
+            extraction_summary=("the extracted method library — callable functions from platform "
+                                "elements with their contracts and pinned import lines")),
     Toolset("make_conversation_file_tools",
             "listing the files this conversation has produced"),
     Toolset("make_code_execution_tools",
@@ -89,7 +94,7 @@ _CODE_ONLY: Tuple[Toolset, ...] = (
     Toolset("make_skill_tools", "packaged skills and saved workflows"),
     Toolset("make_langchain_staging_tools",
             "staging a platform dataset into the code sandbox (by element id or URL) so extracted "
-            "loaders and methods can read it"),
+            "loaders and methods can read it", requires_extraction=True),
 )
 
 CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
@@ -105,10 +110,17 @@ def factories() -> set:
 
 def describe(capability: str) -> str:
     """The inventory clause list for a capability, deduplicated and in declared order."""
+    from agent_runtime.extraction_flag import extraction_enabled
+
+    on = extraction_enabled()
     seen, out = set(), []
     for tool in CAPABILITIES.get(capability, ()):  # declared order is the reading order
-        if tool.summary in seen:
+        if tool.requires_extraction and not on:
             continue
-        seen.add(tool.summary)
-        out.append(tool.summary)
+        clause = (f"{tool.summary}, and {tool.extraction_summary}"
+                  if (on and tool.extraction_summary) else tool.summary)
+        if clause in seen:
+            continue
+        seen.add(clause)
+        out.append(clause)
     return "; ".join(out)
