@@ -178,6 +178,26 @@ def test_off_the_evidence_view_never_points_at_the_bundle(off):
     assert UNIT["import_line"] in on and "stage_element" in on and "kb_method_search" in on
 
 
+def test_off_a_fetched_kb_doc_carries_no_import_line(off, monkeypatch):
+    """get_kb_block returns the RAW stored doc, so a unit doc carried its import line and library
+    module whatever the flag said. Found while driving the map UI with the bundle off (M8.67)."""
+    from rag_pipeline.search import agent_kb
+
+    class Client:
+        def get(self, index, id):
+            return {"found": True, "_source": _hit()["_source"]}
+
+    monkeypatch.setattr(agent_kb, "_os_client", lambda: Client())
+    monkeypatch.setenv("AGENT_KB_BACKEND", "opensearch")
+    unit = agent_kb.get_kb_block("b1fa548b::load_crimes")["source"]["extracted"]["unit"]
+    assert unit["signature"] == UNIT["signature"], "what the unit IS stays"
+    assert not {"import_line", "library_module", "slice_sha", "callability"} & set(unit), unit
+
+    off.setenv("AGENT_EXTRACTION", "1")
+    unit = agent_kb.get_kb_block("b1fa548b::load_crimes")["source"]["extracted"]["unit"]
+    assert unit["import_line"] == UNIT["import_line"], "the ON half of this test is not real"
+
+
 def test_off_the_sweep_does_not_join_the_kb(off, monkeypatch):
     """Recorded rather than raised: the call site swallows exceptions, so a join that raised
     would look exactly like a join that never ran."""

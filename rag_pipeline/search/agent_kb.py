@@ -407,6 +407,30 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         return {**base, "note": f"agent_kb_search error: {type(exc).__name__}: {exc}"}
 
 
+# What it would take to IMPORT a unit, as opposed to what the unit is.
+_IMPORT_FIELDS = ("import_line", "import_line_candidates", "library_module", "slice_sha",
+                  "callability")
+
+
+def _reference_only(source: Any) -> Any:
+    """A stored doc as ``get_kb_block`` may show it: with the extraction bundle off, a unit stays a
+    reference and loses what it would take to import it, by the same rule as ``_method_payload``.
+
+    ``get_kb_block`` returns the RAW stored document, and a unit doc carries ``extracted.unit``
+    with its import line and library module. Prod's index holds none today (0 of its unit docs),
+    but the first ingest with this branch's emitter writes them, and a model handed an import line
+    writes the import.
+    """
+    if extraction_enabled() or not isinstance(source, dict):
+        return source
+    extracted = source.get("extracted")
+    unit = extracted.get("unit") if isinstance(extracted, dict) else None
+    if not isinstance(unit, dict):
+        return source
+    kept = {k: v for k, v in unit.items() if k not in _IMPORT_FIELDS}
+    return {**source, "extracted": {**extracted, "unit": kept}}
+
+
 def _element_block_bundle(element_id: str, blocks: List) -> Dict[str, Any]:
     """Synthesize a single 'whole-element' doc from its blocks (code concatenated in
     order), so a bare element_id resolves to the full notebook source for reuse."""
@@ -443,7 +467,8 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
         if not use_opensearch:
             idx, src = kb_store.local_get(doc_id, indices)
             if src is not None:
-                return {"doc_id": doc_id, "found": True, "index": idx, "source": src}
+                return {"doc_id": doc_id, "found": True, "index": idx,
+                        "source": _reference_only(src)}
             # bare element_id -> bundle all its blocks
             blocks = kb_store.local_blocks_for_parent(doc_id, indices)
             if blocks:
@@ -454,7 +479,8 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
             try:
                 resp = client.get(index=idx, id=doc_id)
                 if resp.get("found"):
-                    return {"doc_id": doc_id, "found": True, "index": idx, "source": resp.get("_source")}
+                    return {"doc_id": doc_id, "found": True, "index": idx,
+                            "source": _reference_only(resp.get("_source"))}
             except Exception:
                 continue
         # bare element_id -> search blocks whose parent is this element, then bundle

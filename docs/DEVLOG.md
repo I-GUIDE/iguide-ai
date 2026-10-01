@@ -4772,3 +4772,19 @@ rather than from the previous one.
     field.
   - The PUT refuses with persistence off and still saves with it unset.
   - CI-style suite: **3,056 passed, 1 failed** (prototype's `Beat`).
+
+## 2026-10-01 · M8.67 · A fetched KB doc follows the flag too
+
+**Change** `get_kb_block` passes every stored doc it returns through `_reference_only`. With the
+  extraction bundle off, a unit doc's `extracted.unit` loses `import_line`,
+  `import_line_candidates`, `library_module`, `slice_sha` and `callability`, and keeps what the
+  unit IS. This is the same rule as `_method_payload` (M8.62). The bundle-on path is unchanged.
+
+**Why** Found while driving the map UI with the bundle off on qwen3.8. M8.62 gated what
+  `agent_kb_search` HITS say, but `get_kb_block`, prototype's own reader, returns the RAW stored
+  document. For a doc from `iguide_agent_method_units` that includes the unit's import line,
+  whatever the flag says. It is not live today: a read-only count of prod's
+  `iguide_agent_method_units` found 0 docs with `extracted.unit.import_line`. But the first ingest
+  with this branch's emitter writes them, and a model handed an import line writes the import.
+
+**Measured** `test_off_a_fetched_kb_doc_carries_no_import_line` checks both halves, off and on. CI-style suite: **3,057 passed, 1 failed** (prototype's `Beat`).
