@@ -75,6 +75,12 @@ COPY extractors/ ./extractors/
 # the image copied neither — so `list_available_skills` returned EMPTY in every deployed
 # container while working fine on a developer checkout. A capability that silently disappears
 # in deployment is worse than one that was never built.
+#
+# BOTH roots. `DEFAULT_SKILL_ROOTS` lists REPO_ROOT/skills FIRST and it holds two of the three
+# curated skills; copying only .agents/ left the deployed registry with one. Confirmed in the
+# running agent-api on 2026-10-01: neither /app/skills nor /app/.agents/skills existed and
+# SkillRegistry.discover() returned 0.
+COPY skills/ ./skills/
 COPY .agents/ ./.agents/
 
 # Pre-download SentenceTransformer model so the container doesn't need

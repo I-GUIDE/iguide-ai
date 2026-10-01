@@ -30,12 +30,20 @@ def test_the_image_copies_every_package_the_agent_imports():
 
 
 def test_the_image_copies_the_skill_bundles():
-    from agent_runtime.skills import DEFAULT_SKILL_ROOTS
+    """EVERY skill root that exists in the checkout must be copied. This used `any(...)`, so it
+    passed with .agents/ copied while skills/ — the FIRST root, holding two of the three curated
+    skills — was not; the deployed registry discovered 0 (2026-10-01)."""
+    from agent_runtime.skills import DEFAULT_SKILL_ROOTS, REPO_ROOT
 
     text = _dockerfile()
-    copied = any(f"COPY {root.name}/" in text or f"COPY .{root.name}/" in text
-                 or "COPY .agents/" in text for root in DEFAULT_SKILL_ROOTS)
-    assert copied, "no skills root is copied into the image; list_available_skills will be empty"
+    missing = []
+    for root in DEFAULT_SKILL_ROOTS:
+        if not root.is_dir():
+            continue
+        top = root.relative_to(REPO_ROOT).parts[0]          # "skills", ".agents"
+        if f"COPY {top}/" not in text:
+            missing.append(top)
+    assert not missing, f"skill roots not copied into the image: {missing}"
 
 
 def test_generated_skills_are_written_to_the_persistent_volume():
@@ -328,3 +336,28 @@ def test_extraction_runs_without_importing_the_agent_graph():
     assert not leaked, (
         f"importing extractors.ingest pulled in the agent stack: {leaked[:5]} — extraction "
         f"cannot then be deployed or scaled separately from the agent")
+
+
+# ------------------------------------------------------- compose must load on a bare .env
+
+def test_compose_has_no_required_variable_that_fails_every_service():
+    """`${VAR:?msg}` is interpolated over the WHOLE file before profiles apply (checked against
+    docker compose v5.5.1), so one required variable for an optional service made `docker compose
+    up` fail for every service on a host whose .env lacked it. Enforce such values where they are
+    used instead — the postgres image already refuses an empty superuser password."""
+    import re
+
+    text = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    config = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    required = re.findall(r"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}", config)
+    assert not required, required
+
+
+def test_the_agent_db_is_behind_a_profile():
+    """The extraction bundle is off by default, so its database must not start with `up -d`."""
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["agent-db"].get("profiles"), "agent-db starts by default"
+    assert "agent-db" not in (compose["services"]["agent-api"].get("depends_on") or {}), (
+        "agent-api must not depend on a service that is off by default")

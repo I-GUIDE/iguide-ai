@@ -4485,3 +4485,24 @@ rather than from the previous one.
   contract each become a titled document carrying the pinned import line and citing the SOURCE
   element; a refused lookup is not cited; a geocoder's `results` still are not evidence. Full
   suite: **2,996 passed**.
+
+## 2026-10-01 · M8.59 · Two things that would have broken the first deploy from this branch
+
+**Change** `agent-db` sits behind `profiles: ["extraction"]` and its password is no longer a compose
+  `:?` required variable. The agent-api image copies BOTH skill roots. Two contract tests guard the
+  compose file, and the skills test requires every root instead of any one.
+
+**Why** Both came from the agent designer's review of the merge.
+  - The `:?` on `AGENT_DB_PASSWORD` failed `docker compose up` for every service on a host whose
+    `.env` lacked it, for a feature that is meant to be off. The review proposed a profile. I
+    checked it before relying on it, and it is not enough: compose v5.5.1 interpolates the WHOLE
+    file before applying profiles, so the error stands with the service profiled out. The password
+    stays mandatory where it matters, because the postgres image refuses an empty superuser password.
+  - The image copied `.agents/` but not `skills/`, which is the first entry in `DEFAULT_SKILL_ROOTS`
+    and holds two of the three curated skills. In the running agent-api neither directory existed
+    and `SkillRegistry.discover()` returned 0. The contract test passed throughout, because it
+    checked `any(...)` root.
+
+**Measured** `docker compose config` with the password unset: before, an interpolation error for
+  the whole file; after, three services by default and four under `--profile extraction`.
+  Deployment contract: 24/24.
