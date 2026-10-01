@@ -4186,3 +4186,22 @@ rather than from the previous one.
 
 **Next** The first green run, and whatever the full suite does on Linux / 3.11, which nothing has
   ever exercised.
+
+## 2026-10-01 · M8.54 · The first full CI run executed zero tests
+
+**Change** The `tests` job runs `python -m pytest -q --ignore=tests/live` instead of `pytest -q`.
+
+**Why** With the lock fixed (M8.53) the suite was reached for the first time, and stopped at
+  collection: `MCP_server/test_dual_transport.py` does `from MCP_server import server`, which
+  resolves only when the repo root is on `sys.path`. `python -m pytest` puts it there; bare
+  `pytest` does not. One collection error interrupts the session, so the run reported 1 error
+  and **0 tests executed**. Every local measurement in this log used `python3 -m pytest`, which
+  is why the difference never showed.
+
+  A root-level run also collects `tests/live/`: 32 tests that call live services and carry no
+  `integration` marker, so `pytest.ini`'s deselection does not reach them. Excluded here; marking
+  them `integration` is the proper fix and belongs with whoever owns them.
+
+**Measured** The exact CI command, locally: **1,947 passed**, 29 deselected, 62 s. That is the
+  documented `rag_pipeline/tests/` suite (1,900) plus 47 tests in `MCP_server/` and `tests/` that
+  were never in the documented command and all pass.

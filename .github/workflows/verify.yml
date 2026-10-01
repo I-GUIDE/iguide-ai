@@ -35,7 +35,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -c constraints.txt
       - name: Run the pure test subset
-        run: pytest -q
+        # `python -m pytest`, not bare `pytest`: only the former puts the repo root on sys.path,
+        # and MCP_server/test_dual_transport.py does `from MCP_server import server`. Bare
+        # pytest died collecting it, so the first full run on CI executed zero tests.
+        # tests/live/ is excluded because its 32 tests call live services but carry no
+        # `integration` marker, so pytest.ini's deselection does not reach them.
+        run: python -m pytest -q --ignore=tests/live
 
   deployment-contract:
     runs-on: ubuntu-latest
