@@ -335,6 +335,21 @@ def require_api_key(view):
 # Request / response normalization
 # ---------------------------------------------------------------------------
 
+PERSISTENT_MEMORY_ENV = "AGENT_PERSISTENT_MEMORY"
+
+
+def _persistent_memory_allowed() -> bool:
+    """Whether this server may write conversations to the conversation store at all.
+
+    The request's ``usePersistentMemory`` was the only switch, and the map UI always sends true.
+    So a server run against a deployment-shaped ``.env``, which names the production cluster,
+    wrote every test turn into production's chat_memory and chat_traces. ``AGENT_PERSISTENT_MEMORY=0``
+    keeps conversations in-process for every request (session memory still carries context
+    within a conversation). Unset honours the request, exactly as before.
+    """
+    return (os.getenv(PERSISTENT_MEMORY_ENV) or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _normalize_agent_chat_request(data: dict) -> dict:
     """Normalize camelCase frontend fields to internal snake_case, accepting both."""
     user_query = _coalesce(data.get("userQuery"), data.get("user_input"))
@@ -351,6 +366,8 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
     enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
     use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+    if not _persistent_memory_allowed():
+        use_persistent_memory = False   # the server's word beats the client's (see the helper)
     smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
@@ -1119,6 +1136,12 @@ def agent_conversation(memory_id):
                     return jsonify({"error": "No conversation found for that id."}), 404
                 return jsonify(snapshot)
 
+            if not _persistent_memory_allowed():
+                # The other write path. Refused rather than silently dropped, so a client that
+                # thinks it saved a conversation is told it did not.
+                return jsonify({"error": "This server keeps conversations in-process only "
+                                         f"({PERSISTENT_MEMORY_ENV}=0); nothing was saved.",
+                                "reason": "persistence_disabled"}), 409
             body = request.get_json(silent=True)
             if not isinstance(body, dict):
                 return jsonify({"error": "Body must be a conversation object."}), 400

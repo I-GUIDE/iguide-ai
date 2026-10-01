@@ -4748,3 +4748,27 @@ rather than from the previous one.
   anchored edit began at `def _os_client():`, so the `@lru_cache(maxsize=1)` above it moved onto the
   new helper. It cached a SETTING: one read with the variable unset pinned `""` for the next test,
   and the client lost its cache. Order-dependent, and invisible in a targeted run.
+
+## 2026-10-01 · M8.66 · A server that writes no conversation anywhere
+
+**Change** `AGENT_PERSISTENT_MEMORY=0` keeps every conversation in-process. It overrides the
+  request's `usePersistentMemory` in `_normalize_agent_chat_request`, and
+  `PUT /agent/conversations/<id>` refuses with 409 `persistence_disabled` rather than dropping the
+  save silently. Session memory still carries context within a conversation. Unset honours the
+  request, exactly as before. Documented in `.env.example`.
+
+**Why** Verifying the extraction flag through the map UI means running this branch locally. The
+  only persistence switch was the request flag, and the map UI always sends `true`
+  (`agentClient.ts:380`). The developer `.env` the dev launcher loads names the PRODUCTION cluster,
+  so every test turn would have written a conversation and a turn trace into production's
+  `chat_memory` / `chat_traces`. The user chose a no-persist switch over writing to dev or prod.
+  Two request paths reach the store: the chat turn (create, update and trace, all gated by the
+  request flag) and the conversation PUT. The other writers (`delete_memory`, `update_rating`)
+  have no route.
+
+**Measured** `test_persistent_memory_switch.py`: 7 tests.
+  - Unset honours the request.
+  - Four spellings of off each beat a client that asks for persistence, in both casings of the
+    field.
+  - The PUT refuses with persistence off and still saves with it unset.
+  - CI-style suite: **3,056 passed, 1 failed** (prototype's `Beat`).
