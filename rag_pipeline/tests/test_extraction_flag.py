@@ -174,7 +174,7 @@ def test_off_the_evidence_view_never_points_at_the_bundle(off):
     assert not [t for t in BUNDLE_TERMS if t in text], text
 
     off.setenv("AGENT_EXTRACTION", "1")
-    on = _render_extracted(_extracted(), "b1fa548b")
+    on = _render_extracted(_extracted(), "b1fa548b", consumer="code_peer")
     assert UNIT["import_line"] in on and "stage_element" in on and "kb_method_search" in on
 
 

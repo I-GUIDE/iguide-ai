@@ -68,14 +68,44 @@ def test_a_method_document_loses_its_import_line_for_a_cli_peer():
     assert IMPORT in _format_documents([METHOD_DOC], consumer="code_peer")
 
 
-def test_the_answer_view_is_unchanged_by_the_table():
-    """Which cut the answerer reads is B3's to settle, not this change's."""
+def test_the_answer_offers_methods_the_agent_can_run_not_lines_to_paste():
+    """The map UI, 2026-10-01: an answer told the user to write `from iguide_methods ...`, which
+    works only inside the agent's sandbox. The answerer writes for a human, so it is told which
+    methods THIS AGENT can run, with the import line kept as a labelled detail."""
+    text = _render("answer")
+    assert "METHODS THIS AGENT CAN RUN" in text and "work ONLY there" in text
+    assert f"agent-sandbox import: {IMPORT}" in text
+    assert not [t for t in ("RUNNABLE", "stage_element", "kb_method_search", "mounted")
+                if t in text], text
+
+
+def test_a_method_document_is_offered_to_the_answerer_with_its_line_labelled():
     from agent_runtime.supervisor.evidence_subgraph import _format_documents
 
-    doc = {"doc_id": "b1fa548b", "title": "Chicago crime", "contents": "A notebook.",
-           "extracted": EXTRACTED}
-    assert (_format_documents([doc, METHOD_DOC])
-            == _format_documents([doc, METHOD_DOC], consumer="code_peer"))
+    text = _format_documents([METHOD_DOC])
+    assert "method this agent can run" in text and "callable method" not in text
+    assert "works only in this agent's sandbox" in text and IMPORT in text
+
+
+def test_an_answer_that_hands_the_user_an_import_gets_a_marked_correction():
+    """The backstop for a model that pastes the raw line anyway: APPENDED, never rewritten, so the
+    model's text stays the model's and the correction is visible as one."""
+    from agent_runtime.supervisor.graph import _correct_artifact_claims
+
+    answer = f"You can reuse it directly:\n\n{IMPORT}\n\nareas = load_crimes(path)"
+    fixed = _correct_artifact_claims(answer)
+    assert fixed.startswith(answer), "the model's text is not rewritten"
+    assert "runs only inside this agent's sandbox, not on your machine" in fixed
+    assert _correct_artifact_claims(answer + "\n\nI can run this in my sandbox.") == (
+        answer + "\n\nI can run this in my sandbox."), "already framed: nothing to correct"
+
+
+def test_the_backstop_says_nothing_with_the_bundle_off(monkeypatch):
+    from agent_runtime.supervisor.graph import _correct_artifact_claims
+
+    monkeypatch.delenv("AGENT_EXTRACTION", raising=False)
+    answer = f"Try {IMPORT}"
+    assert _correct_artifact_claims(answer) == answer
 
 
 # ------------------------------------------------------------------ the CLI brief, end to end

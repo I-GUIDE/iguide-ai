@@ -55,11 +55,15 @@ KB_CODE_PEER_TOOLS: Tuple[str, ...] = (
 RUN_LIBRARY = "run_library"          # imports `iguide_methods`: execute_code, library mounted
 STAGE_INPUTS = "stage_inputs"        # calls stage_element / stage_url
 SEARCH_METHODS = "search_methods"    # calls kb_method_search / get_method_contract
+OFFER_LIBRARY = "offer_library"      # tells a HUMAN which library methods this agent can run
 
 EVIDENCE_CONSUMERS: Dict[str, FrozenSet[str]] = {
-    # The answerer and the evidence subgraph: the view as it was before this table existed. Which
-    # cut the answerer should read is B3's question (the grounding audit reads another today).
-    "answer": frozenset({RUN_LIBRARY, STAGE_INPUTS, SEARCH_METHODS}),
+    # The answerer and the evidence subgraph write for a HUMAN, who can neither import the
+    # library nor call the agent's tools. So methods arrive as references this agent can run,
+    # not as import lines to paste. The map UI, 2026-10-01: an answer told the user to write
+    # `from iguide_methods ...`, which works only inside the agent's sandbox. This is a
+    # rendering change, not an evidence cut (B3's question is untouched).
+    "answer": frozenset({OFFER_LIBRARY}),
     # default_code_fn: execute_code (network-none sandbox, library mounted), staging, method tools.
     "code_peer": frozenset({RUN_LIBRARY, STAGE_INPUTS, SEARCH_METHODS}),
     # default_analyze_fn: execute_code and the method tools, but NOT the staging tools.

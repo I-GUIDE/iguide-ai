@@ -246,7 +246,9 @@ def test_non_dict_entries_do_not_break_the_join():
 def _rendered(doc):
     from agent_runtime.supervisor.evidence_subgraph import _format_documents
 
-    return _format_documents([doc])
+    # The view a code-running peer gets: the import line works there. (The answerer, writing
+    # for a human, gets the same methods offered as runnable by the agent: test_evidence_consumers.)
+    return _format_documents([doc], consumer="code_peer")
 
 
 def test_the_enrichment_reaches_the_evidence_the_model_reads():
@@ -318,7 +320,7 @@ def test_a_capped_unit_list_says_how_many_more_there_are():
     from agent_runtime.supervisor.evidence_subgraph import _render_extracted
 
     text = _render_extracted({"units": [{"symbol": "a", "import_line": "from x import a"}],
-                              "unit_count": 9})
+                              "unit_count": 9}, consumer="code_peer")
     assert "9 methods in total" in text and "kb_method_search" in text
 
 
@@ -344,7 +346,7 @@ def test_a_loader_says_where_its_staged_path_comes_from():
         {"units": [{"symbol": "load_chicago_crime_data_2026",
                     "signature": "def load_chicago_crime_data_2026(staged_path)",
                     "import_line": "from iguide_methods.ke__265e6957.v_abc import load_x"}]},
-        "265e6957")
+        "265e6957", consumer="code_peer")
     assert "stage_element" in text
     assert "265e6957" in text
     assert "not in the sandbox until you do" in text
@@ -358,5 +360,5 @@ def test_a_unit_that_takes_no_staged_path_gets_no_staging_instruction():
         {"units": [{"symbol": "calculate_buffers",
                     "signature": "def calculate_buffers(gdf, buffer)",
                     "import_line": "from iguide_methods.x.v_a import calculate_buffers"}]},
-        "b1fa548b")
+        "b1fa548b", consumer="code_peer")
     assert "stage_element" not in text

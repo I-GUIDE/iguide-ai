@@ -1542,9 +1542,24 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
             "copy of the file."
         )
 
+    # A library import handed to the user as theirs to run. The line is correct code, but only
+    # inside this agent's sandbox, where the method library is mounted; `iguide_methods` is not a
+    # package anyone can install. Rendering now offers methods as things the agent can run, so
+    # this catches only a model that pastes the raw line anyway. Appended, never rewritten: the
+    # model's text stays the model's, and the correction is visible as one.
+    if (_SANDBOX_IMPORT_RE.search(text) and "sandbox" not in text.lower()
+            and extraction_enabled()):
+        notes.append(
+            "The `from iguide_methods ...` import above runs only inside this agent's sandbox, "
+            "not on your machine. Ask me to run it."
+        )
+
     if not notes:
         return answer
     return text + "\n\n---\n\n" + "\n\n".join(f"⚠️ Correction: {n}" for n in notes)
+
+
+_SANDBOX_IMPORT_RE = re.compile(r"\bfrom\s+iguide_methods\b|\bimport\s+iguide_methods\b")
 
 
 _ARTIFACT_CLAIM_MARKERS = (

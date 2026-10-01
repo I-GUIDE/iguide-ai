@@ -27,8 +27,8 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
-from agent_runtime.capability_registry import (RUN_LIBRARY, SEARCH_METHODS, STAGE_INPUTS,
-                                               consumer_capabilities)
+from agent_runtime.capability_registry import (OFFER_LIBRARY, RUN_LIBRARY, SEARCH_METHODS,
+                                               STAGE_INPUTS, consumer_capabilities)
 from agent_runtime.streaming_trace import emit_trace_event
 
 # (query, state) -> list of document dicts
@@ -134,6 +134,10 @@ def _render_extracted(extracted: Any, element_hint: str = "<element id>", *,
     # model told to call a tool it lacks guesses around it.
     caps = consumer_capabilities(consumer)
     runnable = [u for u in units if u.get("import_line")] if RUN_LIBRARY in caps else []
+    # A reader writing for a human gets the same methods as things THIS AGENT can run, with the
+    # import line kept as a labelled detail rather than a snippet to paste.
+    offered = ([u for u in units if u.get("import_line")]
+               if (OFFER_LIBRARY in caps and not runnable) else [])
     if runnable:
         lines = ["RUNNABLE METHODS extracted from this element — the import line works verbatim "
                  "inside execute_code (the library is mounted read-only); prefer it over "
@@ -158,10 +162,23 @@ def _render_extracted(extracted: Any, element_hint: str = "<element id>", *,
                 lines.append(f"      FIRST call stage_element(\"{element_hint}\") to obtain "
                              f"staged_path — this file is not in the sandbox until you do.")
         parts.append("\n".join(lines))
+    if offered:
+        lines = ["METHODS THIS AGENT CAN RUN for the user, in its own sandbox. The import lines "
+                 "work ONLY there, not in the user's environment: offer to run a method rather "
+                 "than telling the user to import it."]
+        for unit in offered:
+            lines.append(f"  - {unit.get('signature') or unit.get('symbol')}")
+            if unit.get("doc_summary"):
+                lines.append(f"      {unit['doc_summary']}")
+            lines.append(f"      agent-sandbox import: {unit['import_line']}")
+            if unit.get("requirements"):
+                lines.append(f"      requires: {', '.join(map(str, unit['requirements']))}")
+        parts.append("\n".join(lines))
 
-    named_only = [u for u in units if u not in runnable]
+    named_only = [u for u in units if u not in runnable and u not in offered]
     if named_only:
-        label = ("METHODS PRESENT but not importable (reference only): " if RUN_LIBRARY in caps
+        label = ("METHODS PRESENT but not importable (reference only): "
+                 if (RUN_LIBRARY in caps or OFFER_LIBRARY in caps)
                  else "METHODS IN THIS ELEMENT (reference only): ")
         parts.append(label + ", ".join(str(u.get("symbol")) for u in named_only if u.get("symbol")))
     if extracted.get("unit_count") and len(units) < int(extracted["unit_count"]):
@@ -205,14 +222,23 @@ def _doc_block(doc: Any, *, max_chars: int = 2500, consumer: str = "answer") -> 
     title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
     contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
     url = _element_url(doc)
+    caps = consumer_capabilities(consumer)
     if (isinstance(doc, dict) and doc.get("resource_type") == "MethodUnit"
-            and RUN_LIBRARY not in consumer_capabilities(consumer)):
+            and RUN_LIBRARY not in caps):
         # A method document carries its import line in `contents`
-        # (graph._method_hit_as_document). For a consumer that cannot run the library it stays a
-        # reference: the same text, minus the one line that would fail if used.
-        contents = "\n".join(line for line in str(contents).splitlines()
-                             if not line.startswith("import: "))
-        title = str(title).replace("— callable method", "— method (reference only)")
+        # (graph._method_hit_as_document). A reader writing for a human keeps it, labelled as
+        # what it is; any other reader that cannot run the library gets a reference: the same
+        # text, minus the one line that would fail if used.
+        if OFFER_LIBRARY in caps:
+            contents = "\n".join(
+                ("agent-sandbox import (works only in this agent's sandbox, not the user's "
+                 "environment): " + line[len("import: "):]) if line.startswith("import: ") else line
+                for line in str(contents).splitlines())
+            title = str(title).replace("— callable method", "— method this agent can run")
+        else:
+            contents = "\n".join(line for line in str(contents).splitlines()
+                                 if not line.startswith("import: "))
+            title = str(title).replace("— callable method", "— method (reference only)")
     head = f"title: {title}" + (f"\nurl: {url}" if url else "")
 
     # An extracted METHOD SPEC is exempt from the generic budget, because it is not a document

@@ -4849,3 +4849,39 @@ rather than from the previous one.
   had ended. That is harmless in the sandbox (one gate per process), but in one test process it left
   the second run's record empty: two degree measurements went unrecorded and their tests failed.
   The wrapper now looks up its record at call time, and conftest restores `warn` around every test.
+
+## 2026-10-01 · M8.69 · The answer offers what the agent can run; it does not hand out imports
+
+**Change**
+  - A new consumer capability, `OFFER_LIBRARY`: telling a HUMAN which library methods this agent
+    can run. The `answer` row is now `{OFFER_LIBRARY}`, where it used to hold all three.
+  - For that reader, `_render_extracted` lists importable units under "METHODS THIS AGENT CAN RUN
+    for the user, in its own sandbox". The import lines work only there, so the model should offer
+    to run a method rather than tell the user to import it. Each line is kept as a labelled
+    `agent-sandbox import:` detail.
+  - `_doc_block` relabels a `MethodUnit` document the same way: "method this agent can run", and
+    its import line marked as working only in the agent's sandbox.
+  - The code and analyse peers keep the runnable view.
+  - The answerer no longer gets the staging instruction or the `kb_method_search` pointer. Both
+    were instructions to call tools it does not have, aimed at a reader who cannot call them.
+  - `_correct_artifact_claims` gains a backstop. An answer containing a `from iguide_methods`
+    import that never says where it runs gets an APPENDED "⚠️ Correction: … runs only inside this
+    agent's sandbox, not on your machine. Ask me to run it." It only fires with the bundle on.
+
+**Why** The map UI with the bundle on: asked for reusable choropleth code, the answer gave the user
+  two `from iguide_methods...` lines to run. They are correct code, but only inside the agent's
+  sandbox; `iguide_methods` is not a package anyone can install.
+
+  This was the case M8.64 deferred ("the answer row keeps everything; B3's question"). The agent
+  designer's review settled it: a rendering change, not an evidence cut, so B3 is untouched. The
+  method stays a REFERENCE (element, function, version, "runnable by this agent"), and the raw
+  line is kept as a detail.
+
+  The backstop appends rather than rewrites, following the delivered-layer precedent. The import
+  IS correct code, so a rewritten snippet would be neither what the model said nor true, and it
+  would hide that a correction happened.
+
+**Measured** 300 tests across the consumer, flag, join, method-evidence, gate and supervisor files; CI-style suite **3,070 passed, 1 failed** (prototype's `Beat`).
+  Four join and flag tests that had been checking the CODE peer's view through the default
+  consumer now name `consumer="code_peer"`. The exit-path test's docstring records the call-site
+  signal seeing inside `main()` as the design win it is.

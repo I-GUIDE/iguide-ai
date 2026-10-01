@@ -478,6 +478,12 @@ def test_every_exit_path_writes_a_report_with_no_internal_error(tmp_path, tail):
 
     Asserting only that checks.json EXISTS does not catch any of them; the absence of an
     ``error`` key is what does. This runs a real subprocess so the exit paths are real.
+
+    It also shows what the call-site signal buys (M8.68). The body buffers in DEGREES inside
+    ``main()``. Frame inspection can never see inside a function, which is why that used to be a
+    coverage cannot_determine. The operation tracker sees the call wherever it runs, so the
+    verdict is now the FAIL the code deserves: the signal doing what frames cannot, not a
+    regression.
     """
     import subprocess
     import sys as _sys
