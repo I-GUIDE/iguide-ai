@@ -1435,3 +1435,56 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+### Stage S12.8 The fifth value kept outside the tier rule: the agent search client's credential
+
+S12.7's rule is that *a value the platform sets per tier, stored anywhere other than the tier
+table, does not move when the tier does*. S12.7 lists three instances. The fourth is on the
+extraction path, `agent_kb._os_client`, which `claude/extraction-integration` moves. The fifth
+was found on 2026-10-01 at `5ae6d92`, in the deployed container's copy as well as the
+repository's, and it is in the platform search itself: `rag_pipeline/search/agents.py`'s
+`_os_client` resolved `OPENSEARCH_NODE` through the tier rule and `OPENSEARCH_USERNAME` /
+`OPENSEARCH_PASSWORD` bare. **A tiered host with the untiered credential.** The three clients
+beside it (`keyword.py`, `semantic.py`, `spatial.py`) resolve all three names through
+`search/utils.getenv`, `<NAME>_<SEARCH_TIER>` first, and `agents.py`'s own `_getenv` already
+delegated to that helper. It was used for one of the three names.
+
+Why nothing failed: the bare pair **is** prod's. Reproduced inside the deployed container,
+`SEARCH_TIER=prod` resolves the node to prod's cluster (`149.165.155.195`) and the bare pair
+authenticates there. The same pair returned 401 against the dev cluster on 2026-09-22, so
+`SEARCH_TIER=dev` would send prod's password to dev's cluster, and the agent search would fail
+with a 401 that reads as a network problem. It is the trap S12.6 records for
+`opensearch_credentials()`, reached by another path. Latent, not live: the deployment searches
+prod.
+
+The fix is the two lines `keyword.py` already had. `claude/extraction-integration` makes the
+same change to `agents.py`, byte for byte including its comment, so the two branches merge
+cleanly there. No resolver was added. That branch introduces `platform_endpoints.search_cluster()`,
+returning `(node, user, pwd)` under a credential-follows-host rule, and a second resolver here
+would be a second answer to the same question for it to unpick. When it lands, the four search
+clients (`agents.py`, `keyword.py`, `semantic.py`, `spatial.py`) share one shape and can move
+onto it together.
+
+Pinned by `rag_pipeline/tests/test_search_tier_credential.py` (seven tests; the suite goes from
+1645 to 1652 passed, 4 skipped before and after):
+
+- The client built under `SEARCH_TIER=dev`, with the `_DEV` triple beside a different bare
+  triple, carries the DEV pair. It is recorded where `agents.py` binds `OpenSearch`, and checked
+  once more through the `Authorization` header the real client would send. Three more
+  configurations pin the precedence: bare names alone, `SEARCH_TIER=dev` under
+  `PLATFORM_TIER=prod` (the pair follows the SEARCH tier), and prod beside the bare triple.
+  Assertions name hosts and pairs by where they came from (dev, prod, bare), never by value.
+- The drift guard: no module under `rag_pipeline/search/` or `extractors/emitters/` reads the
+  three names bare (`os.getenv`, `os.environ`). It carries two named carve-outs, `agent_kb.py`
+  and `opensearch_emitter.py`, which `claude/extraction-integration` moves onto
+  `search_cluster()`. Each carve-out expires itself: the test fails the moment its file stops
+  reading the bare names, so the list cannot go stale.
+- `@lru_cache(maxsize=1)` is on `_os_client` and not on `_os_index`, the settings helper beside
+  it. On the sibling branch an anchored edit here moved the decorator onto a settings helper,
+  caching a setting; targeted runs passed and the full suite caught it. Pinned so the next edit
+  near it fails by name.
+
+Not changed by this: with a tiered node and **no** tiered pair, `tiered_env` still falls back to
+the bare pair, per variable. All four search clients share that rule now. `search_cluster()`'s
+credential-follows-host rule is its replacement once they call it, and that is the sibling
+branch's change, so it is not asserted here either way.
