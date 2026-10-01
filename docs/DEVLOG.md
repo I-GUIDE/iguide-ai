@@ -4145,6 +4145,179 @@ rather than from the previous one.
   the three findings above is an instance. The fix is not another patch at a fourth site; it is
   a single typed evidence contract that every layer must carry forward or explicitly drop.
 
+## 2026-08-30 · M8.49 · IMPLEMENTED_BY produced zero edges, and the parenthetical is why
+
+*Written 2026-10-01 from the commit message (7b4b668) and the run records.*
+
+**Change** `publication_extractor.implemented_by_edges` considers the parenthetical in a tool name
+  as well as the text before it. Three tests: an acronym links; generic and short names still do
+  not, so the widening cannot start linking papers to half the library; and the edge still declares
+  `confidence: low`, because asserting that a paper's method IS a function on the strength of a
+  shared name would be a fabricated provenance claim.
+
+**Why** It was said three times on this branch, including in this log (M8.42–M8.48), that the
+  IMPLEMENTED_BY edge "is still never written". That was wrong: the function exists and has tests.
+  What is true is worse, and shows only when it runs over the corpus. It wrote **zero** edges from
+  the 61 specs that reference any tool at all. It normalised a tool name with `rsplit("(", 1)[0]`,
+  which discards the parenthetical, and the parenthetical is where the symbol lives. A paper writes
+  "Enhanced Two-Step Floating Catchment Area (E2SFCA) method" and the callable unit is `e2sfca`, so
+  the one step meant to make a name matchable threw the match away.
+
+**Measured** With the parenthetical considered: exactly **1** edge across all 73 specs, `355786a5`
+  → `3b45070e.e2sfca`, and no false positive anywhere in the corpus. That is the pairing p5 depends
+  on, which until now the agent rediscovered by search on every turn. 1,869 tests passed.
+
+**Surprised by** One edge is the honest ceiling of this approach, and the cause is a category
+  mismatch, not tuning. `tools_referenced` records what SOFTWARE a paper used ("OSMnx", "Python",
+  "Jupyter Notebook", "Census Bureau API"), while the method library is indexed by FUNCTION. Papers
+  name libraries, libraries contain functions, and the two vocabularies barely meet.
+
+**Next** Link a spec to an ELEMENT, on evidence other than a shared identifier.
+
+## 2026-08-30 · M8.50 · Spec-to-element links from citation and author evidence
+
+*Written 2026-10-01 from the commit message (7c48331), `outputs/spec_links.json` and the source.*
+
+**Change** `extractors/analysis/spec_links.py`, `scripts/build_spec_links.py`, and a `spec_link`
+  table in the record. The module is pure: the author index and the topical scorer are injected, so
+  the ranking is testable without a corpus, a network or a database. Two routes, each carrying its
+  confidence and the evidence for it:
+
+  | route | evidence | confidence |
+  |---|---|---|
+  | `cited_doi` | the element's own text names the paper's DOI | high |
+  | `shared_author_and_topic` | a shared author AND the element's text scores against the spec | medium |
+
+  A medium link is drawn only when the best candidate clears `TOPIC_MIN = 0.05` and the runner-up
+  scores below `TOPIC_MARGIN_RATIO = 0.80` of it, and a spec gets at most one link
+  (`MAX_LINKS_PER_SPEC = 1`). The link travels in the spec's `contents`, not only in a field
+  beside it, because M8.48 established three times over that a fact the model has to go looking
+  for is a fact it does not use.
+
+**Why** Symbol matching draws one edge and can draw no more (M8.49), so the link has to be drawn at
+  the element level, from evidence a person left behind. Neither half of the second route works
+  alone. Author overlap by itself gave `355786a5` **seventeen** candidates, including
+  "CyberGIS-Compute Core" and "Data Collection": a co-authorship graph, not an implementation link.
+  Topical score by itself would link any two papers about accessibility.
+
+**Measured** 14 links → **7** after the two corrections below: 2 high (both `cited_doi`) and 5
+  medium. For `355786a5` the real implementation, `3b45070e`, scores 0.736 against 0.443 for the
+  runner-up and 0.010 for the co-authored bystander. The two high-confidence pairs have
+  near-identical publication and notebook titles, the strongest validation available without a
+  human. 1,889 tests passed.
+
+**Surprised by** Both corrections came from reading the first fourteen links, not the code.
+  - The citation route was gated behind "the publication has extracted steps", and both DOI-citing
+    pairs in the corpus point at publications whose step extraction came back empty. The strongest
+    evidence available produced nothing. A person writing a DOI into a notebook is saying "this
+    implements that" whether or not an LLM got a step list out of the PDF.
+  - A relative floor with a cap of three was too loose. `a182e493` scored 0.7011, 0.6971 and 0.6254,
+    three candidates within 11%. That is the shape of "several of this author's notebooks are about
+    this topic", not of one notebook implementing the paper. A wrong IMPLEMENTED_BY edge is
+    fabricated provenance rather than a gap, so the rule became a margin and a cap of one.
+
+**Known wrong** One of the five medium links is a false positive, found on review: `863cb37f` →
+  `05269a1a` links a trend-analysis paper to an inundation-mapping notebook through a shared author
+  and overlapping topic vocabulary. Medium precision is therefore at most 4 of 5 on what has been
+  checked. It cleared the rule comfortably, 0.221 against a runner-up of 0.013 out of two
+  candidates. A margin shows the best candidate stands apart from the alternatives, not that it is
+  right; with two candidates from one shared author, it stood apart from almost nothing.
+
+## 2026-08-30 · M8.51 · A generated skill becomes a procedure, and step-level tracing to see whether it helps
+
+*Written 2026-10-01 from the commit message (893aab4) and `outputs/agent_traces.json`.*
+
+**Change** Two things, both prompted by asking how the extracted artifacts actually get used.
+  - `scripts/trace_agent_run.py` and `scripts/report_agent_traces.py` record every tool call in a
+    turn, with arguments, result and timing, per arm. The tracer wraps `BaseTool.run`, the one hook
+    every tool passes through. The granular tools are module-level functions, `execute_code` is a
+    closure inside a factory, and the staging tools are built per session, so wrapping the
+    factories would have missed two of the three.
+  - The skill emitter renders a procedure instead of a table of contents. `SkillSpec` carries its
+    methods (symbol, signature, summary, requirements, invariants, pinned import line). Steps lead
+    with the author's own cell titles (`_block_title`, M8.30). `allowed-tools` names
+    `kb_method_search`, `get_method_contract` and `execute_code`. The Run section is four steps
+    naming the tools, the contract check, and the staging precondition a `staged_path` signature
+    implies.
+
+**Why** Every behavioural claim of the previous few days ("it searched the library and wrote its
+  own code anyway") had been inferred from call counts and answer text, not observed. And the
+  generated skill, set beside the hand-written one for the same notebook, read "(cell 3) tools: —
+  — # AI Agent for Chicago Crime Analysis This notebook walks you through building a 'Code Agent'
+  capable of performing geo", with empty `allowed-tools` and a Run section saying only "reuse the
+  functions extracted from this element". The hand-written skill named the functions and the
+  failure to avoid. The difference was raw material, not effort, and the material now existed.
+
+**Measured** First traces, on the p5 question (`e2sfca`): without the KB, 3 calls and no values in
+  142 s; with it, 5 calls and a correct answer in 179 s. With the KB the agent led with
+  `kb_method_search` before any platform search, and its three KB calls took 0.1, 0.1 and 0.0 s,
+  against 1.4 s (keyword) and 1.7 s (spatial) for the ablated arm's platform searches. The
+  regenerated A2SFCA skill lists nine callable methods with signatures, pinned imports, pip
+  requirements and CRS invariants, and its steps read "Travel-Time Polygons", "Reproject", "E2SFCA
+  Implementation" instead of 140 characters of truncated prose. 1,897 tests passed.
+
+**Surprised by**
+  - Import lines have to be resolved at EMIT time. `library_emitter` assigns `library_module` by
+    mutating the live unit dict, but `manifest.skill` is an `asdict` copy taken when the extractor
+    returned, so a module path written afterwards never reached the skill. The emitter now reads
+    the manifest's assets, which `_fan_out` already builds library-first for the same reason.
+  - Invariants are recorded per parameter, so a three-argument method rendered "projected_crs,
+    reject_all_nan" three times over. The reader needs the rules, not their multiplicity.
+
+**Next** Both A/B harnesses set `AGENT_SKILLS_ENABLED=0`, so every measurement so far ran with the
+  skill path switched off entirely. Turning it on is the experiment.
+
+## 2026-08-30 · M8.52 · The generated skill was invisible to the registry that loads it
+
+*Written 2026-10-01 from the commit message (f9c2082) and `outputs/agent_traces.json`.*
+
+**Change** The skill emitter writes front matter with `yaml.safe_dump(..., width=10**6)`, so no
+  scalar folds. `skill_emitter.emit` returns an `error` when the written skill is not discoverable,
+  and ingest reports it as a failure instead of a footnote. Three tests: a long description
+  round-trips through the REAL parser, an undiscoverable skill reports an error, a discoverable one
+  does not. The tracer gains a `with_kb_skills` arm: the `with_kb` tools plus
+  `AGENT_SKILLS_ENABLED=1` and the generated skill root.
+
+**Why** `yaml.safe_dump` folds a long scalar across lines, and `agent_runtime.skills.parse_frontmatter`
+  is, by its own docstring, a "simple YAML-style" line parser. The continuation line carries no
+  `key:`, so the parser rejects the entire skill. The flood skill was generated, written to disk,
+  and absent from the registry. Only long descriptions fold, so the one short-description skill
+  already on disk loaded fine and hid the fault.
+
+  The flood trace was the reason to look. With the KB, calls 15–26 (12 of its 33) went on reading
+  the library's source and searching `/opt /data /mnt /home /tmp` for a dataset nothing had staged.
+  That is exactly what the skill's Run section says to do instead: "If a signature takes
+  `staged_path`, call `stage_element(...)` first; the file is not in the sandbox until you do."
+
+**Measured** Flood: notebook `05269a1a` and its dataset `f49f395e`, against ground truth of 24 test
+  dates, 314 rasters and EPSG:4326 read from the archive beforehand. One run per arm; all three
+  answers correct.
+
+  | arm | calls | time | `stage_element` at call |
+  |---|---|---|---|
+  | no KB | 21 | 635 s | 18 |
+  | with KB | 33 | 638 s | 29 |
+  | KB + skill | **11** | **331 s** | **6** |
+
+  The skill arm imported `read_dates_list` from `iguide_methods` instead of reading its source: the
+  only run that reused a function extracted from a notebook. (p3's KB run had already imported and
+  called a GENERATED dataset loader, `load_chicago_crime_data_2026`, and answered correctly.) Peer
+  routing shortened from search → analysis → search → analysis → code, to search → analysis → code,
+  to search → code. Both arms without the skill opened with a long "cannot access the data" phase
+  and then reported real numbers, so the grounding audit marked their correct answers as
+  unverified; the skill arm's record audited clean. 1,900 tests passed.
+
+**Surprised by** `_roundtrip_ok` was the right check, and caught this: it returned
+  `discoverable: False`, which ingest then recorded inside a warning announcing a successful write.
+  A check whose result nothing acts on is not a check. Separately, in all three arms
+  `import rasterio` from the session's `/work/.deps` failed with `libexpat.so.1`, costing each arm a
+  call; the skill arm took the CRS from a host-side QGIS call instead. Prototype fixed the image in
+  `360a53dd`.
+
+**Limits** One run per arm, on one case. The skill was generated for the element the question
+  names, so finding the right skill is untested. Skills for the rest of the corpus have not been
+  regenerated with the fixed emitter.
+
 ## 2026-10-01 · M8.53 · CI ran for the first time, and the lock had never installed on the images' Python
 
 **Change** `constraints.txt` pins rasterio by interpreter: `1.5.0` on Python ≥3.12, `1.4.4` on
@@ -4182,7 +4355,7 @@ rather than from the previous one.
 
 **Not yet written** Devlog entries for M8.49–M8.52 (IMPLEMENTED_BY, spec links, skills as
   procedures, the registry that could not read a generated skill). Their commit messages carry the
-  reasoning; the entries are owed.
+  reasoning; the entries are owed. *(Written later the same day and inserted above, in sequence.)*
 
 **Next** The first green run, and whatever the full suite does on Linux / 3.11, which nothing has
   ever exercised.
