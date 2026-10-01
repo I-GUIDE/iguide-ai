@@ -4467,3 +4467,21 @@ rather than from the previous one.
   scan.
 
 **Measured** The scan covers 54 tools, including all seven extraction tools; 9/9 pass.
+
+## 2026-10-01 · M8.58 · A method the code peer found is evidence the answer can cite (S3)
+
+**Change** `capability_registry.KB_CODE_PEER_TOOLS` is the one definition of the code peers' KB
+  tools; the peer binding and `_RETRIEVAL_TOOLS` both read it. Method-tool results are rendered as
+  evidence documents through `_method_hit_as_document`, the per-hit renderer lifted out of
+  `_method_units_as_documents` so the sweep and the harvester share it.
+
+**Why** The integration found those names hardcoded in three places that had drifted. The code
+  peer's binding dropped the method tools (S1, fixed at the merge), and the evidence allowlist never
+  had them, so a method a peer found could shape the code but never be cited. Adding the names
+  alone would have been worse: method rows carry `symbol` and `import_line`, not `title` and
+  `contents`, so the name-based harvester would have handed the answerer untitled, empty documents.
+
+**Measured** 6 new tests: one definition; every KB tool counts as evidence; a search result and a
+  contract each become a titled document carrying the pinned import line and citing the SOURCE
+  element; a refused lookup is not cited; a geocoder's `results` still are not evidence. Full
+  suite: **2,996 passed**.

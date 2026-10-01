@@ -33,6 +33,15 @@ class Toolset:
     summary: str
 
 
+# The knowledge-base tools the code-WRITING peers hold, defined ONCE. The peer binding
+# (`supervisor/graph.py:_CODE_PEER_KB_TOOLS`) and the evidence allowlist (`_RETRIEVAL_TOOLS`) both
+# read this tuple. The 2026-10-01 integration found the same names hardcoded in three places that
+# had drifted apart: the code peer's binding dropped the method tools, and the evidence allowlist
+# never had them, so a method the peer found could not be cited.
+KB_CODE_PEER_TOOLS: Tuple[str, ...] = (
+    "agent_kb_search", "get_kb_block", "kb_method_search", "get_method_contract",
+)
+
 # Both peers bind nearly the same spatial toolkit; ``peers`` records which ones actually get it,
 # so a capability offered by only one is never described as if both had it.
 _SHARED: Tuple[Toolset, ...] = (

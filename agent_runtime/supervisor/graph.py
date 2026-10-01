@@ -2618,8 +2618,9 @@ def _wants_external_data(query: str) -> bool:
 # `execute_code` — a peer that can run analysis but cannot discover an existing callable method
 # will re-implement it. Deliberately independent of the request's enabled_search_methods: this
 # is a capability of those peers, not a per-request search preference.
-_CODE_PEER_KB_TOOLS = {"agent_kb_search", "get_kb_block",
-                       "kb_method_search", "get_method_contract"}
+from agent_runtime.capability_registry import KB_CODE_PEER_TOOLS  # noqa: E402 - pure module
+
+_CODE_PEER_KB_TOOLS = set(KB_CODE_PEER_TOOLS)
 
 
 def kb_ablated() -> bool:
@@ -2664,42 +2665,51 @@ def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
         floor = 0.4 * float(hits[0].get("score") or 0.0)
         hits = [h for h in hits if float(h.get("score") or 0.0) >= floor][:4]
 
-    docs: List[Dict[str, Any]] = []
-    for hit in hits:
-        symbol = str(hit.get("symbol") or "")
-        contents = "\n".join(filter(None, [
-            str(hit.get("signature") or ""),
-            str(hit.get("doc_summary") or ""),
-            f"import: {hit['import_line']}" if hit.get("import_line") else "",
-            # The refusal, in the contents the model actually reads.
-            #
-            # This renderer builds `contents` from four fields chosen when it was written, so a
-            # fact added to the record later does not reach the model however carefully it is
-            # carried. Demonstrated three times in one pass: `error`, `import_line_candidates`
-            # and `disambiguate_with` were all on the row and none appeared here, so an agent
-            # that had been given the ambiguity reported instead that "the entries only give
-            # signature and dependency list — they don't include an import: path".
-            (f"AMBIGUOUS: {hit['error']} candidates: "
-             + ", ".join(f"{c.get('qualified_name')} (element {c.get('element_id')})"
-                         for c in (hit.get("import_line_candidates") or [])))
-            if hit.get("error") and hit.get("import_line_candidates") else "",
-            f"requires: {', '.join(hit.get('requirements') or [])}"
-            if hit.get("requirements") else "",
-        ]))
-        docs.append({
-            "doc_id": f"method::{symbol}",
-            "title": f"{symbol.split('.')[-1]} — callable method",
-            "contents": contents,
-            "source": "method_library",
-            "resource_type": "MethodUnit",
-            # Cite the SOURCE ELEMENT, not the synthetic method id: a unit is evidence about
-            # the element it came from, and that is the id a reader can open.
-            "citation_ids": [hit["element_id"]] if hit.get("element_id") else [],
-            "element_id": hit.get("element_id"),
-            "import_line": hit.get("import_line"),
-            "score": hit.get("score"),
-        })
-    return docs
+    return [_method_hit_as_document(hit) for hit in hits]
+
+
+def _method_hit_as_document(hit: Dict[str, Any]) -> Dict[str, Any]:
+    """One library method rendered as an evidence document. Shared by the sweep and by
+    `_evidence_from_artifacts`, so a method reaches the answerer the same way by either path.
+    """
+    requirements = hit.get("requirements") or []
+    if isinstance(requirements, dict):          # a contract carries {"pip": [...], ...}
+        requirements = requirements.get("pip") or []
+    hit = {**hit, "requirements": list(requirements),
+           "symbol": hit.get("symbol") or hit.get("library_symbol") or ""}
+    symbol = str(hit.get("symbol") or "")
+    contents = "\n".join(filter(None, [
+        str(hit.get("signature") or ""),
+        str(hit.get("doc_summary") or ""),
+        f"import: {hit['import_line']}" if hit.get("import_line") else "",
+        # The refusal, in the contents the model actually reads.
+        #
+        # This renderer builds `contents` from four fields chosen when it was written, so a
+        # fact added to the record later does not reach the model however carefully it is
+        # carried. Demonstrated three times in one pass: `error`, `import_line_candidates`
+        # and `disambiguate_with` were all on the row and none appeared here, so an agent
+        # that had been given the ambiguity reported instead that "the entries only give
+        # signature and dependency list — they don't include an import: path".
+        (f"AMBIGUOUS: {hit['error']} candidates: "
+         + ", ".join(f"{c.get('qualified_name')} (element {c.get('element_id')})"
+                     for c in (hit.get("import_line_candidates") or [])))
+        if hit.get("error") and hit.get("import_line_candidates") else "",
+        f"requires: {', '.join(hit.get('requirements') or [])}"
+        if hit.get("requirements") else "",
+    ]))
+    return {
+        "doc_id": f"method::{symbol}",
+        "title": f"{symbol.split('.')[-1]} — callable method",
+        "contents": contents,
+        "source": "method_library",
+        "resource_type": "MethodUnit",
+        # Cite the SOURCE ELEMENT, not the synthetic method id: a unit is evidence about
+        # the element it came from, and that is the id a reader can open.
+        "citation_ids": [hit["element_id"]] if hit.get("element_id") else [],
+        "element_id": hit.get("element_id"),
+        "import_line": hit.get("import_line"),
+        "score": hit.get("score"),
+    }
 
 
 def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
@@ -3459,10 +3469,13 @@ UNIFIED_PEER_ENV = "AGENT_UNIFIED_PEER"
 # carrying "results"/"items"/"hits", so in a merged agent geocode_places({"results": [...]})
 # and overpass_search would silently become retrieved "documents" the answer then cites.
 _RETRIEVAL_TOOLS = frozenset({
-    "agent_kb_search", "get_kb_block", "keyword_search", "semantic_search", "spatial_search",
+    "keyword_search", "semantic_search", "spatial_search",
     "opengeodata_search", "neo4j_search", "neo4j_explore_related_nodes",
-    "neo4j_get_element_by_id", "web_search",
+    "neo4j_get_element_by_id", "web_search", *KB_CODE_PEER_TOOLS,
 })
+# Method tools return rows (symbol / signature / import line), not documents. Harvested raw they
+# would reach the answerer as untitled, contentless "documents"; they are rendered instead.
+_METHOD_TOOLS = frozenset({"kb_method_search", "get_method_contract"})
 
 
 def _decision_sentence(nxt: str, why: str) -> Optional[str]:
@@ -3531,17 +3544,27 @@ def _evidence_from_artifacts(artifacts: Dict[str, Any]) -> List[Any]:
     """
     from agent_runtime.supervisor.evidence_subgraph import extract_documents_from_search_evidence
 
-    rows = [
-        {"name": str(r.get("name") or ""), "content": r.get("content")}
-        for r in (artifacts.get("tool_results") or [])
-        if isinstance(r, dict) and str(r.get("name") or "") in _RETRIEVAL_TOOLS
-    ]
-    if not rows:
-        return []
-    try:
-        return extract_documents_from_search_evidence({"search_agent_tool_results": rows}) or []
-    except Exception:  # noqa: BLE001 - evidence is a bonus here, never the run
-        return []
+    rows, methods = [], []
+    for r in (artifacts.get("tool_results") or []):
+        name = str(r.get("name") or "") if isinstance(r, dict) else ""
+        if name in _METHOD_TOOLS:
+            try:
+                payload = json.loads(r.get("content") or "{}")
+            except (TypeError, ValueError):
+                continue
+            hits = payload.get("results") if name == "kb_method_search" else [payload]
+            methods.extend(_method_hit_as_document(h) for h in (hits or [])
+                           if isinstance(h, dict) and (h.get("symbol") or h.get("library_symbol"))
+                           and not h.get("error"))
+        elif name in _RETRIEVAL_TOOLS:
+            rows.append({"name": name, "content": r.get("content")})
+    docs: List[Any] = []
+    if rows:
+        try:
+            docs = extract_documents_from_search_evidence({"search_agent_tool_results": rows}) or []
+        except Exception:  # noqa: BLE001 - evidence is a bonus here, never the run
+            docs = []
+    return [*docs, *methods]
 
 
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,

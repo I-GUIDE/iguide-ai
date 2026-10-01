@@ -315,7 +315,9 @@ def test_the_evidence_renderer_carries_a_refusal_it_was_not_written_for():
 
     from agent_runtime.supervisor import graph
 
-    src = inspect.getsource(graph._method_units_as_documents)
+    # The per-hit rendering lives in `_method_hit_as_document` since S3 (2026-10-01), shared by the
+    # deterministic sweep and the evidence harvester; the refusal has to survive in that renderer.
+    src = inspect.getsource(graph._method_hit_as_document)
     assert "AMBIGUOUS" in src and "import_line_candidates" in src, (
         "the renderer drops the ambiguity refusal before the model sees it")
 
