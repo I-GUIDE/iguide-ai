@@ -3,12 +3,15 @@
 The bundle is everything the knowledge-element extraction work adds to the agent: the method-library
 tools (`kb_method_search`, `get_method_contract`), the staging tools (`stage_element`, `stage_url`,
 `list_staged_inputs`), the read-only library mount in the code sandbox, the in-sandbox invariant
-gate, run-artifact emission, the deterministic sweep's method-library arm, and every prompt rule,
-tool description and capability clause that tells a model about any of them.
+gate, run-artifact emission, the deterministic sweep's method-library arm and its per-turn
+agent-KB join, and everything that tells a model about any of them: prompt rules, tool
+descriptions, capability clauses, and the import lines, staging instructions and library pointers
+in the evidence it reads (`agent_kb._method_payload`, `evidence_subgraph._render_extracted`).
 
-OFF means the agent behaves exactly as prototype did before the 2026-10-01 integration, so the
-merge itself changes nothing in production until someone turns this on deliberately. It also
-means the model is never TOLD about a capability it does not have: a peer instructed to call
+OFF means none of that is exposed, so turning the bundle on in production is a deliberate act. It
+does NOT mean the merged code is prototype's: retrieval and failure-handling changes that came
+with the merge are not extraction capabilities and are not behind this switch. OFF also means the
+model is never TOLD about a capability it does not have: a peer instructed to call
 `kb_method_search` without it guessed the package name and wrote `from method_library import ...`,
 which fails. So a description is gated with the tool it describes, never separately.
 

@@ -4565,3 +4565,31 @@ rather than from the previous one.
 **Measured** `test_extraction_flag.py` 10/10, `test_method_library_tools.py` 49/49. CI-style suite
   on the deployed-stack venv: **3,006 passed, 1 failed, 1 skipped**, identical to before the flag.
   The failure is still prototype's temporal `Beat` bug.
+
+## 2026-10-01 · M8.62 · The flag also covers what the evidence says
+
+**Change** Three more surfaces follow `AGENT_EXTRACTION`:
+  - `agent_kb._method_payload` keeps a unit's signature, summary and requirements, but drops
+    `import_line`, `slice_sha` and the callability verdict. An `agent_kb_search` hit names a
+    method without saying how to import it;
+  - the sweep's per-turn agent-KB join (`attach_kb_to_documents`) does not run;
+  - `_render_extracted` lists every unit as a reference: no RUNNABLE block, no `stage_element`
+    instruction, no pointer at `kb_method_search`.
+  The flag's docstring, `DEPLOYMENT.md` and `.env.example` now say what off actually means.
+
+**Why** M8.61 gated what the tools and prompts say and missed what the EVIDENCE says. All three
+  surfaces came with the merge. Prototype's `agent_kb.py` (297 lines) had no method payload and no
+  join, and its evidence view had no `_render_extracted`. With the flag off, an `agent_kb_search`
+  hit still carried `from iguide_methods... import ...`, and the evidence view still said the
+  library was mounted read-only. That is M2.7 again: a model handed an import line writes the
+  import. Found by grepping for the bundle's tool and package names outside the gated files,
+  before sending the peer the coverage list.
+
+  Also corrected: M8.61's docs said that off, the agent "behaves as prototype did before the
+  integration". That was never true. The merge also brought retrieval and failure-handling
+  changes that are not extraction capabilities and are not behind the switch. Off means none of
+  the bundle is exposed, and nothing the model reads describes it.
+
+**Measured** `test_extraction_flag.py` 13/13. Each new test checks its on half too, and the join
+  test records calls instead of raising, because the call site swallows exceptions. CI-style
+  suite: **3,009 passed, 1 failed** (prototype's `Beat`).

@@ -118,3 +118,82 @@ def test_off_the_sweep_never_reads_the_library(off, monkeypatch):
     monkeypatch.setattr(ml, "search_methods", boom)
     docs = g._direct_search_sweep("buffer a road network", ["kb_method_search"])
     assert not [d for d in docs if d.get("source") == "method_library"]
+
+
+# ------------------------------------------------------------------ what the evidence says
+#
+# Three surfaces that came with the merge described the bundle with it off: every agent_kb_search
+# hit with a unit carried its import line, the sweep's per-turn KB join attached units to
+# documents, and the evidence view said the library was mounted and told the model to
+# `stage_element` and to call `kb_method_search`. Off, a unit is still NAMED (it is true of the
+# element in any deployment); nothing says how to import it.
+
+UNIT = {
+    "library_symbol": "load_crimes",
+    "library_module": "iguide_methods.ke_b1fa548b.v_abc123",
+    "slice_sha": "abc123",
+    "signature": "def load_crimes(staged_path: str)",
+    "doc_summary": "Read the crime table.",
+    "requirements": {"pip": ["pandas"]},
+    "callability": {"verdict": "callable", "reason": ""},
+    "import_line": "from iguide_methods.ke_b1fa548b.v_abc123 import load_crimes",
+}
+# Every phrase that tells a model some part of the bundle is there.
+BUNDLE_TERMS = ("iguide_methods", "import:", "kb_method_search", "get_method_contract",
+                "stage_element", "mounted", "RUNNABLE")
+
+
+def _hit():
+    return {"_index": "iguide_agent_method_units", "_id": "b1fa548b::load_crimes",
+            "_source": {"doc_id": "b1fa548b::load_crimes", "title": "load_crimes",
+                        "extracted": {"parent_doc_id": "b1fa548b", "unit": dict(UNIT)}}}
+
+
+def test_off_a_kb_hit_names_the_unit_but_not_how_to_import_it(off):
+    from rag_pipeline.search.agent_kb import normalize_hit
+
+    method = normalize_hit(_hit(), "keyword")["method"]
+    assert method["signature"] == UNIT["signature"], "the reference half is true in any deployment"
+    assert not {"import_line", "slice_sha", "callable"} & set(method), method
+
+    off.setenv("AGENT_EXTRACTION", "1")
+    assert normalize_hit(_hit(), "keyword")["method"]["import_line"] == UNIT["import_line"]
+
+
+def _extracted():
+    return {"units": [{"symbol": "load_crimes", "signature": UNIT["signature"],
+                       "import_line": UNIT["import_line"], "requirements": ["pandas"]}],
+            "unit_count": 5}
+
+
+def test_off_the_evidence_view_never_points_at_the_bundle(off):
+    from agent_runtime.supervisor.evidence_subgraph import _render_extracted
+
+    text = _render_extracted(_extracted(), "b1fa548b")
+    assert "load_crimes" in text, "the method is still named, as a reference"
+    assert not [t for t in BUNDLE_TERMS if t in text], text
+
+    off.setenv("AGENT_EXTRACTION", "1")
+    on = _render_extracted(_extracted(), "b1fa548b")
+    assert UNIT["import_line"] in on and "stage_element" in on and "kb_method_search" in on
+
+
+def test_off_the_sweep_does_not_join_the_kb(off, monkeypatch):
+    """Recorded rather than raised: the call site swallows exceptions, so a join that raised
+    would look exactly like a join that never ran."""
+    import rag_pipeline.search.agent_kb as kb
+    from agent_runtime.supervisor import graph as g
+
+    calls = []
+
+    def record(docs, **kwargs):
+        calls.append(len(docs))
+        return {"documents": docs, "attached": 0, "folded": 0, "actionable": []}
+
+    monkeypatch.setattr(kb, "attach_kb_to_documents", record)
+    g._direct_search_sweep("buffer a road network", ["kb_method_search"])
+    assert not calls
+
+    off.setenv("AGENT_EXTRACTION", "1")
+    g._direct_search_sweep("buffer a road network", ["kb_method_search"])
+    assert calls, "the ON half of this test is not real"

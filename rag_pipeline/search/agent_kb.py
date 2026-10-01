@@ -22,6 +22,7 @@ import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from .utils import default_top_k  # shared retrieval window
+from agent_runtime.extraction_flag import extraction_enabled
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +92,14 @@ def _method_payload(extracted: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "slice_sha": unit.get("slice_sha"),
     }
     payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
+    if not extraction_enabled():
+        # The extraction bundle is off (agent_runtime/extraction_flag.py), so no library is
+        # mounted and nothing here can be imported. What the unit IS stays — it is true of the
+        # element in any deployment. What it would take to CALL it goes: a model handed an import
+        # line writes the import, and the import fails.
+        for key in ("import_line", "slice_sha"):
+            payload.pop(key, None)
+        return payload
 
     # Callability is three-valued, and flattening it to a bool was wrong in both directions. An
     # ABSENT verdict is not "not callable" — it means nothing analyzed it — and reporting False

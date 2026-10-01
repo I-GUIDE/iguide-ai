@@ -2825,6 +2825,11 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
     #
     # It also folds away KB rows whose parent element is already in the result set — they were
     # competing with their own element for an evidence slot.
+    #
+    # Part of the extraction bundle (agent_runtime/extraction_flag.py): one more agent-KB read on
+    # EVERY turn, through a client that is not yet tier-routed, so it waits for the switch.
+    if not extraction_enabled():
+        return docs
     try:
         from rag_pipeline.search.agent_kb import attach_kb_to_documents
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
+from agent_runtime.extraction_flag import extraction_enabled
 from agent_runtime.streaming_trace import emit_trace_event
 
 # (query, state) -> list of document dicts
@@ -122,7 +123,10 @@ def _render_extracted(extracted: Any, element_hint: str = "<element id>") -> str
     parts: List[str] = []
 
     units = [u for u in (extracted.get("units") or []) if isinstance(u, dict)]
-    runnable = [u for u in units if u.get("import_line")]
+    # With the extraction bundle off there is no mounted library and no staging tool, so every
+    # unit is a reference and nothing below may say otherwise (agent_runtime/extraction_flag.py).
+    bundle = extraction_enabled()
+    runnable = [u for u in units if u.get("import_line")] if bundle else []
     if runnable:
         lines = ["RUNNABLE METHODS extracted from this element — the import line works verbatim "
                  "inside execute_code (the library is mounted read-only); prefer it over "
@@ -148,13 +152,14 @@ def _render_extracted(extracted: Any, element_hint: str = "<element id>") -> str
                              f"staged_path — this file is not in the sandbox until you do.")
         parts.append("\n".join(lines))
 
-    named_only = [u for u in units if not u.get("import_line")]
+    named_only = [u for u in units if u not in runnable]
     if named_only:
-        parts.append("METHODS PRESENT but not importable (reference only): "
-                     + ", ".join(str(u.get("symbol")) for u in named_only if u.get("symbol")))
+        label = ("METHODS PRESENT but not importable (reference only): " if bundle
+                 else "METHODS IN THIS ELEMENT (reference only): ")
+        parts.append(label + ", ".join(str(u.get("symbol")) for u in named_only if u.get("symbol")))
     if extracted.get("unit_count") and len(units) < int(extracted["unit_count"]):
-        parts.append(f"({extracted['unit_count']} methods in total; "
-                     f"{len(units)} shown — call kb_method_search for the rest)")
+        parts.append(f"({extracted['unit_count']} methods in total; {len(units)} shown"
+                     + (" — call kb_method_search for the rest)" if bundle else ")"))
 
     dataset = extracted.get("dataset")
     if isinstance(dataset, dict) and dataset:
