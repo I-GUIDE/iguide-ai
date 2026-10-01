@@ -44,7 +44,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pytest pyyaml
+      # python-dotenv because pytest imports rag_pipeline/tests/conftest.py as part of the
+      # `rag_pipeline` package, and rag_pipeline/__init__.py imports dotenv at module scope.
+      # Without it the job dies collecting conftest, before a single assertion runs.
+      # networkx because three contract tests pin the graph stack, one of them asserting the
+      # INSTALLED version equals constraints.txt — so it is installed through the lock, not loose.
+      - run: pip install pytest pyyaml python-dotenv networkx -c constraints.txt
       - name: Assert the deployed configuration is safe
         # These are security boundaries, not preferences:
         #   - LLM_PROVIDER=claude-cli routes through a personal subscription

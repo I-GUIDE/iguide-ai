@@ -4144,3 +4144,45 @@ rather than from the previous one.
   fields that existed at the time and each silently lossy for anything added later. Every one of
   the three findings above is an instance. The fix is not another patch at a fourth site; it is
   a single typed evidence contract that every layer must carry forward or explicitly drop.
+
+## 2026-10-01 · M8.53 · CI ran for the first time, and the lock had never installed on the images' Python
+
+**Change** `constraints.txt` pins rasterio by interpreter: `1.5.0` on Python ≥3.12, `1.4.4` on
+  3.11. The `deployment-contract` job now installs `python-dotenv`, and `networkx` through the
+  lock, beside pytest and pyyaml.
+
+**Why** `backend_swap` was pushed for the first time today, so `.github/workflows/verify.yml`
+  ran for the first time, seven weeks after M7.1 wrote it. All three jobs failed, for two causes.
+
+  rasterio 1.5.0 declares `requires_python >=3.12` and ships wheels for cp312+ only. The lock was
+  frozen on this machine's CPython 3.13, while CI and all three Python images (agent-api, MCP,
+  sandbox) use `python:3.11-slim`. So `pip install -r requirements.txt -c constraints.txt`, the
+  exact line `rag_pipeline/Dockerfile` and `MCP_server/Dockerfile` run, could not succeed on any
+  3.11 build from the day M0.5 introduced the lock (2026-08-12). Nobody built either image from
+  this branch in that time, and the CI that would have said so had never run.
+
+  The contract job installed only pytest and pyyaml. pytest imports
+  `rag_pipeline/tests/conftest.py` as part of the `rag_pipeline` package, whose `__init__`
+  imports dotenv at module scope, so the job died at collection before a single assertion. Behind
+  that sat three contract tests that need networkx, one asserting the INSTALLED version equals
+  the pin, which is why it goes through `-c constraints.txt` rather than loose.
+
+**Measured** All 43 unconditional pins checked against PyPI metadata for CPython 3.11: rasterio
+  is the only one that excludes it. A full resolve for 3.11 on manylinux (uv, with pip's
+  merge-all-indexes behaviour): 171 packages, every pin held, rasterio 1.4.4. The same resolve
+  for 3.13 still selects 1.5.0. `test_deployment_contract.py` in a bare venv holding only the
+  job's packages: collection error → 3 failures (networkx) → **22/22**. The gate's CI step, run
+  verbatim: degrees buffer → `fail`, reprojected → `pass`.
+
+**Surprised by** The sandbox image built, and passed its offline geospatial import check, on the
+  first CI run. `sandbox/Dockerfile` does not read `constraints.txt`, so the one image that ignores
+  the lock was the only one that could build. The lock's own header says "both Dockerfiles"
+  use it; that sentence was true and was the problem. A check that never runs is the limiting case
+  of a check that reports success while the thing it establishes is false.
+
+**Not yet written** Devlog entries for M8.49–M8.52 (IMPLEMENTED_BY, spec links, skills as
+  procedures, the registry that could not read a generated skill). Their commit messages carry the
+  reasoning; the entries are owed.
+
+**Next** The first green run, and whatever the full suite does on Linux / 3.11, which nothing has
+  ever exercised.

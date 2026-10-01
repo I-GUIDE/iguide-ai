@@ -56,7 +56,15 @@ numpy==2.1.3
 geopandas==1.1.2
 shapely==2.1.2
 pyproj==3.7.2
-rasterio==1.5.0
+# rasterio is the one pin that depends on the interpreter. This file was frozen on the dev
+# machine (CPython 3.13), and 1.5.0 ships wheels for cp312+ only (requires_python >=3.12).
+# All three images and CI run python:3.11-slim, where 1.5.0 has no distribution at all, so
+# `pip install -r requirements.txt -c constraints.txt` failed outright on every 3.11 build:
+# the agent-api image, the MCP image and all of CI, from the day this lock landed until CI
+# first ran on 2026-10-01. 1.4.4 is the newest release that supports 3.11. Checked: none of
+# the other 42 unconditional pins here exclude 3.11.
+rasterio==1.5.0 ; python_version >= "3.12"
+rasterio==1.4.4 ; python_version < "3.12"
 pyogrio==0.12.1
 # pyarrow is REQUIRED, not optional: langchain_geo_tools.py:436/:476 and
 # geo_handles.py:42 all call to_parquet. It was absent from requirements.txt, so
