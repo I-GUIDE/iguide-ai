@@ -4506,3 +4506,31 @@ rather than from the previous one.
 **Measured** `docker compose config` with the password unset: before, an interpolation error for
   the whole file; after, three services by default and four under `--profile extraction`.
   Deployment contract: 24/24.
+
+## 2026-10-01 · M8.60 · The lock pins what production runs, not what one laptop had
+
+**Change** `constraints.txt` regenerated from `pip freeze` inside the running agent-api container:
+  48 curated pins that keep their reasons, plus 134 generated pins for the rest of the image, so
+  the lock reproduces it. Packages the image does not have yet (the extraction bundle's Postgres
+  client and readers, plus pyarrow) are listed separately. `torch` is split by platform, because
+  the image's `2.14.0+cpu` build has no macOS wheel.
+
+**Why** The agent designer's review flagged it as the most consequential blocker. The agent-api
+  `Dockerfile` installs `-c constraints.txt`, and the lock pinned a dev Mac's stack, so an image
+  built from this branch would have downgraded production in 34 places. Among them: pandas
+  3.0.5→2.2.3 (a major version), numpy 2.4.6→2.1.3, langchain 1.4.1→1.2.10, openai 3.14.1→2.45.0
+  and langsmith 0.12.6→0.6.7. The deployed stack is the one the benchmark measured, so the lock
+  adapts to it.
+
+**Measured** Resolves to 182 packages for CPython 3.11 on manylinux, and for 3.13 on macOS 14+.
+  Suite on the locked stack: **2,996 passed, 1 failed**. The failure is prototype's temporal `Beat`
+  bug (queued for the maintainer). The networkx contract test now passes on 3.6.1.
+
+**Surprised by** pyarrow is NOT in the deployed agent-api image: prototype never declared it, and
+  only the sandbox image has it (25.0.1). Prototype's `reproject_vector` and `vector_spatial_join`
+  write GeoParquet agent-side (`langchain_geo_tools.py:570`, `:620`), and `geo_handles.py` passes
+  frames as parquet, so both tools should fail in production with "Missing optional dependency
+  'pyarrow'". This is the defect M0.5 fixed on `backend_swap` and that never reached prototype.
+  The test venv had pyarrow through `backend_swap`'s requirements, so the suite cannot show it; it
+  needs a check inside the container. This machine still runs the old stack (networkx 3.4.2), so
+  the pin test fails here until the local environment follows the lock.

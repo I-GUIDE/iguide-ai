@@ -48,8 +48,11 @@ ENV MPLBACKEND=Agg \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt constraints.txt ./
-# -c constraints.txt pins the tested stack; without it a clean build silently
-# resolved pandas 3.0 and an untested langchain triple. See constraints.txt.
+# -c constraints.txt pins the stack the DEPLOYED agent-api image runs (pip freeze of the running
+# container, 2026-10-01: pandas 3.0.5, numpy 2.4.6, langchain 1.4.1, torch 2.14.0+cpu), which is
+# the stack the benchmark measured. Without it a clean build resolves whatever is newest that day.
+# Until 2026-10-01 this lock pinned a dev Mac's older stack instead, and an image built from it
+# would have DOWNGRADED production across a pandas major version. See constraints.txt.
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # py-spy reads the Python stacks of a RUNNING process from outside it, without the target's

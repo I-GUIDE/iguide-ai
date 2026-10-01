@@ -1,109 +1,238 @@
 # Version lock for reproducible builds.
 #
-# WHY THIS FILE EXISTS
-# requirements.txt carries unbounded pins (`langchain>=1.0`, bare `pandas`, bare `numpy`),
-# and both Dockerfiles run a plain `pip install -r requirements.txt`. The consequence,
-# measured on 2026-08-07:
+# WHAT THIS PINS
+# The stack the DEPLOYED agent-api image runs, from `pip freeze` inside the running container
+# on 2026-10-01 (CPython 3.11.16, x86_64). That is the stack the EarthVerse / GeoAnalystBench
+# runs measured, so it is the baseline: a lock that differs from it describes an environment
+# nobody deploys. Until 2026-10-01 this file instead pinned a dev Mac's stack (pandas 2.2.3,
+# numpy 2.1.3, langchain 1.2.10, networkx 3.4.2); building the image from it would have
+# downgraded production across a pandas MAJOR version.
 #
-#   dev machine        langchain 1.2.10  core 1.4.9  langgraph 1.0.10  pandas 2.2.3  numpy 2.1.3
-#   clean pip install  langchain 1.3.15  core 1.5.4  langgraph 1.2.11  pandas 3.0.5  numpy 2.5.2
+# WHY A LOCK AT ALL
+# requirements.txt carries unbounded pins (`langchain>=1.0`, bare `pandas`), so a clean build
+# resolves whatever is newest that day. Measured 2026-08-07: the resolution moved inside one
+# afternoon. Nothing measured against a baseline means anything while the stack drifts.
 #
-# So the deployed image ran a *major* pandas version, and a langchain triple, that nobody
-# had tested. The resolution even moved inside a single afternoon (a dry-run gave langchain
-# 1.3.14; the real install an hour later gave 1.3.15). Nothing measured against "the eval
-# baseline" means anything while the stack underneath it drifts silently.
+# Upgrading is fine, as a deliberate, measured step: bump here, re-run `pytest` and the
+# benchmark, and record the delta in docs/DEVLOG.md. Regenerate the generated block below from
+# a fresh `pip freeze` of the image rather than editing it by hand.
 #
-# These are the versions the 503-passing suite and the recorded eval baseline were produced
-# on. Upgrading is fine — but as a deliberate, measured step: bump here, re-run
-# `pytest rag_pipeline/tests/` and `scripts/eval_retrieval.py`, and record the delta in
-# docs/DEVLOG.md.
-#
-# Usage (both Dockerfiles and any clean venv):
+# Usage (both Dockerfiles, CI, and any clean venv):
 #   pip install -r requirements.txt -c constraints.txt
 
 # --- agent / LLM stack. Fastest-moving packages in the tree. -------------------
-langchain==1.2.10
-langchain-core==1.4.9
-langchain-openai==1.1.7
-langgraph==1.0.10
+langchain==1.4.1
+langchain-core==1.6.3
+langchain-openai==1.6.2
+langchain-anthropic==1.7.2
+anthropic==1.6.0
+langgraph==1.2.11
 # The langgraph SUB-PACKAGES must be pinned too, and this is not optional bookkeeping:
-# with only `langgraph==1.0.10` pinned, a clean build resolved langgraph-prebuilt 1.0.13,
-# which does `from langgraph.runtime import ExecutionInfo` — a name that does not exist in
-# langgraph 1.0.10. The result is an ImportError raised while importing
-# `langchain.agents`, i.e. create_agent dies and the ENTIRE agent is dead on arrival.
-# Pinning the parent alone does not prevent that; these version independently.
-langgraph-prebuilt==1.0.8
-langgraph-checkpoint==4.0.1
-langgraph-sdk==0.3.9
-langchain-protocol==0.0.18
+# with only the parent pinned, a clean build once resolved a langgraph-prebuilt that imported
+# a name its langgraph did not have, raising ImportError while importing `langchain.agents`
+# — create_agent dies and the ENTIRE agent is dead on arrival. These version independently.
+langgraph-prebuilt==1.1.0
+langgraph-checkpoint==4.2.0
+langgraph-sdk==0.4.4
 langchain-mcp-adapters==0.3.2
-# langsmith is a langchain-core dependency and moved 0.6.7 -> 0.10.18 in a clean build.
-langsmith==0.6.7
-mcp==1.28.1
-openai==2.45.0
+# langsmith is a langchain-core dependency and has jumped minor series in a clean build.
+langsmith==0.12.6
+mcp==1.30.0
+openai==3.14.1
 
 # --- retrieval backends -------------------------------------------------------
-opensearch-py==3.0.0
-neo4j==6.1.0
-psycopg==3.3.4
-psycopg-binary==3.3.4
+opensearch-py==3.2.0
+neo4j==6.3.1
 
 # --- scientific / geospatial stack --------------------------------------------
-# pandas is capped deliberately: pandas 3.0 is a major release and this platform's
-# correctness depends on DataFrame semantics throughout the geo tool layer.
-pandas==2.2.3
-numpy==2.1.3
-geopandas==1.1.2
+# pandas 3 is what production runs and the benchmark measured. backend_swap's suite was
+# re-run on exactly this stack before the switch (1,945/1,947; M8.56), so extraction's
+# tested paths are pandas-3 clean. Extracted SLICES are third-party code and are not covered.
+pandas==3.0.5
+numpy==2.4.6
+geopandas==1.1.4
 shapely==2.1.2
 pyproj==3.7.2
-# rasterio is the one pin that depends on the interpreter. This file was frozen on the dev
-# machine (CPython 3.13), and 1.5.0 ships wheels for cp312+ only (requires_python >=3.12).
-# All three images and CI run python:3.11-slim, where 1.5.0 has no distribution at all, so
-# `pip install -r requirements.txt -c constraints.txt` failed outright on every 3.11 build:
-# the agent-api image, the MCP image and all of CI, from the day this lock landed until CI
-# first ran on 2026-10-01. 1.4.4 is the newest release that supports 3.11. Checked: none of
-# the other 42 unconditional pins here exclude 3.11.
-rasterio==1.5.0 ; python_version >= "3.12"
-rasterio==1.4.4 ; python_version < "3.12"
-pyogrio==0.12.1
-# pyarrow is REQUIRED, not optional: langchain_geo_tools.py:436/:476 and
-# geo_handles.py:42 all call to_parquet. It was absent from requirements.txt, so
-# vector_reproject and vector_spatial_join failed in every clean build while passing
-# in dev (which had it via anaconda). See M0.5 in docs/DEVLOG.md.
-pyarrow==24.0.0
-matplotlib==3.10.0
-# Same drift this file exists to stop, caught before anything depended on it: dev runs
-# 3.4.2 (arriving via torch), while a clean `pip install -r requirements.txt -c
-# constraints.txt` resolved networkx 3.6.1. Graph results measured here would have run on a
-# different implementation in CI. 3.4.2 is the version the community-detection work is
-# measured against; torch==2.10.0 requires only networkx>=2.5.1, so this does not fight it.
-networkx==3.4.2
+# One pin for every interpreter: 1.4.4 ships wheels for cp310-cp314 on Linux and macOS.
+# (1.5.0, pinned here until 2026-10-01, is cp312+ only, so no 3.11 image could install it.)
+rasterio==1.4.4
+pyogrio==0.13.0
+# pyarrow is REQUIRED, not optional: vector_reproject / vector_spatial_join write GeoParquet.
+# It was once absent from requirements.txt and both tools failed in every clean build.
+pyarrow==25.0.1
+matplotlib==3.11.2
+# The community-detection work was measured on 3.4.2; production runs 3.6.1, and the
+# seeded-partition contract tests pass on it. Re-measure the corpus graph before treating
+# results across the two as comparable.
+networkx==3.6.1
 
 # --- embeddings / NLP ---------------------------------------------------------
-sentence-transformers==5.5.1
-transformers==5.8.1
-torch==2.10.0
-spacy==3.8.11
+sentence-transformers==6.0.1
+transformers==5.17.0
+# The image installs the CPU build from the PyTorch index; macOS has no `+cpu` wheel.
+torch==2.14.0+cpu ; sys_platform == "linux"
+torch==2.14.0 ; sys_platform != "linux"
+spacy==3.8.16
 
-# --- web / serving ------------------------------------------------------------
-flask==3.1.0
-flask-cors==6.0.2
+# --- web / serving / identity -------------------------------------------------
+flask==3.1.3
+flask-cors==6.0.5
 flasgger==0.9.7.1
-gunicorn==23.0.0
-fastapi==0.135.1
-pydantic==2.12.4
+gunicorn==26.2.0
+fastapi==0.141.1
+pydantic==2.13.5
+PyJWT==2.14.0
 
 # --- open-web extraction, data, storage, config -------------------------------
 beautifulsoup4==4.15.0
-lxml==6.0.1
-markdownify==1.2.2
-ddgs==9.5.5
-nbformat==5.10.4
-# Extraction readers, undeclared until 2026-10-01 (see requirements.txt). These are the dev
-# machine's versions, i.e. the ones every publication and dataset coverage figure was measured
-# on. All three support CPython 3.11 and fit the numpy/pandas pins above.
+lxml==6.1.3
+markdownify==1.2.3
+ddgs==9.16.0
+nbformat==5.11.1
+boto3==1.43.96
+python-dotenv==1.2.3
+
+# --- the extraction bundle: NOT in the deployed image yet ----------------------
+# The Postgres client and the three readers the extractors import (declared 2026-10-01).
+# Versions are backend_swap's; all four support CPython 3.11 and fit the pins above.
+psycopg==3.3.4
+psycopg-binary==3.3.4
 pypdf==6.6.2
 python-docx==1.2.0
 xarray==2026.7.0
-boto3==1.36.0
-python-dotenv==1.1.0
+
+# --- the rest of the deployed agent-api image (generated; do not edit by hand) ----
+affine==3.0.1
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+attrs==26.1.0
+blinker==1.9.0
+blis==1.3.3
+botocore==1.43.96
+catalogue==2.0.10
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+click-plugins==1.1.1.2
+cligj==0.7.2
+cloudpathlib==0.25.0
+cloudpickle==3.1.2
+confection==1.3.3
+contourpy==1.3.3
+cryptography==50.0.1
+cycler==0.12.1
+cymem==2.0.13
+distro==1.9.0
+docstring_parser==0.18.0
+esda==2.9.0
+Events==0.5
+fastjsonschema==2.22.2
+filelock==4.0.0
+fiona==1.10.1
+fonttools==4.65.0
+frozenlist==1.8.0
+fsspec==2026.7.0
+grpcio==1.84.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpcore2==2.13.0
+httpx==0.28.1
+httpx-sse==0.4.3
+httpx2==2.13.0
+huggingface_hub==1.31.0
+idna==3.19
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+jiter==0.17.0
+jmespath==1.1.0
+joblib==1.6.0
+jsonpatch==1.33
+jsonpointer==3.1.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+jupyter_core==5.9.1
+kiwisolver==1.5.1
+langchain-protocol==0.0.19
+libpysal==4.14.1
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mistune==3.3.4
+mpmath==1.3.0
+multidict==6.8.0
+murmurhash==1.0.15
+narwhals==2.26.0
+opensearch-protobufs==1.2.0
+orjson==3.12.0
+ormsgpack==1.12.2
+packaging==26.3
+pillow==12.3.0
+platformdirs==4.11.9
+pluggy==1.6.0
+preshed==3.0.13
+primp==2.0.1
+propcache==0.5.4
+protobuf==7.36.1
+py-spy==0.4.2
+pycparser==3.0
+pydantic_core==2.46.5
+pydantic-settings==2.15.0
+pygeoda==0.1.3
+Pygments==2.21.0
+pyparsing==3.3.2
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-multipart==0.0.32
+pytz==2026.3.post1
+PyYAML==6.0.3
+referencing==0.37.0
+regex==2026.9.10
+requests==2.34.2
+requests-toolbelt==1.0.0
+rich==15.0.0
+rpds-py==2026.6.3
+s3transfer==0.19.2
+safetensors==0.8.0
+scikit-learn==1.9.1
+scipy==1.17.1
+shellingham==1.5.4
+six==1.17.0
+smart_open==8.0.1
+sniffio==1.3.1
+soupsieve==2.9.2
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+spreg==1.9.0
+srsly==2.5.3
+sse-starlette==3.4.11
+starlette==1.6.0
+sympy==1.14.0
+tenacity==9.1.4
+thinc==8.3.13
+threadpoolctl==3.7.0
+tiktoken==0.14.0
+tokenizers==0.23.2
+tqdm==4.70.1
+traitlets==5.16.1
+truststore==0.10.4
+typer==0.27.2
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uuid_utils==0.17.1
+uvicorn==0.53.0
+wasabi==1.1.3
+weasel==1.0.0
+websockets==16.1.1
+Werkzeug==3.1.8
+wrapt==2.4.1
+xxhash==4.0.1
+yarl==1.25.1
+zstandard==0.25.0
