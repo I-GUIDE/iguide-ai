@@ -13,7 +13,7 @@ than just the value.
 
 | Variable | Value | If unset, the symptom is… |
 |---|---|---|
-| `AGENT_CHAT_API_KEY` | required | Auth fails **closed** (500) — intended. Set `AGENT_CHAT_AUTH_OPTIONAL=1` only for a local dev box. |
+| `AGENT_CHAT_API_KEY` | required | The service credential for callers without a browser (scripts, eval). A verified platform user (token mode) or demo mode is an alternative to it. **Unset disables the key check** outside token mode, where identity still refuses anonymous callers (prototype's model, kept by the 2026-10-01 integration); `/query` and `/query/batch` use the same check as the agent routes. |
 | `AGENT_CORS_ORIGINS` | explicit allowlist | Browser blocks every request from the prototype; looks like a dead backend. |
 | `AGENT_KB_BACKEND` | `opensearch` | **Silently reads a local file store.** The symptom is "fewer results", which reads as a retrieval-quality problem, not a config one. The payload now names the backend and warns once, but set it. |
 | `AGENT_METHOD_LIBRARY_DIR` | path to `method_library` | `kb_method_search` reports an empty library and the sandbox mount is missing — the agent concludes no such method exists. |

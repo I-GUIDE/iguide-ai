@@ -46,9 +46,22 @@ _STORE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 # turn stays accessible to the agent on later turns ("visualize it" / "execute it").
 _FILES: "OrderedDict[str, List[str]]" = OrderedDict()
 
+# What the agent DID, as opposed to what it said. The turn store above keeps
+# {userQuery, answer} — prose — so everything a tool produced is discarded at the end of the
+# turn. Observed: a clay embedding was computed with pixel_ground_m in its result, the user
+# asked "original resolution or downsampled?" on the next turn, and the supervisor (which sees
+# no prior-turn state) routed to search because as far as it could tell nothing had happened.
+# Forty-nine keyword searches later the payload exceeded the model's context window and the
+# turn died. The answer had been in hand the whole time; nothing remembered it.
+_ACTIONS: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+
 _DEFAULT_MAX_TURNS = 50
 _DEFAULT_MAX_THREADS = 500
 _DEFAULT_MAX_FILES = 50
+# Rows, not turns: one substantial turn can be a dozen tool calls. Small on purpose — this is
+# injected into a routing decision, and a ledger that crowds the window recreates the very
+# failure it exists to prevent.
+_DEFAULT_MAX_ACTIONS = 80
 
 
 def _max_files() -> int:
@@ -56,6 +69,13 @@ def _max_files() -> int:
         return max(1, int(os.getenv("AGENT_SESSION_MEMORY_MAX_FILES", str(_DEFAULT_MAX_FILES))))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_FILES
+
+
+def _max_actions() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_SESSION_MEMORY_MAX_ACTIONS", str(_DEFAULT_MAX_ACTIONS))))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_ACTIONS
 
 
 def _max_turns() -> int:
@@ -161,13 +181,52 @@ def append_session_files(thread_id: Optional[str], file_ids: Optional[List[str]]
             _FILES.popitem(last=False)
 
 
+def get_session_actions(thread_id: Optional[str]) -> List[Dict[str, Any]]:
+    """What this conversation has already DONE, oldest first."""
+    if not thread_id:
+        return []
+    with _LOCK:
+        rows = _ACTIONS.get(thread_id)
+        if not rows:
+            return []
+        _ACTIONS.move_to_end(thread_id)
+        return [dict(r) for r in rows]
+
+
+def append_session_actions(thread_id: Optional[str],
+                           actions: Optional[List[Dict[str, Any]]]) -> None:
+    """Record what this turn's tools did, so a later turn need not redo it.
+
+    Deliberately NOT the durable record: this is process-local working context for routing,
+    the same lifetime and bounds as the turn store beside it.
+    """
+    rows = [dict(a) for a in (actions or []) if isinstance(a, dict)]
+    if not thread_id or not rows:
+        return
+    with _LOCK:
+        cur = _ACTIONS.get(thread_id)
+        if cur is None:
+            cur = []
+            _ACTIONS[thread_id] = cur
+        cur.extend(rows)
+        max_actions = _max_actions()
+        if len(cur) > max_actions:
+            # Drop the OLDEST: a follow-up is nearly always about recent work.
+            del cur[: len(cur) - max_actions]
+        _ACTIONS.move_to_end(thread_id)
+        max_threads = _max_threads()
+        while len(_ACTIONS) > max_threads:
+            _ACTIONS.popitem(last=False)
+
+
 def clear_session(thread_id: Optional[str]) -> None:
-    """Drop all recorded turns and files for *thread_id* (no-op if unknown)."""
+    """Drop all recorded turns, files and actions for *thread_id* (no-op if unknown)."""
     if not thread_id:
         return
     with _LOCK:
         _STORE.pop(thread_id, None)
         _FILES.pop(thread_id, None)
+        _ACTIONS.pop(thread_id, None)
 
 
 def reset_all() -> None:
@@ -175,11 +234,14 @@ def reset_all() -> None:
     with _LOCK:
         _STORE.clear()
         _FILES.clear()
+        _ACTIONS.clear()
 
 
 __all__ = [
     "append_session_turn",
     "append_session_files",
+    "append_session_actions",
+    "get_session_actions",
     "build_session_memory_doc",
     "clear_session",
     "get_session_files",

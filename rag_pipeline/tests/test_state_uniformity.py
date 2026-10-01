@@ -16,6 +16,18 @@ load_dotenv(Path(__file__).parent.parent / ".env.local")
 
 from rag_pipeline.pipeline import run_pipeline
 
+# These exercise LIVE backends. Without them the suite used to report FAILURES rather than
+# skips, which is worse than useless: eight red lines became background noise that a real
+# regression could hide inside. Skipping states the same fact without camouflaging anything.
+import pytest as _pytest
+
+_MISSING = [v for v in ("OPENSEARCH_NODE",) if not (os.getenv(v) or "").strip()]
+pytestmark = _pytest.mark.skipif(
+    bool(_MISSING),
+    reason="live backend not configured: " + ", ".join(_MISSING) + " unset (no repo-root .env)",
+)
+
+
 
 def print_section(title):
     print(f"\n{'='*80}")

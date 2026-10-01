@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .file_store import create_output_file, get_file_record, resolve_file_id, storage_root
+from .file_store import (create_output_file, current_session, find_files, get_file_record,
+                         resolve_file_id, storage_root)
+from agent_runtime.tool_args import accept_null_defaults
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -226,6 +228,46 @@ def write_output_file_tool(filename: str, content: str, overwrite: bool = False)
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
+
+# How many of this conversation's files to describe. Generous: the point of the tool is that the
+# answer is COMPLETE, and a turn that produced twelve artifacts must not be told about ten.
+_CONVERSATION_FILE_MAX = 200
+
+
+def list_conversation_files_tool(name: Optional[str] = None, limit: int = 50) -> str:
+    """Every file THIS conversation has made or been given, newest first."""
+    session = current_session()
+    capped = max(1, min(int(limit or 50), _CONVERSATION_FILE_MAX))
+    # include_unowned=False: records written before sessions existed belong to no conversation,
+    # and answering "what have you saved for me" with the deployment's whole history would be
+    # worse than answering with nothing.
+    records = find_files(name, limit=capped + 1, include_unowned=False)
+    files = [{
+        "file_id": r.get("file_id"),
+        "filename": r.get("filename"),
+        "kind": r.get("kind"),
+        "size_bytes": r.get("size_bytes"),
+        "download_url": r.get("download_url"),
+    } for r in records[:capped]]
+
+    payload: Dict[str, Any] = {"ok": True, "count": len(files), "files": files}
+    if len(records) > capped:
+        payload["truncated"] = f"showing the {capped} newest; ask for more with a higher limit"
+    if not session:
+        # No conversation bound (a CLI run, or a request that never went through the API edge).
+        # Saying "you have no files" would be a lie of a different kind, so name the reason.
+        payload["scope_unknown"] = ("No conversation is bound to this request, so files cannot "
+                                    "be attributed to it. This list is not authoritative.")
+    elif not files:
+        payload["note"] = ("Nothing has been saved in this conversation yet. Files from other "
+                           "conversations are deliberately not listed.")
+    else:
+        payload["note"] = ("This is the complete list for this conversation. Quote these "
+                           "filenames and links rather than any remembered from the transcript, "
+                           "and do not describe a file as saved unless it appears here.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
 def make_langchain_file_tools() -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
@@ -235,8 +277,7 @@ def make_langchain_file_tools() -> List[Any]:
         ) from exc
 
     return [
-        StructuredTool.from_function(
-            func=read_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(read_text_file_tool),
             name="read_text_file",
             description=(
                 "Read a UTF-8 text-like file from an allowed local path and return its contents. "
@@ -245,8 +286,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=inspect_file_for_analysis_tool,
+        StructuredTool.from_function(func=accept_null_defaults(inspect_file_for_analysis_tool),
             name="inspect_file_for_analysis",
             description=(
                 "Load a local file or uploaded file_id into an LLM-friendly JSON payload for interpretation. "
@@ -255,8 +295,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_text_file_tool),
             name="write_text_file",
             description=(
                 "Write text output to a local file under an allowed root. "
@@ -264,8 +303,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_output_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_output_file_tool),
             name="write_output_file",
             description=(
                 "Write downloadable output for the user into managed agent storage using only a filename. "
@@ -273,11 +311,37 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
+        StructuredTool.from_function(func=accept_null_defaults(list_conversation_files_tool),
+            name="list_conversation_files",
+            description=(
+                "List the files THIS conversation has produced or been given, newest first, with "
+                "file_id, filename and download_url. USE IT whenever the user asks what files "
+                "exist, what was saved, or for a link to something made earlier — the transcript "
+                "is not a reliable record of that and earlier links may have been dropped from "
+                "context. Optional `name` filters by filename substring."
+            ),
+            metadata={"category": "io"},
+        ),
     ]
+
+
+def make_conversation_file_tools() -> List[Any]:
+    """Just the listing, for turns with no upload.
+
+    The full file toolset is attached only when the user uploaded something, which is the wrong
+    condition for this one tool: a turn creates files without any upload — a boundary, an
+    embedding, a plot — and it is exactly then that "what did you save?" gets asked. Without it
+    the analyse peer reached for `execute_code` and listed the sandbox working directory instead,
+    inventing its own scratch script as one of the conversation's artifacts.
+    """
+    tools = make_langchain_file_tools()
+    return [t for t in tools if str(getattr(t, "name", "")) == "list_conversation_files"]
 
 
 __all__ = [
     "inspect_file_for_analysis_tool",
+    "make_conversation_file_tools",
+    "list_conversation_files_tool",
     "make_langchain_file_tools",
     "read_text_file_tool",
     "write_output_file_tool",

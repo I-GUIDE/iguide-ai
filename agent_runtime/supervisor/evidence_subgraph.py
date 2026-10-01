@@ -68,25 +68,35 @@ def _doc_field(doc: Any, *keys: str, default: str = "") -> str:
 def _element_url(doc: Any) -> str:
     """The link target for a document, so the synthesizer can render a clickable citation.
 
-    * Internal knowledge element -> ``{FRONTEND_DOMAIN}/{element_type-plural}/{doc_id}``
+    * A document that CARRIES a url -> that url, whatever its element type.
+    * Internal knowledge element (no url) -> ``{FRONTEND_DOMAIN}/{element_type-plural}/{doc_id}``
       (plural, except ``code`` stays ``code``) — same scheme as the smart-search frontend.
-    * External (OpenGeoData catalog record, open-web page) -> its own landing ``url`` from the
-      search payload. Pluralizing those element types would fabricate a platform page that does
-      not exist (``/webs/web-1a2b…``).
     Returns "" when no link can be formed (the synthesizer then cites the title in bold).
+
+    The url check comes FIRST, and that ordering is the whole point. Only internal platform
+    elements lack a url — ``_normalize_hits`` sets ``"url": _landing_url(doc)``, documented there
+    as "external landing url (OpenGeoData); '' for internal" — so a url present means the
+    document lives somewhere real and pluralizing its type would invent a platform page that
+    does not exist.
+
+    This used to be an exception LIST (``opengeodata``/``web``) rather than a rule, and the list
+    went stale the moment another external source arrived: ``overpass_search`` sets
+    ``element_type: "osm_feature"`` and a correct
+    ``url: https://www.openstreetmap.org/node/767555934``, and the answer shipped the restaurant
+    citations as ``platform.i-guide.io/osm_features/osm:node:767555934`` — a 404, and one that
+    ``sanitize_answer_links`` then allow-listed because the same function built the allowlist.
     """
     src = doc.get("document") if isinstance(doc, dict) and isinstance(doc.get("document"), dict) else doc
     if not isinstance(src, dict):
         return ""
+    explicit = str(src.get("url") or "").strip()
+    if explicit:
+        return explicit
     etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
-    if etype in {"opengeodata", "web"}:
-        return str(src.get("url") or "")
     doc_id = str(src.get("doc_id") or src.get("id") or src.get("_id") or "")
-    if not doc_id:
-        return str(src.get("url") or "")
-    if not etype or etype == "resource":
-        # No usable element type -> only link if the payload already carries a url.
-        return str(src.get("url") or "")
+    if not doc_id or not etype or etype == "resource":
+        # No url, and nothing to build one from — cite the title instead of guessing a path.
+        return ""
     plural = etype if etype == "code" else f"{etype}s"
     base = os.getenv("FRONTEND_DOMAIN", "https://platform.i-guide.io").rstrip("/")
     return f"{base}/{plural}/{doc_id}"

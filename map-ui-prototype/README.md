@@ -62,3 +62,31 @@ Vite proxy.
 - **Interactive map** — vector data (GeoJSON) is plotted as a layer. Geometry streamed via the
   `map_layer` SSE event *and* any `.geojson` file artifact the agent writes are both auto-loaded.
 - **Static image** — a PNG plot stays an attachment/download, for when an image is what was asked for.
+
+## Switching back to the original prototype page
+
+The pre-#20 page — I-GUIDE platform chrome, "Knowledge Elements", the generic starter prompts —
+is kept in the tree, not just in git history, and is selected by a build flag:
+
+```
+VITE_UI_VARIANT=platform npm run dev      # or npm run build
+```
+
+Unset (the default) gives the rs-embed deployment: the I-GUIDE mark linking back to the
+platform, "I-GUIDE AI", and remote-sensing prompts.
+
+What makes up each variant:
+
+| | default (`rsembed`) | `platform` |
+|---|---|---|
+| header | `src/components/TopNav.tsx` | `src/components/TopNav.platform.tsx` |
+| prompts | `SUGGESTIONS_RSEMBED` | `SUGGESTIONS_PLATFORM` |
+
+`src/uiVariant.ts` is the single flag both read, so the header and the prompts can never
+disagree. It is a direct `import.meta.env` comparison on purpose: Vite inlines it, so the
+variant you are not building is dropped from the bundle rather than shipped dead — verified by
+grepping `dist/` for each variant's marker strings.
+
+The platform copy is verbatim from commit `76dab0b`, including the CSS its header needs
+(`.navsearch`, `.jpy`, `.avatar`, the caret and the narrow-screen rule). Do not tidy it: its
+value is being an exact copy.

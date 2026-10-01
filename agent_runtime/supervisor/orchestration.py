@@ -23,10 +23,17 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         run_supervisor,
     )
 
+    # This said "Orchestrator agent started" for years. It was copied from the agents-as-tools
+    # arm, where an orchestrator LLM really was wrapped over the sub-agents as tools and the
+    # string was true. Here it names nothing: this function builds three peer callables and
+    # hands them to run_supervisor — no LLM, no decision. The pair was asymmetric too, opening
+    # as the orchestrator and closing as the supervisor graph. Renamed rather than deleted,
+    # because every node_started has a node_completed and other clients read that lifecycle.
+    # The arm that made it true was removed in 2026-09; see docs/agent-architecture-changes.md.
     emit_trace_event(
         "node_started",
-        {"stage": "orchestrate", "message": "Orchestrator agent started"},
-        agent_role="orchestrator_agent",
+        {"stage": "orchestrate", "message": "Supervisor started"},
+        agent_role="supervisor",
         node="orchestrate",
     )
     sup_state = run_supervisor(
@@ -49,19 +56,25 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
             skill_roots=cfg.skill_roots,
             code_exec=cfg.code_exec,
             input_file_ids=cfg.input_file_ids,
+            # Mirrors the search_fn above: in unified mode the analyse peer owns retrieval, so
+            # a request's enabledSearchMethods has to reach it or the allowlist silently
+            # applies to only one of the two arms.
+            enabled_search_methods=cfg.enabled_search_methods,
         ),
         code_fn=default_code_fn(
             llm=cfg.llm, skill_roots=cfg.skill_roots, code_exec=cfg.code_exec,
-            input_file_ids=cfg.input_file_ids,
+            input_file_ids=cfg.input_file_ids, code_peer=cfg.code_peer,
+            code_peer_model=cfg.code_peer_model,
         ),
         # The search NODE needs the allowlist too, so its no-platform-evidence web fallback
         # respects a request that excluded web_search.
         enabled_search_methods=cfg.enabled_search_methods,
+        unified_peer=getattr(cfg, "unified_peer", None),
     )
     emit_trace_event(
         "node_completed",
-        {"stage": "orchestrate", "message": "Supervisor graph completed"},
-        agent_role="orchestrator_agent",
+        {"stage": "orchestrate", "message": "Supervisor finished"},
+        agent_role="supervisor",
         node="orchestrate",
     )
     return {

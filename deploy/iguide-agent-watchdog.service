@@ -1,0 +1,26 @@
+[Unit]
+Description=I-GUIDE agent watchdog — capture evidence and restart a container stuck unhealthy
+Documentation=file:///opt/iguide-agent/deploy/agent-watchdog.sh
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/iguide-agent-watchdog
+ExecStart=/opt/iguide-agent/agent-watchdog.sh
+
+# The script bounds each docker call itself; this bounds the run as a whole so a wedged
+# daemon cannot leave a watchdog process alive across timer firings.
+TimeoutStartSec=300
+
+# One at a time. Without this, a run that is still capturing a bundle when the next timer
+# fires would race with itself over the restart budget and capture the same incident twice.
+ExecCondition=/usr/bin/flock -n /run/iguide-agent-watchdog.lock /bin/true
+
+# Output is the audit trail: every decision lands in the journal under this unit.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iguide-watchdog
+
+[Install]
+WantedBy=multi-user.target

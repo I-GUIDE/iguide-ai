@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_runtime.supervisor_graph import (
     build_supervisor_graph,
-    is_supervisor_enabled,
     run_supervisor,
 )
 
@@ -51,7 +52,7 @@ def test_supervisor_loops_search_then_analyze_then_synthesize():
         decide_fn=_scripted(["search", "analyze", "done"]),
         search_fn=lambda q, s: list(DOCS),
         analyze_fn=lambda q, ev, st: {"summary": "ran workflow"},   # workflow output, not prose
-        synthesize_fn=lambda q, ev, ar, cr, ch: "the answer",       # answer composed separately
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "the answer",       # answer composed separately
         do_rerank=False,
     )
     assert state["actions"] == ["search", "analyze", "done"]
@@ -204,7 +205,7 @@ def test_code_peer_feeds_synthesis():
         decide_fn=_scripted(["code", "done"]),
         search_fn=lambda q, s: [],
         code_fn=lambda q, ev, st: {"answer": "code-answer", "code_result": {"x": 1}},
-        synthesize_fn=lambda q, ev, ar, cr, ch: f"final:{(cr or {}).get('answer', '')}",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: f"final:{(cr or {}).get('answer', '')}",
         do_audit=False,
     )
     assert state["code_result"]["answer"] == "code-answer"
@@ -262,7 +263,7 @@ def test_code_request_routes_then_reruns():
     state = run_supervisor(
         "write code", llm=_fake_llm, decide_fn=decide,
         search_fn=lambda q, s: list(DOCS), code_fn=code_fn,
-        synthesize_fn=lambda q, ev, ar, cr, ch: f"final:{(cr or {}).get('answer', '')}",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: f"final:{(cr or {}).get('answer', '')}",
         do_rerank=False, do_audit=False,
     )
     assert calls["code"] == 2
@@ -372,7 +373,6 @@ def test_initialized_advertises_supervisor_peers(monkeypatch):
     """P1-7: the initialized event advertises the peers that actually run."""
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
 
     class _Graph:
         def invoke(self, *a, **k):
@@ -383,7 +383,7 @@ def test_initialized_advertises_supervisor_peers(monkeypatch):
             }
 
     monkeypatch.setattr(gr, "build_orchestrator_graph", lambda **k: _Graph())
-    events = list(gr.stream_agent_query_events("q", use_supervisor=True))
+    events = list(gr.stream_agent_query_events("q"))
     init = [e for e in events if (e.get("data") or {}).get("stage") == "initialized"]
     assert init and init[0]["data"]["available_agents"] == ["search", "analyze", "code"]
 
@@ -431,26 +431,11 @@ def test_graph_has_peer_nodes():
         assert n in nodes
 
 
-def test_flag_parsing(monkeypatch):
-    # Default ON when unset.
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
-    assert is_supervisor_enabled() is True
-    # Explicit opt-out.
-    monkeypatch.setenv("AGENT_SUPERVISOR", "0")
-    assert is_supervisor_enabled() is False
-    monkeypatch.setenv("AGENT_SUPERVISOR", "false")
-    assert is_supervisor_enabled() is False
-    # Explicit on.
-    monkeypatch.setenv("AGENT_SUPERVISOR", "1")
-    assert is_supervisor_enabled() is True
-
-
 def test_orchestrate_uses_supervisor_by_default(monkeypatch):
-    """With AGENT_SUPERVISOR unset, the orchestrate node defaults to the supervisor."""
+    """The orchestrate node runs the supervisor — the only path."""
     import agent_runtime.supervisor_graph as sg
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
     monkeypatch.setattr(
         sg, "run_supervisor",
         lambda query, **kwargs: {"final_answer": "supervisor answer", "evidence": [], "actions": ["analyze", "done"]},
@@ -502,7 +487,6 @@ def test_audit_surfaced_in_orchestrate_return(monkeypatch):
     import agent_runtime.supervisor_graph as sg
     import agent_runtime.graph_runtime as gr
 
-    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
     monkeypatch.setattr(
         sg, "run_supervisor",
         lambda query, **kwargs: {
@@ -564,25 +548,36 @@ def test_search_peer_forwards_enabled_search_methods(monkeypatch):
 
 # --- P0-4: collect_tools no longer silently defaults to full_pipeline ---------
 
-def test_collect_tools_defaults_to_granular_not_full_pipeline(monkeypatch):
+def test_collect_tools_resolves_an_empty_strategy_to_granular(monkeypatch):
+    """An absent or empty strategy must resolve to the real tool set, never to nothing.
+
+    This used to guard against falling through to `full_pipeline`, a single rag_tool wrapping
+    the whole stage-1 pipeline. That strategy is gone; the property it protected — a missing
+    strategy resolves to granular rather than silently to something lesser — is not.
+    """
     import agent_runtime.langchain_granular_tools as gt
     import agent_runtime.langchain_quality_tools as qt
     import agent_runtime.skills as sk
-    import agent_runtime.langchain_tool as lt
     from agent_runtime.tool_policy import collect_tools
 
     monkeypatch.setattr(gt, "make_langchain_granular_tools", lambda **k: ["GRANULAR"])
     monkeypatch.setattr(qt, "make_quality_tools", lambda: [])
     monkeypatch.setattr(sk, "make_skill_tools", lambda **k: [])
 
-    def boom():
-        raise AssertionError("deprecated full_pipeline rag_tool must not be built by default")
+    for strategy in ("", None, "granular"):
+        assert collect_tools(tool_strategy=strategy, include_mcp_tools=False,
+                             mcp_modules=None) == ["GRANULAR"]
 
-    monkeypatch.setattr(lt, "make_langchain_rag_tool", boom)
 
-    # empty/falsy strategy must resolve to granular, not full_pipeline
-    tools = collect_tools(tool_strategy="", include_mcp_tools=False, mcp_modules=None)
-    assert tools == ["GRANULAR"]
+def test_a_removed_strategy_is_refused_loudly(monkeypatch):
+    """`full_pipeline` silently resolving to granular would hide a stale caller; raising names
+    what changed."""
+    import pytest as _pytest
+    from agent_runtime.tool_policy import collect_tools
+
+    with _pytest.raises(ValueError) as exc:
+        collect_tools(tool_strategy="full_pipeline", include_mcp_tools=False, mcp_modules=None)
+    assert "full_pipeline was removed" in str(exc.value)
 
 
 # --- P2-7: decider uses the fenced-block JSON extractor ----------------------
@@ -658,31 +653,6 @@ def test_bounded_checkpointer_evicts_least_recently_used_thread():
     assert "t2" in saver.storage and "t3" in saver.storage
 
 
-def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):
-    """A per-request use_supervisor=False overrides the default and skips the supervisor."""
-    from types import SimpleNamespace
-
-    import agent_runtime.legacy.orchestration as lo
-    import agent_runtime.supervisor_graph as sg
-    import agent_runtime.graph_runtime as gr
-
-    def boom(*a, **k):
-        raise AssertionError("run_supervisor should NOT be called when use_supervisor=False")
-
-    monkeypatch.setattr(sg, "run_supervisor", boom)
-    monkeypatch.setattr(lo, "collect_orchestration_tools", lambda **k: [])
-    monkeypatch.setattr(lo, "build_orchestrator_agent_executor", lambda **k: object())
-    monkeypatch.setattr(
-        lo, "invoke_agent_with_payload_fallback",
-        lambda *a, **k: {"messages": [SimpleNamespace(content="agents-as-tools answer", type="ai", tool_calls=[])]},
-    )
-
-    result = gr.run_agent_query("substantive query", use_supervisor=False)
-    assert result["final_answer"] == "agents-as-tools answer"
-
-
-# --- inline image embedding in the final answer ----------------------------
-
 def test_collect_image_artifacts_walks_json_tool_results():
     import json as _json
     from agent_runtime.supervisor_graph import _collect_image_artifacts
@@ -735,6 +705,71 @@ def test_element_url_builds_platform_and_external_links(monkeypatch):
     # FRONTEND_DOMAIN override + trailing-slash handling
     monkeypatch.setenv("FRONTEND_DOMAIN", "https://dev.example/")
     assert _element_url({"element_type": "notebook", "doc_id": "n"}) == "https://dev.example/notebooks/n"
+
+
+def test_a_document_with_its_own_url_is_never_given_a_platform_path(monkeypatch):
+    """Reported from the deployed UI: "Show the popular restaurants in St. Louis" cited each
+    restaurant as platform.i-guide.io/osm_features/osm:node:767555934 — a 404. overpass_search
+    sets element_type "osm_feature" AND a correct openstreetmap.org url; the old code matched an
+    exception LIST of external types ({opengeodata, web}), so a type not on the list had its url
+    ignored and its type pluralised into a platform page that does not exist.
+
+    The rule is now url-first, which also covers the NEXT external source rather than waiting
+    for it to ship a broken link.
+    """
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.supervisor.evidence_subgraph import _element_url
+
+    osm = {"element_type": "osm_feature", "doc_id": "osm:node/767555934",
+           "url": "https://www.openstreetmap.org/node/767555934"}
+    assert _element_url(osm) == "https://www.openstreetmap.org/node/767555934"
+    assert "platform.i-guide.io" not in _element_url(osm)
+
+    # an external type nobody has added an exception for yet
+    assert _element_url({"element_type": "sentinel_scene", "doc_id": "s2:123",
+                         "url": "https://scihub.example/s2/123"}) == "https://scihub.example/s2/123"
+    # ...while internal elements, which never carry a url, still get the platform path
+    assert _element_url({"element_type": "dataset", "doc_id": "abc"}) == \
+        "https://platform.i-guide.io/datasets/abc"
+
+
+def test_client_evidence_carries_the_same_citation_url_as_the_answer(monkeypatch):
+    """The answer body linked its citations while "Sources used" showed the same element as
+    plain text, because internal knowledge elements reach the client with url "" —
+    _normalize_hits fills that field for external hits only. The link is computed server-side so
+    the scheme is not reimplemented in TypeScript, which is how the /osm_features/ 404 happened.
+    """
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.graph_runtime import _with_citation_urls
+
+    orch = {"evidence": [
+        {"document": {"element_type": "dataset", "doc_id": "abc"}},          # internal, no url
+        {"element_type": "osm_feature", "doc_id": "osm:node/1",
+         "url": "https://www.openstreetmap.org/node/1"},                     # keeps its own
+        {"element_type": "resource", "doc_id": "r1"},                        # unlinkable
+    ]}
+    docs = _with_citation_urls(orch)["evidence"]
+    assert docs[0]["document"]["url"] == "https://platform.i-guide.io/datasets/abc"
+    assert docs[1]["url"] == "https://www.openstreetmap.org/node/1"   # never overwritten
+    assert "url" not in docs[2]                                        # no link invented
+
+    # never raises on shapes it does not understand
+    assert _with_citation_urls(None) is None
+    assert _with_citation_urls({"a": 1}) == {"a": 1}
+
+
+def test_both_response_paths_decorate_evidence_with_citation_urls():
+    """The map UI STREAMS, and the streaming path builds its own orchestration_result rather
+    than calling run_agent_query. Decorating only the latter left "Sources used" unlinked in the
+    one client that uses it — the helper was unit-tested, the wiring was not.
+    """
+    import inspect
+    from agent_runtime import graph_runtime as gr
+
+    for fn in (gr.run_agent_query, gr.stream_agent_query_events):
+        src = inspect.getsource(fn)
+        assert "_with_citation_urls(final_state.get(\"orchestration_result\"))" in src, \
+            f"{fn.__name__} hands the client undecorated evidence"
 
 
 def test_format_documents_emits_url_line(monkeypatch):
@@ -801,7 +836,7 @@ def test_conversational_request_answered_from_history_not_refused():
         "summarize our discussion", llm=_fake_llm,
         decide_fn=lambda s, d: "done",            # straight to synthesize, nothing retrieved
         search_fn=lambda q, s: [],
-        synthesize_fn=lambda q, ev, ar, cr, ch: "Here is a summary of our chat.",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "Here is a summary of our chat.",
         chat_history=[{"role": "user", "content": "what's the risk of aging dams?"}],
         do_rerank=False, do_audit=False,
     )
@@ -985,7 +1020,7 @@ def test_default_search_fn_short_circuits_id_lookup(monkeypatch):
         raise AssertionError("must NOT build the LLM SearchAgent for an id-lookup query")
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
-    docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})
+    docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})["documents"]
     assert len(docs) == 1 and docs[0]["title"] == "NID"   # served deterministically, no LLM
 
 
@@ -1043,7 +1078,7 @@ def test_default_search_fn_recalls_id_for_subjectless_followup(monkeypatch):
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
     state = {"thread_id": "t", "chat_history": [{"userQuery": f"Explain {UUID}", "answer": "NID ..."}]}
-    docs = default_search_fn()("What are the related elements", state)
+    docs = default_search_fn()("What are the related elements", state)["documents"]
     assert seen.get("eid") == UUID                                   # recalled the id from memory
     assert any(d.get("provenance") == "curated" for d in docs)
 
@@ -1110,7 +1145,7 @@ def test_default_search_fn_short_circuits_popularity(monkeypatch):
         raise AssertionError("must NOT build the LLM SearchAgent for a popularity query")
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
-    docs = default_search_fn()("What are the most popular knowledge elements", {"thread_id": "t"})
+    docs = default_search_fn()("What are the most popular knowledge elements", {"thread_id": "t"})["documents"]
     assert [d["doc_id"] for d in docs] == ["e1", "e2"]
     assert docs[0]["click_count"] == 42                      # real usage counts carried
     assert "[popularity: 42 clicks]" in docs[0]["contents"]  # visible to the synthesizer
@@ -1177,7 +1212,7 @@ def test_search_fn_unions_sweep_with_llm_harvest(monkeypatch):
     monkeypatch.setattr(kw, "get_keyword_search_results", lambda q, size=8: [_kw_hit("k1", "KW")])
     monkeypatch.setattr(sem, "semantic_search", lambda q, size=8: [_kw_hit("k1", "KW"), _kw_hit("s1", "Sem")])
 
-    docs = default_search_fn()("datasets about floods", {"thread_id": "t"})
+    docs = default_search_fn()("datasets about floods", {"thread_id": "t"})["documents"]
     assert [d["doc_id"] for d in docs] == ["k1", "s1"]          # merged + deduped on k1
 
 
@@ -1340,11 +1375,30 @@ def _stub_code_peer(monkeypatch, responses):
     return out, seen
 
 
-def _resp(answer, tool_names=()):
-    """Shape extract_search_artifacts/extract_final_answer read: a messages payload."""
-    from langchain_core.messages import AIMessage
+# A tool RESULT that really delivers a layer. A name in tool_calls no longer counts: the
+# delivery check asks map_layers.build_map_layers whether the client would get anything, and a
+# descriptor needs a url. That strictness is the point — a FAILED admin_boundary used to satisfy
+# the old name match and suppress the corrective retry.
+_DELIVERED = {"ok": True, "on_map": True,
+              "map_layer": {"url": "/agent/files/file_layer1/download",
+                            "label": "layer", "render": "shapes"}}
+
+
+def _resp(answer, tool_names=(), results=None):
+    """Shape extract_search_artifacts/extract_final_answer read: a messages payload.
+
+    ``results`` maps a tool name to the payload it returned; extract_search_artifacts only
+    records a tool_result for a ToolMessage carrying both a name and a tool_call_id.
+    """
+    import json as _j
+
+    from langchain_core.messages import AIMessage, ToolMessage
     calls = [{"name": n, "args": {}, "id": f"c{i}"} for i, n in enumerate(tool_names)]
     msgs = [AIMessage(content="", tool_calls=calls)] if calls else []
+    for i, n in enumerate(tool_names):
+        payload = (results or {}).get(n)
+        if payload is not None:
+            msgs.append(ToolMessage(content=_j.dumps(payload), tool_call_id=f"c{i}", name=n))
     msgs.append(AIMessage(content=answer))
     return {"messages": msgs}
 
@@ -1352,7 +1406,11 @@ def _resp(answer, tool_names=()):
 def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
     """Unrun code triggers ONE retry carrying the observation — not a prompt threat."""
     first = _resp("Here you go:\n```python\nprint(1)\n```")          # no execute_code
-    second = _resp("Ran it; output was 42.", tool_names=["execute_code"])
+    # WITH the payload: in production execute_code always returns one, and `executed` now
+    # means the code RAN, not that the tool was called. A call with no result is a tool that
+    # never returned, which is not a successful run.
+    second = _resp("Ran it; output was 42.", tool_names=["execute_code"],
+                   results={"execute_code": {"ok": True, "exit_code": 0, "stdout": "42"}})
     out, seen = _stub_code_peer(monkeypatch, [first, second])
 
     assert len(seen) == 2, "should re-invoke exactly once"
@@ -1363,7 +1421,8 @@ def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
 
 def test_code_peer_does_not_retry_when_it_already_ran(monkeypatch):
     out, seen = _stub_code_peer(
-        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"])])
+        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"],
+                             results={"execute_code": {"ok": True, "exit_code": 0}})])
     assert len(seen) == 1
     assert out["executed"] is True
 
@@ -1403,7 +1462,7 @@ def test_analyze_peer_retries_once_when_the_map_got_nothing(monkeypatch):
     png_only = _resp("You can view the heat map on the interactive map beside this chat.",
                      tool_names=["execute_code", "heatmap_image"])
     delivered = _resp("Added the incident density layer to your map.",
-                      tool_names=["add_map_layer"])
+                      tool_names=["add_map_layer"], results={"add_map_layer": _DELIVERED})
     out, seen = _stub_analyze_peer(monkeypatch, [png_only, delivered])
 
     assert len(seen) == 2, "should re-invoke exactly once"
@@ -1414,7 +1473,8 @@ def test_analyze_peer_retries_once_when_the_map_got_nothing(monkeypatch):
 
 def test_analyze_peer_does_not_retry_when_the_layer_was_delivered(monkeypatch):
     out, seen = _stub_analyze_peer(
-        monkeypatch, [_resp("Layer is on your map.", tool_names=["add_map_layer"])])
+        monkeypatch, [_resp("Layer is on your map.", tool_names=["add_map_layer"],
+                            results={"add_map_layer": _DELIVERED})])
     assert len(seen) == 1
     assert out["on_map"] is True
 
@@ -1440,7 +1500,8 @@ def test_a_map_claim_alone_triggers_the_check(monkeypatch):
     """Even when the ASK did not mention a map, claiming one must be backed by a layer."""
     out, seen = _stub_analyze_peer(
         monkeypatch, [_resp("I put the results on the map for you.", tool_names=["execute_code"]),
-                      _resp("Corrected: added the layer.", tool_names=["add_map_layer"])],
+                      _resp("Corrected: added the layer.", tool_names=["add_map_layer"],
+                            results={"add_map_layer": _DELIVERED})],
         query="summarise these incidents")
     assert len(seen) == 2
     assert out["on_map"] is True
@@ -1463,7 +1524,10 @@ _MAP_AUDIT = {
 def test_a_delivered_map_layer_clears_the_map_hallucination_flag():
     from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
 
-    ar = {"summary": "done", "on_map": True, "tool_calls": [{"name": "add_map_layer"}]}
+    ar = {"summary": "done", "on_map": True,
+          "tool_calls": [{"name": "add_map_layer", "args": {}, "id": "c0"}],
+          "tool_results": [{"name": "add_map_layer", "tool_call_id": "c0",
+                            "content": json.dumps(_DELIVERED)}]}
     out = _reconcile_audit_with_artifacts(
         _MAP_AUDIT, [{"filename": "grid.geojson"}], {"analysis_results": ar})
 
@@ -1483,12 +1547,171 @@ def test_a_map_claim_with_no_layer_is_still_flagged():
     assert len(out["issues"]) == 1
 
 
+# --- the AFFORDANCE residue ---------------------------------------------------------------
+# The map-delivery fix stopped a FAILED tool from claiming a layer and stopped a delivered
+# layer from being flagged for EXISTENCE. What survived was the answer's description of the map
+# itself. Reproduced on the deployed agent, 2026-09-02, "Show hospitals near Chicago on the
+# map": one layer delivered, 49 features drawn, 1 map_layer and 1 ledger row in the logs, and
+# the auditor accepted the count, the location and the OpenStreetMap source — then flagged the
+# single sentence "You can pan, zoom, and click the hospital markers for details" at high
+# severity, so a wholly correct answer shipped wearing a hallucination caveat.
+#
+# No tool result can EVER evidence an affordance: pan/zoom/toggle/click are properties of the
+# client (MapLibre + deck.gl getTooltip/onClick + the layers panel), not of the data. So this
+# fired on every map answer, and the marker list missed it only because the sentence used the
+# bare verbs "pan"/"zoom"/"click" rather than "panning"/"zooming"/"interactive map".
+
+_AFFORDANCE_AUDIT = {
+    "hallucination_detected": True, "severity": "high",
+    "issues": [{"claim": "You can pan, zoom, and click the hospital markers for details",
+                "reason": "The retrieved evidence does not describe any interactive map "
+                          "capabilities."}],
+    "summary": "The hospital count, location, and OpenStreetMap source are supported, but the "
+               "claimed interactive-map creation and capabilities are not evidenced.",
+}
+
+
+def _osm_delivery():
+    """The execution context of the reproduced turn: one succeeded OSM layer, 49 features."""
+    layer = {"url": "/agent/files/file_h1/download", "render": "shapes",
+             "label": "OSM: hospital in Chicago, Illinois"}
+    return {"analysis_results": {"summary": "49 hospitals", "tool_results": [
+        {"name": "osm_features", "tool_call_id": "c0",
+         "content": json.dumps({"ok": True, "count": 49, "map_layer": layer})}]}}
+
+
+def test_an_affordance_claim_is_cleared_when_a_layer_was_delivered():
+    """The reproduced false positive: the exact claim, the exact delivery, no caveat."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    out = _reconcile_audit_with_artifacts(
+        dict(_AFFORDANCE_AUDIT), [], execution_context=_osm_delivery())
+
+    assert out["severity"] == "none", out
+    assert out["hallucination_detected"] is False
+    assert out["issues"] == []
+
+
+def test_an_affordance_claim_with_no_layer_is_still_flagged():
+    """The other direction, which must not be loosened: describing a map nobody was given.
+
+    This is the failure the analyze peer's own map check exists to catch — a PNG, or a FAILED
+    admin_boundary, written up as an explorable layer.
+    """
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    failed = {"analysis_results": {"summary": "boundary lookup failed", "tool_results": [
+        {"name": "admin_boundary", "tool_call_id": "c0",
+         "content": json.dumps({"ok": False, "error": "ambiguous place name"})}]}}
+    out = _reconcile_audit_with_artifacts(
+        dict(_AFFORDANCE_AUDIT), [], execution_context=failed)
+
+    assert out["severity"] == "high", out
+    assert len(out["issues"]) == 1
+
+
+@pytest.mark.parametrize("claim", [
+    "You can pan, zoom, and click the hospital markers for details",
+    "The map is interactive and lets you explore the hospital locations",
+    "Users can toggle the layer on and off",
+    "click a feature for its attributes",
+    "Hover over a marker to see its tags",
+    "You may zoom in to see individual facilities",
+    "Zoom into the map for a closer look",
+    "the layer allows you to inspect each polygon",
+])
+def test_affordance_phrasings(claim):
+    from agent_runtime.supervisor.graph import _is_map_claim
+
+    assert _is_map_claim(claim)
+
+
+@pytest.mark.parametrize("claim", [
+    # Substring matching on the bare verbs is what these guard. "pan" is inside
+    # "expand"/"Japan"/"company"; "click" is inside the "[popularity: 42 clicks]" that real
+    # evidence carries; and "selected N features" is analysis prose, not a map gesture — which
+    # is why tier 2 admits only verbs that mean nothing else here.
+    "the model selected 4096 features",
+    "the model inspected 300 samples during training",
+    "the dataset has 1,200 clicks of popularity",
+    "the analysis expanded to Japan and the company's holdings",
+    "the study covered 4096 counties",
+    "the embeddings have 1024 dimensions",
+    "the raster was produced at 7.645 m/px",
+    "the paper was published in Nature Geoscience in 2021",
+])
+def test_claims_that_are_not_about_the_map(claim):
+    from agent_runtime.supervisor.graph import _is_map_claim
+
+    assert not _is_map_claim(claim)
+
+
+def test_an_invented_figure_survives_even_with_a_layer_on_the_map():
+    """A delivered layer must not become a blanket amnesty for everything else in the answer."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    audit = {"hallucination_detected": True, "severity": "high",
+             "issues": [{"claim": "You can click the markers for details",
+                         "reason": "no evidence of map capabilities"},
+                        {"claim": "Chicago funded 4096 of these hospitals in 1974",
+                         "reason": "no evidence for this figure"}]}
+    out = _reconcile_audit_with_artifacts(dict(audit), [], execution_context=_osm_delivery())
+
+    assert out["severity"] == "high", out
+    assert [i["claim"] for i in out["issues"]] == ["Chicago funded 4096 of these hospitals in 1974"]
+
+
+def test_the_auditor_is_told_what_the_map_client_does_only_when_a_layer_is_there():
+    """The second half of the fix: a span the auditor can legitimately copy.
+
+    The audit prompt requires a VERBATIM span for any row it marks "supported", so with nothing
+    in the record about the viewer the auditor's only honest verdict on an affordance was
+    "absent". This does not replace the deterministic drop above — evidence_quality.py records
+    four audit-prompt formulations that were measured and did not hold — it just stops the
+    auditor from being asked a question its inputs cannot answer.
+    """
+    from agent_runtime.evidence_quality import _format_execution_context
+    from agent_runtime.supervisor.graph import _map_environment_lines
+
+    assert _map_environment_lines(False) == []
+    lines = _map_environment_lines(True)
+    assert lines and "pan and zoom" in lines[0]
+
+    rendered = _format_execution_context({"analysis_results": {"summary": "49 hospitals"},
+                                          "environment": lines})
+    assert "pan and zoom" in rendered and "click a vector feature" in rendered
+    # It must NOT arrive under the prior_actions heading, which says "EARLIER TURNS": this is
+    # true of the run NOW, and mislabelling it invites the auditor to read it as stale.
+    assert "EARLIER TURNS" not in rendered
+    # And nothing is said about a map when no layer reached one.
+    bare = _format_execution_context({"analysis_results": {"summary": "49 hospitals"},
+                                      "environment": _map_environment_lines(False)})
+    assert "pan and zoom" not in bare
+
+
+def test_the_environment_fact_is_wired_into_the_audit_record():
+    """_map_environment_lines is fed by the same delivery predicate the reconciler uses, so the
+    prose half and the deterministic half can never disagree about whether a layer exists."""
+    from agent_runtime.supervisor.graph import _map_environment_lines, _map_layer_was_delivered
+
+    assert _map_environment_lines(_map_layer_was_delivered(_osm_delivery()))
+    failed = {"analysis_results": {"tool_results": [
+        {"name": "admin_boundary", "content": json.dumps({"ok": False})}]}}
+    assert _map_environment_lines(_map_layer_was_delivered(failed)) == []
+
+
 def test_map_delivery_is_detected_from_a_nested_tool_record():
     """on_map can sit anywhere in the execution context (peer result, tool output, nested)."""
     from agent_runtime.supervisor.graph import _map_layer_was_delivered
 
-    assert _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
-    assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
+    # A real descriptor, however deeply nested, IS a delivery.
+    layer = {"url": "/agent/files/file_n1/download", "label": "n", "render": "shapes"}
+    assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"map_layer": layer}]}]})
+    # A tool NAME with no result is not — this assertion used to be the bug: it is what let a
+    # failed admin_boundary report a layer and suppress the corrective retry.
+    assert not _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
+    # Nor is a bare on_map flag with nothing for the client to fetch.
+    assert not _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
     assert not _map_layer_was_delivered({"analysis_results": {"tool_calls": [{"name": "heatmap_image"}]}})
 
 
@@ -1518,7 +1741,9 @@ def test_toolkit_layers_count_as_delivery_for_the_analyze_peer(monkeypatch):
 
     from langchain_core.messages import ToolMessage
 
-    payload = _json.dumps({"ok": True, "on_map": True, "map_layer": {"render": "shapes"}})
+    payload = _json.dumps({"ok": True, "on_map": True,
+                           "map_layer": {"url": "/agent/files/file_b1/download",
+                                         "render": "shapes"}})
     resp = {"messages": [
         AIMessage(content="", tool_calls=[{"name": "buffer_layer", "args": {}, "id": "c0"}]),
         ToolMessage(content=payload, tool_call_id="c0", name="buffer_layer"),
@@ -1548,7 +1773,18 @@ def test_decider_knows_embedding_is_analyze_not_search():
     assert out == "analyze"
     p = seen["prompt"]
     assert "remote-sensing foundation-model embeddings" in p
-    assert "ARGUMENTS to those" in p and "not datasets to retrieve" in p
+    # The claim, not its wording: model names are arguments, not things to go and find.
+    assert "ARGUMENTS" in p and "not datasets to retrieve" in p
+    # Both routes, and in the right order of preference. The one-shot tools exist and work on
+    # the NATIVE grid server-side; composition is the fallback for what they cannot express, and
+    # it clusters the EXPORTED grid, decimated to a cell budget. A router that named only
+    # composition sent every segmentation through the coarser path.
+    assert "segmenting it into look-alike zones" in p, "the one-shot route must be offered"
+    assert "cannot express" in p, "composition must be offered as the fallback it is"
+    # And it must say composition depends on code execution, which the one-shot tools do not:
+    # execute_code is bound behind a flag, so promising it unconditionally is a promise the
+    # peer cannot always keep.
+    assert "needs code execution" in p
 
 
 def test_analysis_hints_cover_embedding_vocabulary():
@@ -1609,3 +1845,218 @@ def test_analyze_peer_routes_around_a_dead_end_tool(monkeypatch):
     assert "failed repeatedly" in seen[1]
     assert out["tool_failures"] == {"regionalize": "AttributeError: no attribute 'to_list'"}
     assert "execute_code" in out["summary"]
+
+
+# --- the audit as a gate, not an annotation -------------------------------------------------
+#
+# Reproduced on the deployed agent with "Which counties border Champaign County, Illinois?":
+# admin_boundary succeeded, then an EXPLORATORY execute_code downloaded a Census gazetteer and
+# printed its filename list — computing no adjacency, and from a gazetteer it could not — and
+# the peer then answered with six county names out of the model's own memory. The audit caught
+# it exactly right. But `synthesize` had an unconditional edge to END, so the finding could only
+# be stapled on as a caveat while the unfinished work stayed unfinished.
+
+_UNGROUNDED = {"verdict": "partially_supported", "severity": "high",
+               "issues": [{"claim": "Champaign County borders Ford, Vermilion, Edgar, Douglas, "
+                                    "Piatt and McLean counties",
+                           "reason": "absent - no tool result lists neighbouring counties"}]}
+_GROUNDED = {"verdict": "supported", "severity": "none", "summary": "grounded", "issues": []}
+
+
+def _run_with_audits(monkeypatch, verdicts, analyze_fn=None, **kw):
+    """Drive the real graph with a scripted sequence of audit verdicts."""
+    from agent_runtime.supervisor import graph as g
+
+    seen = {"n": 0}
+
+    def fake_audit(*a, **k):
+        i = seen["n"]
+        seen["n"] += 1
+        return verdicts[i] if i < len(verdicts) else verdicts[-1]
+
+    monkeypatch.setattr(g, "audit_answer_grounding", fake_audit)
+    tasks = []
+
+    def default_analyze(q, ev, st):
+        tasks.append(q)
+        return {"summary": "ran workflow", "tool_results": [{"name": "execute_code",
+                                                             "content": '{"ok": true}'}]}
+
+    state = run_supervisor(
+        "Which counties border Champaign County, Illinois?", llm=_fake_llm,
+        decide_fn=kw.pop("decide_fn", _scripted(["analyze", "done", "done", "done"])),
+        search_fn=lambda q, s: list(DOCS),
+        analyze_fn=analyze_fn or default_analyze,
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "Champaign County borders six counties: "
+                                                         "Ford, Vermilion, Edgar, Douglas, Piatt, McLean.",
+        do_rerank=False, **kw)
+    return state, tasks, seen["n"]
+
+
+def test_an_ungrounded_answer_is_sent_back_to_be_computed(monkeypatch):
+    """The gate: a surviving high-severity flag re-runs the analysis instead of shipping."""
+    state, tasks, audits = _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED])
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert audits == 2
+    assert state.get("grounding_retries") == 1
+    # the answer ships clean once the second pass is grounded
+    assert "may not be fully supported" not in state["final_answer"]
+
+
+def test_the_gate_hands_the_peer_the_claims_to_establish(monkeypatch):
+    """The state the second analyze pass runs against must carry the gaps.
+
+    Asserted on state rather than on the task string because the directive is appended inside
+    default_analyze_fn, and this harness injects its own analyze_fn.
+    """
+    seen = {}
+
+    def analyze_fn(q, ev, st):
+        seen.setdefault("gaps_on_second_pass", None)
+        if "gaps" in seen:
+            seen["gaps_on_second_pass"] = list(st.get("grounding_gaps") or [])
+        seen["gaps"] = list(st.get("grounding_gaps") or [])
+        return {"summary": "ran workflow"}
+
+    _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED], analyze_fn=analyze_fn)
+    assert seen["gaps_on_second_pass"] == [
+        "Champaign County borders Ford, Vermilion, Edgar, Douglas, Piatt and McLean counties"]
+
+
+def test_the_directive_names_the_claims_and_permits_an_honest_failure():
+    """Re-running blind would just repeat the same unsupported answer — and a directive that
+    only demanded an answer would push the model straight back into inventing one."""
+    from agent_runtime.supervisor import graph as g
+    note = g._reground_note({"grounding_gaps": ["Champaign borders six counties", "  "]})
+    assert "were NOT present in any tool result" in note
+    assert "  - Champaign borders six counties" in note
+    assert "Do NOT restate them from your own knowledge" in note
+    assert "which parts you could not establish" in note
+    # the specific failure observed: an exploratory download mistaken for the computation
+    assert "downloading or inspecting a file is not the same as computing" in note
+    assert g._reground_note({}) is None
+    assert g._reground_note({"grounding_gaps": ["", "   "]}) is None
+
+
+def test_every_peer_the_gate_can_route_to_reads_the_directive():
+    """`_reground_target` routes to analyze OR search, so BOTH must append the directive.
+
+    Search was missed when the gate shipped, and the repo's own note called that "latent
+    because the gate routes to analyze/search" — which is exactly the case that is NOT latent.
+    A retrieval-side pass without the directive re-runs blind.
+    """
+    import inspect
+    from agent_runtime.supervisor import graph as g
+
+    for fn in (g.default_analyze_fn, g.default_search_fn):
+        assert "_reground_note(state)" in inspect.getsource(fn), \
+            f"{fn.__name__} can be a re-grounding target but never reads the directive"
+    # the code peer is NOT a target today; if that changes, this is the reminder
+    assert g._reground_target({"step": 1, "max_steps": 8, "actions": [],
+                               "code_result": {"x": 1}}) == "analyze"
+
+
+def test_the_directive_never_contaminates_the_query_itself():
+    """query is regexed by the QGIS/map/model heuristics and recorded in searched_queries;
+    the directive belongs on the task text alone."""
+    import inspect
+    from agent_runtime.supervisor import graph as g
+    src = inspect.getsource(g.default_analyze_fn)
+    assert "_reground_note(state)" in src
+    # the augmented variable is the task (q), never the query the heuristics read
+    assert "query = f\"{query}" not in src
+
+
+def test_the_gate_spends_at_most_one_pass(monkeypatch):
+    """The audit has a false-positive history, so an unbounded gate would burn every step."""
+    state, tasks, audits = _run_with_audits(monkeypatch, [_UNGROUNDED])   # always flags
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert state.get("grounding_retries") == 1
+    # second pass still ungrounded -> ship WITH the caveat rather than loop
+    assert "may not be fully supported" in state["final_answer"]
+
+
+def test_a_grounded_answer_never_triggers_a_pass(monkeypatch):
+    state, tasks, audits = _run_with_audits(monkeypatch, [_GROUNDED])
+    assert state["actions"].count("analyze") == 1
+    assert not state.get("grounding_retries")
+    assert audits == 1
+
+
+def test_an_empty_issue_list_is_cleared_before_the_gate_is_reached(monkeypatch):
+    """Documents where this is handled: _reconcile_audit_with_artifacts drops the verdict when
+    no substantive issue remains, so the gate never even sees it."""
+    empty = {"verdict": "partially_supported", "severity": "high", "issues": []}
+    state, _, _ = _run_with_audits(monkeypatch, [empty])
+    assert state["actions"].count("analyze") == 1
+    assert not state.get("grounding_retries")
+
+
+def test_a_flag_with_no_quotable_claims_does_not_trigger_a_pass(monkeypatch):
+    """Nothing to tell the peer means nothing to gain from re-running.
+
+    Uses an issue that SURVIVES reconciliation but carries no text — reconcile only clears a
+    verdict whose issue list is empty, so a blank-claim issue reaches the gate still flagged.
+    """
+    blank = {"verdict": "partially_supported", "severity": "high",
+             "issues": [{"claim": "   ", "reason": ""}]}
+    state, _, _ = _run_with_audits(monkeypatch, [blank])
+    assert state["actions"].count("analyze") == 1, "nothing to name means nothing to re-run for"
+    assert not state.get("grounding_retries")
+
+
+def test_the_gate_does_not_leak_into_the_client_payload(monkeypatch):
+    state, _, _ = _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED])
+    assert state.get("reground") is False
+    assert state.get("grounding_gaps") == []
+
+
+_COMPUTED = {"step": 1, "max_steps": 8, "actions": ["analyze"],
+             "analysis_results": {"summary": "ran"}}
+_RETRIEVED = {"step": 1, "max_steps": 8, "actions": ["search"], "evidence": [{"doc_id": "a"}]}
+
+
+def test_a_computed_answer_is_sent_back_to_analyze_and_a_retrieved_one_to_search():
+    """The corrective depends on how the answer was produced. A computed answer went ungrounded
+    because the computation was unfinished; a retrieved one because nothing supported it, and
+    re-running the analysis peer would do nothing for that."""
+    from agent_runtime.supervisor import graph as g
+    assert g._reground_target(_COMPUTED) == "analyze"
+    assert g._reground_target(_RETRIEVED) == "search"
+
+
+def test_regrounding_respects_the_step_budget():
+    """It must not route a pass it cannot afford: synthesize + peer is 2 steps."""
+    from agent_runtime.supervisor import graph as g
+    assert g._reground_target({**_COMPUTED, "step": 2}) == "analyze"
+    assert g._reground_target({**_COMPUTED, "step": 7}) is None
+    assert g._reground_target({**_RETRIEVED, "step": 7}) is None
+
+
+def test_regrounding_respects_the_per_peer_cap():
+    """The same cap `_dead` applies to a queued need — otherwise we burn a step routing to a
+    peer whose need the supervisor is about to discard."""
+    from agent_runtime.supervisor import graph as g
+    maxed = ["analyze"] * g._max_peer_runs()
+    assert g._reground_target({**_COMPUTED, "actions": maxed}) is None
+    assert g._reground_target({**_COMPUTED, "actions": maxed[:-1]}) == "analyze"
+
+
+def test_regrounding_does_not_re_search_an_exhausted_search():
+    """A retrieval turn with nothing left to find has no corrective available."""
+    from agent_runtime.supervisor import graph as g
+    exhausted = {**_RETRIEVED, "search_attempts": 99, "search_empty_streak": 99}
+    assert g._reground_target(exhausted) is None
+
+
+def test_regrounding_is_capped_by_the_retry_counter():
+    from agent_runtime.supervisor import graph as g
+    assert not g._can_reground({"step": 1, "max_steps": 8, "actions": [],
+                                "grounding_retries": g._MAX_GROUNDING_RETRIES})
+
+
+def test_unsupported_claims_reads_both_issue_shapes():
+    from agent_runtime.supervisor import graph as g
+    assert g._unsupported_claims({"issues": [{"claim": "a"}, "b", {"claim": "  "}]}) == ["a", "b"]
+    assert g._unsupported_claims({}) == []
+    assert len(g._unsupported_claims({"issues": [{"claim": f"c{i}"} for i in range(20)]})) == 6

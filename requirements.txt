@@ -15,6 +15,9 @@ openai
 langchain>=1.0
 langchain-core>=1.0
 langchain-openai>=1.0
+# Claude as an ANSWERING provider (the code peer talks to the CLI instead, and needs none
+# of this). Selectable per request alongside OpenAI and AnvilGPT; inert without a key.
+langchain-anthropic>=1.0
 langgraph>=1.0
 langchain-mcp-adapters
 mcp[cli]>=1.2
@@ -96,3 +99,8 @@ boto3
 python-dotenv
 pytest
 pydantic
+
+# Verifies the platform's HS256 access token in token mode (agent_runtime/identity.py).
+# Pinned explicitly although it already arrives transitively: identity must not stop
+# working because something else dropped its dependency on it.
+PyJWT>=2.8

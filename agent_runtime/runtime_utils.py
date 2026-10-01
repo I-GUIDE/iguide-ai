@@ -172,6 +172,13 @@ def extract_search_artifacts(result: Any) -> Dict[str, Any]:
                     {
                         "name": call.get("name", "unknown_tool"),
                         "args": call.get("args", {}),
+                        # The id is the ONLY thing saying which result belongs to which call.
+                        # Without it the ledger paired by position within a tool name, so a
+                        # fail-then-succeed pair put the failed call's arguments on the
+                        # successful call's result — and since a failed result carried no
+                        # curated facts and was dropped entirely, the good run's file_id and
+                        # map_layer landed on the failed row and read as a delivered layer.
+                        "id": call.get("id"),
                     }
                 )
 

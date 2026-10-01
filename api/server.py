@@ -3,6 +3,7 @@ import logging
 import json
 from functools import wraps
 from pathlib import Path
+from typing import Any, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -10,8 +11,16 @@ from flask import Flask, Response, jsonify, request, send_file, stream_with_cont
 from flask_cors import CORS
 from flasgger import Swagger
 
-from rag_pipeline.agent_file_store import require_file_record, resolve_file_id, save_uploaded_file
+from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
+                                           require_file_record, reset_session as reset_file_store_session,
+                                           resolve_file_id, save_uploaded_file,
+                                           set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
+from agent_runtime import deployment_mode, identity, platform_endpoints
+from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
+                                        assert_owner as assert_memory_owner,
+                                        get_session_snapshot, get_turn_trace, list_memories,
+                                        list_turn_traces, save_session_snapshot)
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -72,8 +81,75 @@ def _coalesce(*values):
     return None
 
 
+def _demo_mode() -> bool:
+    """True when this deployment is in demo mode — see ``agent_runtime.deployment_mode``.
+
+    Demo turns OFF the API-key check on every agent endpoint and tells the UI to hide its
+    connection settings, so a page can be handed to an audience without also handing them a
+    credential to paste. That is the whole point of it, and it is also exactly why it is not the
+    default: with it on, anyone who finds the URL can run turns that spend this deployment's
+    Earth Engine quota and LLM budget. Set it only on a deployment you are willing to have used.
+
+    Kept as a named helper rather than inlined: it is read from a dozen places here, and the
+    legacy ``DEMO_MODE=true`` env still selects it when ``AGENT_MODE`` is unset.
+    """
+    return deployment_mode.is_demo()
+
+
+# Which model answers in demo mode. Configurable, but with a real default rather than falling
+# through to OPENAI_CHAT_MODEL: a demo is handed to an audience, and "whatever this deployment
+# happens to be set to" is not a demo decision.
+DEMO_MODEL_DEFAULT = "gpt-5.6-luna"
+DEMO_PROVIDER_DEFAULT = "openai"
+
+
+def _demo_model() -> tuple:
+    """(provider, model) for demo mode, from DEMO_MODEL / DEMO_MODEL_PROVIDER."""
+    return (str(os.getenv("DEMO_MODEL_PROVIDER") or DEMO_PROVIDER_DEFAULT).strip(),
+            str(os.getenv("DEMO_MODEL") or DEMO_MODEL_DEFAULT).strip())
+
+
+def _client_may_choose_the_model() -> bool:
+    """Whether a model named by the request is honoured, or dropped for the deployment's own.
+
+    The only control that can change the model is the settings panel, and BOTH demo and token
+    mode hide it — demo because there is nothing to configure, token because the credential is a
+    cookie rather than something you paste. A value left in a returning visitor's localStorage
+    then pins them to a model they can neither see nor change.
+
+    That is not hypothetical. Token mode was switched on while browsers still held
+    `gpt-oss:120b`; the deployment default moved to gpt-5.6-luna and every request from the map
+    UI kept asking for the old one, with no picker to correct it. Demo mode already had this
+    guard for exactly this reason; token mode hid the same panel without it.
+    """
+    return not (_demo_mode() or deployment_mode.is_token())
+
+
 def _get_agent_chat_api_key() -> str:
     return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
+
+
+# At import, so it appears once in the container log rather than per request. An open
+# deployment should never be a thing someone discovers from its behaviour, and the mode an
+# operator THINKS is set is the one thing worth stating out loud on every boot.
+logger.info("Agent deployment mode: %s (api key %s, platform tier %s)",
+            deployment_mode.current_mode(),
+            "configured" if _get_agent_chat_api_key() else "NOT configured",
+            platform_endpoints.current_tier() or "unset")
+if platform_endpoints.consistency_warning():
+    logger.warning("%s", platform_endpoints.consistency_warning())
+# Said at boot for the same reason as the tier/cookie mismatch above: an agent quietly talking
+# to a cluster the rest of the tier has moved off is not a state anyone goes looking for.
+if platform_endpoints.opensearch_drift_warning():
+    logger.warning("%s", platform_endpoints.opensearch_drift_warning())
+# Names only, never values — the same rule /agent/whoami follows for cookies.
+if platform_endpoints.opensearch_credential_warning():
+    logger.warning("%s", platform_endpoints.opensearch_credential_warning())
+# Supported and deliberate, but not a thing to discover from surprising search results.
+if platform_endpoints.search_tier_note():
+    logger.info("%s", platform_endpoints.search_tier_note())
+if deployment_mode.boot_warning():
+    logger.warning("%s", deployment_mode.boot_warning())
 
 
 def _extract_presented_api_key() -> str:
@@ -86,52 +162,170 @@ def _extract_presented_api_key() -> str:
     return ""
 
 
-def _auth_is_optional() -> bool:
-    """True only when a deployment has EXPLICITLY opted out of API-key auth.
-
-    Local development sets ``AGENT_CHAT_AUTH_OPTIONAL=1``. Everything else must
-    configure ``AGENT_CHAT_API_KEY`` — an unset key is a misconfiguration, not a
-    licence to serve the agent and the RAG pipeline to the open internet.
-    """
-    return str(os.getenv("AGENT_CHAT_AUTH_OPTIONAL") or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _require_agent_chat_api_key() -> None:
-    """Raise unless the caller presented the configured API key.
-
-    Fails CLOSED: with no key configured this raises ``RuntimeError``, which the
-    routes surface as a 500 "misconfiguration" rather than serving the request.
-    The previous behaviour returned early, so an unset environment variable
-    silently disabled auth on every protected route.
-    """
+def _require_agent_chat_api_key(user: Optional[Any] = None) -> None:
+    # A verified user IS a credential, and the stronger one: the API key says only "someone who
+    # has the key", the JWT says WHO. Requiring both would mean a signed-in visitor is refused
+    # for lacking a key that token mode gives them no way to enter — the settings panel is
+    # hidden precisely because there is nothing to paste. Observed live: sign in, then
+    # "You are not signed in".
+    #
+    # The key remains the way a caller with no browser gets in (the eval harness, scripts), so
+    # the two are ALTERNATIVES, never a pair.
+    if user is not None:
+        return
+    # Checked BEFORE the key is read, so a deployment can keep AGENT_CHAT_API_KEY configured and
+    # simply stop enforcing it for the duration of a demo — rather than having to unset the
+    # secret and remember to put it back.
+    if _demo_mode():
+        return
     expected = _get_agent_chat_api_key()
     if not expected:
-        if _auth_is_optional():
-            return
-        raise RuntimeError(
-            "AGENT_CHAT_API_KEY is not configured. Set it, or set "
-            "AGENT_CHAT_AUTH_OPTIONAL=1 to run without auth in local development."
-        )
+        return  # auth disabled when key is not configured
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
 
 
-def require_api_key(view):
-    """Apply :func:`_require_agent_chat_api_key` to a route.
+def _service_key_presented() -> bool:
+    """True when this request carried the VALID service key (not merely some key)."""
+    expected = _get_agent_chat_api_key()
+    return bool(expected) and _extract_presented_api_key() == expected
 
-    Mirrors the inline try/except the agent-chat routes already use, so the
-    response contract is identical: 403 on a bad key, 500 on a missing one.
+
+def _token_strict() -> bool:
+    """See ``identity.token_strict`` — the memory store needs the same answer."""
+    return identity.token_strict()
+
+
+def _extract_user_token() -> str:
+    """The platform access token for this request.
+
+    The cookie is the real path: it is httpOnly, scoped to `.i-guide.io`, and arrives here on
+    its own because the UI is served from this same origin. A Bearer value is accepted too, but
+    ONLY when it is structurally a JWT — `Authorization: Bearer` is also how a service caller
+    presents the API key, and treating that key as a token would turn a valid service request
+    into a confusing 403 about signatures.
+    """
+    cookie = str(request.cookies.get(identity.cookie_name()) or "").strip()
+    if cookie:
+        return cookie
+    auth = str(request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        value = auth[7:].strip()
+        if value.count(".") == 2:
+            return value
+    return ""
+
+
+def _require_user():
+    """Identify the caller. Returns a ``User``, or None when this deployment has no identity.
+
+    Only token mode identifies anyone. In dev and demo the answer is None and the file store
+    keeps scoping by conversation — which is the important part: "no identity" must resolve to
+    SESSION scoping, never to one shared owner that every anonymous caller lands in and can
+    read each other's files through.
+    """
+    if not deployment_mode.is_token():
+        return None
+    token = _extract_user_token()
+    # A service caller — the eval harness, a script, anything without a browser — has no JWT and
+    # presents the service key instead. `_require_agent_chat_api_key` already validated it; such
+    # a request simply gets no user, and falls back to session scoping like dev mode.
+    if not token and _service_key_presented():
+        return None
+    try:
+        # `identify`, not `decode_token`: against production this deployment verifies by ASKING
+        # the platform rather than by holding its signing secret. See identity.verify_mode.
+        user = identity.identify(token)
+        identity.authorize(user)
+    except identity.IdentityError:
+        # Non-strict relaxes OWNERSHIP of records written before ownership existed. It does not
+        # relax "who are you", and it never did anyone a favour by trying: a signed-out visitor
+        # whose identity error was swallowed here fell through to the API-key gate and was told
+        # "Forbidden: invalid API key" — a message about a credential token mode gives them no
+        # way to enter, for a problem that is actually "please sign in". Observed live.
+        #
+        # A caller holding the service key is the one exception, because it is a real credential
+        # and belongs to something without a browser.
+        if not _token_strict() and _service_key_presented():
+            return None
+        raise
+    return user
+
+
+def _identity_reason(exc: Exception) -> str:
+    """One vocabulary for "why not", shared by the refusals and by /agent/whoami.
+
+    /agent/whoami answers 200 by design — it exists to EXPLAIN a refusal, so it cannot make
+    one — which means a client reading it has no status code to act on. Without this it would
+    have to match on the prose in `reason`, and the whole point of labelling refusals was that
+    nobody should ever do that. Derived from the same exception here so the two cannot drift:
+    a 401 on /agent/chat and a `token_expired` from whoami are the same fact.
+    """
+    if isinstance(exc, identity.TokenExpired):
+        return "token_expired"
+    if isinstance(exc, identity.InsufficientRole):
+        return "insufficient_role"
+    if isinstance(exc, identity.TokenMissing):
+        return "not_signed_in"
+    if isinstance(exc, identity.IdentityNotConfigured):
+        return "identity_not_configured"
+    return "token_invalid"
+
+
+def _identity_error_response(exc: Exception):
+    """Map an identity failure to a status a client can ACT on without reading prose.
+
+    401 and 403 mean different things here and the split is the whole contract: 401 says the
+    token was fine and has simply aged out, so refresh once and retry; 403 says stop. Collapsing
+    them leaves the UI unable to tell those apart, so it either never refreshes or refreshes
+    forever against a token that will never validate. `reason` carries the same distinction in
+    machine-readable form, because a client should never have to match on an error string.
+    """
+    if isinstance(exc, identity.TokenExpired):
+        return jsonify({"error": "Your session has expired.",
+                        "reason": "token_expired"}), 401
+    if isinstance(exc, identity.InsufficientRole):
+        # The NAMES travel with the numbers. The threshold is the platform's scale, which the
+        # client has no way to learn; without these it can only say "role 8 needs 4 or lower",
+        # or hardcode a copy of the scale that stops matching the day a tier is added.
+        return jsonify({"error": "This account is not permitted to use the agent.",
+                        "reason": "insufficient_role",
+                        "role": exc.role, "requiredRole": exc.required,
+                        "roleName": identity.role_name(exc.role),
+                        "requiredRoleName": identity.role_name(exc.required)}), 403
+    if isinstance(exc, identity.TokenMissing):
+        return jsonify({"error": "Please sign in to use the agent.",
+                        "reason": "not_signed_in"}), 403
+    if isinstance(exc, identity.IdentityNotConfigured):
+        # Fails CLOSED: a deployment that cannot verify identity must not serve as if it had.
+        logger.error("Identity misconfigured: %s", exc)
+        return jsonify({"error": "Server misconfiguration: identity is not configured.",
+                        "reason": "identity_not_configured"}), 500
+    return jsonify({"error": "Please sign in to use the agent.",
+                    "reason": "token_invalid"}), 403
+
+
+def require_api_key(view):
+    """Gate a route on the same credentials /agent/chat accepts.
+
+    The decorator is backend_swap's (M0): /query and /query/batch had no check of any kind, so
+    the RAG pipeline answered anonymous callers even in token mode. The CHECK is prototype's —
+    `_require_user()` then `_require_agent_chat_api_key(user)` — so these routes and the agent
+    routes cannot disagree about who may call them: a verified platform user, the service key,
+    or demo mode. That includes prototype's documented choice that an unset service key leaves
+    the key check open outside token mode; tightening that is a separate decision.
     """
     @wraps(view)
     def wrapper(*args, **kwargs):
         try:
-            _require_agent_chat_api_key()
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        try:
+            _require_agent_chat_api_key(user)
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
-        except RuntimeError as exc:
-            logger.error("Agent chat API key misconfigured: %s", exc)
-            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
         return view(*args, **kwargs)
 
     return wrapper
@@ -167,10 +361,6 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # (None) falls back to the AGENT_DEV env var in the streaming layer.
     agent_dev_raw = _coalesce(data.get("agentDev"), data.get("agent_dev"))
     agent_dev = None if agent_dev_raw is None else bool(agent_dev_raw)
-    # use_supervisor is tri-state too: absent (None) falls back to the
-    # AGENT_SUPERVISOR env default (on).
-    use_supervisor_raw = _coalesce(data.get("useSupervisor"), data.get("use_supervisor"))
-    use_supervisor = None if use_supervisor_raw is None else bool(use_supervisor_raw)
     # code_exec is tri-state: absent (None) falls back to the AGENT_CODE_EXEC env
     # default (ON; set AGENT_CODE_EXEC=0/false to disable). Controls the sandboxed
     # execute_code tool for this request.
@@ -183,6 +373,17 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # models that would reject the argument.
     reasoning_effort = _coalesce(data.get("reasoningEffort"), data.get("reasoning_effort"))
     code_exec = None if code_exec_raw is None else bool(code_exec_raw)
+    # Which code-peer backend runs THIS request: "langchain" (the built-in peer),
+    # "opencode" or "claude". Absent, the AGENT_CODE_PEER env default applies, so a
+    # client that never sends it behaves exactly as before.
+    code_peer = _coalesce(data.get("codePeer"), data.get("code_peer"))
+    # Model for a CLI code peer — an alias like "sonnet"/"opus", or a full id. Only
+    # meaningful when that peer is the one running; the built-in peer uses the same
+    # model as the answer, which the `model` field above already selects.
+    code_peer_model = _coalesce(data.get("codePeerModel"), data.get("code_peer_model"))
+    # Per-request A/B of the orchestration shape. Without this the two architectures could
+    # only be compared by restarting the deployment between arms.
+    unified_peer = _coalesce(data.get("unifiedPeer"), data.get("unified_peer"))
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -202,10 +403,27 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "skill_roots": skill_roots,
         "verbose": verbose,
         "agent_dev": agent_dev,
-        "use_supervisor": use_supervisor,
         "code_exec": code_exec,
-        "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
-        "llm_model": (str(llm_model).strip() or None) if llm_model else None,
+        "code_peer": (str(code_peer).strip() or None) if code_peer else None,
+        "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
+        "unified_peer": (str(unified_peer).strip().lower() in {"1", "true", "yes", "on"}
+                         if unified_peer is not None else None),
+        # FORCED in demo mode and DROPPED in token mode, neither of them merely defaulted. The
+        # control that would let anyone change the model is the settings panel, and both modes
+        # hide it — so a value left in a returning visitor's localStorage would pin them to a
+        # model they can neither see nor change. That is the same trap the spatial-tools toggle
+        # had. In demo it also bounds what an unauthenticated endpoint can be made to spend.
+        #
+        # The two differ in what replaces the client's choice. Demo names its own model, because
+        # "whatever this deployment happens to be set to" is not a demo decision. Token mode
+        # passes None, which means the agent uses its configured default — so changing the
+        # deployment's model actually changes what signed-in users get.
+        "llm_provider": _demo_model()[0] if _demo_mode() else (
+            (str(llm_provider).strip() or None)
+            if (llm_provider and _client_may_choose_the_model()) else None),
+        "llm_model": _demo_model()[1] if _demo_mode() else (
+            (str(llm_model).strip() or None)
+            if (llm_model and _client_may_choose_the_model()) else None),
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
     }
 
@@ -255,7 +473,14 @@ def _category_for_agent_role(role: object) -> str:
     return "analysis"
 
 
-def _short_text(value: object, limit: int = 900) -> str:
+# 900 chars cut a python traceback off before its last frame — the one naming the error — so the
+# expandable trace row had nothing useful to expand into. 4000 is enough for a stack trace and a
+# tool's argument dict while still being a bound: the trace is a stream, not a transport for
+# results, and a 15 MB GeoJSON must never travel down it.
+_TRACE_TEXT_LIMIT = int(os.getenv("AGENT_TRACE_SSE_TEXT_LIMIT") or 4000)
+
+
+def _short_text(value: object, limit: int = _TRACE_TEXT_LIMIT) -> str:
     text = value if isinstance(value, str) else str(value or "")
     text = " ".join(text.split())
     return text if len(text) <= limit else f"{text[:limit]}..."
@@ -623,6 +848,357 @@ def agent_dashboard():
     return send_file(dashboard_path)
 
 
+def _list_code_peers():
+    """The code-peer backends a request may select, and which one is the default.
+
+    A CLI peer needs BOTH a credential and its sandbox image. Reporting only the
+    credential offered opencode as available on a host where its image had never
+    been built, which fails at run time with a docker error — the picker has to
+    tell "not configured" apart from "not built".
+    """
+    import os as _os
+    import subprocess as _sp
+
+    from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, SELECTABLE_MODELS,
+                                           resolve_claude_settings, selects_claude)
+    from agent_runtime.opencode_peer import (CODE_PEER_ENV, DEFAULT_OPENCODE_IMAGE,
+                                             resolve_llm_settings, selects_opencode)
+
+    def _image_present(env_var, default_name):
+        name = _os.getenv(env_var, default_name)
+        try:
+            return _sp.run(["docker", "image", "inspect", name],
+                           capture_output=True, timeout=5).returncode == 0
+        except Exception:  # noqa: BLE001 - no docker, no answer, never a page error
+            return False
+
+    env_value = _os.getenv(CODE_PEER_ENV) or ""
+    default = ("opencode" if selects_opencode(env_value)
+               else "claude" if selects_claude(env_value) else "langchain")
+    claude = resolve_claude_settings()
+    try:
+        opencode_ready = bool(resolve_llm_settings().get("api_key"))
+    except Exception:  # noqa: BLE001
+        opencode_ready = False
+    claude_image = _image_present("AGENT_CLAUDE_IMAGE", DEFAULT_CLAUDE_IMAGE)
+    opencode_image = _image_present("AGENT_OPENCODE_IMAGE", DEFAULT_OPENCODE_IMAGE)
+    return {
+        "default": default,
+        "peers": [
+            {"id": "langchain", "label": "Built-in peer (generates code, runs execute_code)",
+             "available": True},
+            {"id": "claude", "label": "Claude Code CLI (sandboxed, iterates on its own)",
+             "available": bool(claude["credential"]) and claude_image,
+             "reason": None if (claude["credential"] and claude_image)
+                       else ("no credential" if not claude["credential"] else "image not built"),
+             "model": claude["model"], "auth": claude["auth"],
+             # Aliases, so the list cannot pin itself to a retired id. The CLI refuses
+             # an unknown one locally, before any API call, so a bad pick costs nothing.
+             "models": list(SELECTABLE_MODELS)},
+            {"id": "opencode", "label": "opencode CLI (sandboxed, iterates on its own)",
+             "available": opencode_ready and opencode_image,
+             "reason": None if (opencode_ready and opencode_image)
+                       else ("no credential" if not opencode_ready else "image not built")},
+        ],
+    }
+
+
+@app.route('/agent/ui-config', methods=['GET'])
+def agent_ui_config():
+    """What the browser needs to know before it can render its own chrome.
+
+    Deliberately UNAUTHENTICATED and deliberately tiny: a client that cannot yet authenticate is
+    exactly the client that needs to ask whether it has to. It answers only whether this
+    deployment is in demo mode and whether a key is required — never the key itself, and nothing
+    else about the configuration.
+    """
+    demo = _demo_mode()
+    body = {
+        # `mode` is the field to read. `demo_mode` stays for clients built before modes existed:
+        # dropping it would blank the settings panel on every page still holding an old bundle.
+        "mode": deployment_mode.current_mode(),
+        "demo_mode": demo,
+        "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
+    }
+    if deployment_mode.is_token():
+        # Where the CLIENT refreshes an expired token. The agent never handles refresh tokens:
+        # the browser calls the platform directly, which re-mints the .i-guide.io cookie. Sent
+        # from here rather than compiled into the bundle so the same build runs against any
+        # tier — the dev and production backends are different hosts.
+        body["refresh_url"] = platform_endpoints.refresh_url()
+        body["signin_url"] = platform_endpoints.signin_url()
+    return jsonify(body)
+
+
+@app.route('/agent/whoami', methods=['GET'])
+def agent_whoami():
+    """
+    Who the server thinks you are, and — when it thinks nobody — why.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ mode, verify, signedIn, user: {id, role, roleName?}|null, permitted, reason,
+          cookiesSeen, expectedCookie, platformTier, checkTokensUrl, signinUrl, requiredRole,
+          requiredRoleName }`. Always 200, even when the caller is anonymous or refused: this
+          endpoint exists to EXPLAIN a refusal, so answering with one would defeat it.
+          Everything the profile renders comes from here, including where to sign in.
+    """
+    body = {
+        "mode": deployment_mode.current_mode(),
+        "signedIn": False,
+        "user": None,
+        "permitted": False,
+        "reason": None,
+        # Names only, never values. A cookie value is a live credential; the NAME is what is
+        # actually in question when a tier turns out to use a different one than configured,
+        # and no amount of guessing beats the server saying what arrived.
+        "cookiesSeen": sorted(request.cookies.keys()),
+        "expectedCookie": identity.cookie_name(),
+        # Machine-readable twin of `reason`. Clients act on this; `reason` is for a human
+        # reading a log or a support request.
+        "reasonCode": None,
+    }
+    # Every field below reads configuration that REFUSES TO GUESS: an unrecognised
+    # PLATFORM_TIER raises rather than picking a platform, and an unparseable AGENT_MIN_ROLE
+    # raises rather than widening access. Both are right — and both would turn this endpoint
+    # into a 500 in precisely the situation it exists to explain. So each is reported when it
+    # can be read, left null when it cannot, and the misconfiguration itself becomes the
+    # `reason`, which is the one place a human is going to look.
+    #
+    # `signinUrl` is here, and not only on /agent/ui-config, because the profile renders from
+    # this response alone: the state that most needs a sign-in link is the signed-out one,
+    # where whoami already knows everything else.
+    for key, read in (
+        ("platformTier", platform_endpoints.current_tier),
+        ("checkTokensUrl", platform_endpoints.check_tokens_url),
+        ("signinUrl", platform_endpoints.signin_url),
+        ("requiredRole", identity.min_role),
+    ):
+        try:
+            body[key] = read()
+        except (identity.IdentityError, ValueError) as exc:
+            body[key] = None
+            body["reason"] = f"{type(exc).__name__}: {exc}"
+    body["requiredRoleName"] = identity.role_name(body.get("requiredRole"))
+
+    try:
+        body["verify"] = identity.verify_mode()
+    except identity.IdentityError as exc:
+        body["verify"] = None
+        body["reason"], body["reasonCode"] = str(exc), _identity_reason(exc)
+        return jsonify(body)
+
+    if not deployment_mode.is_token():
+        body["reason"] = "this deployment does not identify callers"
+        body["reasonCode"] = "no_identity_in_this_mode"
+        return jsonify(body)
+
+    token = _extract_user_token()
+    if not token:
+        body["reason"] = "no access token was presented"
+        body["reasonCode"] = "not_signed_in"
+        return jsonify(body)
+    try:
+        user = identity.identify(token)
+    except identity.IdentityError as exc:
+        # `token_expired` here is the one a client must ACT on rather than display: the access
+        # cookie aged out, the refresh cookie almost certainly has not, and telling someone to
+        # sign in again when one silent refresh would do it is the worst of the options.
+        body["reason"], body["reasonCode"] = f"{type(exc).__name__}: {exc}", _identity_reason(exc)
+        return jsonify(body)
+
+    body["signedIn"] = True
+    body["user"] = user.to_dict()
+    try:
+        identity.authorize(user)
+        body["permitted"] = True
+    except identity.InsufficientRole as exc:
+        body["reason"], body["reasonCode"] = str(exc), _identity_reason(exc)
+    return jsonify(body)
+
+
+@app.route('/agent/conversations', methods=['GET'])
+def agent_conversations():
+    """
+    The signed-in user's own conversations, newest first.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ "conversations": [ { memoryId, conversationName, createdAt, updatedAt } ] }`.
+          Summaries only, never transcripts. Outside token mode this is always empty: a
+          deployment that identifies nobody has no "your" conversations to list.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in, or this account is not permitted to use the agent.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        if not user:
+            # Deliberately 200-with-nothing rather than an error: dev and demo have no users,
+            # and a client that shows a history pane should render it empty, not break.
+            return jsonify({"conversations": []})
+        token = identity.set_user(user)
+        try:
+            return jsonify({"conversations": list_memories(limit=50)})
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error listing conversations: %s", exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/conversations/<memory_id>', methods=['GET', 'PUT'])
+def agent_conversation(memory_id):
+    """
+    Read or write the client's view of one conversation.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: memory_id
+        type: string
+        required: true
+      - in: body
+        name: body
+        required: false
+        description: >-
+          On PUT, the client's own conversation record — the `StoredSession` shape from
+          `map-ui-prototype/src/sessionStore.ts`: messages, layer DESCRIPTORS (a sourceUrl to
+          re-fetch, or small inline geometry), every fileId used across the session, region,
+          model and provider. `owner_id`, `chat_history` and the timestamps are server-owned and
+          ignored if sent.
+        schema:
+          type: object
+    responses:
+      200:
+        description: The stored record (GET), or what was written (PUT).
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in, or not permitted.
+      404:
+        description: No such conversation, or it belongs to someone else.
+      413:
+        description: The record is larger than this store will hold.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        token = identity.set_user(user)
+        try:
+            try:
+                assert_memory_owner(memory_id)
+            except MemoryAccessDenied:
+                # Same 404-not-403 rule as everywhere else: a 403 confirms the id exists.
+                logger.info("Conversation refused: %s is not this caller's", memory_id)
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
+
+            if request.method == 'GET':
+                snapshot = get_session_snapshot(memory_id)
+                if snapshot is None:
+                    return jsonify({"error": "No conversation found for that id."}), 404
+                return jsonify(snapshot)
+
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                return jsonify({"error": "Body must be a conversation object."}), 400
+            try:
+                return jsonify(save_session_snapshot(memory_id, body))
+            except SnapshotTooLarge as exc:
+                # A real ceiling rather than a silent truncation: a conversation that came back
+                # missing half its layers would look like data loss with no explanation.
+                return jsonify({"error": str(exc), "reason": "conversation_too_large"}), 413
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/conversations/<memory_id>/traces', methods=['GET'])
+def agent_conversation_traces(memory_id):
+    """
+    The raw trace of every recorded turn in this conversation.
+    ---
+    tags:
+      - agent
+    parameters:
+      - in: path
+        name: memory_id
+        required: true
+        type: string
+      - in: query
+        name: traceId
+        type: string
+        description: >-
+          Return this one turn with its full event list. Without it, a summary per turn and no
+          events -- a conversation's traces are large, and a caller choosing which turn to look
+          at should not have to download all of them to choose.
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          `{ traces: [ { traceId, query, answer, model, provider, eventCount, createdAt } ] }`,
+          or a single `{ traceId, events: [...] }` when `traceId` is given.
+      404:
+        description: No such conversation or trace, or it belongs to someone else.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        token = identity.set_user(user)
+        try:
+            try:
+                # Ownership is asserted on the CONVERSATION, not on the trace: the trace is a
+                # property of the conversation and inherits its access, and checking the parent
+                # means a trace can never be reachable by an id its conversation would refuse.
+                assert_memory_owner(memory_id)
+            except MemoryAccessDenied:
+                logger.info("Traces refused: %s is not this caller's", memory_id)
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
+
+            trace_id = (request.args.get("traceId") or "").strip()
+            if trace_id:
+                trace = get_turn_trace(trace_id)
+                # The id embeds its conversation, but that is a convenience and not a check:
+                # confirm the trace really belongs to the conversation just authorised.
+                if not trace or trace.get("memory_id") != memory_id:
+                    return jsonify({"error": "No trace found for that id."}), 404
+                return jsonify(trace)
+
+            limit = request.args.get("limit", type=int) or 20
+            return jsonify({"traces": list_turn_traces(memory_id, limit=limit)})
+        finally:
+            identity.reset_user(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on traces for %s: %s", memory_id, exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
 @app.route('/agent/models', methods=['GET'])
 def agent_models():
     """
@@ -652,15 +1228,22 @@ def agent_models():
     from agent_runtime.executor_factory import list_available_models
 
     try:
-        return jsonify(list_available_models())
+        catalogue = list_available_models()
     except Exception as exc:  # never let a catalogue lookup break the page
         logger.warning("model catalogue unavailable: %s", exc)
-        return jsonify({"default": {"provider": "openai", "model": "gpt-4o-2024-11-20"},
-                        "providers": [], "error": str(exc)}), 200
+        catalogue = {"default": {"provider": "openai", "model": "gpt-4o-2024-11-20"},
+                     "providers": [], "error": str(exc)}
+    # The code PEER is a second, independent axis: which agent writes the code, not
+    # which model writes the answer. It rides along on this endpoint so a client
+    # needs one call, but it is reported under its own key so nothing conflates them.
+    try:
+        catalogue["code_peers"] = _list_code_peers()
+    except Exception as exc:  # noqa: BLE001 - a peer list must never break the page
+        logger.warning("code peer catalogue unavailable: %s", exc)
+    return jsonify(catalogue)
 
 
 @app.route('/agent/files/upload', methods=['POST'])
-@require_api_key
 def upload_agent_files():
     """
     Upload one or more files for the agent to inspect.
@@ -721,11 +1304,38 @@ def upload_agent_files():
         description: Internal server error.
     """
     try:
+        # This endpoint had NO guard of any kind — not identity, not even the API key — so the
+        # deployed server accepted uploads from anyone who could reach it, and the files landed
+        # in a store the download endpoint then served. Measured live before this fix: a keyless
+        # POST returned 200.
+        #
+        # Identity first, then the key, exactly as the chat endpoints do: a signed-in caller is
+        # already a credential, and running the key gate first refuses them for lacking one they
+        # have no way to supply.
+        try:
+            _upload_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        try:
+            _require_agent_chat_api_key(_upload_user)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent file upload API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+
         files = _normalize_uploaded_files()
         if not files:
             return jsonify({"error": "No files uploaded. Use form field `file` or `files`."}), 400
 
-        uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+        # Bound so save_uploaded_file stamps the owner. Without this every upload was written
+        # owner_id: None, which made AGENT_TOKEN_STRICT=1 unreachable in practice: a user could
+        # not download their own attachment.
+        _upload_token = identity.set_user(_upload_user)
+        try:
+            uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+        finally:
+            identity.reset_user(_upload_token)
         return jsonify({"files": uploaded, "count": len(uploaded)}), 200
     except ValueError as e:
         logger.error(f"Agent file upload validation error: {str(e)}")
@@ -736,7 +1346,6 @@ def upload_agent_files():
 
 
 @app.route('/agent/files/<file_id>/download', methods=['GET'])
-@require_api_key
 def download_agent_file(file_id):
     """
     Download an uploaded (or generated) file by file_id.
@@ -761,8 +1370,26 @@ def download_agent_file(file_id):
         description: Internal server error.
     """
     try:
-        record = require_file_record(file_id)
-        path = resolve_file_id(file_id)
+        # Identity matters here as much as on /agent/chat, and for a while it was missing: this
+        # endpoint served ANY file to ANYONE who could guess or be handed an id, which also made
+        # every download_url in an answer a permanent public link.
+        try:
+            _download_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        _download_token = identity.set_user(_download_user)
+        try:
+            record = require_file_record(file_id)
+            # Unowned records are readable only while the backfill is still running
+            # (AGENT_TOKEN_STRICT=0). Once strict, a file nobody owns is a file nobody reads.
+            if not file_store_may_read(record, allow_unowned=not _token_strict()):
+                # 404 rather than 403: a 403 would confirm that this id exists, turning the
+                # endpoint into an oracle for enumerating other people's files.
+                logger.info("Download refused: %s does not belong to this caller", file_id)
+                return jsonify({"error": f"No file found for id {file_id}"}), 404
+            path = resolve_file_id(file_id)
+        finally:
+            identity.reset_user(_download_token)
         mimetype = None
         suffix = Path(record.get("filename", "")).suffix.lower()
         image_types = {
@@ -1173,15 +1800,6 @@ def agent_chat():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
-            useSupervisor:
-              type: boolean
-              nullable: true
-              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
-              example: true
-            use_supervisor:
-              type: boolean
-              nullable: true
-              description: Snake_case alias for `useSupervisor`.
             codeExec:
               type: boolean
               nullable: true
@@ -1446,8 +2064,15 @@ def agent_chat():
               description: Optional readable diagnostic trace.
     """
     try:
+        # Identity first: it can satisfy the credential check on its own, and running the key
+        # gate ahead of it refuses a signed-in visitor before anyone asks who they are.
         try:
-            _require_agent_chat_api_key()
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
+        try:
+            _require_agent_chat_api_key(_request_user)
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
         except RuntimeError as exc:
@@ -1461,30 +2086,55 @@ def agent_chat():
             return jsonify({"error": "Missing userQuery in request body."}), 400
 
         logger.info(f"Processing agent chat: {user_query[:100]}...")
-        raw = run_agent_chat(
-            user_input=user_query,
-            thread_id=normalized.get("thread_id"),
-            memory_id=normalized.get("memory_id"),
-            conversation_name=normalized.get("conversation_name"),
-            recent_k=normalized.get("recent_k"),
-            tool_strategy=normalized.get("tool_strategy", "granular"),
-            include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
-            mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
-            enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
-            use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
-            smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
-            forced_intent=normalized.get("forced_intent"),
-            file_paths=normalized.get("file_paths"),
-            file_ids=normalized.get("file_ids"),
-            skill_roots=normalized.get("skill_roots"),
-            verbose=bool(normalized.get("verbose", False)),
-            use_supervisor=normalized.get("use_supervisor"),
-            code_exec=normalized.get("code_exec"),
-            llm_provider=normalized.get("llm_provider"),
-            llm_model=normalized.get("llm_model"),
-            reasoning_effort=normalized.get("reasoning_effort"),
-        )
-        return jsonify(_format_agent_chat_result(raw)), 200
+        # Bind the conversation for the whole turn, so every file a tool writes records who
+        # wrote it and every lookup sees this conversation's files first. Set at the EDGE
+        # because nothing deeper knows what a session is. JWT will change where this id comes
+        # from, not what it does with it.
+        _session_token = set_file_store_session(normalized.get("thread_id"))
+        _user_token = identity.set_user(_request_user)
+        try:
+            # Checked INSIDE the identity binding: assert_owner reads the caller from the same
+            # ContextVar everything else does, so before this line it would see nobody and wave
+            # every conversation through.
+            if normalized.get("memory_id"):
+                try:
+                    assert_memory_owner(normalized["memory_id"])
+                except MemoryAccessDenied:
+                    # 404 for the same reason the download endpoint uses it: a 403 confirms the
+                    # conversation exists, and a memory_id is the only thing guarding it.
+                    logger.info("Chat refused: memory %s is not this caller's",
+                                normalized["memory_id"])
+                    return jsonify({"error": "No conversation found for that id.",
+                                    "reason": "not_your_conversation"}), 404
+            raw = run_agent_chat(
+                user_input=user_query,
+                thread_id=normalized.get("thread_id"),
+                memory_id=normalized.get("memory_id"),
+                conversation_name=normalized.get("conversation_name"),
+                recent_k=normalized.get("recent_k"),
+                tool_strategy=normalized.get("tool_strategy", "granular"),
+                include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+                mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+                enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+                use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+                forced_intent=normalized.get("forced_intent"),
+                file_paths=normalized.get("file_paths"),
+                file_ids=normalized.get("file_ids"),
+                skill_roots=normalized.get("skill_roots"),
+                verbose=bool(normalized.get("verbose", False)),
+                code_exec=normalized.get("code_exec"),
+                code_peer=normalized.get("code_peer"),
+                unified_peer=normalized.get("unified_peer"),
+                code_peer_model=normalized.get("code_peer_model"),
+                llm_provider=normalized.get("llm_provider"),
+                llm_model=normalized.get("llm_model"),
+                reasoning_effort=normalized.get("reasoning_effort"),
+            )
+            return jsonify(_format_agent_chat_result(raw)), 200
+        finally:
+            reset_file_store_session(_session_token)
+            identity.reset_user(_user_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -1564,7 +2214,6 @@ def agent_chat_stream():
     - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
     - `mcpModules`: null = all MCP modules (when MCP tools are on).
     - `smartToolRouting`: `true`.
-    - `useSupervisor`: server default `AGENT_SUPERVISOR` (ON = supervisor-over-peers graph).
     - `codeExec`: server default `AGENT_CODE_EXEC` (ON = sandboxed `execute_code` tool); send
       `false` to disable.
     - `agentDev`: server default `AGENT_DEV` (off = status-only SSE). When true, also emit the SSE
@@ -1826,15 +2475,6 @@ def agent_chat_stream():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
-            useSupervisor:
-              type: boolean
-              nullable: true
-              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
-              example: true
-            use_supervisor:
-              type: boolean
-              nullable: true
-              description: Snake_case alias for `useSupervisor`.
             codeExec:
               type: boolean
               nullable: true
@@ -1879,6 +2519,11 @@ def agent_chat_stream():
           - `error`: streamed error payload. Missing `userQuery` is reported this way after the stream is opened.
 
           Additional UI events:
+          - `node`: graph node lifecycle (`node_started` / `node_completed`) with a
+            human-readable `message`. This carries MOST of the progress text a user reads —
+            triage, the supervisor's next step, each peer starting and finishing. A client
+            that has no branch for it drops that text into whatever its default branch does,
+            which is how one client rendered nine rows of routing bookkeeping per turn.
           - `routing`: route initialization, intent/policy state, and final route trace.
           - `search`: search-agent starts, completions, tool calls, tool results, and tool errors.
           - `analysis`: analysis/code-agent starts, completions, tool calls, tool results, and tool errors.
@@ -1893,6 +2538,12 @@ def agent_chat_stream():
 
             event: routing
             data: {"type":"initialized","detail":{"stage":"initialized","thread_id":"demo-thread-1","tool_strategy":"granular","available_agents":["answer_from_memory","search_agent_evidence","analysis_agent_answer"],"available_skills":[]}}
+
+            event: node
+            data: {"type":"node_started","stage":"triage","node":"triage","agent":"","message":"Routing the request","detail":{"stage":"triage","message":"Routing the request"}}
+
+            event: node
+            data: {"type":"node_completed","stage":"supervisor","node":"supervisor","agent":"","message":"Next: analyze","detail":{"stage":"supervisor","route":"analyze","message":"Next: analyze"}}
 
             event: agent_trace
             data: {"type":"route_decision","agent":"orchestrator_agent","label":"Route decision","message":"route=search_then_analysis; intent=search","detail":{"kind":"agent_route_decision","route":"search_then_analysis"}}
@@ -1944,8 +2595,15 @@ def agent_chat_stream():
               example: "Internal server error: agent execution failed"
     """
     try:
+        # Identity first: it can satisfy the credential check on its own, and running the key
+        # gate ahead of it refuses a signed-in visitor before anyone asks who they are.
         try:
-            _require_agent_chat_api_key()
+            _request_user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+
+        try:
+            _require_agent_chat_api_key(_request_user)
         except PermissionError as exc:
             return jsonify({"error": str(exc)}), 403
         except RuntimeError as exc:
@@ -1969,7 +2627,20 @@ def agent_chat_stream():
         @stream_with_context
         def generate():
             error_emitted = False
+            stream_session_token = set_file_store_session(normalized.get("thread_id"))
+            stream_user_token = identity.set_user(_request_user)
             try:
+                if normalized.get("memory_id"):
+                    try:
+                        assert_memory_owner(normalized["memory_id"])
+                    except MemoryAccessDenied:
+                        logger.info("Stream refused: memory %s is not this caller's",
+                                    normalized["memory_id"])
+                        # Headers are long gone by now, so the refusal travels as an SSE frame
+                        # rather than a status code. Same wording as the JSON path.
+                        yield _sse_event("error", {"error": "No conversation found for that id.",
+                                                   "reason": "not_your_conversation"})
+                        return
                 for item in stream_agent_chat_events(
                     user_input=user_query,
                     thread_id=normalized.get("thread_id"),
@@ -1988,8 +2659,10 @@ def agent_chat_stream():
                     skill_roots=normalized.get("skill_roots"),
                     verbose=bool(normalized.get("verbose", False)),
                     agent_dev=normalized.get("agent_dev"),
-                    use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
+                    code_peer=normalized.get("code_peer"),
+                    unified_peer=normalized.get("unified_peer"),
+                    code_peer_model=normalized.get("code_peer_model"),
                     llm_provider=normalized.get("llm_provider"),
                     llm_model=normalized.get("llm_model"),
                     reasoning_effort=normalized.get("reasoning_effort"),
@@ -2071,6 +2744,16 @@ def agent_chat_stream():
                         "mcp_call_start",
                         "mcp_call_end",
                         "mcp_call_error",
+                        # The error-and-repair story. Without these three the trace shows a tool
+                        # being called twice and never says the first attempt failed, which is
+                        # how a 1.6s rejection read as a duplicate tile sweep for two rounds of
+                        # diagnosis. tool_dead_end is not new — the supervisor has emitted it
+                        # whenever a tool failed twice and it re-ran the peer with an
+                        # observation, and it was dropped HERE, so the one repair mechanism the
+                        # agent already had has never been visible to anyone watching.
+                        "tool_retry",
+                        "tool_recovered",
+                        "tool_dead_end",
                     }:
                         yield _sse_event("agent_trace", _agent_trace_event(payload))
 
@@ -2103,7 +2786,7 @@ def agent_chat_stream():
                         continue
 
                     if event_name == "memory_saved":
-                        yield _sse_event("status", {"status": "Updating memory..."})
+                        yield _sse_event("status", {"status": "Updating memory"})
                         continue
 
                     if event_name == "warning":
@@ -2163,6 +2846,11 @@ def agent_chat_stream():
                         yield _sse_event("agent_trace", trace_event)
                 yield _sse_event("error", error_payload)
 
+            finally:
+                # A stream that is cancelled mid-flight must not leave this thread bound to
+                # the conversation; the next request on it would inherit the scope.
+                reset_file_store_session(stream_session_token)
+                identity.reset_user(stream_user_token)
         return Response(
             generate(),
             mimetype="text/event-stream",

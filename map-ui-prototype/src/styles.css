@@ -9,30 +9,124 @@ html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--ink); font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
 a { color: var(--link); }
 
-/* layout: top nav + workspace (left panel + map + chat), progressive */
-.app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
+/* layout: top nav + workspace (left panel + map + chat), progressive.
+   The map/chat split is the user's: the seam is a real control (.splitter below) and the chat
+   width rides on --chat-w, published by App on .workspace. The two floors are mirrored as
+   constants in App.tsx — change them in BOTH places.
+     --chat-min  the composer's three 42px circles plus its padding leave the textarea almost
+                 nothing below this, and the remote-sensing row starts wrapping.
+     --map-min   .leftpanel floats over the map at left:12px and is 288px wide, so 312 is the
+                 hard floor. Neither floor may be reached by a drag, and neither may be reached
+                 by a width restored from a wider window: a map pane at 0 does not collapse,
+                 it UNMOUNTS, and the camera goes with it. */
+.app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden;
+  --chat-min: 380px; --map-min: 360px; --split-w: 8px; }
 .workspace { flex: 1; display: flex; min-height: 0; position: relative; }
-.mapwrap { flex: 1; position: relative; min-width: 0; }
+.mapwrap { flex: 1; position: relative; min-width: var(--map-min); }
 .app.chat-only .mapwrap { display: none; }
 .chat { height: 100%; width: 460px; flex: none; background: var(--bg); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 .app.chat-only .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; border-left: none; }
+/* clamp() is the safety net the drag arithmetic cannot be: 100% resolves against .workspace, so
+   the ceiling follows the window live — a width saved on a wide monitor, a half-screened window,
+   a browser-zoom change and a docked devtools panel are all handled here rather than by a
+   listener, and the user's chosen width comes back untouched when the room returns.
+   The splitter draws the seam now, so the pane does not draw a second line beside it. */
+.app.map-on .chat {
+  width: clamp(var(--chat-min), var(--chat-w, 460px), calc(100% - var(--map-min) - var(--split-w)));
+  border-left: none;
+}
+
+/* ---- the map/chat seam -------------------------------------------------------------------
+   A control, not a border: 8px of flex item with a ::before widening the grab band to ~16px,
+   while the visible line stays the 1px the chat's border-left used to draw. A flex ITEM and not
+   an overlay, so it shrinks the map's box instead of covering the OSM attribution the basemap's
+   terms require. z-index above .leftpanel's 5 so the handle stays clickable with the map at its
+   minimum, and below .history's 30. */
+.splitter { flex: 0 0 var(--split-w); position: relative; z-index: 6; background: transparent;
+  cursor: col-resize; user-select: none; -webkit-user-select: none;
+  /* React registers touchmove passively at the root, so preventDefault in a touch handler is a
+     no-op and the browser would claim the gesture and fire pointercancel. CSS wins regardless. */
+  touch-action: none; }
+.splitter::before { content: ''; position: absolute; inset-block: 0; inset-inline: -4px; }
+.splitter::after { content: ''; position: absolute; inset-block: 0; left: 50%; width: 1px;
+  margin-left: -.5px; background: var(--line); }
+.splitter:hover::after, .splitter:active::after { width: 3px; margin-left: -1.5px; background: var(--brand); }
+/* Outline, not box-shadow, so the focus ring survives forced colors. Pulled inward because a
+   +2px ring on an 8px bar reads as a blob over the canvas. */
+.splitter:focus-visible { outline: 2px solid var(--brand); outline-offset: -1px; }
+.splitter:focus-visible::after { background: var(--brand); width: 3px; margin-left: -1.5px; }
+/* A background-only affordance disappears in High Contrast — for the readers most likely to
+   want a wider chat. There is no width transition anywhere: it would lag the pointer and
+   multiply the map's resize churn, so there is nothing here for prefers-reduced-motion. */
+@media (forced-colors: active) {
+  .splitter::after { background: CanvasText; forced-color-adjust: none; }
+}
+
+/* While the seam is being dragged the whole window is one gesture: the map's cursor="grab"
+   would otherwise flicker through the moment the pointer crossed the canvas, and the drag would
+   paint a selection across the transcript. pointer-events:none on the map also keeps deck.gl's
+   per-move picking pass off the frame budget — safe, because the pointer is captured by the
+   handle, not by the canvas. */
+.app.resizing, .app.resizing * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
+.app.resizing .mapwrap { pointer-events: none; }
 
 /* top nav bar (reference chrome; nav items are placeholders) */
 .bar { padding: 12px 16px 6px; }
 .bar-inner { max-width: 1400px; margin: 0 auto; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 18px; padding: 8px 16px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
-.brand .caret, .top .caret { color: #9aa0a6; font-size: 11px; }
-.top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
-.top span { cursor: default; white-space: nowrap; }
-.grow { flex: 1; }
+/* The mark is the link home, so it gets a real affordance. Sized by HEIGHT: the official
+   asset is 208x240, so fixing width would squash it. */
+.brand .marklink { display: inline-flex; align-items: center; border-radius: 6px; }
+.brand .marklink:focus-visible { outline: 2px solid #1aa37a; outline-offset: 2px; }
+.brand .marklink:hover { opacity: .82; }
+img.iglogo { height: 26px; width: auto; display: block; }
+
+/* --- styles the ORIGINAL page needs (VITE_UI_VARIANT=platform) -------------------
+   Restored verbatim from commit 76dab0b. The rs-embed header renders none of these
+   elements, so they are inert there; without them the preserved copy is not actually
+   a copy — its search box, jpy badge and avatar would render unstyled. */
 .navsearch { display: flex; align-items: center; gap: 8px; background: #f1f2f3; border-radius: 999px; padding: 7px 14px; color: #9aa0a6; min-width: 180px; }
 .navsearch .mag { font-size: 15px; }
 .navsearch input { border: 0; background: transparent; outline: 0; color: var(--ink); width: 100%; font-size: 14px; }
-.navbtn { font-size: 12px; padding: 5px 11px; }
-.navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
 .jpy { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font-size: 11px; color: #f37726; font-weight: 700; }
 .avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #7a8b3a, #c9b15a); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
-@media (max-width: 900px) { .top, .navsearch { display: none; } }
+.brand .caret, .top .caret { color: #9aa0a6; font-size: 11px; }
+@media (max-width: 900px) { .top:has(> span), .navsearch { display: none; } }
+/* ---------------------------------------------------------------------------- */
+.top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
+.top span { cursor: default; white-space: nowrap; }
+/* The only header item that actually navigates, so unlike the placeholders it replaced it
+   gets a pointer, a hover state and a visited-proof colour. */
+.top a.platform-link { color: #2b2f36; text-decoration: none; white-space: nowrap; }
+.top a.platform-link:hover, .top a.platform-link:focus-visible { color: #1aa37a; text-decoration: underline; }
+.grow { flex: 1; }
+.navbtn { font-size: 12px; padding: 5px 11px; }
+.navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
+
+/* Account badge — who the server says you are, in token mode only.
+   Three states, three colours, because they are three different things to do about it: sign in
+   (accent, it is an action), no access (amber, nothing to click will fix it), signed in (quiet,
+   it is only a statement). The amber is a WARNING and not an error: the account is perfectly
+   valid, it simply is not permitted here. */
+.acctwrap { position: relative; display: inline-flex; }
+.acct { font-size: 12px; padding: 5px 11px; max-width: 170px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+a.acct { display: inline-flex; align-items: center; text-decoration: none; border: 1px solid var(--line);
+  border-radius: 999px; background: #fff; box-shadow: var(--shadow); color: #3b4046; line-height: 1.6; }
+.acct-out { color: var(--link); border-color: #cfe3d7; font-weight: 600; }
+.acct-ok { color: #3b4046; }
+.acct-blocked { color: #8a5b00; border-color: #e8d8ae; background: #fffaf0; }
+.acctcard { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: 286px;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 10px 12px; }
+.acctrow { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 12px; }
+.acctkey { color: var(--muted); width: 66px; flex: none; }
+.acctval { color: var(--ink); overflow-wrap: anywhere; }
+code.acctval { font-size: 11px; background: var(--soft); border-radius: 6px; padding: 1px 5px; }
+.acctnote { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 12px; line-height: 1.5; color: #8a5b00; }
+.acctnote-quiet { color: var(--muted); }
+/* .top now holds the platform back-link, so it stays visible when narrow. */
 
 /* left panel: layer manager + feature inspector — floats over the map so it never
    steals the map's width (standard map-app pattern). */
@@ -89,10 +183,13 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 
 /* settings */
 .settings { margin: 4px 18px 6px; background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 12px 14px; }
-.settings .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+/* 1fr is minmax(auto, 1fr), and a <select>'s auto floor is its widest option — the model
+   picker's runtime optgroup labels already floored this panel past 460px. minmax(0,1fr) plus a
+   min-width on the controls lets the columns actually shrink with the pane. */
+.settings .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
 .settings label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
 .settings label.wide { grid-column: 1 / -1; }
-.settings input, .settings select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; color: var(--ink); background: #fff; }
+.settings input, .settings select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; color: var(--ink); background: #fff; min-width: 0; width: 100%; }
 .settings .chk { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: #5b6168; }
 .settings .chk input { width: 15px; height: 15px; }
 
@@ -125,11 +222,50 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .reason .body .ln::before { content: "– "; color: #b7bcc2; }
 .reason .body .ln.tool { color: #3b4046; font-weight: 600; }
 .reason .body .ln.tool::before { content: "→ "; color: var(--brand); }
+/* What a tool RETURNED, under the → line that called it. Indented and quieter than the call:
+   the call is the decision, this is its consequence, and a reader scanning for what happened
+   wants them paired rather than competing. A failure colours itself through .ln.warn's palette
+   only when the tool actually failed — the text says "failed —" and that is enough. */
+/* A clamped row is clickable and says so on hover. The chevron sits in the gutter so it does
+   not shift the text when the row opens — a transcript that reflows as you read it is worse
+   than one that is too short. */
+.reason .body .ln.clampable { cursor: pointer; position: relative; padding-right: 14px; }
+.reason .body .ln.clampable:hover { background: rgba(16, 24, 40, .04); border-radius: 4px; }
+.reason .body .ln.clampable::after { content: "⌄"; position: absolute; right: 2px; color: #9aa0a6; }
+.reason .body .ln.clampable.open::after { content: "⌃"; }
+.reason .body .ln.clampable.open { white-space: pre-wrap; }
+.reason .body .ln.result { color: #6b7280; padding-left: 14px; }
+.reason .body .ln.result::before { content: "← "; color: #9aa0a6; }
+/* A tool that failed and then worked. Green rather than red: the turn recovered, and colouring
+   it as an error would train the reader to ignore the reds that matter. It still has to APPEAR —
+   a turn that quietly needed two attempts is a turn whose tool contract is wrong, and one retry
+   sits below the dead-end detector's threshold of two, so nothing else reports it. */
+.reason .body .ln.recovered { color: #1f7a4d; }
+.reason .body .ln.recovered::before { content: "↺ "; color: #1f7a4d; }
 .reason .body .ln.warn { color: #a4453a; }
 .reason .body .ln.warn::before { content: "! "; color: #a4453a; }
 .reason .body .ln.routing, .reason .body .ln.route { color: #3b4046; font-weight: 600; }
 .reason .body .ln.routing::before, .reason .body .ln.route::before { content: "⇢ "; color: var(--brand); }
 .reason .body .ln.search, .reason .body .ln.analysis, .reason .body .ln.status { color: #6b6478; }
+/* The graph narrating its own traversal. Same weight as .routing — it IS routing — but the run
+   collapses to one row, so what shows is a heading for a phase rather than a list of hops. */
+/* Why the loop stopped early, or started where it did. Not folded, and marked so it reads as
+   a reason rather than another step — this is the row that answers "why did it do that". */
+.reason .body .ln.decision { color: #7a5a12; font-weight: 600; }
+.reason .body .ln.decision::before { content: "? "; color: #7a5a12; }
+.reason .body .ln.node { color: #3b4046; font-weight: 600; }
+.reason .body .ln.node::before { content: "⇢ "; color: var(--brand); }
+/* How many rows are folded under this one. Stated on the row rather than left to the chevron:
+   "+4" says there is something specific behind the click, which "⌄" alone does not. */
+.reason .body .ln .more {
+  margin-left: 6px; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--brand); background: rgba(26, 163, 122, .12);
+  padding: 0 5px; border-radius: 8px; vertical-align: 1px;
+}
+/* A folded row, once shown. Indented and unemphasised: it is the detail behind a heading the
+   reader has already read, not a peer of it. No marker of its own — the indent carries it. */
+.reason .body .ln.sub { padding-left: 16px; font-weight: 400; color: #7b8189; }
+.reason .body .ln.sub::before { content: ""; }
 
 /* answer card */
 .answer-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); padding: 6px 18px 14px; }
@@ -159,9 +295,25 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .art img { display: block; width: 100%; height: auto; }
 .art figcaption { padding: 7px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
 .art figcaption .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-.files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.files a { display: inline-flex; align-items: center; gap: 7px; background: #eef6f0; border: 1px solid #d6e7db; color: var(--link); text-decoration: none; border-radius: 10px; padding: 7px 12px; font-size: 13px; }
-.files a:hover { background: #e4f0e8; }
+/* Downloads: a named section, ruled off from the answer.
+   The pills it replaces sat flush against the last paragraph and read as part of the prose —
+   and truncating the names to keep them pill-sized is what made four different artifacts
+   indistinguishable. A row each, the full name, and a divider that says where the answer ends. */
+.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+      display: flex; flex-direction: column; gap: 6px; }
+.dl-head { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+           color: var(--muted); font-weight: 600; }
+.dl-item { display: flex; align-items: center; gap: 9px; background: #eef6f0;
+           border: 1px solid #d6e7db; color: var(--link); text-decoration: none;
+           border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.dl-item:hover { background: #e4f0e8; }
+/* Underscore-joined filenames have no break opportunity, so they punch out of the pane and get
+   clipped. Shown in FULL on purpose — the name is how one artifact is told from another — so
+   it wraps rather than being cut. */
+.dl-name { overflow-wrap: anywhere; min-width: 0; }
+.dl-ico { flex: none; color: var(--brand); }
+.dl-ext { font-size: 6.2px; font-weight: 700; fill: currentColor; letter-spacing: .04em; }
+.md code { overflow-wrap: anywhere; }
 
 /* map-layer pills */
 .mlayers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
@@ -172,8 +324,17 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .srcs { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .srcs h4 { margin: 0 0 4px; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: #9aa0a6; }
 .srcs .grp { margin-top: 10px; }
-.srcs .hd { font-size: 13px; font-weight: 700; color: #5b6168; display: flex; justify-content: space-between; margin-bottom: 5px; }
-.srcs .hd .n { font-weight: 500; color: #9aa0a6; }
+/* The group header is now a <summary>: it must look and behave like a control. Mirrors the
+   Reasoning block above so the two foldables in a turn are consistent. */
+.srcs .hd { font-size: 13px; font-weight: 700; color: #5b6168; display: flex; align-items: center;
+  gap: 8px; margin-bottom: 5px; cursor: pointer; list-style: none; user-select: none; }
+.srcs .hd::-webkit-details-marker { display: none; }
+.srcs .hd:hover { color: #2f3437; }
+.srcs .grp > .hd:focus-visible { outline: 2px solid var(--link, #3f6591); outline-offset: 2px; border-radius: 4px; }
+.srcs .hd .n { font-weight: 500; color: #9aa0a6; margin-left: auto; }
+.srcs .hd .chev { color: #9aa0a6; transition: transform .15s ease; }
+.srcs .grp[open] > .hd .chev { transform: rotate(180deg); }
+.srcs .grp[open] > .hd { margin-bottom: 7px; }
 .srcs .it { padding: 6px 0; border-top: 1px dashed var(--line); }
 .srcs .it:first-of-type { border-top: 0; }
 .srcs .it .t { font-size: 14px; font-weight: 600; color: #2f3437; word-break: break-word; }
@@ -192,7 +353,13 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 /* composer */
 .composer { padding: 8px 18px 12px; }
 .box { display: flex; align-items: flex-end; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 26px; box-shadow: var(--shadow); padding: 8px; }
-.box textarea { flex: 1; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; max-height: 160px; height: 40px; padding: 8px 6px; background: transparent; color: var(--ink); }
+/* Without min-width:0 the textarea's automatic minimum is its cols-derived width (~180px),
+   which put the composer's real floor above the pane's. */
+/* Height is set by ChatPanel's grow effect (COMPOSER_MAX_ROWS lines, measured from this
+   element's own computed style). `min-height` keeps a one-line composer level with the circular
+   buttons beside it; `max-height` is a backstop for the case where that effect has not run, not
+   the real ceiling — leave the two consistent if the font or padding here changes. */
+.box textarea { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; font: inherit; font-size: 15px; line-height: 1.5; min-height: 40px; max-height: 40vh; padding: 8px 6px; background: transparent; color: var(--ink); }
 .circle { width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line); background: #fff; color: #5b6168; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; padding: 0; box-shadow: none; }
 .circle:hover:not(:disabled) { background: var(--soft); }
 .circle.send { background: var(--brand); border-color: var(--brand); color: #fff; }
@@ -214,7 +381,6 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 /* Satellite-embedding actions on the drawn region. They send the same sentences a user
    could type, so the box and the chat are one path, not two. */
 .rsrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 14px 8px; }
-.rslabel { font-size: 11px; color: #9aa0a6; margin-right: 2px; }
 .rsbtn { font-size: 11px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
          background: var(--soft); color: var(--ink); cursor: pointer; }
 .rsbtn:hover:not(:disabled) { border-color: #c98a1a; color: #8a5d05; }
@@ -254,3 +420,136 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .hdel { border: 0; background: none; color: #9aa0a6; font-size: 16px; cursor: pointer;
   padding: 4px 8px; box-shadow: none; }
 .hdel:hover { color: #b42318; }
+
+/* ---- workspace tabs -------------------------------------------------------------------
+   A temporary demo surface beside the ordinary chat. Understated on purpose: this is a
+   switch between two setups of one page, not a second application. */
+.tabs { display: flex; gap: 2px; margin-left: 18px; background: var(--soft); padding: 3px; border-radius: 999px; position: relative; }
+.tab { font-size: 13px; font-weight: 600; padding: 5px 14px; border: 0; border-radius: 999px;
+       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap;
+       /* Matches the lens's own transition below, so the label's colour arrives WITH the lens
+          instead of snapping the instant React flips the .on class — a plain class swap beat
+          the travelling lens by the full 460ms. */
+       transition: color 460ms cubic-bezier(.22, 1.18, .36, 1); }
+.tab:hover:not(.on) { color: var(--ink); }
+/* The generic `button:hover:not(:disabled) { background: var(--soft) }` above is specificity
+   (0,2,1) and outranks `.tab.on`'s (0,2,0) `background: none`, so hovering the SELECTED tab
+   painted solid grey OVER the lens. Invisible while the lens is white on a grey track, which is
+   why it shipped; worst right after a click, with the cursor still sitting there while the lens
+   travels. Unselected tabs lose nothing — that hover fill is the same grey as the track, and
+   the affordance is the label darkening on the line above. */
+.tab:hover:not(:disabled) { background: none; }
+/* The selected tab no longer paints its own background: the lens behind it is the selection,
+   and two of them would double the highlight during the travel. */
+.tab.on { background: none; color: #fff; box-shadow: none; }
+.tab { position: relative; z-index: 1; }
+
+/* Liquid glass. The lens is a real translucent material rather than a white pill: it blurs and
+   saturates the track behind it, carries a specular highlight along its top edge and a thin
+   dark underside, and deforms as it travels. Two elements, because the travel and the stretch
+   have to run on different timings — the parent translates and resizes with a transition, the
+   child squashes with a keyframe that peaks mid-flight. Composed into one transform they would
+   fight, and the keyframe would win and teleport the lens. */
+.tabglass {
+  position: absolute; top: 3px; bottom: 3px; left: 0;
+  pointer-events: none;
+  /* width and transform come from the component, which measures the active tab. */
+  transition: transform 460ms cubic-bezier(.22, 1.18, .36, 1),
+              width 460ms cubic-bezier(.22, 1.18, .36, 1);
+}
+.tabglass-lens {
+  position: absolute; inset: 0; border-radius: 999px;
+  /* Brand green, matching every other active-state control (send, the spatial toggle) rather
+     than being the one selected state that reads as a different material. No backdrop-filter:
+     the fill is opaque, so nothing shows through it — blurring a backdrop nobody can see costs
+     a compositing layer for no picture. The specular top and dark underside stay, dialled back
+     for a dark ground: they are what keeps it reading as a lens rather than a flat chip. */
+  /* A shade below --brand (#1aa37a), and deliberately: the label is 13px text, which WCAG AA
+     holds to 4.5:1, and white on --brand is 3.20:1. Both ends of the gradient have to clear it
+     because the text spans the pill — #158664 is 4.54:1 and #127658 is 5.59:1. The send button
+     keeps the exact brand green and is fine there: an icon is a graphic, held to 3:1. Revert
+     these two stops to #1db386/var(--brand) to match the swatch exactly and lose the contrast. */
+  background: linear-gradient(180deg, #158664, #127658);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .10),
+              0 0 0 .5px rgba(16, 24, 40, .06),
+              inset 0 1px 0 rgba(255, 255, 255, .35),
+              inset 0 -1px 0 rgba(16, 24, 40, .12);
+}
+.tabglass.travelling .tabglass-lens { animation: tab-lens 460ms cubic-bezier(.4, 0, .2, 1); }
+@keyframes tab-lens {
+  0%, 100% { transform: scaleX(1); }
+  45% { transform: scaleX(1.07); }
+}
+/* Reduced motion keeps the material and drops the movement: the lens still marks the selection,
+   it simply arrives instead of travelling. */
+@media (prefers-reduced-motion: reduce) {
+  .tabglass { transition: none; }
+  .tabglass.travelling .tabglass-lens { animation: none; }
+}
+.tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+/* ---- the satellite-embedding operations, above the composer ---------------------------- */
+.rspanel { padding: 0 18px 10px; }
+.rspanel.demo { padding-top: 10px; border-top: 1px solid var(--line); margin-top: 2px; }
+
+.rssteps { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 8px; padding: 0;
+           counter-reset: rsstep; }
+.rssteps li { counter-increment: rsstep; font-size: 12.5px; color: var(--ink); display: flex;
+              align-items: center; gap: 7px; }
+.rssteps li::before { content: counter(rsstep); flex: none; width: 18px; height: 18px; border-radius: 50%;
+                      background: var(--brand); color: #fff; font-size: 11px; font-weight: 700;
+                      display: grid; place-items: center; }
+.rssteps li.done { color: #6b7280; }
+.rssteps li.done::before { content: '✓'; background: #12805c; }
+.rssteps li.muted { color: #9aa0a6; }
+.rssteps li.muted::before { background: #c8ccd0; }
+
+/* Bigger than the old 11px pills: these ARE the demonstration, so they have to read as
+   primary controls rather than as fine print under the toolbar. */
+.rsrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0; }
+.rsbtn { font-size: 13.5px; font-weight: 600; padding: 7px 15px; border-radius: 999px;
+         border: 1px solid #e0c48a; background: #fff8ec; color: #8a5d05; cursor: pointer; }
+.rsbtn:hover:not(:disabled) { background: #fdeccb; border-color: #c98a1a; }
+.rsbtn:disabled { opacity: .45; cursor: not-allowed; }
+.rsbtn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ---- what the operations are composed from ---------------------------------------------- */
+.rsopts { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 9px; }
+.rsopts label { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+                color: #6b7280; text-transform: lowercase; }
+.rsopts select { font-size: 12px; padding: 3px 6px; border: 1px solid var(--line);
+                 border-radius: 7px; background: #fff; color: var(--ink); max-width: 130px; }
+.rsopts select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+/* The staged operation, and the hint that the composed question is editable. */
+.rsbtn.on { background: #f6b93b; border-color: #c98a1a; color: #3d2a02; }
+.rsbtn.on:hover:not(:disabled) { background: #f2ad20; }
+
+/* The model picker. Its own full-width line inside .rsopts so a fifth chip pushes nothing else
+   around, and so the selection is readable at a glance — the composer is a fixed 40px and shows
+   about 22 characters at the pane's 380px floor, far short of where the model names sit. */
+.rsmodels { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.rschip { border: 1px solid var(--line); background: #fff; color: #5c6166; border-radius: 999px;
+  padding: 2px 9px; font: inherit; font-size: 12px; line-height: 1.7; cursor: pointer; }
+.rschip:hover:not(:disabled) { border-color: #c98a1a; color: #3d2a02; }
+/* Selected chips carry the same amber as a staged operation: one colour for "this is what the
+   question will use". */
+.rschip.on { background: #fdf1d6; border-color: #c98a1a; color: #3d2a02; font-weight: 600; }
+/* Disabled means the cap is reached, not that the model is unavailable — keep it legible rather
+   than greying it into looking broken. */
+.rschip:disabled { opacity: .45; cursor: not-allowed; }
+.rschip:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* Shown only when the combination is actually risky, so it reads as a fact about THIS selection
+   rather than a standing disclaimer nobody reads. */
+.rswarn { flex-basis: 100%; font-size: 11.5px; color: #9a6b1a; }
+
+/* Two panes need 380 + 8 + 360 = 748px of workspace. Below that the chat cannot shrink
+   (flex:none), so the composer would be clipped by .app{overflow:hidden} with no scrollbar and
+   no way to reach the send button. Fall back to the single-pane reading column the app already
+   has, and ignore the stored width entirely. Equal specificity to .app.map-on .chat above, so
+   this has to stay last in the file to win. The map instance goes with the pane, which is only
+   safe because AgentMap now clears window.__map on unmount. */
+@media (max-width: 760px) {
+  .app.map-on .mapwrap, .app.map-on .splitter { display: none; }
+  .app.map-on .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; }
+}

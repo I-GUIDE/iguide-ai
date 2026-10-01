@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Map, Source, Layer, useControl } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
@@ -120,34 +120,90 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
       boundRef.current = null;
     };
   }, []);
-  useEffect(() => () => { unbindRef.current?.(); unbindRef.current = null; }, []);
+  useEffect(() => () => {
+    const bound = boundRef.current;
+    unbindRef.current?.(); unbindRef.current = null;
+    // The instance goes with this component — react-map-gl calls map.remove(). App clears the
+    // handle when the map is HIDDEN, but the pane can also be taken away underneath us (a window
+    // narrowed past the two-pane minimum), and a stale handle is worse than none: fitView sees a
+    // truthy map, skips arming pendingFit, and the next delivered layer is never framed —
+    // invisibly, because applyFit's catch reads the throw as a degenerate bbox.
+    if (bound && (window as any).__map === bound) (window as any).__map = undefined;
+  }, []);
 
   // The map is mounted while hidden (progressive reveal), so its canvas is sized for a
   // zero/40x30 box and stays that way: observed 400x300 inside an 820x646 container, painting
   // nothing. A one-shot resize on reveal races the layout, so track the container instead.
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapRef | null>(null);
+  const roRaf = useRef(0);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
-      const m = (window as any).__map;
-      if (m && el.clientWidth > 0) {
-        try { m.resize(); } catch { /* */ }
-        // Resizing keeps the CENTER but not the framing: a fit computed against the
-        // pre-reveal box stays over-zoomed after the canvas grows, so let the owner
-        // re-apply it now that the container is its real size.
-        onResize?.();
-      }
+      // MapLibre already observes this same container on its own 50ms throttle, so what this
+      // callback is really for is the onResize NOTIFICATION. Coalesce it to one frame: a
+      // splitter drag fires the observer at pointer rate, and each resize() reallocates the
+      // WebGL drawing buffer — costlier here because preserveDrawingBuffer is on.
+      if (roRaf.current) return;
+      roRaf.current = requestAnimationFrame(() => {
+        roRaf.current = 0;
+        const m = (window as any).__map;
+        if (m && el.clientWidth > 0) {
+          try { m.resize(); } catch { /* */ }
+          // Resizing keeps the CENTER but not the framing: a fit computed against the
+          // pre-reveal box stays over-zoomed after the canvas grows, so let the owner
+          // re-apply it now that the container is its real size.
+          onResize?.();
+        }
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (roRaf.current) cancelAnimationFrame(roRaf.current);
+      roRaf.current = 0;
+    };
   }, [onResize]);
 
+  // Rebuilt when the map finishes loading as well as when `layers` changes, for the case where
+  // the map mounts with layers already in props. deck layers are immutable descriptors, so new
+  // instances are what make the overlay draw them again.
+  const [mapReady, setMapReady] = useState(false);
   const deckLayers = useMemo(
     () => layers.map((a) => toDeckLayer(a)),
-    [layers],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mapReady is a redraw trigger
+    [layers, mapReady],
   );
+
+  // A raster's image loads ASYNCHRONOUSLY, and in interleaved mode nothing repaints when it
+  // lands, so the layer is in deck's list with its image ready and simply never drawn.
+  //
+  // Live delivery hides this: the map is being panned or fitted while the image loads, so a
+  // frame gets drawn anyway. RESTORING a conversation does not — the map settles before the
+  // image arrives, and the conversation came back with its boundary over an empty basemap and
+  // the DEM missing. Any stray resize made it appear, which is what gave the cause away:
+  // `map.triggerRepaint()` on its own was enough to paint it.
+  //
+  // So repaint at the one moment that matters rather than polling for it: preload each raster
+  // image and repaint when it loads. The browser serves deck the cached copy, so the two
+  // resolve together. One repaint per image, nothing on a timer.
+  useEffect(() => {
+    const map = mapRef.current?.getMap?.();
+    if (!map) return;
+    map.triggerRepaint();
+    const urls = layers
+      .filter((l) => l.kind === 'raster' && (l as any).url)
+      .map((l) => (l as any).url as string);
+    if (!urls.length) return;
+    let live = true;
+    for (const url of urls) {
+      const img = new Image();
+      img.onload = () => { if (live) map.triggerRepaint(); };
+      img.src = url;
+    }
+    return () => { live = false; };
+  }, [deckLayers, layers]);
 
   const regionFeature: Feature | null = useMemo(() => {
     if (!drawnRegion) return null;
@@ -179,7 +235,9 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
           else { m.once?.('idle', announce); setTimeout(announce, 3000); }
         }
       }}
-      onLoad={(e: any) => { (window as any).__map = e.target; bindRegionDrag(e.target); onReady?.(); }}
+      onLoad={(e: any) => {
+        (window as any).__map = e.target; bindRegionDrag(e.target); setMapReady(true); onReady?.();
+      }}
       interactiveLayerIds={[]}
       onMouseMove={() => {}}
       style={{ position: 'absolute', inset: 0 }}

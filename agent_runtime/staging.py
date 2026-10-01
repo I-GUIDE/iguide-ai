@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 INPUTS_DIRNAME = "inputs"
 MANIFEST_NAME = "inputs.jsonl"
 
-# The container path the sandbox sees. `session_work_dir()` is bind-mounted at /work, so a file
-# written to <work>/inputs/x.csv is /work/inputs/x.csv inside — and that is the string a generated
-# loader needs, not the host path.
+# The container path the sandbox sees. The conversation's durable workspace is carried into /work
+# at the start of every run, so a file written to <workspace>/inputs/x.csv is /work/inputs/x.csv
+# inside — and that is the string a generated loader needs, not the host path.
 CONTAINER_WORK = "/work"
 
 #: Set ``AGENT_STAGING_ALLOW_PRIVATE=1`` to permit private-range hosts. Off by default, and it
@@ -126,10 +126,24 @@ def safe_filename(name: str, *, fallback: str = "input.bin") -> str:
     return cleaned[:120]
 
 
-def inputs_dir(session_id: str) -> Path:
-    from agent_runtime.code_execution import session_work_dir
+def _workspace(session_id: str) -> Path:
+    """The conversation's durable workspace: what the next sandbox run carries into /work.
 
-    path = session_work_dir(session_id) / INPUTS_DIRNAME
+    Staging anywhere else would put the bytes on the host and nowhere in the container, which
+    surfaces inside a sandbox with no network as a bare "file not found".
+    """
+    from agent_runtime.code_execution import session_workspace_dir
+
+    path = session_workspace_dir(session_id)
+    if path is None:
+        raise StagingError("no code-execution workspace is available for this conversation "
+                           "(no session id, or the work root is not writable)",
+                           kind="no_workspace")
+    return path
+
+
+def inputs_dir(session_id: str) -> Path:
+    path = _workspace(session_id) / INPUTS_DIRNAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -153,21 +167,20 @@ def record_input(session_id: str, entry: Dict[str, Any]) -> None:
     Append-only and one JSON object per line, so a partially-written run still yields every input
     that completed — a re-run needs to know what it HAD, not only what a tidy final state says.
     """
-    from agent_runtime.code_execution import session_work_dir
-
-    manifest = session_work_dir(session_id) / MANIFEST_NAME
     try:
+        manifest = _workspace(session_id) / MANIFEST_NAME
         with open(manifest, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
-    except OSError as exc:                                  # pragma: no cover - defensive
+    except (OSError, StagingError) as exc:                  # pragma: no cover - defensive
         logger.warning("could not record staged input for %s: %s", session_id, exc)
 
 
 def staged_inputs(session_id: str) -> List[Dict[str, Any]]:
     """Everything staged into this session so far, oldest first."""
-    from agent_runtime.code_execution import session_work_dir
-
-    manifest = session_work_dir(session_id) / MANIFEST_NAME
+    try:
+        manifest = _workspace(session_id) / MANIFEST_NAME
+    except StagingError:
+        return []
     if not manifest.is_file():
         return []
     out: List[Dict[str, Any]] = []

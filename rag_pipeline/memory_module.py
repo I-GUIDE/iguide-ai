@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from math import sqrt
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -22,6 +23,13 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 MEMORY_INDEX = os.getenv("OPENSEARCH_MEMORY_INDEX", "chat_memory")
+# Raw trace events, one document per TURN — beside the conversation, not inside it. Three
+# reasons it is its own index rather than another field on `chat_memory`:
+#   * a trace belongs to a turn, and a conversation has many;
+#   * the conversation document is fetched to render a sidebar, and traces are large;
+#   * the questions asked of a trace are searches ("every turn where execute_code failed"),
+#     which wants documents of its own rather than nested objects.
+TRACE_INDEX = os.getenv("OPENSEARCH_TRACE_INDEX", "chat_traces")
 EMBEDDING_MODEL = os.getenv("MEMORY_EMBEDDER_MODEL", "all-MiniLM-L6-v2")
 DEFAULT_STATE_PARAMS: Dict[str, Any] = {"top_k": 8, "max_context_tokens": 6000}
 
@@ -76,12 +84,30 @@ def _get_opensearch_client() -> OpenSearch:
     if _OPENSEARCH_CLIENT is not None:
         return _OPENSEARCH_CLIENT
 
+    # Explicit setting first, then the tier's own cluster. A deployment that has said which
+    # PLATFORM_TIER it is has already said which OpenSearch that tier uses, and making it repeat
+    # itself is how the two drifted apart: dev's cluster moved hosts and OPENSEARCH_NODE stayed
+    # pinned to the old one, which kept answering.
     node = os.getenv("OPENSEARCH_NODE")
     if not node:
-        raise RuntimeError("OPENSEARCH_NODE must be set before using the memory module.")
+        try:
+            from agent_runtime import platform_endpoints
+            node = platform_endpoints.opensearch_url()
+        except Exception:  # noqa: BLE001 - memory predates the tier table; never hard-depend
+            node = None
+    if not node:
+        raise RuntimeError(
+            "No OpenSearch host: set OPENSEARCH_NODE, or PLATFORM_TIER to a tier that names one.")
 
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+    # Credential from the same place as the host, so flipping PLATFORM_TIER moves both. A tier
+    # that changed cluster but kept the password would fail with a 401 that reads as a network
+    # problem.
+    try:
+        from agent_runtime import platform_endpoints
+        user, pwd = platform_endpoints.opensearch_credentials()
+    except Exception:  # noqa: BLE001 - memory predates the tier table; never hard-depend
+        user = os.getenv("OPENSEARCH_USERNAME", "")
+        pwd = os.getenv("OPENSEARCH_PASSWORD", "")
     use_ssl = node.lower().startswith("https")
 
     _OPENSEARCH_CLIENT = OpenSearch(
@@ -124,15 +150,371 @@ def _get_embedder() -> Any:
     return _EMBEDDER
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _coerce_mapping(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     return {}
 
 
-def create_memory(conversation_name: str) -> str:
+class MemoryAccessDenied(Exception):
+    """This conversation belongs to someone else."""
+
+
+def _current_owner() -> Optional[str]:
+    """The signed-in user, or None in a deployment that identifies nobody."""
+    try:
+        from agent_runtime import identity
+    except Exception:  # noqa: BLE001 - identity is optional; memory predates it
+        return None
+    return identity.current_user_id()
+
+
+def owner_of(memory_id: str) -> Optional[str]:
+    """Who owns this conversation, or None if it is unowned or does not exist."""
+    doc = get_memory(memory_id)
+    value = (doc or {}).get("owner_id")
+    return str(value).strip() or None if value else None
+
+
+def assert_owner(memory_id: str, *, allow_unowned: Optional[bool] = None) -> None:
+    """Refuse to touch a conversation that belongs to someone else.
+
+    Checked at the EDGE rather than inside every read and write, for one specific reason: a
+    mismatched ``get_or_create`` must not fall through to CREATE, because the id it would create
+    under is the id of the document it just refused to read — and indexing there overwrites the
+    owner's conversation with an empty one. Refusing at the door removes that whole class of
+    mistake rather than guarding each door.
+
+    A memory_id is a UUID4 and not guessable, which is why an unowned legacy conversation stays
+    reachable during the migration and closes with everything else once strict.
+    """
+    caller = _current_owner()
+    if not caller:
+        return                      # dev / demo / service: no identity, nothing to enforce
+    if allow_unowned is None:
+        try:
+            from agent_runtime import identity
+            allow_unowned = not identity.token_strict()
+        except Exception:  # noqa: BLE001
+            allow_unowned = True
+    owner = owner_of(memory_id)
+    if owner is None:
+        if not allow_unowned:
+            raise MemoryAccessDenied(f"conversation {memory_id} has no owner")
+        return
+    if owner != caller:
+        raise MemoryAccessDenied(f"conversation {memory_id} belongs to another user")
+
+
+def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Dict[str, Any]]:
+    """This user's conversations, newest first — the "my conversations" list.
+
+    Returns summaries, never whole transcripts: the caller is rendering a sidebar, and a
+    conversation carrying a turn's worth of analysis per entry is not something to fetch fifty
+    of to show fifty titles.
+    """
+    owner = owner_id or _current_owner()
+    if not owner:
+        return []
+    try:
+        response = _get_opensearch_client().search(
+            index=MEMORY_INDEX,
+            body={
+                "size": max(1, int(limit)),
+                # `.keyword`, not `owner_id`. The index maps strings dynamically, which gives
+                # `text` + a `keyword` subfield — and a `term` query against the analysed
+                # `text` field compares the whole owner id to individual TOKENS, so a platform
+                # id like `http://cilogon.org/serverE/users/137206` is indexed as `http`,
+                # `cilogon.org`, `users`, `137206` and matches nothing. The list came back
+                # empty for a user with three stored conversations, and every other path —
+                # fetching one by id, saving, ownership checks — worked, because they go by
+                # document id and never search.
+                # Owned by this caller AND actually openable. The list and the detail read
+                # two different things: this index holds every memory, including ones the
+                # AGENT created mid-turn with no client snapshot, while
+                # GET /agent/conversations/<id> serves `session_snapshot` and 404s without
+                # one. Listing those produced rows that rendered, reported their age, and
+                # could not be opened — the worst kind of entry, because nothing about them
+                # says why. A conversation becomes listable exactly when it becomes
+                # restorable: when the client has stored its view of it.
+                "query": {"bool": {
+                    "filter": [{"term": {"owner_id.keyword": owner}},
+                               {"exists": {"field": "session_snapshot"}}],
+                }},
+                "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
+                "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                            "messageCount", "layerCount", "fileCount"],
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error listing memories for %s: %s", owner, err)
+        return []
+    # Projected EXPLICITLY rather than spread from _source. `_source` in the query is a request,
+    # not a guarantee, and the field this must never leak — chat_history — is the whole
+    # transcript. Naming the summary keys means a new field cannot leak by simply existing.
+    summary_keys = ("conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
+                    "messageCount", "layerCount", "fileCount")
+    out: List[Dict[str, Any]] = []
+    for hit in (response.get("hits", {}) or {}).get("hits", []) or []:
+        source = hit.get("_source") or {}
+        out.append({"memoryId": hit.get("_id"),
+                    **{k: source.get(k) for k in summary_keys if k in source}})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The client's view of a conversation
+# ---------------------------------------------------------------------------
+# `chat_history` is the AGENT's memory: what was asked and answered, used to give the next turn
+# context. It is not what the user sees. The map UI additionally holds the layers drawn on the
+# map, every file uploaded across the session, the selected region and the model used — and a
+# conversation restored from `chat_history` alone comes back as a text shell whose answers say
+# "you can see these features on the map" beside an empty map.
+#
+# The client already models this correctly (`map-ui-prototype/src/sessionStore.ts`, written
+# server-shaped on purpose), so the server STORES that record rather than reconstructing it from
+# tool output. Rebuilding it here would duplicate the client's layer-descriptor rules — which
+# geometry is small enough to inline, which layer re-fetches by url — in a second place, where
+# they would drift.
+#
+# The snapshot is client-supplied, so it is treated as data: capped in size, and stripped of the
+# fields the server owns. Nothing in it is ever executed or trusted to name its own owner.
+_SNAPSHOT_MAX_BYTES_DEFAULT = 5_000_000
+
+
+def _snapshot_max_bytes() -> int:
+    """Read at call time, not frozen at import: a limit that needs a restart to change is a
+    limit nobody adjusts when a real conversation turns out to sit just over it."""
+    raw = str(os.getenv("AGENT_SESSION_SNAPSHOT_MAX_BYTES") or "").strip()
+    try:
+        return int(raw) if raw else _SNAPSHOT_MAX_BYTES_DEFAULT
+    except ValueError:
+        return _SNAPSHOT_MAX_BYTES_DEFAULT
+
+# Server-owned: a client that sends these is ignored, not obeyed.
+_SNAPSHOT_RESERVED = {"owner_id", "chat_history", "createdAt", "updatedAt", "_id"}
+
+
+class SnapshotTooLarge(Exception):
+    """The client's conversation record exceeds what this store will hold."""
+
+
+def _snapshot_size(snapshot: Mapping[str, Any]) -> int:
+    import json as _json
+    return len(_json.dumps(snapshot, default=str).encode("utf-8"))
+
+
+def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Store the client's view of this conversation. Caller must already own it.
+
+    Ownership is NOT re-derived from the snapshot: it is asserted by the caller before this runs
+    and the document's own ``owner_id`` is left untouched, so a snapshot cannot hand a
+    conversation to someone else by claiming to.
+    """
+    clean = {k: v for k, v in dict(snapshot or {}).items() if k not in _SNAPSHOT_RESERVED}
+    size = _snapshot_size(clean)
+    limit = _snapshot_max_bytes()
+    if size > limit:
+        raise SnapshotTooLarge(
+            f"conversation record is {size} bytes, over the {limit} limit")
+    client = _get_opensearch_client()
+    patch: Dict[str, Any] = {"session_snapshot": clean, "updatedAt": _now()}
+    # A rename in the client should show up in the conversation list, which sorts and labels on
+    # the document's own fields rather than reaching into the snapshot.
+    title = clean.get("title")
+    if isinstance(title, str) and title.strip():
+        patch["conversationName"] = title.strip()
+    thread_id = clean.get("threadId")
+    if isinstance(thread_id, str) and thread_id.strip():
+        patch["threadId"] = thread_id.strip()
+    # Counts live on the DOCUMENT, not inside the snapshot, so a history list can show "12
+    # messages, 3 layers" without fetching twelve messages and three layers to count them.
+    for field, key in (("messageCount", "messages"), ("layerCount", "layers"),
+                       ("fileCount", "fileIds")):
+        value = clean.get(key)
+        patch[field] = len(value) if isinstance(value, (list, tuple)) else 0
+    # `refresh="wait_for"` because the caller's very next action is to LIST. OpenSearch is
+    # near-real-time: an indexed document is not searchable until the next refresh, a second by
+    # default, so the client saved a conversation, immediately re-listed, and got back the list
+    # without it — the header sat one behind until something re-opened the panel a moment later.
+    # Waiting makes the endpoint's contract true: when this returns, the conversation is
+    # listable. It costs up to one refresh interval, and it is paid after the turn has already
+    # been answered, not on the streaming path.
+    try:
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch}, refresh="wait_for")
+    except NotFoundError:
+        owner = _current_owner()
+        client.index(index=MEMORY_INDEX, id=memory_id, refresh="wait_for",
+                     body={"conversationName": patch.get("conversationName")
+                           or f"conversation-{memory_id}",
+                           "chat_history": [], "owner_id": owner,
+                           "createdAt": patch["updatedAt"], **patch})
+    return {"memoryId": memory_id, "bytes": size}
+
+
+# ---------------------------------------------------------------------------
+# Raw trace events
+# ---------------------------------------------------------------------------
+# The client's snapshot stores a RENDERED trace: tool names with arguments truncated at the
+# display cap, results as headlines ("1 feature · 0.4s"). That is the right thing to show a
+# person and the wrong thing to reproduce a turn from. These are the events as emitted --
+# full arguments, full outcomes -- which is what a failure needs to be re-run and what a
+# benchmark case needs to be built from.
+
+_TRACE_MAX_BYTES_DEFAULT = 2_000_000
+
+
+def _trace_max_bytes() -> int:
+    raw = str(os.getenv("AGENT_TRACE_MAX_BYTES") or "").strip()
+    try:
+        return int(raw) if raw else _TRACE_MAX_BYTES_DEFAULT
+    except ValueError:
+        return _TRACE_MAX_BYTES_DEFAULT
+
+
+def _trace_timeout_seconds() -> float:
+    """How long a trace write may hold the turn, from ``AGENT_TRACE_TIMEOUT_SECONDS``."""
+    raw = str(os.getenv("AGENT_TRACE_TIMEOUT_SECONDS") or "").strip()
+    try:
+        return max(0.5, float(raw)) if raw else 5.0
+    except ValueError:
+        return 5.0
+
+
+def _fit_events(events: List[Any], limit: int) -> tuple:
+    """Trim from the MIDDLE until the batch fits, and say how much went.
+
+    Dropping the tail would lose the outcome and dropping the head would lose the question;
+    a turn that blew the limit did so in its middle, which is usually a retry loop repeating
+    itself. Returns ``(kept, dropped)``.
+    """
+    import json as _json
+
+    def size(items: List[Any]) -> int:
+        return len(_json.dumps(items, default=str).encode("utf-8"))
+
+    if size(events) <= limit:
+        return events, 0
+    head, tail, dropped = 20, 20, 0
+    while len(events) > head + tail:
+        cut = max(1, (len(events) - head - tail) // 2)
+        events = events[:head] + events[head + cut:]
+        dropped += cut
+        if size(events) <= limit:
+            return events, dropped
+    # Still over with only head+tail left: the individual events are the problem, not the count.
+    while events and size(events) > limit:
+        events = events[:-1]
+        dropped += 1
+    return events, dropped
+
+
+def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
+                    events: List[Any], answer: Optional[str] = None,
+                    model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+    """Store one turn's raw events. Caller must already own the conversation.
+
+    Never raises: a trace is diagnostic, and losing the answer because the diagnostics could not
+    be written would invert the priority. Failures are logged and reported in the return value.
+    """
+    doc_id = f"{memory_id}:{uuid.uuid4().hex[:12]}"
+    kept, dropped = _fit_events(list(events or []), _trace_max_bytes())
+    body = {
+        "memory_id": memory_id,
+        "thread_id": thread_id,
+        "owner_id": _current_owner(),
+        "query": query,
+        "answer": answer,
+        "model": model,
+        "provider": provider,
+        "event_count": len(kept),
+        "dropped_count": dropped,
+        "events": kept,
+        "createdAt": _now(),
+    }
+    try:
+        # NO `refresh="wait_for"` here, unlike the snapshot. That flag exists for save-then-list,
+        # and the client re-lists conversations the instant a turn ends; nothing lists traces —
+        # they are read later, by someone debugging. Waiting buys nothing and costs everything
+        # when the index is unhealthy: measured against a RED `chat_traces` (the cluster was out
+        # of disk and could not allocate its shard), `wait_for` blocked until the 30-second
+        # client timeout, once per turn, after the answer had already been delivered.
+        #
+        # The short `request_timeout` is the second half of that lesson. Diagnostics must fail
+        # FAST as well as fail alone: a sick cluster should cost a turn a few seconds, not
+        # thirty, and the trace is the thing worth giving up.
+        _get_opensearch_client().index(index=TRACE_INDEX, id=doc_id, body=body,
+                                       request_timeout=_trace_timeout_seconds())
+    except Exception as err:  # noqa: BLE001 - diagnostics must not break a turn
+        logger.warning("Failed to store trace for %s: %s", memory_id, err)
+        return {"stored": False, "error": str(err)}
+    return {"stored": True, "traceId": doc_id, "eventCount": len(kept), "dropped": dropped}
+
+
+def list_turn_traces(memory_id: str, *, limit: int = 20,
+                     include_events: bool = False) -> List[Dict[str, Any]]:
+    """Every recorded turn of one conversation, newest first. Caller must already own it."""
+    source = ["memory_id", "thread_id", "query", "answer", "model", "provider",
+              "event_count", "dropped_count", "createdAt"]
+    if include_events:
+        source.append("events")
+    try:
+        response = _get_opensearch_client().search(
+            index=TRACE_INDEX,
+            body={
+                "size": max(1, int(limit)),
+                # `.keyword` for the same reason `list_memories` needs it: these ids are URLs
+                # and slugs, and a term query on an analysed field matches tokens, not values.
+                "query": {"term": {"memory_id.keyword": memory_id}},
+                "sort": [{"createdAt": {"order": "desc", "unmapped_type": "date"}}],
+                "_source": source,
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error listing traces for %s: %s", memory_id, err)
+        return []
+    out: List[Dict[str, Any]] = []
+    for hit in (response.get("hits", {}) or {}).get("hits", []) or []:
+        src = hit.get("_source") or {}
+        out.append({"traceId": hit.get("_id"), **{k: src.get(k) for k in source if k in src}})
+    return out
+
+
+def get_turn_trace(trace_id: str) -> Optional[Dict[str, Any]]:
+    """One recorded turn, events included. Caller must already own the conversation."""
+    try:
+        doc = _get_opensearch_client().get(index=TRACE_INDEX, id=trace_id)["_source"]
+    except NotFoundError:
+        return None
+    except Exception as err:  # noqa: BLE001
+        logger.error("Error reading trace %s: %s", trace_id, err)
+        return None
+    return {"traceId": trace_id, **dict(doc)}
+
+
+def get_session_snapshot(memory_id: str) -> Optional[Dict[str, Any]]:
+    """The client's stored view of this conversation, or None. Caller must already own it."""
+    doc = get_memory(memory_id)
+    if not doc:
+        return None
+    snapshot = doc.get("session_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    return {**dict(snapshot), "memoryId": memory_id,
+            "title": doc.get("conversationName") or dict(snapshot).get("title"),
+            "createdAt": doc.get("createdAt"), "updatedAt": doc.get("updatedAt")}
+
+
+def create_memory(conversation_name: str, owner_id: Optional[str] = None) -> str:
     memory_id = str(uuid.uuid4())
-    new_memory = {"conversationName": conversation_name, "chat_history": []}
+    stamp = _now()
+    new_memory = {"conversationName": conversation_name, "chat_history": [],
+                  "owner_id": owner_id or _current_owner(),
+                  "createdAt": stamp, "updatedAt": stamp}
     _get_opensearch_client().index(index=MEMORY_INDEX, id=memory_id, body=new_memory)
     return memory_id
 
@@ -143,7 +525,12 @@ def get_or_create_memory(memory_id: str) -> Dict:
         response = client.get(index=MEMORY_INDEX, id=memory_id)
         return response["_source"]
     except NotFoundError:
-        new_memory = {"conversationName": f"conversation-{memory_id}", "chat_history": []}
+        # Claiming the id on creation is what stops a later caller inheriting this conversation
+        # simply by knowing its id.
+        stamp = _now()
+        new_memory = {"conversationName": f"conversation-{memory_id}", "chat_history": [],
+                      "owner_id": _current_owner(),
+                      "createdAt": stamp, "updatedAt": stamp}
         client.index(index=MEMORY_INDEX, id=memory_id, body=new_memory)
         return new_memory
 
@@ -183,7 +570,20 @@ def update_memory(
             entry["ratings"] = ratings
 
         chat_history.append(entry)
-        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": {"chat_history": chat_history}})
+        # `updatedAt` is what orders the user's conversation list; without it every conversation
+        # sorts equal and the list is arbitrary. `owner_id` is written only when the document
+        # does not already have one, so a write can never move a conversation between users.
+        patch: Dict[str, Any] = {"chat_history": chat_history, "updatedAt": _now()}
+        existing_owner = doc["_source"].get("owner_id")
+        existing_owner = str(existing_owner).strip() if existing_owner else ""
+        # Attributed only if the document has no owner yet, so a write can never move a
+        # conversation between users — a mismatched caller is refused upstream by assert_owner,
+        # and this is the second half of that guarantee rather than a repeat of it.
+        if not existing_owner:
+            owner = _current_owner()
+            if owner:
+                patch["owner_id"] = owner
+        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch})
     except Exception as err:
         logger.error("Error updating memory %s: %s", memory_id, err)
         raise

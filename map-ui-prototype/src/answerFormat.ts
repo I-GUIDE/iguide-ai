@@ -39,3 +39,39 @@ export function groupedSources(response: any): Record<SourceGroup, SourceDoc[]> 
   for (const d of evidenceDocs(response)) groups[sourceGroup(d)].push(d);
   return groups;
 }
+
+// --- where a source links to ------------------------------------------------------------
+// The I-GUIDE platform. Not configurable here because the client has no FRONTEND_DOMAIN; if a
+// deployment moves, this is the one line to change.
+const PLATFORM = 'https://platform.i-guide.io';
+
+// Element types that really ARE pages on the platform, and the path each lives under.
+// An ALLOWLIST, deliberately: the server once derived these paths by pluralising whatever
+// element_type it was handed, which turned an OpenStreetMap hit into
+// platform.i-guide.io/osm_features/osm:node:767555934 — a 404 that looked like a real citation.
+// A type that is not on this list gets NO link rather than an invented one.
+const PLATFORM_PATHS: Record<string, string> = {
+  dataset: 'datasets',
+  notebook: 'notebooks',
+  publication: 'publications',
+  oer: 'oers',
+  map: 'maps',
+  code: 'code',          // singular on the platform, unlike the rest
+};
+
+/** The href for a source item, or '' when no honest link can be formed.
+ *
+ * URL-FIRST: anything carrying its own url is cited there, whatever its type — external hits
+ * (OpenGeoData, OpenStreetMap, open web) always do. Internal knowledge elements arrive with
+ * url '' and are linked by type + doc_id instead. The server fills this in too; doing it here
+ * as well means the sources list is clickable regardless of which backend answered.
+ */
+export function sourceHref(src: SourceDoc): string {
+  const url = String(src.url || '').trim();
+  if (/^https?:\/\//i.test(url)) return url;
+  const etype = String(src.element_type || src['resource-type'] || '').trim().toLowerCase();
+  const id = String(src.doc_id || src.id || '').trim();
+  const path = PLATFORM_PATHS[etype];
+  if (!path || !id) return '';
+  return `${PLATFORM}/${path}/${encodeURIComponent(id)}`;
+}

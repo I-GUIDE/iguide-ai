@@ -52,6 +52,13 @@ COPY requirements.txt constraints.txt ./
 # resolved pandas 3.0 and an untested langchain triple. See constraints.txt.
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
+# py-spy reads the Python stacks of a RUNNING process from outside it, without the target's
+# cooperation. deploy/agent-watchdog.sh runs it against this container before restarting one
+# that has gone unhealthy, so a hang leaves behind the stack every thread was sitting on
+# rather than just the fact that it happened. Its own layer: a few MB, and it must not
+# invalidate the requirements layer above.
+RUN pip install --no-cache-dir py-spy
+
 # Install spaCy model for NLP processing
 RUN python -m spacy download en_core_web_sm
 
@@ -85,7 +92,7 @@ EXPOSE 5002
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:5002/health', timeout=5)" || exit 1
+    CMD python -c "import requests; requests.get('http://localhost:5002/health', timeout=5).raise_for_status()" || exit 1
 
 # Run with gunicorn. Worker COUNT is intentionally NOT pinned here: gunicorn reads it from the
 # WEB_CONCURRENCY env var (or defaults to 1). Keep it at 1 unless persistent memory (OpenSearch)

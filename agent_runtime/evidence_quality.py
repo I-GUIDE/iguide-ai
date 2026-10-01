@@ -325,6 +325,12 @@ _AUDIT_PROMPT = (
     '* "absent" - you searched the evidence AND the execution record and found NO span on this\n'
     '  subject at all: the number, name, venue, price or event simply does not occur anywhere.\n'
     '  Set evidence_quote to "none".\n'
+    'ELIDED RECORDS. A record may carry a marker like "... [4213 chars elided] ...". That text\n'
+    'was cut to fit, NOT withheld: what it held is unknown to you, so its absence is not\n'
+    'evidence that a claim is unsupported. When a claim is on the SUBJECT of an elided section -\n'
+    'the same tool, the same list, the same file - and you can find no span for it, mark it\n'
+    '"absent" but say in the reason that the record was TRUNCATED rather than that the subject\n'
+    'never occurs, and treat it as a minor over-reach rather than an invented specific.\n'
     '\n'
     'STEP 2 - VERDICT, DERIVED ONLY FROM THE LEDGER.\n'
     '* issues = exactly the rows whose status is "contradicted" or "absent", one issue each.\n'
@@ -395,25 +401,200 @@ def _format_evidence(evidence: Any, *, limit: int = AUDIT_DOC_LIMIT,
     return "\n\n".join(lines) if lines else "(no evidence supplied)"
 
 
+# The ledger arrives ALREADY budgeted by its producer (_LEDGER_MAX_CHARS in
+# supervisor/graph.py). Re-truncating it here at the generic 2200 is what made the answerer
+# and the auditor disagree: the answerer was told to answer from a line the auditor could not
+# see, and the auditor then flagged the result as high-severity hallucination.
+_PRIOR_ACTIONS_MAX_CHARS = 8000
+
+
+# This turn's execution record was capped at 2,200 chars while prior_actions gets 8,000 — so
+# the auditor saw LESS of the run it was auditing than of earlier turns. Worse, the cap was a
+# blind prefix cut over a JSON dump that is overwhelmingly coordinate data.
+#
+# Measured on a reconstruction of the observed failure (26 OSM county boundaries, the payload
+# behind "Which counties border Champaign County?"): the record was 87,648 chars, the auditor
+# saw 2,218, and exactly ONE of the 26 county names survived. Coordinate arrays were 94.2% of
+# those chars. The auditor then reported, honestly, that "the county-bordering claims are not
+# grounded in the supplied evidence or execution record" — it could not see them.
+#
+# So the fix is to spend the budget on what an ANSWER can quote. Nothing ever cites a coordinate
+# pair or an embedding component; claims cite names, counts, statistics and stdout. Eliding bulk
+# numeric arrays turns that 87,648 into a few thousand chars with every name intact.
+_EXEC_RECORD_MAX_CHARS = 8000
+# A coordinate ring or an embedding vector, versus a short numeric field an answer might quote
+# (a bbox is 4 numbers, an rgb triple 3, a small distance list a handful).
+_MAX_INLINE_NUMBERS = 32
+_BULK_NUMERIC_KEYS = {"coordinates", "embedding", "embeddings", "vector", "vectors", "values"}
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _numeric_count(value: Any, _depth: int = 0) -> int:
+    """How many numbers a structure holds — the test for whether it is BULK."""
+    if _depth > 12:
+        return 0
+    if isinstance(value, (list, tuple)):
+        return sum(_numeric_count(v, _depth + 1) for v in value)
+    return 1 if _is_number(value) else 0
+
+
+def _summarize_numeric(value: Any) -> str:
+    """Replace a bulk numeric structure with its shape, which is all an audit needs from it."""
+    outer = len(value) if isinstance(value, (list, tuple)) else 0
+    depth, probe = 0, value
+    while isinstance(probe, (list, tuple)):
+        depth += 1
+        probe = probe[0] if probe else None
+
+    return (f"<{_numeric_count(value)} numbers, nesting depth {depth}, "
+            f"outer length {outer} - elided>")
+
+
+def _compact_for_audit(obj: Any, _depth: int = 0) -> Any:
+    """Strip bulk numeric payloads from an execution record, keeping every quotable fact.
+
+    Also parses JSON-string tool results, because tool `content` arrives as a STRING: without
+    parsing, the walk cannot reach the coordinates inside it and the elision does nothing.
+    """
+    if _depth > 12:
+        return obj
+    if isinstance(obj, str):
+        # Only worth parsing when it is big enough to matter and actually looks like JSON.
+        stripped = obj.strip()
+        if len(obj) > 512 and stripped[:1] in "{[":
+            try:
+                return _compact_for_audit(json.loads(stripped), _depth + 1)
+            except Exception:      # noqa: BLE001 - not JSON after all; keep the text
+                return obj
+        return obj
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for key, val in obj.items():
+            if (str(key).lower() in _BULK_NUMERIC_KEYS
+                    and isinstance(val, (list, tuple))
+                    and _numeric_count(val) > _MAX_INLINE_NUMBERS):
+                # Size-gated on purpose: a Point geometry is 2 numbers and a bbox is 4, and
+                # answers DO quote those ("the bounding box is -88.28, 40.06, -88.16, 40.16").
+                # Only a ring or a vector is bulk.
+                out[key] = _summarize_numeric(val)
+            else:
+                out[key] = _compact_for_audit(val, _depth + 1)
+        return out
+    if isinstance(obj, (list, tuple)):
+        if len(obj) > _MAX_INLINE_NUMBERS and all(_is_number(v) for v in obj):
+            return _summarize_numeric(obj)
+        return [_compact_for_audit(v, _depth + 1) for v in obj]
+    return obj
+
+
+def _elided(text: str, max_chars: int) -> str:
+    """*text* capped at *max_chars*, and SAYING SO when it was cut.
+
+    A blind slice makes a cut span indistinguishable from a span that was never there — and the
+    auditor's rule for "absent" is "you searched and found nothing", so a claim supported at
+    char 9000 of an 8000-char cap comes back as an invented specific at high severity, over an
+    answer that was right. `_render_execution_record` already marked its cut; prior_actions and
+    the environment lines did not, which is the half that produced a false caveat on a correct
+    cross-turn answer. The marker is worded the same in both, so the prompt explains it once.
+    """
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n... [{len(text) - max_chars} chars elided] ..."
+
+
+def _render_execution_record(key: str, value: Any, max_chars: int) -> str:
+    """One execution-record section, compacted, and cut at BOTH ends rather than just the head.
+
+    A head-only cut is what lost 25 of 26 names: the informative tail of a feature list never
+    arrived. Keeping a tail costs nothing and preserves the end of whatever overflows.
+    """
+    try:
+        rendered = json.dumps(_compact_for_audit(value), default=str)
+    except Exception:      # noqa: BLE001 - never let rendering break the audit
+        try:
+            rendered = json.dumps(value, default=str)
+        except Exception:  # noqa: BLE001
+            rendered = str(value)
+    if len(rendered) <= max_chars:
+        return f"{key}: {rendered}"
+    head = int(max_chars * 0.7)
+    tail = max_chars - head
+    if tail <= 0:
+        # rendered[-0:] is the WHOLE string, not the empty one, so a zero tail would emit the
+        # entire record and silently defeat the cap. Degrade to a head-only cut instead.
+        return f"{key}: {rendered[:max_chars]}\n... [{len(rendered) - max_chars} chars elided]"
+    return (f"{key}: {rendered[:head]}\n... [{len(rendered) - max_chars} chars elided] ...\n"
+            f"{rendered[-tail:]}")
+
+
 def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) -> str:
     """Render the agent's execution outcomes (tool calls/results, produced artifacts) so
     the auditor can treat genuinely-produced outputs as grounding."""
     if not execution_context:
         return "(no tools were executed)"
     if isinstance(execution_context, str):
-        return execution_context[:max_chars]
+        return _elided(execution_context, max_chars)
     parts: List[str] = []
     if isinstance(execution_context, dict):
+        # FIRST, because it is the turn under audit and everything after it may be elided.
+        #
+        # Earlier turns reach the auditor as purpose-built lines — `tool(args) -> facts`, and
+        # `FAILED tool(args) -> DID NOT RUN: <error>`. The CURRENT turn reached it only as a
+        # JSON dump of the peers' results, so the turn whose answer was on trial was the one
+        # described worst: a tool's ARGUMENTS were quotable for every turn except this one, and
+        # a failed call looked like any other entry. An answer saying "embedded for 2022" is
+        # grounded by `embed_zones(year=2022)`, which is an argument, not a result.
+        this_turn = execution_context.get("this_turn")
+        if this_turn:
+            rendered_turn = ("\n".join(str(p) for p in this_turn)
+                             if isinstance(this_turn, (list, tuple)) else str(this_turn))
+            parts.append("tool calls and results from THIS TURN, the one being audited (first-"
+                         "class grounding, exactly like the evidence — an ARGUMENT grounds a "
+                         "claim about what was asked for, and a line beginning FAILED means "
+                         "that tool produced NOTHING, so a claim resting on it is "
+                         "contradicted, not merely absent):\n"
+                         + _elided(rendered_turn, max(max_chars, _EXEC_RECORD_MAX_CHARS)))
+        # The execution record gets the SAME budget as prior_actions: the auditor should not
+        # see less of the turn it is auditing than of earlier ones.
+        record_cap = max(max_chars, _EXEC_RECORD_MAX_CHARS)
         for key in ("analysis_results", "code_result"):
             val = execution_context.get(key)
             if val:
-                parts.append(f"{key}: {json.dumps(val, default=str)[:max_chars]}")
+                parts.append(_render_execution_record(key, val, record_cap))
         arts = execution_context.get("artifacts")
         if arts:
             parts.append(f"produced artifacts (files/images generated by tools): "
                          f"{json.dumps(arts, default=str)[:max_chars]}")
+        # Facts about the environment the answer was produced into — currently what the user's
+        # map client lets them do with a delivered layer. Kept OUT of prior_actions because that
+        # section is headed "from EARLIER TURNS", and this is true of the run now.
+        #
+        # This section exists because of a structural gap, not a model failure: STEP 1 above
+        # requires a verbatim span for any row marked "supported", and an affordance
+        # (pan/zoom/toggle/click) is a property of the VIEWER that no tool result can ever
+        # report. Asked whether "you can pan, zoom, and click the hospital markers" was
+        # supported, the auditor could only answer "absent" — and did, at high severity, over an
+        # otherwise fully-verified answer whose 49-feature layer had really been delivered.
+        env = execution_context.get("environment")
+        if env:
+            rendered_env = ("\n".join(str(p) for p in env) if isinstance(env, (list, tuple))
+                            else str(env))
+            parts.append("facts about the environment this answer was produced in (first-class "
+                         "grounding: quote these spans when the answer describes them):\n"
+                         + _elided(rendered_env, max_chars))
+        prior = execution_context.get("prior_actions")
+        if prior:
+            rendered = ("\n".join(str(p) for p in prior) if isinstance(prior, (list, tuple))
+                        else str(prior))
+            parts.append("tool calls and results from EARLIER TURNS of this same conversation "
+                         "(the agent legitimately answers follow-up questions from these — treat "
+                         "them as grounding exactly like this turn's tool output):\n"
+                         + _elided(rendered, max(max_chars, _PRIOR_ACTIONS_MAX_CHARS)))
     else:
-        parts.append(json.dumps(execution_context, default=str)[:max_chars])
+        parts.append(_elided(json.dumps(execution_context, default=str), max_chars))
     return "\n".join(parts) if parts else "(no tools were executed)"
 
 

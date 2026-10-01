@@ -72,7 +72,13 @@ if [ -z "${AGENT_METHOD_LIBRARY_DIR:-}" ] && [ -d "$REPO/agent_chat_files/method
   export AGENT_METHOD_LIBRARY_DIR="$REPO/agent_chat_files/method_library"
 fi
 echo "[run_agent_api_dev] method library: ${AGENT_METHOD_LIBRARY_DIR:-none built}"
-export AGENT_CHAT_API_KEY="${AGENT_CHAT_API_KEY:-dev-key}"
+# Prototype's semantics: an EMPTY service key disables the key check outside token mode, so
+# the opt-out clears the key rather than setting a variable the server no longer reads.
+if [ "${AGENT_CHAT_AUTH_OPTIONAL:-}" = "1" ]; then
+  export AGENT_CHAT_API_KEY=""
+else
+  export AGENT_CHAT_API_KEY="${AGENT_CHAT_API_KEY:-dev-key}"
+fi
 export AGENT_CORS_ORIGINS="${AGENT_CORS_ORIGINS:-http://localhost:8131,http://127.0.0.1:8131}"
 # The prototype runs outside the compose network, so the in-container embedding
 # hostname is unreachable here; prefer an explicitly provided value.

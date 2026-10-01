@@ -1,17 +1,20 @@
-"""API-key auth must fail CLOSED on every data-bearing route.
+"""Who may call the data-bearing routes, after the 2026-10-01 integration.
 
-Before this suite, ``_require_agent_chat_api_key`` returned early when
-``AGENT_CHAT_API_KEY`` was unset, so an unset environment variable silently
-disabled auth — and ``/query`` (the full RAG pipeline) never called it at all.
-These tests pin the three properties that fix depends on:
+The credential model is prototype's: a verified platform user, the service key, or demo mode,
+as ALTERNATIVES (``_require_user`` then ``_require_agent_chat_api_key(user)``). backend_swap's
+M0 contribution that survives is coverage: ``/query`` and ``/query/batch`` — the full RAG
+pipeline — never asked who the caller was, and now go through the same check as the agent routes.
 
-1. With a key configured, every protected route rejects a missing/wrong key.
-2. With NO key configured, protected routes 500 rather than serving the request.
-3. Local development can still opt out, explicitly, via AGENT_CHAT_AUTH_OPTIONAL.
+backend_swap's fail-CLOSED rule (no key configured -> 500) did not survive: it cannot coexist with
+prototype's dev and demo modes, and prototype documents an unset key as "auth disabled" outside
+token mode, where identity refuses anonymous callers anyway. Pinned below as a decision, not an
+accident, so changing it is deliberate.
 
-``/health`` stays open (it is the container healthcheck) and ``/agent/dashboard``
-stays open (a static HTML page carrying no data); both are asserted so a future
-change to either is deliberate.
+``/agent/files/<id>/download`` is deliberately NOT key-gated: map layers load their GeoJSON from
+``download_url`` directly, and a browser loading a map source cannot attach an X-API-KEY header.
+It is owner-checked in token mode, and an unknown id is a 404 so the route is no existence oracle.
+
+``/health`` stays open (it is the container healthcheck).
 """
 
 from __future__ import annotations
@@ -25,21 +28,16 @@ PROTECTED = [
     ("POST", "/agent/chat"),
     ("POST", "/agent/chat/stream"),
     ("POST", "/agent/files/upload"),
-    ("GET", "/agent/files/does-not-exist/download"),
 ]
 
 OPEN = [("GET", "/health")]
 
 
-def _client(monkeypatch, *, api_key=None, auth_optional=False):
+def _client(monkeypatch, *, api_key=None):
     if api_key is None:
         monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)
     else:
         monkeypatch.setenv("AGENT_CHAT_API_KEY", api_key)
-    if auth_optional:
-        monkeypatch.setenv("AGENT_CHAT_AUTH_OPTIONAL", "1")
-    else:
-        monkeypatch.delenv("AGENT_CHAT_AUTH_OPTIONAL", raising=False)
     import api.server as srv
     return srv.app.test_client()
 
@@ -65,17 +63,20 @@ def test_wrong_key_is_rejected(monkeypatch, method, path):
     assert resp.status_code == 403, f"{method} {path} returned {resp.status_code}"
 
 
-@pytest.mark.parametrize("method,path", PROTECTED)
-def test_unconfigured_key_fails_closed(monkeypatch, method, path):
-    """THE REGRESSION THIS SUITE EXISTS FOR.
-
-    With no key configured and no explicit opt-out, a protected route must refuse
-    to serve. Previously this path returned early and the request was served.
-    """
+def test_no_key_configured_leaves_dev_mode_open(monkeypatch):
+    """Prototype's documented choice, kept by the integration: outside token mode an unset service
+    key disables the key check. If this ever fails, the decision changed — update the module
+    docstring and DEPLOYMENT.md with it."""
     client = _client(monkeypatch, api_key=None)
-    resp = _call(client, method, path)
-    assert resp.status_code == 500, f"{method} {path} returned {resp.status_code}"
-    assert "misconfiguration" in resp.get_json()["error"].lower()
+    resp = client.post("/query", json={})
+    assert resp.status_code not in (403, 500), resp.status_code
+
+
+def test_download_is_not_key_gated_and_is_no_existence_oracle(monkeypatch):
+    """A configured key is NOT demanded here (the map client cannot send one), and an unknown id
+    answers 404 rather than 403, so probing ids reveals nothing."""
+    client = _client(monkeypatch, api_key="s3cret")
+    assert client.get("/agent/files/does-not-exist/download").status_code == 404
 
 
 def test_valid_key_passes_auth(monkeypatch):
@@ -88,13 +89,6 @@ def test_valid_key_passes_auth(monkeypatch):
 def test_bearer_token_accepted(monkeypatch):
     client = _client(monkeypatch, api_key="s3cret")
     resp = client.post("/query", json={}, headers={"Authorization": "Bearer s3cret"})
-    assert resp.status_code not in (403, 500)
-
-
-def test_explicit_opt_out_allows_unauthenticated_dev(monkeypatch):
-    """Local dev must remain workable, but only by saying so."""
-    client = _client(monkeypatch, api_key=None, auth_optional=True)
-    resp = client.post("/query", json={})
     assert resp.status_code not in (403, 500)
 
 

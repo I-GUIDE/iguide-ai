@@ -1,8 +1,12 @@
 """Per-zone remote-sensing embeddings: pixels inside a polygon, aggregated.
 
-Runs under the rs-embed interpreter (it needs ``rs_embed`` + Earth Engine), invoked as a
-subprocess by ``agent_runtime.rs_embed_tools``. Reads a JSON request on stdin, writes a JSON
-result to ``out_path``.
+What still runs from here, and what moved. The tile sweep in :func:`run` needs ``rs_embed``
+and Earth Engine, so it runs under the rs-embed interpreter, reading a JSON request on stdin
+and writing the result to ``out_path``; the agent no longer invokes it, because
+``rs_embed.embed_zones`` now does the same sweep behind the rs-embed SERVICE. This module
+remains the standalone/CLI implementation and the reference for the method below, and the
+agent still calls two things in it directly, in its own process: :func:`fit` (pandas, numpy
+and a linear solve — no model runtime) and :func:`assign_look_alike_groups`.
 
 The method, and why it is shaped this way:
 
@@ -56,6 +60,179 @@ def main() -> int:
     return 0 if result.get("ok") else 1
 
 
+# --- numpy stand-ins for the scikit-learn pieces ---------------------------------
+#
+# These run in the AGENT's process, which already has torch loaded, and scikit-learn's
+# k-means reaches OpenMP through its own compiled extension. Two OpenMP runtimes in one
+# process is not a warning here: `KMeans.fit` SEGFAULTED the pytest process outright
+# (macOS, anaconda scikit-learn beside torch), taking the whole run down rather than
+# failing one test. It is the same clash that once wedged a turn through fork.
+#
+# So nothing in the agent-side path may import scikit-learn. These are the three things it
+# was used for, in plain numpy: k-means, ridge with its alpha chosen by leave-one-out, and
+# the two fold splitters. Each mirrors the scikit-learn behaviour it replaces closely enough
+# that the reported numbers do not move — see the equivalence test, which runs scikit-learn
+# in a FRESH subprocess (where torch is absent and it is safe) and compares.
+
+
+def _kmeans_pp_centres(X, k, rng):
+    """k-means++ seeding: spread the first centres out, so Lloyd's starts somewhere sane."""
+    import numpy as np
+
+    centres = [X[rng.integers(len(X))]]
+    for _ in range(1, k):
+        d2 = np.min(((X[:, None, :] - np.asarray(centres)[None, :, :]) ** 2).sum(-1), axis=1)
+        total = float(d2.sum())
+        if total <= 0:                      # every point already sits on a centre
+            centres.append(X[rng.integers(len(X))])
+            continue
+        centres.append(X[rng.choice(len(X), p=d2 / total)])
+    return np.asarray(centres, dtype=np.float64)
+
+
+def kmeans_labels(X, k: int, seed: int = 0, restarts: int = 10, iters: int = 100):
+    """Lloyd's algorithm with k-means++ starts; the lowest-inertia restart wins.
+
+    Deterministic for a given seed, which matters more than it sounds: the map colours zones
+    by group number, so a rerun that relabels the clusters looks like the analysis changed.
+    """
+    import numpy as np
+
+    X = np.asarray(X, dtype=np.float64)
+    n = len(X)
+    if k >= n:
+        return np.arange(n)
+    rng = np.random.default_rng(seed)
+    best_labels, best_inertia = None, float("inf")
+    for _ in range(restarts):
+        centres = _kmeans_pp_centres(X, k, rng)
+        labels = np.full(n, -1)
+        for _ in range(iters):
+            d2 = ((X[:, None, :] - centres[None, :, :]) ** 2).sum(-1)
+            new_labels = d2.argmin(1)
+            if np.array_equal(new_labels, labels):
+                break
+            labels = new_labels
+            for j in range(k):
+                member = X[labels == j]
+                if len(member):
+                    centres[j] = member.mean(0)
+        inertia = float(((X - centres[labels]) ** 2).sum())
+        if inertia < best_inertia - 1e-12:
+            best_inertia, best_labels = inertia, labels
+    return best_labels
+
+
+def ridge_loo_predict(X_train, y_train, X_test, alphas):
+    """Ridge whose alpha is chosen by leave-one-out on the training fold, then predict.
+
+    This is what ``RidgeCV(alphas=...)`` does by default, and it is closed-form: one SVD of
+    the centred training matrix gives every alpha's LOO error at once, because the hat matrix
+    is ``U diag(s^2/(s^2+a)) U'`` and the LOO residual is the plain residual over ``1 - h_ii``.
+    No refitting, no inner loop.
+    """
+    import numpy as np
+
+    X_train = np.asarray(X_train, dtype=np.float64)
+    y_train = np.asarray(y_train, dtype=np.float64)
+    n = len(X_train)
+    x_bar = X_train.mean(0)
+    y_bar = float(y_train.mean())
+    U, s, Vt = np.linalg.svd(X_train - x_bar, full_matrices=False)
+    Uy = U.T @ (y_train - y_bar)
+    s2 = s ** 2
+    best_alpha, best_err = float(alphas[0]), float("inf")
+    for alpha in alphas:
+        shrink = s2 / (s2 + float(alpha))
+        fitted = U @ (shrink * Uy)
+        # + 1/n for the intercept, which centring fitted implicitly.
+        leverage = (U ** 2) @ shrink + 1.0 / n
+        residual = (y_train - y_bar) - fitted
+        err = float(np.mean((residual / np.clip(1.0 - leverage, 1e-9, None)) ** 2))
+        if err < best_err:
+            best_alpha, best_err = float(alpha), err
+    coef = Vt.T @ ((s / (s2 + best_alpha)) * Uy)
+    return (np.asarray(X_test, dtype=np.float64) - x_bar) @ coef + y_bar, best_alpha
+
+
+def kfold_indices(n: int, splits: int, seed: int = 0):
+    """``KFold(shuffle=True, random_state=seed)``: contiguous folds over a shuffled order.
+
+    RandomState, not the newer Generator, so the permutation matches scikit-learn's exactly
+    and the "what a random split would have claimed" number is reproducible against it.
+    """
+    import numpy as np
+
+    order = np.random.RandomState(seed).permutation(n)
+    sizes = [n // splits + (1 if i < n % splits else 0) for i in range(splits)]
+    folds, start = [], 0
+    for size in sizes:
+        test = np.sort(order[start:start + size])
+        folds.append((np.setdiff1d(np.arange(n), test), test))
+        start += size
+    return folds
+
+
+def group_kfold_indices(groups, splits: int):
+    """``GroupKFold``: whole groups per fold, biggest group first into the emptiest fold.
+
+    No group is ever split across the train/test line — which is the entire point of blocking
+    by space, since a zone scored by a model trained on its own neighbours is not held out.
+    """
+    import numpy as np
+
+    groups = np.asarray(groups)
+    unique, counts = np.unique(groups, return_counts=True)
+    fold_of, load = {}, [0] * splits
+    # argsort(counts)[::-1], not argsort(-counts): the two order ties differently, and a tie
+    # is the common case when blocks come out even. This is scikit-learn's order.
+    for idx in np.argsort(counts)[::-1]:
+        target = int(np.argmin(load))
+        fold_of[unique[idx]] = target
+        load[target] += int(counts[idx])
+    assigned = np.array([fold_of[g] for g in groups])
+    folds = []
+    for f in range(splits):
+        test = np.flatnonzero(assigned == f)
+        if len(test):
+            folds.append((np.flatnonzero(assigned != f), test))
+    return folds
+
+
+def assign_look_alike_groups(zones: list, clusters: int) -> int:
+    """Tag each covered zone with a 1-based look-alike ``group``; return the group count.
+
+    A 64-dimension vector has no natural colour, so the map shows clusters instead. Vectors
+    are L2-normalised first: without that, k-means splits on overall brightness — how much
+    sunlit surface a zone has — rather than on what the surface is.
+
+    Groups are 1-based because the map layer treats a missing group as "not embedded", and
+    zones with no pixels are left untagged for the same reason. Mutates ``zones`` in place;
+    ``clusters < 2`` means "do not group" and is a no-op.
+
+    ``clusters`` is a ceiling, not a requirement: asking for five groups across three zones
+    gives three. It used to give NONE, and since the group layer is the only thing embed_zones
+    puts on the map, "embed this one polygon" — the commonest request there is — delivered a
+    CSV and an empty map with nothing saying why.
+    """
+    import numpy as np
+
+    with_px = [z for z in zones if z.get("pixels")]
+    if clusters < 2 or not with_px:
+        return 0
+    k = min(int(clusters), len(with_px))
+    if k < 2:
+        # One covered zone: there is nothing to cluster, but it still belongs on the map.
+        with_px[0]["group"] = 1
+        return 1
+    X = np.asarray([z["mean"] for z in with_px], dtype=np.float64)
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+    lab = kmeans_labels(Xn, k)
+    for z, v in zip(with_px, lab, strict=True):
+        z["group"] = int(v) + 1
+    return int(len(set(lab)))
+
+
 def run(req: dict) -> dict:
     # Validation first, on the light dependencies only: a bad column name should not need
     # Earth Engine to be importable to be reported.
@@ -66,7 +243,10 @@ def run(req: dict) -> dict:
 
     model = str(req.get("model") or "gse")
     tile_px = int(req.get("tile_px") or 200)
-    max_tiles = int(req.get("max_tiles") or 24)
+    # None means uncapped, matching embed_zones. `or 24` would have turned an explicit
+    # "no cap" back into 24, and an explicit 0 into 24 as well.
+    _mt = req.get("max_tiles")
+    max_tiles = None if _mt is None else int(_mt)
     year = int(req.get("year") or 2022)
 
     gdf = gpd.read_file(req["polygons_path"])
@@ -133,9 +313,11 @@ def run(req: dict) -> dict:
     pixel_size_warnings: list[str] = []
     zone_index = {i + 1: i for i in range(len(gdf))}
 
+    capped = False
     for ty in range(ny):
         for tx in range(nx):
-            if tiles_done >= max_tiles:
+            if max_tiles is not None and tiles_done >= max_tiles:
+                capped = True
                 break
             x0, y0 = ox + tx * step, oy + ty * step
             x1, y1 = x0 + step, y0 + step
@@ -183,7 +365,8 @@ def run(req: dict) -> dict:
                         row0 = (ny - 1 - ty) * tile_px   # canvas rows run north -> south
                         proj_pixels.append((row0, tx * tile_px, arr.copy(), inside))
             tiles_done += 1
-        if tiles_done >= max_tiles:
+        if max_tiles is not None and tiles_done >= max_tiles:
+            capped = True
             break
 
     zones = []
@@ -199,18 +382,7 @@ def run(req: dict) -> dict:
             "mean": [round(float(v / n), 6) for v in sums[i + 1]] if n else None,
         })
 
-    # Look-alike groups for the map. A 64-dim vector has no natural colour; clusters do.
-    clusters = int(req.get("clusters") or 0)
-    if clusters >= 2:
-        with_px = [z for z in zones if z["pixels"]]
-        if len(with_px) >= clusters:
-            from sklearn.cluster import KMeans
-
-            X = np.asarray([z["mean"] for z in with_px], dtype=np.float64)
-            Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
-            lab = KMeans(n_clusters=clusters, n_init=10, random_state=0).fit_predict(Xn)
-            for z, v in zip(with_px, lab, strict=True):
-                z["group"] = int(v) + 1
+    assign_look_alike_groups(zones, int(req.get("clusters") or 0))
 
     image_info = None
     if canvas is not None and proj_pixels:
@@ -280,7 +452,10 @@ def run(req: dict) -> dict:
         "pixel_ground_m": round(scale * math.cos(math.radians(_to_lonlat(0, (miny + maxy) / 2)[1])), 3),
         "zone_id_field": id_field,
         "tiles_planned": planned, "tiles_fetched": tiles_done,
-        "tiles_capped": planned > max_tiles,
+        # Set where the sweep ACTUALLY stopped early, not `planned > max_tiles` -- that
+        # compared the cap against the whole bounding grid, most of whose cells are empty and
+        # skipped for free, so it reported truncation on sweeps that lost nothing.
+        "tiles_capped": capped,
         "tile_px": tile_px,
         "zones_total": len(zones), "zones_with_pixels": covered,
         "zones": zones,
@@ -301,9 +476,6 @@ def fit(req: dict) -> dict:
     import geopandas as gpd
     import numpy as np
     import pandas as pd
-    from sklearn.cluster import KMeans
-    from sklearn.linear_model import RidgeCV
-    from sklearn.model_selection import GroupKFold, KFold
 
     df = pd.read_csv(req["vectors_csv"])
     gdf = gpd.read_file(req["polygons_path"])
@@ -337,17 +509,23 @@ def fit(req: dict) -> dict:
     cent = m.to_crs("EPSG:5070").geometry.centroid
     XY = np.c_[cent.x.to_numpy(), cent.y.to_numpy()]
     blocks = int(max(2, min(int(req.get("blocks") or 5), n // 4)))
-    groups = KMeans(n_clusters=blocks, n_init=10, random_state=0).fit_predict(XY)
+    groups = kmeans_labels(XY, blocks)
     alphas = (0.01, 0.1, 1.0, 10.0, 100.0, 1000.0)
 
-    def _oof(splitter, g=None):
+    def _oof(folds):
         out = np.full(n, np.nan)
-        for tr, te in (splitter.split(X, y, g) if g is not None else splitter.split(X)):
-            out[te] = RidgeCV(alphas=alphas).fit(X[tr], y[tr]).predict(X[te])
+        for tr, te in folds:
+            out[te] = ridge_loo_predict(X[tr], y[tr], X[te], alphas)[0]
         return out
 
-    oof = _oof(GroupKFold(n_splits=blocks), groups)
-    naive = _oof(KFold(n_splits=blocks, shuffle=True, random_state=0))
+    block_folds = group_kfold_indices(groups, blocks)
+    # Fewer distinct clusters than blocks means fewer folds, and the naive split has to use
+    # the SAME count: the two r2 values are subtracted to decide whether apparent skill was
+    # only adjacency, and a 5-fold naive score against a 4-fold blocked one moves that
+    # difference by enough to flip the verdict on its own.
+    blocks = len(block_folds)
+    oof = _oof(block_folds)
+    naive = _oof(kfold_indices(n, blocks, seed=0))
     ss_tot = float(np.sum((y - y.mean()) ** 2))
     def _r2(p):
         return 1.0 - float(np.sum((y - p) ** 2)) / ss_tot if ss_tot > 0 else float("nan")

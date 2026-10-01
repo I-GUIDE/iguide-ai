@@ -59,7 +59,8 @@ def shapefile(monkeypatch, tmp_path):
 def test_factory_shape():
     tools = _tools()
     assert set(tools) == {"inspect_vector", "render_map_image", "vector_to_geojson",
-                          "reproject_vector", "vector_spatial_join", "add_map_layer"}
+                          "reproject_vector", "vector_spatial_join", "add_map_layer",
+                          "add_raster_layer"}
     assert all(getattr(t, "metadata", {}).get("category") == "geo" for t in tools.values())
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from agent_runtime import evidence_quality as eq
 from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
 
 
@@ -281,3 +282,132 @@ def test_a_ledger_of_all_supported_rows_yields_a_clean_verdict():
 
     v = audit_answer_grounding("q", "an answer", DOCS, llm=fake_llm)
     assert v["hallucination_detected"] is False and v["severity"] == "none" and v["issues"] == []
+
+
+# --- the execution record actually reaching the auditor -------------------------------------
+#
+# Third false-positive class in this audit. The first two were the ledger asymmetry and map
+# affordances; this one is simple starvation: the record was capped at 2,200 chars — LESS than
+# the 8,000 given to earlier turns — and cut blindly from the head of a JSON dump that is
+# overwhelmingly coordinate data.
+
+_COUNTY_NAMES = ["Ford", "Iroquois", "Vermilion", "Edgar", "Douglas", "Piatt", "McLean",
+                 "Moultrie", "Coles", "Clark", "Cumberland", "Shelby", "Macon", "DeWitt",
+                 "Livingston", "Kankakee", "Will", "Grundy", "LaSalle", "Woodford", "Tazewell",
+                 "Logan", "Menard", "Sangamon", "Christian", "Montgomery"]
+
+
+def _boundary_payload(names=None):
+    """26 OSM admin boundaries, the shape behind "Which counties border Champaign County?"."""
+    names = names or _COUNTY_NAMES
+    feats = [{"type": "Feature",
+              "properties": {"name": f"{n} County", "admin_level": "6",
+                             "boundary": "administrative"},
+              "geometry": {"type": "Polygon",
+                           "coordinates": [[[-88.0 - i * 0.013 - k * 0.0007,
+                                             40.1 + i * 0.011 + k * 0.0009]
+                                            for k in range(120)]]}}
+             for i, n in enumerate(names)]
+    return json.dumps({"ok": True, "count": len(names), "features": feats})
+
+
+def _record(payload):
+    return [{"content": "Fetched neighbouring administrative boundaries.",
+             "tool_results": [{"name": "overpass_search", "content": payload}]}]
+
+
+def test_every_name_in_a_large_tool_result_reaches_the_auditor():
+    """The reproduced failure: measured at 87,648 chars, the auditor saw 2,218 and exactly ONE
+    of 26 county names survived, so it reported the claims ungrounded — honestly."""
+    ar = _record(_boundary_payload())
+    assert len(json.dumps(ar)) > 80_000          # the record really is this big
+    rendered = eq._format_execution_context({"analysis_results": ar})
+    missing = [n for n in _COUNTY_NAMES if n not in rendered]
+    assert not missing, f"names starved out of the audit record: {missing}"
+
+
+def test_bulk_geometry_is_what_gets_dropped_not_the_facts():
+    ar = _record(_boundary_payload())
+    rendered = eq._format_execution_context({"analysis_results": ar})
+    assert '"count": 26' in rendered            # the count an answer would cite
+    assert "Polygon" in rendered                # the geometry TYPE is a fact
+    assert "-88.0" not in rendered              # the ring itself is not
+    assert "elided" in rendered
+
+
+def test_the_record_is_not_given_less_room_than_earlier_turns():
+    """It was 2,200 against prior_actions' 8,000 — the auditor saw less of the turn it was
+    auditing than of the conversation before it."""
+    assert eq._EXEC_RECORD_MAX_CHARS >= eq._PRIOR_ACTIONS_MAX_CHARS
+
+
+def test_quotable_short_coordinates_are_preserved():
+    """A Point is 2 numbers and a bbox is 4, and answers quote those verbatim — eliding by KEY
+    alone would strip the very span the auditor needs."""
+    compact = eq._compact_for_audit({
+        "geometry": {"type": "Point", "coordinates": [-88.24, 40.11]},
+        "bbox": [-88.28, 40.06, -88.16, 40.16],
+    })
+    assert compact["geometry"]["coordinates"] == [-88.24, 40.11]
+    assert compact["bbox"] == [-88.28, 40.06, -88.16, 40.16]
+
+
+def test_statistics_and_stdout_survive_untouched():
+    """What claims are actually made of: computed statistics and printed output."""
+    compact = eq._compact_for_audit({
+        "morans_i": 0.42, "p_value": 0.001, "clusters": 4,
+        "stdout": "BORDERING COUNTIES: ['Douglas', 'Edgar', 'Ford']\ncount: 3\n",
+    })
+    assert compact["morans_i"] == 0.42 and compact["p_value"] == 0.001
+    assert "BORDERING COUNTIES" in compact["stdout"]
+
+
+def test_embedding_vectors_are_elided_with_their_shape():
+    compact = eq._compact_for_audit({"embedding": [0.01] * 768})
+    assert "768 numbers" in compact["embedding"]
+
+
+def test_json_string_tool_results_are_parsed_so_elision_can_reach_them():
+    """Tool content arrives as a STRING. Without parsing it the walk never sees the coordinates
+    and the elision silently does nothing."""
+    raw = _boundary_payload(["Ford", "Piatt"])
+    compact = eq._compact_for_audit({"tool_results": [{"name": "overpass_search",
+                                                       "content": raw}]})
+    inner = compact["tool_results"][0]["content"]
+    assert isinstance(inner, dict), "a JSON tool result must be parsed, not left as text"
+    assert "elided" in json.dumps(inner)
+
+
+def test_non_json_text_is_left_alone():
+    text = "x" * 2000
+    assert eq._compact_for_audit({"content": text})["content"] == text
+
+
+def test_an_overflowing_record_keeps_its_tail_too():
+    """A head-only cut is what lost the informative end of the feature list.
+
+    Asserts on a marker planted at the very END of the record. The obvious version of this test
+    — "does it end with a brace" — passes even with the tail removed, because rendered[-0:] is
+    the whole string rather than the empty one.
+    """
+    ar = _record(_boundary_payload(_COUNTY_NAMES * 60))
+    ar[0]["last_field_marker"] = "ZZTAILSENTINEL"
+    rendered = eq._format_execution_context({"analysis_results": ar})
+    assert "chars elided" in rendered
+    assert len(rendered) < len(json.dumps(ar)), "the cap must still bite"
+    assert "ZZTAILSENTINEL" in rendered, "content at the end of the record was cut away"
+
+
+def test_a_zero_tail_cannot_defeat_the_cap():
+    """rendered[-0:] returns everything, so a zero-width tail would emit the whole record."""
+    big = json.dumps({"features": [{"name": f"n{i}"} for i in range(4000)]})
+    out = eq._render_execution_record("analysis_results", {"content": big}, 1)
+    assert len(out) < len(big) / 2
+
+
+def test_a_broken_compactor_still_produces_a_record(monkeypatch):
+    """Rendering the audit record must never be able to fail the turn."""
+    monkeypatch.setattr(eq, "_compact_for_audit",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    rendered = eq._format_execution_context({"analysis_results": _record(_boundary_payload())})
+    assert "analysis_results" in rendered and rendered != "(no tools were executed)"

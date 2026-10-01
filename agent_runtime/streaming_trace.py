@@ -8,6 +8,7 @@ LangChain callbacks, MCP tool wrappers, and that queue.
 from __future__ import annotations
 
 import json
+import time
 import logging
 import os
 from contextlib import contextmanager
@@ -73,6 +74,12 @@ class _TraceState:
     # Per-request override for detail-tier verbosity. None -> fall back to the
     # AGENT_DEV env var; True/False -> force on/off for this stream.
     agent_dev: Optional[bool] = None
+    # A second sink that receives EVERY event, before the detail-tier filter below. The client's
+    # stream and the durable record answer different questions: a viewer asked for a readable
+    # trace, while a record exists to reproduce the turn later, and a record that only holds what
+    # someone happened to switch on is not a record. Everything the client sees, the recorder
+    # also sees; the reverse is not true.
+    recorder: Optional[TraceSink] = None
 
 
 _TRACE_STATE: ContextVar[Optional[_TraceState]] = ContextVar("agent_stream_trace_state", default=None)
@@ -84,6 +91,75 @@ _TRACE_AGENT: ContextVar[str] = ContextVar("agent_stream_trace_agent", default="
 # import, so set the env before importing this module).
 _TEXT_LIMIT = int(os.environ.get("AGENT_TRACE_TEXT_LIMIT") or 1200)
 _JSON_LIMIT = int(os.environ.get("AGENT_TRACE_JSON_LIMIT") or 3000)
+
+
+def _outcome(output: Any) -> Optional[str]:
+    """What a tool RETURNED, in a few words, or None when it cannot be said briefly.
+
+    The trace showed that a tool was called and never what came back, so a search finding eight
+    documents, a search finding none, and a search that failed all rendered as the same single
+    line. Two wrong diagnoses in one afternoon came out of that: a tool failing in a second and
+    being retried looked exactly like the same tool running twice.
+
+    Deliberately a HEADLINE, not the payload — the truncated result content is already available
+    to anyone who wants it, and a trace that prints result bodies is the noise this line has to
+    stay clear of. Reads the fields the tools already set; returns None rather than inventing a
+    summary for a shape it does not recognise, in which case the caller still has the duration.
+    """
+    # Unwrap first. LangChain hands on_tool_end a ToolMessage in some versions and the raw
+    # string in others; _short_text stringifies either, which is why `content` was right while
+    # the outcome came back empty and the trace line showed a duration and nothing else.
+    body = getattr(output, "content", output)
+    if isinstance(body, (bytes, bytearray)):
+        body = body.decode("utf-8", "replace")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(body, dict):
+        return None
+
+    # A failure first, and never silently: this is the case the line exists for. Four shapes,
+    # because the tools do not agree on one — execute_code reports an exit code and a timeout
+    # flag, the service tools an `ok` flag, and some return a bare `error`.
+    failed = (body.get("ok") is False
+              or body.get("timed_out") is True
+              or (body.get("exit_code") not in (None, 0))
+              or (body.get("error") and body.get("ok") is not True))
+    if failed:
+        reason = body.get("error") or body.get("detail") or body.get("stderr") or body.get("hint")
+        if not reason and body.get("timed_out"):
+            reason = "timed out"
+        if not reason and body.get("exit_code") not in (None, 0):
+            reason = f"exit code {body['exit_code']}"
+        # 600, not 140: the row CLAMPS at 140 in the transcript and expands on click, so the
+        # cap here decides what there is to expand INTO. At 140 a python traceback lost the
+        # last frame — the one naming the error — which is the only part worth reading.
+        return f"failed — {_short_text(reason or 'failed', limit=600)}"
+
+    # `count` is what every search tool's _build_payload already reports.
+    for key in ("count", "feature_count", "zones_with_pixels", "row_count"):
+        value = body.get(key)
+        if isinstance(value, int):
+            noun = {"count": "result", "feature_count": "feature",
+                    "zones_with_pixels": "zone with pixels", "row_count": "row"}[key]
+            return f"{value:,} {noun}{'' if value == 1 else 's'}"
+    for key in ("documents", "results", "matched"):
+        value = body.get(key)
+        if isinstance(value, list):
+            return f"{len(value):,} {key.rstrip('s')}{'' if len(value) == 1 else 's'}"
+
+    layers = body.get("map_layers")
+    if isinstance(layers, list) and layers:
+        return f"{len(layers)} layers on the map"
+    if isinstance(body.get("map_layer"), dict):
+        return "1 layer on the map"
+    if body.get("filename"):
+        return _short_text(body["filename"], limit=60)
+    if body.get("ok") is True:
+        return "ok"
+    return None
 
 
 def _short_text(value: Any, *, limit: Optional[int] = None) -> str:
@@ -171,10 +247,6 @@ def _emit_with_state(
         return
     # Detail-tier events are suppressed unless dev mode is enabled. The
     # per-request flag on the trace state wins; otherwise fall back to AGENT_DEV.
-    dev_enabled = state.agent_dev if state.agent_dev is not None else is_agent_dev()
-    if not is_status_tier_event(event) and not dev_enabled:
-        return
-
     payload: Dict[str, Any] = dict(data or {})
     context_role = current_agent_role()
     role = agent_role or payload.get("agent") or (context_role if context_role != "agent" else state.agent_role)
@@ -189,6 +261,18 @@ def _emit_with_state(
         item["agent_role"] = role
     if node:
         item["node"] = node
+
+    # The recorder runs FIRST and unfiltered. Sequence numbers are assigned above, so both sinks
+    # agree on ordering even though the client sees a subset.
+    if state.recorder is not None:
+        try:
+            state.recorder(item)
+        except Exception:
+            logger.debug("Trace recorder rejected event %s", event, exc_info=True)
+
+    dev_enabled = state.agent_dev if state.agent_dev is not None else is_agent_dev()
+    if not is_status_tier_event(event) and not dev_enabled:
+        return
 
     try:
         state.sink(item)
@@ -224,6 +308,9 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self._state: Optional[_TraceState] = None
         self._tool_runs: Dict[str, Dict[str, Any]] = {}
+        # tool name -> {"error": str, "attempts": int}. Per HANDLER, which is per turn, so a
+        # failure never colours a later conversation. Cleared when the tool succeeds.
+        self._tool_failures: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
 
     def _tool_run_key(self, run_id: Any) -> str:
@@ -232,8 +319,26 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
     def _emit(self, event: str, data: Optional[Dict[str, Any]] = None) -> None:
         _emit_with_state(self._state or _TRACE_STATE.get(), event, data)
 
+    @staticmethod
+    def _model_label(serialized: Optional[Dict[str, Any]], kwargs: Dict[str, Any]) -> str:
+        """Which MODEL is answering, not which LangChain class wraps it.
+
+        serialized["name"] is the class, and AnvilGPT, vLLM and any other
+        OpenAI-compatible endpoint all arrive as ChatOpenAI — so the trace read
+        "ChatOpenAI started" while qwen3.6:27b or gpt-oss:120b did the work. That is the
+        same confusion active_llm_description() exists to prevent: the transport does not
+        tell you who answered. The invocation params carry the id the user actually picked.
+        """
+        params = kwargs.get("invocation_params") or {}
+        meta = kwargs.get("metadata") or {}
+        for value in (params.get("model"), params.get("model_name"),
+                      meta.get("ls_model_name")):
+            if value:
+                return str(value)
+        return (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
+
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
-        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
+        name = self._model_label(serialized, kwargs)
         message_count = sum(len(group or []) for group in messages or []) if isinstance(messages, list) else None
         self._emit(
             "llm_start",
@@ -246,7 +351,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
-        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "llm"
+        name = self._model_label(serialized, kwargs)
         self._emit(
             "llm_start",
             {
@@ -296,7 +401,22 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         args = _normalize_tool_args(input_str)
         run_key = self._tool_run_key(kwargs.get("run_id"))
         with self._lock:
-            self._tool_runs[run_key] = {"name": tool_name, "args": args}
+            self._tool_runs[run_key] = {"name": tool_name, "args": args,
+                                        "started": time.monotonic()}
+            prior = self._tool_failures.get(tool_name)
+        # THE REPAIR, said out loud. A tool that fails and is immediately retried is the single
+        # most misleading thing this trace could show, because two calls of one tool render
+        # identically whether the first worked or not — that is exactly how a 1.6-second
+        # rejection read as a duplicate tile sweep for two rounds of diagnosis. One retry is
+        # also below the dead-end detector's threshold of two, so nothing else reports it.
+        if prior:
+            self._emit(
+                "tool_retry",
+                {"kind": "tool_retry", "label": "Retrying", "name": tool_name,
+                 "attempt": prior["attempts"] + 1,
+                 "message": f"retrying {tool_name} after: "
+                            f"{_short_text(prior['error'], limit=600)}"},
+            )
         self._emit(
             "tool_call",
             {
@@ -314,17 +434,48 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         with self._lock:
             meta = self._tool_runs.pop(run_key, {})
         tool_name = str(meta.get("name") or kwargs.get("name") or "unknown_tool")
-        self._emit(
-            "tool_result",
-            {
-                "kind": "tool_result",
-                "label": f"Tool result {tool_name}",
-                "tool_name": tool_name,
-                "name": tool_name,
-                "content": _short_text(output),
-                "message": _short_text(output),
-            },
-        )
+        # The HEADLINE goes out beside the content: `outcome` is what the trace line says, and
+        # `duration_s` is what makes a fast failure distinguishable from a real run — the two
+        # facts that were missing when a 1.6-second rejection read as a duplicate tile sweep.
+        outcome = _outcome(output)
+        started = meta.get("started")
+        duration = round(time.monotonic() - started, 2) if isinstance(started, float) else None
+        payload: Dict[str, Any] = {
+            "kind": "tool_result",
+            "label": f"Tool result {tool_name}",
+            "tool_name": tool_name,
+            "name": tool_name,
+            "content": _short_text(output),
+            "message": _short_text(output),
+        }
+        if outcome:
+            payload["outcome"] = outcome
+        if duration is not None:
+            payload["duration_s"] = duration
+        self._emit("tool_result", payload)
+
+        # Track the failure/repair pair so the NEXT call can name what it is retrying, and so a
+        # success after a failure is reported as a recovery rather than passing silently. A turn
+        # that quietly needed two attempts is a turn whose tool contract is wrong, and that is
+        # worth seeing: one retry sits below the dead-end detector's threshold of two.
+        failed = bool(outcome and outcome.startswith("failed"))
+        with self._lock:
+            prior = self._tool_failures.get(tool_name)
+            if failed:
+                self._tool_failures[tool_name] = {
+                    "error": (outcome or "")[len("failed — "):] or "failed",
+                    "attempts": (prior or {}).get("attempts", 0) + 1}
+            elif prior:
+                self._tool_failures.pop(tool_name, None)
+        if not failed and prior:
+            attempts = prior["attempts"] + 1
+            self._emit(
+                "tool_recovered",
+                {"kind": "tool_recovered", "label": "Recovered", "name": tool_name,
+                 "attempts": attempts,
+                 "message": f"{tool_name} succeeded on attempt {attempts} — "
+                            f"the first failed with: {_short_text(prior['error'], limit=400)}"},
+            )
         # Geometry-bearing results (e.g. overpass_search) also stream as an untruncated
         # `map_layer` event so a map client can plot them live; the `content` above is
         # truncated and not reliably parseable.
@@ -377,14 +528,17 @@ def trace_context(
     *,
     agent_role: str = "orchestrator_agent",
     agent_dev: Optional[bool] = None,
+    recorder: Optional[TraceSink] = None,
 ) -> Iterator[None]:
     """Enable streamed trace emission for the current thread/context.
 
     ``agent_dev`` overrides detail-tier verbosity for this stream (None falls
-    back to the ``AGENT_DEV`` env var).
+    back to the ``AGENT_DEV`` env var). ``recorder``, when given, receives every
+    event regardless of that setting -- see ``_TraceState.recorder``.
     """
     handler = StreamingTraceCallbackHandler()
-    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role, agent_dev=agent_dev)
+    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role, agent_dev=agent_dev,
+                        recorder=recorder)
     handler._state = state
     state_token = _TRACE_STATE.set(state)
     agent_token = _TRACE_AGENT.set(agent_role)

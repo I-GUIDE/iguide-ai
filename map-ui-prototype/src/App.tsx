@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
 import { ChatPanel, type ChatMessage, type Mode, type AgentCfg } from './components/ChatPanel';
 import { TopNav } from './components/TopNav';
 import { LeftPanel, type SelectedFeature } from './components/LeftPanel';
+import { Splitter } from './components/Splitter';
 import type { LayerArtifact } from './contracts';
 import { parseIntent } from './agentBrain';
 import { searchKb, kbHitsToFeatureCollections, type KbHit } from './mockKb';
@@ -11,10 +13,13 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels,
-  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine,
-} from './agentClient';
+  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
+import { AuthError, authMessage } from './auth';
+import { fetchWhoAmI, listConversations, putConversation, getConversation,
+  type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import type { AppTab } from './uiVariant';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -30,12 +35,35 @@ const DEFAULT_CFG: AgentCfg = {
 // is off so a pure-chat turn stays fast and never opens the map.
 const CHAT_ONLY_METHODS = ['keyword_search', 'semantic_search', 'neo4j_search', 'web_search', 'agent_kb_search', 'get_kb_block'];
 
-function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean } {
+// The chat pane's width belongs to the user now. These are mirrored in styles.css as
+// --chat-min / --map-min so the stylesheet can re-clamp a restored width on its own, live, as
+// the window changes — change them in BOTH places.
+const CHAT_W_DEFAULT = 460;   // the width the remote-sensing row was tuned against
+const CHAT_W_MIN = 380;       // below this the composer's three 42px circles crowd the textarea out
+const MAP_W_MIN = 360;        // .leftpanel floats over the map and needs 312 (288 + gutters)
+
+// The first thing anyone reads, and it has to be actionable by the person reading it. The
+// default points at the settings gear; DEMO_MODE hides that gear, so pointing at it there tells
+// a visitor to click something that is not on their screen. The demo greeting says what is
+// already true instead — spatial tools are on, and forced on below, since nothing can turn them
+// off once the gear is gone.
+const GREETING = "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-click or right-drag on it to select a region.";
+const GREETING_DEMO = "Hi — I'm the I-GUIDE agent. Ask me anything — spatial tools are on, so I can search geodata and open datasets. The map appears on its own when I return geometry, or hit Map — then right-click or right-drag on it to select a region.";
+
+function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean; chatW: number } {
   try {
     const raw = localStorage.getItem('iguide-map-ui');
-    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg }, spatial: j.spatial !== false }; }
+    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg }, spatial: j.spatial !== false, chatW: readChatW(j.chatW) }; }
   } catch { /* */ }
-  return { mode: 'live', cfg: DEFAULT_CFG, spatial: true };
+  return { mode: 'live', cfg: DEFAULT_CFG, spatial: true, chatW: CHAT_W_DEFAULT };
+}
+// A stored width is not to be trusted: an older blob has no field at all, and JSON round-trips
+// NaN and Infinity to null. Only the FLOOR is enforced here — the ceiling depends on the window,
+// and styles.css applies that live in clamp(), so a width saved on a wide monitor cannot starve
+// the map on a laptop and the user's choice comes back when the room returns.
+function readChatW(v: unknown): number {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.max(n, CHAT_W_MIN) : CHAT_W_DEFAULT;
 }
 
 function bboxPolygon(a: [number, number], b: [number, number]): Polygon {
@@ -45,8 +73,12 @@ function bboxPolygon(a: [number, number], b: [number, number]): Polygon {
 }
 function viewportPolygon(): Polygon | null {
   const m = (window as any).__map; if (!m) return null;
-  const b = m.getBounds();
-  return bboxPolygon([b.getWest(), b.getSouth()], [b.getEast(), b.getNorth()]);
+  // A handle can outlive its map — the pane is taken away by more than the Hide button now —
+  // and unlike applyFit this result is spliced straight into the prompt we send.
+  try {
+    const b = m.getBounds();
+    return bboxPolygon([b.getWest(), b.getSouth()], [b.getEast(), b.getNorth()]);
+  } catch { return null; }
 }
 function polygonBBox(poly: Polygon): [number, number, number, number] {
   const ring = poly.coordinates[0]; const lons = ring.map((c) => c[0]); const lats = ring.map((c) => c[1]);
@@ -54,22 +86,33 @@ function polygonBBox(poly: Polygon): [number, number, number, number] {
 }
 
 export default function App() {
-  const init = loadCfg();
+  // loadCfg reads localStorage and parses JSON. As a bare call in the body it did that on EVERY
+  // render, for values only the initial useState arguments ever read; lazily, it runs once.
+  const [init] = useState(loadCfg);
   const [layers, setLayers] = useState<LayerArtifact[]>([]);
   const [drawnRegion, setDrawnRegion] = useState<Polygon | null>(null);
   const [drawPreview, setDrawPreview] = useState<Feature | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>(init.mode);
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
+  const [chatW, setChatW] = useState<number>(init.chatW);
+  // The drag class on .app — two renders per gesture, not one per frame.
+  const [resizing, setResizing] = useState(false);
+  // refitAfterResize is memoized with [] and reads its inputs from refs, so the drag flag is one too.
+  const resizingRef = useRef(false);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
+  const [tab, setTab] = useState<AppTab>('chat');
+  // Where the RS-Embed Demo tab lands you. The demo is about this pair of cities, and a map
+  // opened over the whole country asks the visitor to go and find the subject first.
+  const CHAMPAIGN_URBANA: [number, number, number, number] = [-88.32, 40.05, -88.14, 40.16];
   const [showSettings, setShowSettings] = useState(false);
   // Which models this agent will accept. Fetched once so the picker offers what is actually
   // served rather than a hardcoded list that drifts; null just means "agent default only".
   const [models, setModels] = useState<ModelCatalogue | null>(null);
   const [selected, setSelected] = useState<SelectedFeature | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-drag on it to select a region." },
+    { role: 'agent', text: GREETING },
   ]);
 
   const threadRef = useRef<string>(newThreadId());
@@ -88,7 +131,11 @@ export default function App() {
   const layersRef = useRef(layers); layersRef.current = layers;
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial })); } catch { /* */ } }, [mode, cfg, spatial]);
+  // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
+  // the same single record as everything else. It has to be in BOTH the payload and the deps: in
+  // the payload alone it would only ever be flushed by an unrelated settings change, and a
+  // SEPARATE effect writing this key would clobber cfg — setItem replaces the whole object.
+  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial, chatW })); } catch { /* */ } }, [mode, cfg, spatial, chatW]);
 
   // Progressive map: auto-reveal ONCE the first time a layer appears, then respect the
   // manual show/hide toggle (don't fight the user). Re-arm after layers are cleared.
@@ -111,6 +158,56 @@ export default function App() {
   }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
+  // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
+  // so a link can be handed to an audience without also handing them a credential to paste.
+  // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
+  // Unreachable or unknown means NOT a demo, which keeps the settings available: a page that
+  // hides the key field on a deployment that turns out to need one cannot be recovered from.
+  const [demoMode, setDemoMode] = useState(false);
+  // Token mode hides the connection settings for a different reason than demo does: there is a
+  // credential, it is just not one you paste — the browser holds it as a cookie.
+  const [tokenMode, setTokenMode] = useState(false);
+  // Who the SERVER says we are. The access cookie is httpOnly, so the page cannot answer this
+  // itself. Null means "nobody", which lists nothing rather than everything.
+  //
+  // The whole answer is kept, not just the id: the id is what scopes stored conversations, but
+  // the role, the permitted flag and the reason are what the account badge needs to say where
+  // someone stands BEFORE they spend a question finding out.
+  const [me, setMe] = useState<WhoAmI | null>(null);
+  const [viewer, setViewer] = useState<string | null>(null);
+  const viewerRef = useRef<string | null>(null);
+  useEffect(() => { viewerRef.current = viewer; }, [viewer]);
+  useEffect(() => {
+    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); return; }
+    let live = true;
+    void fetchUiConfig(asAgentConfig()).then((c) => {
+      if (!live) return;
+      const demo = !!c?.demo_mode;
+      setDemoMode(demo);
+      setTokenMode(c?.mode === 'token');
+      if (c?.mode === 'token') {
+        void fetchWhoAmI(asAgentConfig()).then((who) => {
+          if (!live) return;
+          setMe(who);
+          setViewer(who?.user?.id ?? null);
+        });
+      } else {
+        // Dev and demo identify nobody, so there is no badge and no owner to scope by.
+        setMe(null);
+        setViewer(null);
+      }
+      if (!demo) return;
+      // The config arrives after the first paint, so the greeting is already on screen and has
+      // to be replaced — but only while it is still the whole conversation. A restored session,
+      // or a visitor who typed before the answer came back, keeps what it has.
+      setMessages((m) => (m.length === 1 && m[0].role === 'agent' && m[0].text === GREETING
+        ? [{ ...m[0], text: GREETING_DEMO }] : m));
+      // Nothing can turn these back on with the gear hidden, and a returning visitor who once
+      // switched them off would otherwise be stuck with a crippled demo and no way out of it.
+      setSpatial(true);
+    });
+    return () => { live = false; };
+  }, [mode, cfg.endpoint]);
   useEffect(() => {
     if (mode !== 'live') return;
     let live = true;
@@ -151,6 +248,10 @@ export default function App() {
   // Re-apply the fit when the container resizes, but only right after we asked for it, so a
   // view the user has since panned or zoomed is never yanked back.
   const refitAfterResize = useCallback(() => {
+    // A splitter drag resizes the map on every frame. Re-framing per frame makes the map fight
+    // the pointer for the 2.5s after any fit — which is exactly when a user reaches for the
+    // seam, a layer having just landed. Hold off, and refit once on release instead.
+    if (resizingRef.current) return;
     const m = (window as any).__map;
     const last = lastFit.current;
     if (!m || !last || Date.now() - last.at > 2500) return;
@@ -162,6 +263,52 @@ export default function App() {
   // expect to come back to, and it keeps writes off the streaming path.
   const layersRef2 = useRef(layers); layersRef2.current = layers;
   const messagesRef = useRef(messages); messagesRef.current = messages;
+  /** Where the history list comes from.
+   *
+   *  In token mode the SERVER owns it: conversations belong to the user, follow them to another
+   *  browser, and — the reason this changed — do not sit in IndexedDB waiting for the next
+   *  person to open the page. IndexedDB stays the source for dev and demo, which identify
+   *  nobody, and stays a local cache in token mode so a restore does not wait on a round trip.
+   *
+   *  A failed fetch returns null and is NOT treated as "no conversations": showing an empty
+   *  history because the server was briefly unreachable reads as data loss. */
+  //  Every write is GENERATION-GUARDED, because the calls race and the slow one was winning.
+  //  On load this runs once before /agent/ui-config has answered (tokenMode still false, so it
+  //  reads the local store) and again the moment it does. The second call takes a synchronous
+  //  path and finishes first; the first one then resolves its IndexedDB read and overwrites the
+  //  correct answer with the stale one. That is why a signed-in page settled on 27 local rows,
+  //  and why signing out left them there: not a wrong branch, a lost race.
+  const sessionsGen = useRef(0);
+  const refreshSessions = useCallback(async () => {
+    const gen = ++sessionsGen.current;
+    const apply = (next: SessionSummary[]) => { if (gen === sessionsGen.current) setSessions(next); };
+    if (tokenMode && viewerRef.current) {
+      const remote = await listConversations(asAgentConfig());
+      if (remote) {
+        apply(remote.map((c) => ({
+          id: c.memoryId,
+          title: c.conversationName || 'Untitled conversation',
+          createdAt: Date.parse(c.createdAt || '') || 0,
+          updatedAt: Date.parse(c.updatedAt || '') || 0,
+          threadId: c.threadId || '',
+          messageCount: c.messageCount ?? 0,
+          layerCount: c.layerCount ?? 0,
+          fileCount: c.fileCount ?? 0,
+        })));
+        return;
+      }
+      return;                       // could not ask; keep whatever is on screen
+    }
+    if (tokenMode) {
+      // Token mode, no viewer: identity has not landed (or has aged out). The local store is a
+      // CACHE of somebody's conversations, and until we know whose, showing it is the same
+      // mistake the owner filter closes — just reached by a different route. Empty is honest.
+      apply([]);
+      return;
+    }
+    apply(await listSessions(viewerRef.current));
+  }, [tokenMode, asAgentConfig]);
+
   const snapshotSession = useCallback(() => {
     const msgs = messagesRef.current;
     if (!msgs.some((m) => m.role === 'user')) return;   // nothing worth listing yet
@@ -178,15 +325,44 @@ export default function App() {
       region: drawnRegion ?? undefined,
       model: cfg.model, provider: cfg.provider,
     };
-    void loadSession(rec.id).then((prev) => {
+    rec.ownerId = viewerRef.current;
+    void loadSession(rec.id, viewerRef.current).then((prev) => {
       if (prev) rec.createdAt = prev.createdAt;          // keep the original start time
       return saveSession(rec);
-    }).then(() => listSessions()).then(setSessions);
-  }, [drawnRegion, cfg.model, cfg.provider]);
+    }).then(() => {
+      // Server-side too, keyed by the agent's own memoryId so the record and the conversation
+      // it continues are the same thing. Local stays a cache; this is the copy that survives a
+      // new browser, and the one another device will read.
+      if (tokenMode && viewerRef.current && memoryRef.current) {
+        return putConversation(asAgentConfig(), memoryRef.current, rec).then(() => undefined);
+      }
+      return undefined;
+    }).then(() => refreshSessions());
+  }, [drawnRegion, cfg.model, cfg.provider, tokenMode, asAgentConfig, refreshSessions]);
 
   const restoreSession = useCallback(async (id: string) => {
-    const rec = await loadSession(id);
-    if (!rec) return;
+    // Local first — it is a cache, and a hit avoids a round trip. In token mode fall back to
+    // the server, which is where a conversation opened on another browser actually lives.
+    //
+    // `tokenMode` MUST stay in the deps below. It starts false and flips when /agent/ui-config
+    // lands, so a callback memoised without it keeps the initial false forever — and then this
+    // line never runs, every server-listed conversation fails to open, and the click is a
+    // silent no-op. That is exactly what shipped: rows that rendered, reported "3 messages ·
+    // 2 layers", and did nothing at all, with not even a network request to show for it. The
+    // neighbouring reads use `viewerRef` precisely to dodge this; `tokenMode` was plain state
+    // and went stale.
+    let rec = await loadSession(id, viewerRef.current);
+    if (!rec && tokenMode && viewerRef.current) rec = await getConversation(asAgentConfig(), id);
+    if (!rec) {
+      // Never silent. A row the server listed but cannot produce is a real state — an agent
+      // memory that predates client snapshots has no transcript to restore — and "nothing
+      // happens on click" is the least debuggable way to express it.
+      pushMsg({ role: 'agent', text:
+        'That conversation could not be opened — the server has no saved transcript for it. '
+        + 'It may have been started before conversations were saved to your account.' });
+      setShowHistory(false);
+      return;
+    }
     setShowHistory(false);
     // Identity first: the next turn must continue the SAME agent conversation, and must
     // re-attach the files or the analysis tools will not even load.
@@ -231,7 +407,7 @@ export default function App() {
       `Continuing "${rec.title}" — ${(rec.messages || []).length} messages, ` +
       `${restored.length} layer(s) restored${missing > 0 ? `, ${missing} no longer available` : ''}` +
       `${(rec.fileIds || []).length ? `, ${(rec.fileIds || []).length} file(s) re-attached` : ''}.` });
-  }, [resolveUrl, fitView, pushMsg]);
+  }, [resolveUrl, fitView, pushMsg, tokenMode, asAgentConfig]);
 
   const startNewSession = useCallback(() => {
     sessionIdRef.current = newSessionId();
@@ -248,7 +424,12 @@ export default function App() {
     setMessages([{ role: 'agent', text: "New conversation. Ask me anything." }]);
   }, []);
 
-  useEffect(() => { void listSessions().then(setSessions); }, []);
+  // `viewer` is in the deps even though refreshSessions reads it from a REF. The ref exists so
+  // the callback is not rebuilt on every identity change, but that also meant nothing re-ran
+  // the list when identity finally arrived: whoami lands after ui-config, so token mode listed
+  // the local cache once and kept showing that count until someone clicked History. Live, that
+  // read as "History (27)" for an account with no conversations at all.
+  useEffect(() => { void refreshSessions(); }, [refreshSessions, viewer]);
 
   // --- layer management + feature inspection (left panel) ---
   const toggleLayer = useCallback((id: string) => {
@@ -275,11 +456,24 @@ export default function App() {
   // auto-loaded too: three stacked layers of 128,855 points buried the heatmap under
   // a solid mass of circles.
   const mapLayerDelivered = useRef(false);
+  // …and the files those layers were drawn FROM, for the whole conversation rather than one
+  // turn. mapLayerDelivered resets each turn, so a later turn that places no layer of its own
+  // (e.g. "what parameters were used?", answered from memory) ran the artifact fallback over a
+  // downloads list that still carried EARLIER turns' files — re-adding the boundary the
+  // map_layer event had already drawn, as a second filled layer over the top of it.
+  const layerSourceFiles = useRef<Set<string>>(new Set());
   // A map mounted into a zero-sized container (collapsed pane, hidden tab) never finishes
   // initialising — MapLibre does not fire `load`, so there is no instance to resize later and
   // the canvas stays blank. Mount only once the container actually has room.
   const mapBoxRef = useRef<HTMLDivElement | null>(null);
   const [mapBoxReady, setMapBoxReady] = useState(false);
+  // Compare files by their file_id, not the URL string: the map_layer descriptor and the
+  // download record for the same file differ in absolute-vs-relative form.
+  const fileKey = (u?: string | null) => {
+    if (!u) return '';
+    const m = /\/agent\/files\/([^/]+)\/download/.exec(u);
+    return m ? m[1] : u;
+  };
   const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
     if (!spatial) return;
     for (const f of files) {
@@ -287,6 +481,9 @@ export default function App() {
       if (!/\.(geo)?json$/i.test(name)) continue;
       const key = f.file_id || f.download_url;
       if (!key || loadedArtifacts.current.has(key)) continue;
+      // Already on the map because a map_layer event drew it — possibly several turns ago.
+      if (layerSourceFiles.current.has(f.file_id || '') ||
+          layerSourceFiles.current.has(fileKey(f.download_url))) continue;
       loadedArtifacts.current.add(key);
       try {
         const res = await fetch(resolveUrl(f.download_url));
@@ -382,6 +579,7 @@ export default function App() {
         onFile: (files) => patch({ artifacts: files }),
         onMapLayer: async (layer) => {
           mapLayerDelivered.current = true;
+          if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
           // A raster (embedding PCA image, segmentation mask) is an IMAGE draped over its
           // footprint. It must be handled before the GeoJSON path below, which would try to
           // parse the PNG as JSON, fail, and silently deliver nothing.
@@ -391,6 +589,9 @@ export default function App() {
               kind: 'raster', id: layer.id, source: (layer.source as any) || 'analysis',
               label: layer.label, url: resolveUrl(layer.url), bounds,
               opacity: layer.opacity ?? 0.85, fitBounds: true,
+              // Kept, not dropped: this branch names every field it copies, so a descriptor
+              // field left out here never reaches the layer list or the session store.
+              ...(layer.embedding ? { embedding: layer.embedding } : {}),
             });
             fitView(bboxToFC(bounds));
             addTrace({ text: `map: raster — ${layer.label}`, kind: 'tool' });
@@ -417,6 +618,10 @@ export default function App() {
             render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
+            // Dropped here once already: the flag reached the client and died in this call,
+            // so the zone came back as a violet slab over its own pixel image.
+            outline: layer.outline === true ? true : undefined,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,
@@ -430,7 +635,8 @@ export default function App() {
           addTrace({ text: `map: ${layer.render || 'layer'} — ${layer.label} `
             + (layer.sampled && layer.total
                 ? `(SAMPLE: ${layer.count ?? fc.features.length} of ${layer.total})`
-                : `(${layer.count ?? fc.features.length} features)`), kind: 'tool' });
+                : (() => { const n = layer.count ?? fc.features.length;
+                            return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
         },
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
       });
@@ -449,11 +655,47 @@ export default function App() {
       if (!mapLayerDelivered.current) await loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
-      patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
-                            : `Request failed: ${e.message}`,
-              streaming: false });
+      // An auth refusal is not a failed request and must not read like one: "Request failed:
+      // Forbidden" tells someone nothing about what to do, and with the role gate starting at
+      // contributor this is the message most accounts will actually see.
+      const isAuth = !stopped && e instanceof AuthError;
+      const text = stopped
+        ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
+        : isAuth ? authMessage(e) : `Request failed: ${e.message}`;
+      // The auth refusal is the ONE message here that carries a link — "[Sign in](…)" — so it
+      // goes through the markdown renderer. `patch({ text })` renders verbatim (ChatPanel puts
+      // it in a bare <p>), which showed people the literal "[Sign in](https://…)" and left
+      // nothing to click on the single message whose entire job is to be clicked.
+      //
+      // Only this branch. The others interpolate `e.message`, which is somebody else's string,
+      // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
+      // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
+      patch(isAuth
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false }
+        : { text, streaming: false });
     } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
-  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
+    // `snapshotSession` MUST be in these deps. It was not, and that single omission is the
+    // whole of "after I ask a question the wrong history shows up" — plus two things that
+    // looked unrelated.
+    //
+    // This callback was memoised on the first render, when `tokenMode` was still false
+    // (/agent/ui-config had not answered yet), so the `snapshotSession` it captured was the
+    // one built in that render — and IT captured `tokenMode: false` and the matching
+    // `refreshSessions`. Every turn therefore ended by: saving locally (fine), SKIPPING the
+    // server PUT because its `tokenMode` said this deployment has no users, and then
+    // refreshing the list through the local branch — which is why the history flipped to 30
+    // browser-local rows the moment a question finished.
+    //
+    // The two consequences that did not look like this bug: conversations never reached the
+    // server on their own, and the agent's own mid-turn memory was left snapshot-less, which
+    // is where the orphan `conversation-sess-...` documents came from.
+    //
+    // Third instance of this exact class in this file (`refreshSessions`/`viewer`,
+    // `restoreSession`/`tokenMode`, now this). The neighbouring long-lived reads use refs for
+    // the same reason; anything read inside a callback that outlives a render either goes in
+    // the deps or goes in a ref.
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts,
+      snapshotSession]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;
@@ -560,10 +802,25 @@ export default function App() {
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
 
   return (
-    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
-      <TopNav onToggleSettings={() => setShowSettings((s) => !s)}
-        onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
-        sessionCount={sessions.length} />
+    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
+      <TopNav demoMode={demoMode || tokenMode} me={tokenMode ? me : null}
+        onToggleSettings={() => setShowSettings((s) => !s)}
+        onToggleHistory={() => { setShowHistory((v) => !v); void refreshSessions(); }}
+        sessionCount={sessions.length}
+        tab={tab}
+        onSetTab={(t) => {
+          setTab(t);
+          // The remote-sensing tab is ABOUT the map: there is no drawing a region on a map
+          // that is not on screen, so opening the tab opens the map. Leaving it does not
+          // close the map again — by then the user may have put something on it.
+          if (t !== 'rs') return;
+          setMapVisible(true);
+          // Land on the subject — but only when there is nothing of the user's to displace.
+          // Yanking the view away from a layer they just produced, or a region they drew,
+          // would be worse than starting them somewhere generic. fitView carries the waiting:
+          // the map may not have loaded yet, and it re-fits once the pane finishes expanding.
+          if (!layers.length && !drawnRegion) fitView(bboxToFC(CHAMPAIGN_URBANA));
+        }} />
       {showHistory && (
         <div className="history" role="dialog" aria-label="Past conversations">
           <div className="history-head">
@@ -571,7 +828,17 @@ export default function App() {
             <button className="hbtn" onClick={startNewSession}>New conversation</button>
             <button className="hbtn" onClick={() => setShowHistory(false)}>Close</button>
           </div>
-          {!sessions.length && <p className="hempty">No saved conversations yet. They are kept in this browser only.</p>}
+          {/* Where they are kept is DIFFERENT in token mode, and the account badge two inches
+              away already promises that conversations follow the account to another browser.
+              The old line said the opposite of that, to the same person, on the same screen. */}
+          {!sessions.length && (
+            <p className="hempty">
+              No saved conversations yet.{' '}
+              {tokenMode
+                ? 'They will be saved to your I-GUIDE account and follow you to another browser.'
+                : 'They are kept in this browser only.'}
+            </p>
+          )}
           <ul className="hlist">
             {sessions.map((s2) => (
               <li key={s2.id} className={s2.id === sessionIdRef.current ? 'hrow current' : 'hrow'}>
@@ -584,25 +851,28 @@ export default function App() {
                   </span>
                 </button>
                 <button className="hdel" title="Delete this conversation"
-                  onClick={() => void deleteSession(s2.id).then(() => listSessions()).then(setSessions)}>×</button>
+                  onClick={() => void deleteSession(s2.id).then(() => refreshSessions())}>×</button>
               </li>
             ))}
           </ul>
         </div>
       )}
-      <div className="workspace">
-        {mapVisible && (
-          <LeftPanel
-            layers={layers} selected={selected}
-            onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
-            onFitLayer={fitLayer} onSetOpacity={setLayerOpacity} onClearSelection={() => setSelected(null)}
-          />
-        )}
+      <div className="workspace" style={{ '--chat-w': `${chatW}px` } as CSSProperties}>
         {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
             at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
             canvas painted nothing (observed 400x300 inside an 820x646 container). */}
         {mapVisible && (
-          <div className="mapwrap" ref={mapBoxRef}>
+          <div className="mapwrap" id="mapwrap" ref={mapBoxRef}>
+            {/* The layer manager floats over the MAP, so it has to be positioned against the map
+                pane. As a sibling of .mapwrap its containing block was .workspace — the full
+                width of BOTH panes — so a narrow map pushed it across the seam and over the
+                transcript, where its z-index 5 beats a static .chat. .mapwrap is already
+                position:relative, so this costs no CSS. */}
+            <LeftPanel
+              layers={layers} selected={selected}
+              onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
+              onFitLayer={fitLayer} onSetOpacity={setLayerOpacity} onClearSelection={() => setSelected(null)}
+            />
             {mapBoxReady && (
               <AgentMap
                 layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview}
@@ -619,18 +889,40 @@ export default function App() {
             )}
           </div>
         )}
+        {/* Only while there are two panes to divide. In chat-only the chat is a centred reading
+            column, and a handle beside it is dead chrome that would also shift the `margin:0 auto`
+            centring by half its width. */}
+        {mapVisible && (
+          <Splitter
+            chatMin={CHAT_W_MIN} mapMin={MAP_W_MIN} defaultWidth={CHAT_W_DEFAULT}
+            onResizeStart={() => { resizingRef.current = true; setResizing(true); }}
+            onResizeEnd={(px) => {
+              resizingRef.current = false;
+              setResizing(false);
+              setChatW(px);
+              // One settle pass, once the browser has laid the new width out. The per-frame refit
+              // was suppressed above; and a fitBounds still easing when the drag began was framed
+              // for the pre-drag width — MapLibre skips its own stop() for the whole 800ms of an
+              // ease, so nothing else would ever correct it.
+              requestAnimationFrame(() => {
+                const m = (window as any).__map;
+                if (m) { try { m.resize(); } catch { /* */ } }
+                refitAfterResize();
+              });
+            }}
+          />
+        )}
         <ChatPanel
-          messages={messages} busy={busy} hasRegion={!!drawnRegion} layers={layers}
+          messages={messages} busy={busy} tab={tab} hasRegion={!!drawnRegion} layers={layers}
           mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
           models={models}
-          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
+          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode && !tokenMode} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
           onSetSpatial={setSpatial}
-          onToggleSettings={() => setShowSettings((s) => !s)}
         />
       </div>
     </div>

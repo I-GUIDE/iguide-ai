@@ -3,6 +3,7 @@
 // the single swap point: replace parseIntent()+the executor with either the real
 // I-GUIDE agent endpoint or an LLM tool-router. See README "Where the real
 // system plugs in".
+import { isPlatformVariant } from './uiVariant';
 import { OVERPASS_PRESETS, type OverpassPreset } from './overpass';
 
 export type Intent =
@@ -85,13 +86,34 @@ export function parseIntent(text: string): Intent {
   return { kind: 'clarify', text };
 }
 
-// Starter prompts for the LIVE agent. The first two need nothing set up; the rest name
-// their prerequisite (an upload, a drawn region) so it is obvious what to do first.
-// These replace the mock-era examples ("Show cafés here", "Buffer the cafés by 2 km"),
-// which exercised the offline demo rather than the real toolkit.
-export const SUGGESTIONS = [
+// Starter prompts for the LIVE agent (issue #20). NONE of these needs anything set up first —
+// no upload, no drawn region — because a starter prompt that fails on a fresh session teaches
+// the wrong thing about the agent.
+//
+// They are ordered as a tour: what the agent is, what it has, one thing it does with a named
+// area, one thing it does with live geodata.
+//   1. capability introspection — answered from the LIVE tool registry, not a canned blurb
+//   2. list_embedding_models
+//   3. admin_boundary -> embed_region. `gse` on purpose: it is PRECOMPUTED and returns in
+//      seconds, where an on-the-fly model would make the first click look like a hang
+//   4. overpass_search -> a clickable map layer, which shows the delivery contract (the map IS
+//      the deliverable) without needing an upload
+export const SUGGESTIONS_RSEMBED = [
+  'What can you do?',
+  'Which satellite embedding models can I use?',
+  'Embed Urbana, Illinois with the GSE model',
+  'Show the popular restaurants in St. Louis',
+];
+
+// The ORIGINAL prototype prompts, kept verbatim from commit 76dab0b so the pre-#20 page can be
+// switched back to whole — chrome AND prompts together, which is the only way the switch is
+// actually a switch. Their own principle was different: the first two need nothing set up, the
+// rest name their prerequisite.
+export const SUGGESTIONS_PLATFORM = [
   'Find flood risk datasets on I-GUIDE',
   'Show hospitals near Chicago on the map',
   'Aggregate my uploaded points into a 1 km grid',
   'Embed the selected region with the GSE model',
 ];
+
+export const SUGGESTIONS = isPlatformVariant ? SUGGESTIONS_PLATFORM : SUGGESTIONS_RSEMBED;

@@ -10,7 +10,6 @@ from .executor_factory import (
 )
 from .graph_runtime import (
     run_agent_query,
-    run_code_agent_query,
     stream_agent_query_events,
 )
 from .runtime_utils import extract_final_answer
@@ -96,8 +95,8 @@ def main() -> None:
     parser.add_argument(
         "--tool-strategy",
         default="granular",
-        choices=["full_pipeline", "granular"],
-        help="Tool mode: granular uses modular search tools; full_pipeline uses rag_tool compatibility mode.",
+        choices=["granular"],
+        help="Tool mode: granular (the only mode; full_pipeline was removed).",
     )
     parser.add_argument(
         "--include-mcp-tools",
@@ -123,7 +122,7 @@ def main() -> None:
     args = parser.parse_args()
     selected_mcp_modules = [item.strip() for item in args.mcp_modules.split(",") if item.strip()]
 
-    runner = run_code_agent_query if args.agent_mode == "code" else run_agent_query
+    runner = run_agent_query
     result = runner(
         args.query,
         verbose=args.verbose,
@@ -148,7 +147,6 @@ __all__ = [
     "build_agent_executor",
     "build_code_agent_executor",
     "run_agent_query",
-    "run_code_agent_query",
     "stream_agent_query_events",
 ]
 

@@ -77,9 +77,15 @@ MAX_ANALYSIS_CHARS = 1500
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
+def selects_opencode(value: Optional[str]) -> bool:
+    """Does this AGENT_CODE_PEER value name this backend? (pure, so the env default
+    and a per-request override share one definition)."""
+    return (value or "").strip().lower() == "opencode"
+
+
 def is_opencode_peer_enabled() -> bool:
-    """Whether the code peer should run opencode instead of the LangChain agent."""
-    return (os.getenv(CODE_PEER_ENV) or "").strip().lower() == "opencode"
+    """Whether the deployment default selects opencode for the code peer."""
+    return selects_opencode(os.getenv(CODE_PEER_ENV))
 
 
 def _strip_ansi(text: str) -> str:
@@ -232,6 +238,11 @@ def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
                     "filename": rec["filename"],
                     "download_url": rec.get("download_url"),
                     "size_bytes": rec.get("size_bytes"),
+                    # The path RELATIVE to the work dir, which the basename cannot stand in
+                    # for once directories nest. A caller that persists across turns needs
+                    # to know exactly which files reached the store — the cap above and the
+                    # except below both mean "walked, not delivered".
+                    "path": str(rel),
                 }
             )
         except Exception:
@@ -247,7 +258,7 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
     from agent_runtime.langchain_exec_tools import _build_staging
 
     staging, staged_info, errors, skipped = _build_staging(refs)
-    staged, stage_errors = _stage_inputs(work, staging)
+    staged, stage_errors, _shadowed = _stage_inputs(work, staging)
     return {
         "staged": staged,
         "staged_info": staged_info,
@@ -310,6 +321,16 @@ def run_opencode(
 
         answer = _clip(_strip_ansi(stdout).strip())
         artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *staging["staged"]})
+        # No tools means no add_map_layer means nothing checked what this wrote. See
+        # layer_qa.inspect_artifacts.
+        from agent_runtime.layer_qa import inspect_artifacts
+
+        qa = inspect_artifacts(str(work), [a.get("filename") for a in artifacts])
+        # A peer with no tools still wrote geodata. Turn it into layer descriptors here,
+        # while the work dir still exists — the wrapper emits them from the request context.
+        from agent_runtime.map_layers import layers_for_artifacts
+
+        map_layers = layers_for_artifacts(work, artifacts)
         result: Dict[str, Any] = {
             "ok": error is None and not timed_out and exit_code == 0,
             "exit_code": exit_code,
@@ -321,6 +342,13 @@ def run_opencode(
             "backend": "opencode-docker",
             "model": model_ref(model),
         }
+        if qa:
+            result["output_warnings"] = qa
+        if map_layers:
+            result["map_layers"] = map_layers
+            # The supervisor's delivery check reads this off the execution record; without
+            # it a turn that DID put something on the map still counts as undelivered.
+            result["on_map"] = True
         if staging["staged_info"]:
             result["input_files"] = staging["staged_info"]
         if staging["errors"]:
@@ -374,6 +402,7 @@ def run_opencode_code_peer(
     """Code-peer adapter: returns the same flat shape as ``default_code_fn``
     (``answer`` + compact ``tool_calls``/``tool_results``) so synthesis and the
     trace pipeline are agnostic to which backend produced the code result."""
+    from agent_runtime.map_layers import build_map_layers
     from agent_runtime.streaming_trace import emit_trace_event
 
     # Resolve refs to the names the files will be staged under (file_id AND
@@ -407,7 +436,21 @@ def run_opencode_code_peer(
         },
         node="code",
     )
+    # The peer has no tools, so nothing emitted a map_layer on its behalf. This wrapper
+    # runs in the request's trace context — the same place a tool callback would — so the
+    # descriptors go out here, through the same build_map_layers boundary every tool's
+    # layer crosses, and get the same validation.
+    for layer in build_map_layers("opencode_run", result):
+        emit_trace_event("map_layer", layer, node="code")
+
     answer = result.get("answer") or ""
+    warnings = result.get("output_warnings") or []
+    if warnings:
+        lines = [f"- {w['file']}: {'; '.join(w['problems'])}" for w in warnings]
+        answer = "\n\n".join(x for x in (answer, "Checks on the files this run produced "
+                                                   "found problems — say so rather than "
+                                                   "presenting them as results:\n"
+                                                   + "\n".join(lines)) if x)
     if not result.get("ok"):
         failure = result.get("error") or f"opencode exited with code {result.get('exit_code')}"
         detail = str(result.get("stderr") or "")[-2000:]

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pytest
 import sys
 from pathlib import Path
 
@@ -116,6 +117,10 @@ def test_single_query() -> None:
         print(f"   [{hit['_score']:.4f}] {t[:70]}")
 
 
+# The only test here that needs the OPENSEARCH keyword path; the rest exercise the embedding
+# service and pass without it, so this guard is per-test rather than module-level.
+@pytest.mark.skipif(not (os.getenv("OPENSEARCH_NODE") or "").strip(),
+                    reason="live backend not configured: OPENSEARCH_NODE unset")
 def test_semantic_vs_keyword_divergence() -> None:
     _banner("TEST 4: Semantic vs keyword divergence")
     from rag_pipeline.search.keyword import get_keyword_search_results

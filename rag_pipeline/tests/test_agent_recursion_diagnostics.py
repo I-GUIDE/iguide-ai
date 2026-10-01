@@ -58,6 +58,9 @@ def test_recursion_error_includes_tool_diagnostics():
         {
             "name": "load_skill",
             "args": {"skill_name": "chicago-crime-analysis"},
+            # The call id is carried so a result can be paired to the call that produced it
+            # rather than by position within a tool name.
+            "id": "call_1",
         }
     ]
     assert diagnostics["tool_results"][0]["name"] == "load_skill"

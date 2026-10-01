@@ -6,8 +6,9 @@ import os
 import shutil
 import threading
 import time
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from werkzeug.datastructures import FileStorage
@@ -261,6 +262,169 @@ def resolve_file_id(file_id: str) -> Path:
     return path
 
 
+# Which conversation is writing. A ContextVar because the store is called from deep inside tool
+# code that has no idea what a session is — the same shape the streaming trace state uses, set
+# once per request at the edge. JWT will replace WHERE this value comes from, not what it does.
+_SESSION: ContextVar[Optional[str]] = ContextVar("agent_file_store_session", default=None)
+# Sentinel: `session=None` means "search every conversation", which is different from
+# "the caller did not say", and a default of None could not tell them apart.
+_UNSET = object()
+
+
+def set_session(session_id: Optional[str]) -> Any:
+    """Bind the conversation for this request. Returns a token for ContextVar.reset."""
+    return _SESSION.set(str(session_id).strip() or None if session_id else None)
+
+
+def reset_session(token: Any) -> None:
+    try:
+        _SESSION.reset(token)
+    except Exception:  # noqa: BLE001 - a stale token must not break a response
+        pass
+
+
+def current_session() -> Optional[str]:
+    return _SESSION.get()
+
+
+# ---------------------------------------------------------------------------
+# WHOSE file this is (token mode), as distinct from WHICH CONVERSATION wrote it
+# ---------------------------------------------------------------------------
+# Two independent axes, and conflating them loses one of them: a user has many conversations,
+# and in dev/demo there is no user at all. `session` keeps answering "which conversation", and
+# `owner_id` answers "whose". Outside token mode `owner_id` is None on every new record and
+# nothing changes — scoping stays exactly the per-conversation behaviour it is today.
+#
+# The value comes from the identity ContextVar rather than a second one of our own, so there is
+# one place a caller is established and one place it can be wrong.
+
+
+def current_owner() -> Optional[str]:
+    """The signed-in user's id, or None when this deployment does not identify anyone."""
+    try:
+        from agent_runtime import identity
+    except Exception:  # noqa: BLE001 - identity is optional; the store predates it
+        return None
+    return identity.current_user_id()
+
+
+def record_owner(record: Dict[str, Any]) -> Optional[str]:
+    value = (record or {}).get("owner_id")
+    return str(value).strip() or None if value else None
+
+
+def may_read(record: Dict[str, Any], *, allow_unowned: bool = True) -> bool:
+    """Whether the CURRENT caller may read this record.
+
+    With no caller — dev, demo, or a service request — this is always True and the store behaves
+    exactly as it did before ownership existed.
+
+    ``allow_unowned`` decides the one genuinely awkward case: 1,325 records predate ownership
+    and cannot be attributed to anyone. Treating them as readable keeps every existing reuse
+    working; treating them as denied is the safe reading for a browser download. The two callers
+    want different answers, so neither is hardcoded here.
+    """
+    caller = current_owner()
+    if not caller:
+        return True
+    owner = record_owner(record)
+    if owner is None:
+        return allow_unowned
+    return owner == caller
+
+
+def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
+               kind: Optional[str] = None, limit: int = 20,
+               session: Any = _UNSET,
+               include_unowned: bool = True) -> List[Dict[str, Any]]:
+    """Stored file records, newest first, optionally narrowed by name / extension / kind.
+
+    A ``file_id`` has been the store's only handle, and a ``file_id`` is exactly what a later
+    turn does not have: an answer surfaces an artifact by FILENAME with a download link, and the
+    id survives only in the process-local action ledger, which a restart discards. So a turn
+    asked to "predict from the package you saved for Champaign" had no way to reach a file it
+    could plainly see. This is the lookup that closes that gap.
+
+    ``name`` matches as a case-insensitive substring, so a filename remembered imprecisely still
+    finds its file. Ordering is by mtime, because records carry no timestamp of their own; ties
+    break on file_id so the result is deterministic.
+
+    ``include_unowned=False`` narrows the result to records this conversation actually wrote.
+    The default keeps unstamped records visible, which is right for REUSE — a saved embedding
+    package is worth offering whoever asks — and wrong for a question about this conversation,
+    where "the files you made" must not be answered with 1,325 files from everyone else.
+
+    There is no index — records are one json file each — so this scans the metadata directory,
+    which is the same scan ``create_output_file_from_path`` already does to honour ``overwrite``.
+    """
+    needle = (name or "").strip().lower()
+    want_suffix = (suffix or "").strip().lower()
+    # THIS conversation's files by default. A record written before sessions existed has no
+    # `session` and stays visible to everyone: the store holds 1,325 of them and hiding the lot
+    # would break every reuse the demo depends on. Pass session=None to search across all.
+    want_session = current_session() if session is _UNSET else session
+    out: List[Dict[str, Any]] = []
+    for meta_path in _metadata_dir().glob("*.json"):
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written record must not break the lookup
+            continue
+        filename = str(record.get("filename") or "")
+        if kind and str(record.get("kind") or "") != kind:
+            continue
+        if want_suffix and not filename.lower().endswith(want_suffix):
+            continue
+        if needle and needle not in filename.lower():
+            continue
+        owner = record.get("session")
+        if want_session and owner and owner != want_session:
+            continue
+        if want_session and not owner and not include_unowned:
+            continue
+        # Another user's file is never a candidate, in any conversation. Unowned records stay
+        # visible: they are the legacy reuse pool, they were created by a deployment that
+        # identified nobody, and hiding them would break the reuse this lookup exists for.
+        if not may_read(record, allow_unowned=True):
+            continue
+        try:
+            path = _record_path(record)
+            if not path.exists():
+                continue
+            stamped = {**record, "_mtime": path.stat().st_mtime}
+        except Exception:  # noqa: BLE001
+            continue
+        out.append(stamped)
+    out.sort(key=lambda r: (r.get("_mtime") or 0, str(r.get("file_id"))), reverse=True)
+    return [_with_public_url({k: v for k, v in r.items() if k != "_mtime"})
+            for r in out[:max(1, int(limit))]]
+
+
+def resolve_file_ref(ref: str, *, suffix: Optional[str] = None
+                     ) -> Tuple[Path, Dict[str, Any], List[Dict[str, Any]]]:
+    """A path for a file named either by its ``file_id`` or by its filename.
+
+    Returns the path, the record it resolved to, and any OTHER records that matched the same
+    name. The caller is expected to say which one it used whenever that list is non-empty:
+    "the Champaign package" can legitimately name several files, and silently taking the newest
+    would be a guess reported as a fact.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        raise ValueError("no file_id or filename given")
+    try:
+        return resolve_file_id(text), require_file_record(text), []
+    except Exception:  # noqa: BLE001 - not an id, so try it as a name
+        pass
+    # A high limit on purpose: the CALLER reports how many matched, and find_files' default page
+    # size of 20 made that count the page size rather than the truth — "20 saved packages match"
+    # where 32 did. The caller still shows only a handful.
+    matches = find_files(name=text, suffix=suffix, limit=500)
+    if not matches:
+        raise ValueError(f"no stored file matches {text!r}")
+    first = matches[0]
+    return resolve_file_id(str(first["file_id"])), first, matches[1:]
+
+
 def _write_record(record: Dict[str, Any]) -> Dict[str, Any]:
     _metadata_path(record["file_id"]).write_text(json.dumps(record, ensure_ascii=True, indent=2), encoding="utf-8")
     return record
@@ -307,6 +471,8 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
         "file_id": file_id,
         "filename": original_name,
         "kind": "upload",
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -343,6 +509,11 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -387,6 +558,11 @@ def create_output_file_from_path(
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -398,6 +574,8 @@ def create_output_file_from_path(
 __all__ = [
     "create_output_file",
     "create_output_file_from_path",
+    "find_files",
+    "resolve_file_ref",
     "get_file_record",
     "maybe_sweep_expired_files",
     "require_file_record",

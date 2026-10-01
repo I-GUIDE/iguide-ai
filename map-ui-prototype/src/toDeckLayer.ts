@@ -95,7 +95,9 @@ export function toDeckLayer(a: LayerArtifact) {
     visible: a.visible !== false,
     pickable: true,
     stroked: true,
-    filled: true,
+    // An outline layer frames what is underneath instead of covering it — the case that
+    // matters is a zone boundary over its own pixel-embedding raster.
+    filled: !a.outline,
     extruded: !!s.extruded,
     getElevation: s.elevation ?? 0,
     pointType: 'circle',
@@ -103,8 +105,9 @@ export function toDeckLayer(a: LayerArtifact) {
     // On a choropleth the FILL carries the number, so the outline must stay out of its way:
     // a 708-cell hex grid drawn with the standard 2px purple border read as an empty mesh —
     // the borders covered more pixels than the shaded interiors. Hairline grey instead.
-    getLineColor: ramp ? [90, 90, 105, 90] : line,
-    getLineWidth: ramp ? (s.lineWidth ?? 0.5) : (s.lineWidth ?? 2),
+    getLineColor: a.outline ? (s.line ?? [90, 60, 160, 255]) : (ramp ? [90, 90, 105, 90] : line),
+    getLineWidth: a.outline ? (s.lineWidth ?? 2.5)
+                            : (ramp ? (s.lineWidth ?? 0.5) : (s.lineWidth ?? 2)),
     lineWidthUnits: 'pixels',
     getPointRadius: s.pointRadius ?? 6,
     pointRadiusUnits: s.radiusUnits ?? 'pixels',

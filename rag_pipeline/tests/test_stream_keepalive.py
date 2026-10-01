@@ -36,7 +36,6 @@ def test_keepalive_rendered_as_sse_comment(monkeypatch):
         yield {"event": "response", "data": {"answer": "hi", "thread_id": "t"}}
     monkeypatch.setattr(srv, "stream_agent_chat_events", fake_stream)
     monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)
-    monkeypatch.setenv("AGENT_CHAT_AUTH_OPTIONAL", "1")  # auth fails closed; opt out explicitly
 
     client = srv.app.test_client()
     resp = client.post("/agent/chat/stream", json={"userQuery": "hi"})

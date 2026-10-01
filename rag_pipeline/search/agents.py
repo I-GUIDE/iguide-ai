@@ -59,12 +59,11 @@ log = logging.getLogger("search_agents")
 # ---------------------------------------------------------------------------
 
 def _getenv(name: str, required: bool = True, default: Optional[str] = None) -> str:
-    value = os.getenv(name, default)
-    if required and (value is None or value == ""):
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    if value and len(value) >= 2 and value[0] == value[-1] in ('"', "'"):
-        value = value[1:-1]
-    return value or ""
+    """Delegates to the shared helper. This was a verbatim copy of it, which meant the tier
+    rule would have applied to every search module except this one — and this one resolves
+    OPENSEARCH_INDEX."""
+    from .utils import getenv as _shared
+    return _shared(name, required=required, default=default)
 
 
 def _retry(times: int = 3, base_delay: float = 0.25, exc: Tuple = (Exception,)):

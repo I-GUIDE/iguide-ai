@@ -44,7 +44,10 @@ export function LeftPanel(p: Props) {
               <li key={l.id} className={visible ? '' : 'off'}>
                 <button className="eye" title={visible ? 'Hide' : 'Show'} onClick={() => p.onToggleLayer(l.id)}>{visible ? '👁' : '⦰'}</button>
                 <span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />
-                <button className="lname" title="Zoom to layer" onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
+                {/* The name is clipped to the panel width, so the title carries it in full —
+                    otherwise two layers whose names differ past the ellipsis are unreadable. */}
+                <button className="lname" title={`${l.label}\nZoom to layer`}
+                  onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
                 <span className="cnt" title={partial ? `sample of ${partial.total}` : undefined}>
                   {partial ? `${partial.shown}/${partial.total}` : (n ?? "img")}
                 </span>

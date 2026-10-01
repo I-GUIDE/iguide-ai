@@ -57,6 +57,15 @@ def make_state(query: str) -> MutableMapping[str, Any]:
 
 
 
+_LIVE_VARS = ("OPENSEARCH_NODE", "GOOGLE_MAPS_API_KEY", "ANVILGPT_URL", "ANVILGPT_KEY")
+_MISSING = [v for v in _LIVE_VARS if not (os.getenv(v) or "").strip()]
+
+
+# Runs the whole pipeline against live APIs (OpenSearch, Google Maps geocoding, AnvilGPT
+# generation), so with none of them configured it used to fail on an empty result set rather
+# than say why. Its own docstring already listed these as requirements.
+@pytest.mark.skipif(bool(_MISSING),
+                    reason="live backend not configured: " + ", ".join(_MISSING) + " unset")
 # Live-service test: needs a reachable OpenSearch cluster, the embedding server and
 # Neo4j. Marked `integration` so a clean `pytest` on a fresh clone is GREEN — these
 # three were the only red in the suite, and a suite that is red by default trains

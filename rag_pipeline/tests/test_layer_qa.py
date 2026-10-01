@@ -119,3 +119,70 @@ def test_a_missing_file_never_raises():
     """A checker that breaks must not break the delivery it was inspecting."""
     assert inspect_geojson("/nope/missing.geojson")["ok"] is True
     assert inspect_image("/nope/missing.png")["ok"] is True
+
+
+def test_inspect_artifacts_finds_the_blank_outputs_a_cli_peer_leaves(tmp_path):
+    """A sandboxed CLI peer has no tools, so add_map_layer never sees what it wrote and
+    nothing between it and the user looks at the output. Its own summary will not mention
+    that the figure came out blank — it did not look either."""
+    import json as _json
+
+    from agent_runtime.layer_qa import inspect_artifacts
+
+    (tmp_path / "empty.geojson").write_text(
+        _json.dumps({"type": "FeatureCollection", "features": []}))
+    (tmp_path / "notes.txt").write_text("nothing to check here")
+    try:
+        from PIL import Image
+        Image.new("RGB", (40, 40), (255, 255, 255)).save(tmp_path / "plot.png")
+        expect_image = True
+    except ImportError:
+        expect_image = False
+
+    found = inspect_artifacts(str(tmp_path), ["empty.geojson", "notes.txt", "plot.png",
+                                              "missing.geojson"])
+    by_file = {f["file"]: f["problems"] for f in found}
+
+    assert "empty.geojson" in by_file
+    assert any("no features" in p for p in by_file["empty.geojson"])
+    if expect_image:
+        assert "plot.png" in by_file, "an all-white figure is the classic silent failure"
+    assert "notes.txt" not in by_file, "a text file has nothing to check"
+    assert "missing.geojson" not in by_file, "a name with no file is not a finding"
+
+
+def test_inspect_artifacts_is_quiet_when_the_output_is_fine(tmp_path):
+    """Empty means nothing detectable is wrong, and it must stay empty for real output —
+    a checker that cries wolf gets ignored, which is worse than not having one."""
+    import json as _json
+
+    from agent_runtime.layer_qa import inspect_artifacts
+
+    (tmp_path / "ok.geojson").write_text(_json.dumps({
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {"v": 1},
+             "geometry": {"type": "Point", "coordinates": [-87.6, 41.8]}},
+            {"type": "Feature", "properties": {"v": 2},
+             "geometry": {"type": "Point", "coordinates": [-87.5, 41.9]}},
+        ]}))
+    assert inspect_artifacts(str(tmp_path), ["ok.geojson"]) == []
+    assert inspect_artifacts(str(tmp_path / "nope"), ["ok.geojson"]) == []
+
+
+def test_the_llm_trace_names_the_model_not_the_langchain_class():
+    """AnvilGPT, vLLM and every other OpenAI-compatible endpoint arrive as ChatOpenAI, so the
+    trace said "ChatOpenAI started with 2 message(s)" while gpt-oss:120b or qwen3.6:27b was
+    answering. The transport does not tell you who answered — the invocation params do."""
+    from agent_runtime.streaming_trace import StreamingTraceCallbackHandler as H
+
+    serialized = {"name": "ChatOpenAI"}
+    assert H._model_label(serialized, {"invocation_params": {"model": "gpt-oss:120b"}}) \
+        == "gpt-oss:120b"
+    assert H._model_label(serialized, {"invocation_params": {"model_name": "qwen3.6:27b"}}) \
+        == "qwen3.6:27b"
+    assert H._model_label(serialized, {"metadata": {"ls_model_name": "claude-sonnet-5"}}) \
+        == "claude-sonnet-5"
+    # No params at all: the class name is still better than nothing.
+    assert H._model_label(serialized, {}) == "ChatOpenAI"
+    assert H._model_label(None, {}) == "chat_model"

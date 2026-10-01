@@ -39,6 +39,16 @@ export type LayerArtifact =
       legend?: Legend[];
       fitBounds?: boolean;
       visible?: boolean;
+      // Pointer to the saved vectors behind the picture, when there are any. Persisted with the
+      // layer, so a session restored tomorrow still knows which package each raster came from.
+      embedding?: {
+        file_id: string;
+        filename?: string;
+        model?: string;
+        months?: string;
+        models_in_package?: string[];
+        recoloured_on_shared_basis?: boolean;
+      };
     }
   | {
       kind: 'geojson';
@@ -53,6 +63,10 @@ export type LayerArtifact =
       // path: Number('High-High') is NaN, so a categorical column on the choropleth ramp
       // renders every feature in one flat colour.
       styleBy?: string;   // property to shade by: numeric (choropleth) or class name (categories)
+      // Draw the boundary only, leaving the interior clear. A filled polygon over a raster
+      // hides the raster: the embedded tract came back as a solid violet slab covering the
+      // very pixel image it was framing.
+      outline?: boolean;
       partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
       fitBounds?: boolean;

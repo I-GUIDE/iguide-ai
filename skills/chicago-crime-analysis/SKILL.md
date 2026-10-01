@@ -20,11 +20,12 @@ Use this skill when the user asks about Chicago crime incidents, crime-type summ
 
 1. Call `agent_kb_search("load chicago crime data community areas")` to find the contributed Chicago crime blocks; note the cited `element_id`.
 2. Call `get_kb_block(<element_id or block doc_id>)` to read the FULL source of the loader/analysis functions — typically `load_chicago_crime_data`, `load_chicago_community_areas`, `filter_dataframe_by_value`, `spatial_join_and_count`. These already contain the real data URLs/APIs (the City of Chicago Socrata API for incidents and the community-area boundary GeoJSON).
-3. In `execute_code`, paste the reused function source verbatim, call it to load the data, then:
+3. Get the data in as a FILE — the sandbox runs with `--network none`, so a Socrata or GeoJSON URL called from inside it always fails. The data has to arrive as an `input_files` entry: either the user attached it to the turn, or a tool you have returns it as a file. `web_fetch` will not do it — it returns a page's on-topic passages, not a dataset. If neither route is available, say the data is not reachable and ask for the file — do not write a loader that cannot run.
+4. In `execute_code`, paste the reused ANALYSIS source verbatim and point it at the staged files instead of the URLs — keep the logic, replace only the fetch. Then:
    - **crime-type filter:** keep rows whose category matches the requested type(s);
    - **counts by community area:** spatially join incidents to community polygons and count;
    - **map — match the user's words:** a "heat map" / "hotspot" / "density" request → a hexbin or KDE **point-density** map of the incident points (not a choropleth); a "choropleth" / "by community area" / "by region" request → **shaded polygons** of counts per area. Produce the type asked for — do not substitute one for the other — and SAVE it with `plt.savefig('result.png', bbox_inches='tight')` (the sandbox is headless — never rely on `plt.show()`).
-4. Report the result and cite the source `element_id`.
+5. Report the result and cite the source `element_id`.
 
 ## Answer requirements
 

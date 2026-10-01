@@ -310,13 +310,23 @@ def test_the_staging_tools_are_registered_with_the_names_the_filter_allows():
 
 
 def test_staging_shares_the_workspace_the_sandbox_mounts():
-    """The execution tools key their workspace on `child_thread_id(thread_id, "code_exec")`.
-    Staging into a different key would put the bytes in a directory the sandbox never mounts, and
-    the failure would surface inside a container with no network as "file not found"."""
+    """Staging and execute_code must key the workspace identically. Staging into a different key
+    would put the bytes in a directory the sandbox never carries into /work, and the failure would
+    surface inside a container with no network as "file not found".
+
+    The key is prototype's "codeexec" (what deployed conversations' workspaces already use);
+    backend_swap used "code_exec" until the 2026-10-01 integration."""
+    import re
+
     source = Path(__file__).resolve().parents[2] / "agent_runtime" / "supervisor" / "graph.py"
     text = source.read_text(encoding="utf-8")
+    key = re.compile(r'child_thread_id\(state\.get\("thread_id"\), "([a-z_]+)"\)')
     staging_call = text.split("make_langchain_staging_tools(", 1)[1][:200]
-    assert 'child_thread_id(state.get("thread_id"), "code_exec")' in staging_call, staging_call
+    staging_key = key.search(staging_call).group(1)
+    exec_keys = {m.group(1) for m in key.finditer(text)
+                 if "make_code_execution_tools(" in text[max(0, m.start() - 300):m.start()]}
+    assert staging_key == "codeexec", staging_call
+    assert exec_keys == {staging_key}, (staging_key, exec_keys)
 
 
 def test_a_refusal_reaches_the_model_as_an_answer_not_a_traceback():

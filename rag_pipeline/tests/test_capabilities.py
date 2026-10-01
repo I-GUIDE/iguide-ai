@@ -50,43 +50,76 @@ def test_inventory_is_read_from_the_live_registries():
 
 
 def test_new_tool_appears_without_touching_this_module(monkeypatch):
-    """Data-driven proof: a tool that exists only in the registry reaches the LLM prompt."""
-    from types import SimpleNamespace
+    """Data-driven proof: a tool that exists only in the registry reaches the MODEL.
+
+    It now arrives through the introspection tool rather than being pasted into a prompt —
+    which is what removed the 12,000-char truncation that used to drop 56% of the surface.
+    """
     import agent_runtime.capabilities as cap
 
-    monkeypatch.setattr(cap, "collect_capability_inventory", lambda **k: {
-        "tools": [{"name": "brand_new_tool", "description": "Does a brand new thing."}],
-        "code_execution": {"enabled": True, "sandbox_backend": "docker"}, "skills": [],
-    })
-    seen = {}
+    from langchain_core.tools import tool
 
-    def fake_llm(prompt):
-        seen["prompt"] = prompt
-        return "Composed answer."
-    assert cap.describe_capabilities(llm=fake_llm) == "Composed answer."
-    assert "brand_new_tool" in seen["prompt"]           # inventory reached the model
-    assert "Does a brand new thing." in seen["prompt"]
+    @tool
+    def brand_new_tool(x: str) -> str:
+        """Does a brand new thing."""
+        return x
+
+    # Stub at the DISCOVERY seam, which is the real contract now: a registry appears and its
+    # tools come with it, without this module (or the tool) naming either.
+    monkeypatch.setattr(cap, "_discover_registry_factories",
+                        lambda: [("make_brand_new_tools", lambda: [brand_new_tool])])
+
+    introspect = cap.make_capability_tools(include_mcp_tools=False)[0]
+    assert "brand_new_tool" in introspect.invoke({})                      # in the area map
+    assert "Does a brand new thing." in introspect.invoke({"area": "brand_new"})
 
 
-def test_answer_is_llm_composed_from_the_inventory():
-    """describe_capabilities delegates the wording to the LLM (no authored capability prose)."""
+def test_answer_is_llm_composed_not_authored(monkeypatch):
+    """The wording is still the model's — there is no authored capability prose anywhere.
+
+    Previously this asserted the prompt contained "Tool inventory"; the inventory now reaches
+    the model as a tool result, so the contract is about WHERE the answer comes from.
+    """
     from agent_runtime.capabilities import describe_capabilities
+    import agent_runtime.executor_factory as ef
+
+    monkeypatch.setattr(ef, "build_default_llm", lambda: object())
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **kw: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback",
+                        lambda *a, **k: {"messages": [_Msg("**Finding things**\nI can search.")]})
+
+    assert describe_capabilities(query="what can you do?") == \
+        "**Finding things**\nI can search."
+
+
+class _Msg:
+    """An AI message shaped the way extract_final_answer reads one."""
+
+    def __init__(self, content):
+        self.content = content
+        self.tool_calls = []
+
+
+def test_the_agent_is_given_the_means_to_introspect(monkeypatch):
+    """A fixed prompt can only answer the question it was written for; the loop can look."""
+    from agent_runtime.capabilities import describe_capabilities
+    import agent_runtime.executor_factory as ef
+
     captured = {}
 
-    class _LLM:
-        def invoke(self, prompt):
-            captured["prompt"] = prompt
-            return SimpleNamespaceContent("**Finding things**\nI can search the platform.")
+    def _build(**kw):
+        captured["tools"] = [str(getattr(t, "name", "")) for t in (kw.get("preloaded_tools") or [])]
+        captured["prompt"] = kw.get("system_prompt_override") or ""
+        return object()
 
-    class SimpleNamespaceContent:
-        def __init__(self, content):
-            self.content = content
+    monkeypatch.setattr(ef, "build_default_llm", lambda: object())
+    monkeypatch.setattr(ef, "build_agent_executor", _build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback",
+                        lambda *a, **k: {"messages": [_Msg("ok")]})
 
-    out = describe_capabilities(llm=_LLM())
-    assert out == "**Finding things**\nI can search the platform."
-    p = captured["prompt"]
-    assert "Tool inventory" in p and "keyword_search" in p        # live inventory in the prompt
-    assert "Do NOT name internal tools" in p                      # style constraint enforced
+    describe_capabilities(query="can you handle GeoTIFF?")
+    assert "list_my_capabilities" in captured["tools"]
+    assert "INTROSPECT" in captured["prompt"]
 
 
 def test_mechanical_fallback_when_no_model_answers():
@@ -94,9 +127,17 @@ def test_mechanical_fallback_when_no_model_answers():
     blurb."""
     from agent_runtime.capabilities import describe_capabilities
 
-    def broken_llm(prompt):
+    import agent_runtime.executor_factory as ef
+
+    def _boom(**kwargs):
         raise RuntimeError("llm down")
-    text = describe_capabilities(llm=broken_llm)
+
+    ef_build = ef.build_agent_executor
+    ef.build_agent_executor = _boom
+    try:
+        text = describe_capabilities(query="what can you do?")
+    finally:
+        ef.build_agent_executor = ef_build
     assert "Available capabilities:" in text
     assert "keyword_search" in text          # mechanical listing derived from the inventory
 
@@ -111,13 +152,11 @@ def test_graph_routes_capability_question_deterministically(monkeypatch):
         raise AssertionError("orchestrate strategy must not run for a capability question")
     monkeypatch.setattr(strat, "get_orchestration_strategy", explode)
 
-    class _LLM:
-        def invoke(self, prompt):
-            assert "Tool inventory" in prompt      # composed from the live inventory
-            class R:
-                content = "I can search the knowledge base and run analyses."
-            return R()
+    import agent_runtime.executor_factory as ef
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **kw: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {
+        "messages": [_Msg("I can search the knowledge base and run analyses.")]})
 
-    graph = og.build_orchestrator_graph(llm=_LLM())
+    graph = og.build_orchestrator_graph(llm=object())
     state = graph.invoke({"query": "what tools do you have", "chat_history": [], "thread_id": None})
     assert state.get("final_answer") == "I can search the knowledge base and run analyses."

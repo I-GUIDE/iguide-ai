@@ -14,12 +14,13 @@ location is a throwaway work dir whose files are persisted as output artifacts.
 A ``local`` subprocess backend exists for development only — it is **NOT a
 sandbox** (it runs on the host) and must be opted into explicitly.
 
-Gated by ``AGENT_CODE_EXEC`` (off by default). Treat all executed code as
+Gated by ``AGENT_CODE_EXEC``, which defaults to ON. Treat all executed code as
 untrusted.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -28,14 +29,31 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+def _num_env(name: str, default: float) -> float:
+    """A numeric env var that tolerates being present but blank.
 
+    `.env` files and compose interpolation both produce ``KEY=`` for an unset optional value,
+    and a bare ``int(os.getenv(...))`` on that raises at IMPORT time — which does not degrade
+    the sandbox, it takes the whole process down before it serves a request.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+# NOTE the default is the SLIM image on purpose: a fresh checkout must be able to run code
+# without first building anything. The pre-baked image is opt-in via the env var, and the
+# probe below reports which one is actually in play — see _log_image_choice.
 DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
 DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
@@ -65,183 +83,29 @@ DEPS_DIRNAME = ".deps"
 # rather than the small in-container tmpfs, so installing big wheels (numpy/matplotlib)
 # doesn't run out of space.
 PIPTMP_DIRNAME = ".piptmp"
+
+# A conversation's durable workspace is never reaped otherwise: one directory per thread,
+# forever, including every one-off question. That was survivable while a workspace held a few
+# output files; it is not once it also holds a site-packages tree.
+WORKSPACE_TTL_HOURS = _num_env("AGENT_CODE_EXEC_WS_TTL_HOURS", 72.0)
+# Above this, the conversation's dependency cache is dropped and rebuilt. A cache is an
+# optimisation, so the safe failure is to lose it, never to fill the disk.
+DEPS_CACHE_MAX_MB = int(_num_env("AGENT_CODE_EXEC_DEPS_CACHE_MB", 2048))
+# How often the TTL sweep may actually walk the work root (see _sweep_workspaces).
+SWEEP_INTERVAL_S = 600.0
+_last_sweep = 0.0
 # When set, per-run sandbox work dirs are created under this path instead of the
 # system temp dir. This is REQUIRED for Docker-out-of-Docker (agent runs in a
 # container, shelling out to the host daemon): the path must exist at the SAME
 # absolute location on the host (a shared bind mount), so the `docker run -v <work>:/work`
 # the agent issues resolves to a real host directory the daemon can mount.
 WORK_ROOT_ENV = "AGENT_CODE_EXEC_WORK_ROOT"
-
-# --- persistent per-session workspaces -------------------------------------------------
-# Runs used to get a fresh mkdtemp() that was rmtree'd in a `finally`, so a workspace
-# never outlived one call and step 2 could not read step 1's output. That was the hard
-# ceiling on multi-step workflows: no matter how capable the model, "load the data, then
-# join it, then map it" could not be expressed across calls.
-SESSIONS_DIRNAME = "sessions"
 # The extracted method library is mounted READ-ONLY so the agent can
 # `from iguide_methods import ...` and compose validated units in Python instead of chaining
 # tool calls. Read-only because the library is generated from ingested elements: a run must
 # never be able to edit the thing later runs will trust.
 METHOD_LIBRARY_DIRNAME = "method_library"
 METHOD_LIBRARY_MOUNT = "/opt/iguide_methods"
-# Records (mtime_ns, size) per file so a run persists only what it actually produced.
-ARTIFACT_INDEX_FILENAME = ".iguide_artifact_index.json"
-# Reclamation: workspaces are swept by age, and capped in size so one runaway session
-# cannot fill the shared work-root bind mount.
-WORKSPACE_TTL_HOURS = float(os.getenv("AGENT_CODE_EXEC_WORKSPACE_TTL_HOURS", "24"))
-WORKSPACE_MAX_MB = float(os.getenv("AGENT_CODE_EXEC_WORKSPACE_MAX_MB", "2048"))
-
-# Execution tiers. 512m/1cpu/60s is a quick-tool budget, not an analysis budget: a
-# county-level spatial join on a national layer OOMs or times out under it, which teaches
-# the model to avoid real computation. `heavy` is gated because it is a real resource
-# commitment on a shared host.
-EXEC_TIERS: Dict[str, Dict[str, str]] = {
-    "quick":    {"timeout": "60",  "memory": "512m", "cpus": "1.0"},
-    "standard": {"timeout": "300", "memory": "2g",   "cpus": "2.0"},
-    "heavy":    {"timeout": "900", "memory": "6g",   "cpus": "4.0"},
-}
-DEFAULT_TIER = os.getenv("AGENT_CODE_EXEC_DEFAULT_TIER", "standard")
-
-
-def _allow_heavy() -> bool:
-    return (os.getenv("AGENT_CODE_EXEC_ALLOW_HEAVY", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def resolve_tier(tier: Optional[str]) -> Tuple[str, Dict[str, str]]:
-    """Return (tier_name, limits). Unknown or ungated tiers fall back, never raise."""
-    name = (tier or DEFAULT_TIER or "standard").strip().lower()
-    if name not in EXEC_TIERS:
-        name = "standard" if "standard" in EXEC_TIERS else "quick"
-    if name == "heavy" and not _allow_heavy():
-        logger.info("execution tier 'heavy' requested but AGENT_CODE_EXEC_ALLOW_HEAVY is off; using 'standard'")
-        name = "standard"
-    return name, dict(EXEC_TIERS[name])
-
-
-def _safe_session_id(session_id: Optional[str]) -> str:
-    """Sanitise a session id for use as a single path segment.
-
-    Modelled on ``rag_pipeline/qgis_headless_tools.py:153`` but NOT identical, because that
-    version is unsafe for this use: its allowlist ``[^A-Za-z0-9_.-]`` permits dots, so the
-    id ``".."`` survives sanitisation untouched. ``<sessions_root>/..`` is the work root
-    itself — and since ``sweep_workspaces`` removes expired workspaces, an id of ``".."``
-    could take the whole shared work root with it.
-
-    So any purely-dot name is rejected outright. (``../../etc/passwd`` was already safe: the
-    separators become underscores, leaving one harmless segment.)
-    """
-    value = (session_id or "default").strip() or "default"
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:120]
-    if not cleaned or set(cleaned) <= {"."}:      # "", ".", "..", "..." -> path-special
-        return "default"
-    return cleaned
-
-
-def _sessions_root() -> Optional[Path]:
-    root = _work_root()
-    base = Path(root) if root else Path(tempfile.gettempdir())
-    return base / SESSIONS_DIRNAME
-
-
-def session_work_dir(session_id: str) -> Path:
-    """The persistent workspace for *session_id*, created if absent.
-
-    Defence in depth: the resolved path is asserted to sit inside the sessions root, so a
-    future change to the sanitiser cannot silently reintroduce an escape.
-    """
-    root = (_sessions_root() or Path(tempfile.gettempdir()))
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / _safe_session_id(session_id)
-    root_resolved = root.resolve()
-    if not str(path.resolve()).startswith(str(root_resolved)):
-        logger.error("session workspace %r escaped the sessions root; using 'default'", session_id)
-        path = root / "default"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _deps_marker_path(work: Path) -> Path:
-    return work / DEPS_DIRNAME / ".installed.json"
-
-
-def _deps_satisfied(work: Path, dependencies: List[str]) -> bool:
-    """True when every requested dep was already installed into this workspace's .deps.
-
-    Only meaningful for a persistent workspace: a throwaway dir never has a prior install.
-    Compared as an exact set of the sanitised specs, so a version change reinstalls.
-    """
-    try:
-        recorded = set(json.loads(_deps_marker_path(work).read_text(encoding="utf-8")) or [])
-    except (OSError, ValueError):
-        return False
-    return bool(recorded) and set(dependencies).issubset(recorded)
-
-
-def _record_deps(work: Path, dependencies: List[str]) -> None:
-    marker = _deps_marker_path(work)
-    try:
-        prior = set(json.loads(marker.read_text(encoding="utf-8")) or [])
-    except (OSError, ValueError):
-        prior = set()
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps(sorted(prior | set(dependencies))), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def method_library_dir() -> Optional[Path]:
-    """Host path of the generated method library, or None when nothing is ingested yet."""
-    override = (os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip()
-    if override:
-        p = Path(override).expanduser()
-        return p if p.is_dir() else None
-    try:
-        from agent_runtime.file_store import storage_root
-        p = Path(storage_root()) / METHOD_LIBRARY_DIRNAME
-    except Exception:
-        return None
-    return p if p.is_dir() else None
-
-
-def _dir_size_mb(path: Path) -> float:
-    total = 0
-    for p in path.rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
-    return total / (1024 * 1024)
-
-
-def sweep_workspaces(*, ttl_hours: Optional[float] = None) -> Dict[str, int]:
-    """Remove session workspaces older than the TTL. Returns a small summary.
-
-    Cheap and best-effort: called opportunistically before creating a workspace rather than
-    on a timer, because there is no scheduler in this process.
-    """
-    ttl = WORKSPACE_TTL_HOURS if ttl_hours is None else ttl_hours
-    root = _sessions_root()
-    summary = {"examined": 0, "removed": 0}
-    if not root or ttl <= 0:
-        return summary
-    cutoff = time.time() - (ttl * 3600)
-    try:
-        entries = list(root.iterdir())
-    except OSError:
-        return summary
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        summary["examined"] += 1
-        try:
-            if entry.stat().st_mtime < cutoff:
-                shutil.rmtree(entry, ignore_errors=True)
-                summary["removed"] += 1
-        except OSError:
-            continue
-    return summary
 
 # A conservative pip requirement spec: name[extras]version-specifiers. No flags,
 # no whitespace, no shell/path characters — deps are passed as argv (never a shell).
@@ -295,24 +159,6 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
     return allowed[:MAX_DEPS], rejected
 
 
-def artifacts_enabled() -> bool:
-    from agent_runtime.artifacts import artifacts_enabled as _enabled
-    return _enabled()
-
-
-def invariant_gate_enabled() -> bool:
-    """Whether to append the in-sandbox invariant checks. **On by default.**
-
-    Default-on is deliberate: the failure it catches — a distance computed in a geographic
-    CRS — produces a plausible number and no error, so a gate that is off by default protects
-    nobody. Set ``AGENT_INVARIANT_GATE`` to a falsy value to disable it. The epilogue cannot
-    fail a run (every check is guarded and the writer swallows OSError), so the cost of
-    leaving it on is one JSON file.
-    """
-    return (os.getenv("AGENT_INVARIANT_GATE", "1") or "").strip().lower() not in {
-        "0", "false", "no", "off"}
-
-
 # The sandbox image ships no third-party packages, so code that imports pandas dies with
 # ModuleNotFoundError unless `dependencies` was passed. Observed in every data task: the model
 # omits it, burns a container run, reads the traceback, then retries the byte-identical code
@@ -335,6 +181,116 @@ def _infer_deps(code: str, declared: List[str]) -> List[str]:
     return [pip for mod, pip in _IMPORT_TO_PIP.items() if mod in tops and pip.lower() not in have]
 
 
+# ---------------------------------------------------------------------------
+# What the sandbox image already ships
+# ---------------------------------------------------------------------------
+# ``pip install --target /work/.deps`` installs UNCONDITIONALLY — it does not consult the
+# image's own site-packages. So baking pandas into the sandbox image saves nothing on its own:
+# the install phase still runs and still spends its budget. The executor closes that gap by
+# asking the image what it can already import and dropping those from the install list.
+#
+# The set is PROBED rather than declared, because a declared list drifts: an image that stops
+# shipping a package would then suppress an install the code needs, and the run would die on
+# ModuleNotFoundError with nothing naming the cause. A probe that fails returns nothing, so the
+# worst case is the install phase we already pay for today.
+PREINSTALLED_ENV = "AGENT_CODE_EXEC_PREINSTALLED"
+PROBE_TIMEOUT = int(_num_env("AGENT_CODE_EXEC_PROBE_TIMEOUT", 60))
+
+_LOG = logging.getLogger(__name__)
+_probe_cache: Dict[str, frozenset] = {}
+_image_logged: set = set()
+_probe_lock = threading.Lock()
+
+# A REAL import, not importlib.util.find_spec. find_spec locates the module file without
+# loading it, so it answers True for a package whose extension module cannot link — measured:
+# fiona and rasterio in a slim-based image find fine and then die on
+# `ImportError: libexpat.so.1`. Skipping the install on the strength of that turns a slow run
+# into a broken one, which is precisely the drift this probe exists to prevent. Importing all
+# twenty costs ~2.5 s, once per process.
+# Reports {pip_name: version}. The VERSION matters as much as the presence: see
+# _constraints_text — an install into --target re-resolves the whole closure, so without the
+# image's own versions to pin against it silently replaces them.
+_PROBE_SCRIPT = (
+    "import importlib, json, sys\n"
+    "try:\n"
+    "    from importlib.metadata import version as _v\n"
+    "except Exception:\n"
+    "    _v = lambda n: ''\n"
+    "out = {}\n"
+    "for mod, pip in json.loads(sys.argv[1]).items():\n"
+    "    try:\n"
+    "        importlib.import_module(mod)\n"
+    "    except Exception:\n"
+    "        continue\n"
+    "    try:\n"
+    "        out[pip] = _v(pip)\n"
+    "    except Exception:\n"
+    "        out[pip] = ''\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def _constraints_text(versions: Dict[str, str]) -> str:
+    """A pip constraints file pinning the image's own packages to the image's own versions.
+
+    ``pip install --target`` sets ignore_installed=True, so it re-resolves the FULL transitive
+    closure of whatever is asked for — including numpy and pandas that the image already has —
+    and installs them into the cache. PYTHONPATH precedes site-packages, so those copies then
+    win for the rest of the conversation: asking for one small package silently swaps the
+    numpy underneath rasterio and geopandas, which were compiled against the image's. The
+    model is told ``installed: []`` for numpy, so nothing in the transcript shows the swap.
+
+    Constraints do not install anything; they only bound versions if pip pulls one in. A
+    genuine conflict now fails loudly with pip naming it, which beats an ABI mismatch that
+    surfaces as a segfault three tools later.
+    """
+    if (os.getenv("AGENT_CODE_EXEC_PIN_IMAGE", "1") or "").strip().lower() in {"0", "false", "no", "off"}:
+        # The escape hatch is real: pinning every baked package also blocks a legitimate
+        # request for a newer one. Turning it off restores the silent-swap behaviour, which
+        # is the right trade only if you know the image's compiled packages tolerate it.
+        return ""
+    lines = [f"{name}=={ver}" for name, ver in sorted(versions.items()) if ver]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _dep_name(spec: str) -> Optional[str]:
+    """The bare pip name of *spec*, or None when it carries a version or extra constraint.
+
+    A pinned spec (``geopandas==0.14``) must not be satisfied by whatever version the image
+    happens to ship, so only unconstrained names are eligible to be skipped.
+    """
+    text = str(spec or "").strip()
+    if not text or re.search(r"[<>=!~\[]", text):
+        return None
+    return text.lower()
+
+
+def _preinstalled_override() -> Optional[frozenset]:
+    """``AGENT_CODE_EXEC_PREINSTALLED`` as a set, or None when unset.
+
+    Set it to a comma-separated list to skip the probe (a custom backend, or a test), or to
+    the empty string to turn the optimisation off entirely.
+    """
+    raw = os.getenv(PREINSTALLED_ENV)
+    if raw is None:
+        return None
+    return frozenset(x.strip().lower() for x in raw.split(",") if x.strip())
+
+
+def _drop_preinstalled(deps: List[str], have: frozenset) -> Tuple[List[str], List[str]]:
+    """Split *deps* into (still to install, already in the image)."""
+    if not have:
+        return list(deps), []
+    have_norm = {_normalize_dist(h) for h in have}
+    kept: List[str] = []
+    skipped: List[str] = []
+    for spec in deps:
+        name = _dep_name(spec)
+        hit = bool(name) and _normalize_dist(name) in have_norm
+        (skipped if hit else kept).append(spec)
+    return kept, skipped
+
+
 def is_code_exec_enabled() -> bool:
     """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
     value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
@@ -346,40 +302,38 @@ def _clip(text: Any, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s if len(s) <= limit else (s[:limit] + f"\n…[truncated {len(s) - limit} chars]")
 
 
-@dataclass
-class ExecResult:
-    exit_code: Optional[int]
-    stdout: str = ""
-    stderr: str = ""
-    timed_out: bool = False
-    error: Optional[str] = None
-    artifacts: List[Dict[str, Any]] = field(default_factory=list)
-    backend: str = ""
-    code: str = ""   # the executed source (also saved as a downloadable artifact)
-    installed: List[str] = field(default_factory=list)  # pip deps installed before the run
-    # Findings from the in-sandbox invariant gate. Empty dict = the gate did not run.
-    verification: Dict[str, Any] = field(default_factory=dict)
+def method_library_dir() -> Optional[Path]:
+    """Host path of the generated method library, or None when nothing is ingested yet."""
+    override = (os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip()
+    if override:
+        p = Path(override).expanduser()
+    else:
+        try:
+            from agent_runtime.file_store import storage_root
+            p = Path(storage_root()) / METHOD_LIBRARY_DIRNAME
+        except Exception:
+            return None
+    # "Ingested" means the package exists, not merely the directory. An empty directory used to
+    # count, so it was mounted and put first on the sandbox PYTHONPATH with nothing in it.
+    return p if (p / "iguide_methods").is_dir() else None
 
-    @property
-    def ok(self) -> bool:
-        return self.error is None and not self.timed_out and self.exit_code == 0
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "exit_code": self.exit_code,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "timed_out": self.timed_out,
-            "error": self.error,
-            "code": self.code,
-            "installed": self.installed,
-            "artifacts": self.artifacts,
-            "backend": self.backend,
-            # Surfaced INSIDE the tool result, not appended to the answer afterwards, so the
-            # model can react in-loop: reproject and re-run rather than caveat a wrong number.
-            "verification": self.verification,
-        }
+def artifacts_enabled() -> bool:
+    from agent_runtime.artifacts import artifacts_enabled as _enabled
+    return _enabled()
+
+
+def invariant_gate_enabled() -> bool:
+    """Whether to append the in-sandbox invariant checks. **On by default.**
+
+    Default-on is deliberate: the failure it catches — a distance computed in a geographic
+    CRS — produces a plausible number and no error, so a gate that is off by default protects
+    nobody. Set ``AGENT_INVARIANT_GATE`` to a falsy value to disable it. The epilogue cannot
+    fail a run (every check is guarded and the writer swallows OSError), so the cost of
+    leaving it on is one JSON file.
+    """
+    return (os.getenv("AGENT_INVARIANT_GATE", "1") or "").strip().lower() not in {
+        "0", "false", "no", "off"}
 
 
 def contracts_for_code(code: str) -> Dict[str, Any]:
@@ -461,62 +415,63 @@ def _read_checks(work: Path) -> Dict[str, Any]:
             **({"error": data["error"]} if data.get("error") else {})}
 
 
-def _artifact_index_path(work: Path) -> Path:
-    return work / ARTIFACT_INDEX_FILENAME
+def session_workspace_dir(session: Optional[str]) -> Optional[Path]:
+    """The durable workspace for *session*, or None without a work root.
 
-
-def _read_artifact_index(work: Path) -> Dict[str, List[int]]:
-    try:
-        return json.loads(_artifact_index_path(work).read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _write_artifact_index(work: Path, index: Dict[str, List[int]]) -> None:
-    try:
-        _artifact_index_path(work).write_text(json.dumps(index), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _persist_artifacts(work: Path, exclude: set, *, incremental: bool = False) -> List[Dict[str, Any]]:
-    """Persist files the run created in *work* to the agent file store.
-
-    With ``incremental=True`` only files that are NEW or CHANGED since the previous run in
-    this workspace are persisted, judged by (mtime_ns, size) against a small on-disk index.
-
-    This is not an optimisation — it is required for a persistent workspace to be usable.
-    This function walks the whole tree and stops at ``MAX_ARTIFACTS`` (20), so once a
-    workspace survives between calls, step 1's leftovers occupy the budget in sorted-path
-    order and step 5's actual output silently never gets persisted. Incremental persistence
-    and the persistent workspace therefore have to land together.
+    Public so agent-side staging writes into the SAME directory the next run carries into /work:
+    a file staged anywhere else would exist on the host and be missing in the container, which
+    surfaces inside a sandbox with no network as a bare "file not found".
     """
+    return _session_workspace(session)
+
+
+@dataclass
+class ExecResult:
+    exit_code: Optional[int]
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    error: Optional[str] = None
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    backend: str = ""
+    code: str = ""   # the executed source (also saved as a downloadable artifact)
+    installed: List[str] = field(default_factory=list)  # pip deps installed before the run
+    # Findings from the in-sandbox invariant gate. Empty dict = the gate did not run.
+    verification: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and not self.timed_out and self.exit_code == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "timed_out": self.timed_out,
+            "error": self.error,
+            "code": self.code,
+            "installed": self.installed,
+            "artifacts": self.artifacts,
+            "backend": self.backend,
+            # Surfaced INSIDE the tool result, not appended to the answer afterwards, so the
+            # model can react in-loop: reproject and re-run rather than caveat a wrong number.
+            "verification": self.verification,
+        }
+
+
+def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
+    """Persist files the run created in *work* to the agent file store."""
     from agent_runtime.file_store import create_output_file_from_path
 
-    index = _read_artifact_index(work) if incremental else {}
-    new_index: Dict[str, List[int]] = dict(index)
     artifacts: List[Dict[str, Any]] = []
-    skipped_unchanged = 0
-
     for path in sorted(work.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(work)
-        rel_str = str(rel)
-        if rel_str in exclude or rel_str == ARTIFACT_INDEX_FILENAME:
+        if str(rel) in exclude or (rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}):
             continue
-        if rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}:
-            continue
-        try:
-            stat = path.stat()
-            stamp = [stat.st_mtime_ns, stat.st_size]
-        except OSError:
-            continue
-        if incremental:
-            if index.get(rel_str) == stamp:
-                skipped_unchanged += 1
-                continue
-            new_index[rel_str] = stamp
         if len(artifacts) >= MAX_ARTIFACTS:
             break
         try:
@@ -531,11 +486,6 @@ def _persist_artifacts(work: Path, exclude: set, *, incremental: bool = False) -
             )
         except Exception:
             continue
-
-    if incremental:
-        _write_artifact_index(work, new_index)
-        if skipped_unchanged:
-            logger.debug("skipped %d unchanged file(s) in %s", skipped_unchanged, work)
     return artifacts
 
 
@@ -637,7 +587,9 @@ def _persist_source(code: str, *, label: Optional[str] = None,
         return []
 
 
-def _stage_inputs(work: Path, input_files: Optional[List[Dict[str, str]]]) -> Tuple[List[str], List[Dict[str, str]]]:
+def _stage_inputs(work: Path,
+                  input_files: Optional[List[Dict[str, str]]]
+                  ) -> Tuple[List[str], List[Dict[str, str]], List[str]]:
     """Copy requested input files into *work* so the sandboxed code can read them.
 
     Each spec is ``{"source": <host_path>, "dest": <relative_name>}``.  ``dest`` must
@@ -645,10 +597,12 @@ def _stage_inputs(work: Path, input_files: Optional[List[Dict[str, str]]]) -> Tu
     *work* is the only writable mount, so files placed here appear at ``/work/<dest>``
     inside the container (the run's working directory).
 
-    Returns ``(staged_dest_names, errors)``.
+    Returns ``(staged_dest_names, errors, shadowed)`` — ``shadowed`` being names where an
+    upload landed on top of a file the conversation's workspace already had.
     """
     staged: List[str] = []
     errors: List[Dict[str, str]] = []
+    shadowed: List[str] = []
     work_resolved = work.resolve()
     for spec in input_files or []:
         source = str((spec or {}).get("source") or "").strip()
@@ -667,11 +621,17 @@ def _stage_inputs(work: Path, input_files: Optional[List[Dict[str, str]]]) -> Tu
             errors.append({"source": source, "error": "source file not found"})
             continue
         try:
+            # Uploads are staged AFTER the workspace is carried in, so an upload whose
+            # filename matches a file the model wrote wins silently — it reads its own
+            # edited file and gets the original upload. Staging still wins (the user's data
+            # must be reachable under its own name), but the run is told.
+            if target.exists():
+                shadowed.append(dest)
             shutil.copyfile(src, target)
             staged.append(dest)
         except Exception as exc:  # pragma: no cover - defensive
             errors.append({"source": source, "dest": dest, "error": f"{type(exc).__name__}: {exc}"})
-    return staged, errors
+    return staged, errors, shadowed
 
 
 def _work_root() -> Optional[str]:
@@ -688,6 +648,190 @@ def _work_root() -> Optional[str]:
         return root
     except OSError:
         return None
+
+
+def _session_workspace(session: Optional[str]) -> Optional[Path]:
+    """The durable working directory for a conversation's code, or None.
+
+    Each run gets a throwaway dir and an ``--rm`` container, so a follow-up run used to
+    start from an empty directory: the file the previous step wrote was gone, and the only
+    way to continue a piece of work was to re-upload it by file_id. The CONTAINER stays
+    ephemeral (that is the sandbox), but the workspace persists per conversation, so
+    "now add a heatmap of that GeoJSON" can build on what the last step produced.
+    """
+    key = str(session or "").strip()
+    if not key:
+        return None
+    root = _work_root() or tempfile.gettempdir()
+    # Slug PLUS a digest of the real key. The slug alone is many-to-one — it maps every
+    # unsafe character to "_" and then truncates — so thread ids 'sess:42' and 'sess_42',
+    # both raw client input, would land in one directory and share its files and its package
+    # cache. claude_peer.session_dir carries the same digest for the same reason.
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)[:40]
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    try:
+        path = Path(root) / f"agentws_{safe}_{digest}"
+        _sweep_workspaces(Path(root))
+        path.mkdir(parents=True, exist_ok=True)
+        # Mark the workspace as used. A directory's mtime only moves when an entry is added
+        # or removed, so a long conversation that keeps rewriting the same files would look
+        # untouched to the sweep and be deleted underneath itself.
+        os.utime(path, None)
+        return path
+    except OSError:
+        return None
+
+
+def _sweep_workspaces(root: Path, *, force: bool = False) -> None:
+    """Drop conversation workspaces nobody has touched inside the TTL.
+
+    Throttled because the caller is on the hot path: every execute_code and every workspace
+    file tool resolves a workspace, and globbing the work root each time is pure waste on a
+    deployment with a thousand conversations in it. A TTL measured in hours does not need a
+    sweep measured in milliseconds.
+
+    Failure here is never fatal: a full disk is a problem, but so is refusing to run code
+    because a stale directory would not delete.
+    """
+    if WORKSPACE_TTL_HOURS <= 0:
+        return
+    import time
+
+    global _last_sweep
+    now = time.time()
+    if not force and (now - _last_sweep) < SWEEP_INTERVAL_S:
+        return
+    _last_sweep = now
+    cutoff = now - WORKSPACE_TTL_HOURS * 3600
+    try:
+        candidates = list(root.glob("agentws_*"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _dir_size_mb(directory: Path) -> float:
+    """Bytes under *directory*, in MB, counting as much as can be walked.
+
+    rglob is a generator, so an OSError part-way through (an unreadable directory left by an
+    OOM-killed install, ESTALE on a bind mount) used to abort the walk and report 0.0 — which
+    reads as "well under the cap" and quietly disables it forever. os.walk skips what it
+    cannot read and keeps going, so the total is a floor rather than a zero.
+    """
+    total = 0
+    for base, _dirs, files in os.walk(str(directory), onerror=None):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(base, name)).st_size
+            except OSError:
+                continue
+    return total / (1024 * 1024)
+
+
+def workspace_deps_dir(session: Optional[str], *,
+                       workspace: Optional[Path] = None) -> Optional[Path]:
+    """The conversation's durable dependency cache, or None when it has no workspace.
+
+    Packages installed by one run stay importable by the next. This is deliberately NOT part
+    of the copy-in/copy-out that carries a workspace's files: a site-packages tree is tens of
+    thousands of files, and copying it twice per run would cost more than the pip install it
+    is meant to replace. It is bind-mounted into the container instead, so the bytes never
+    move — which is also why `_copy_tree` can keep skipping ``.deps`` unchanged.
+    """
+    if workspace is None:
+        workspace = _session_workspace(session)
+    if workspace is None:
+        return None
+    cache = workspace / DEPS_DIRNAME
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return cache
+
+
+def reset_deps_cache_if_oversized(cache: Path) -> bool:
+    """Drop the cache when it outgrows its cap. Returns True when it was reset.
+
+    Only worth checking before an install — the walk is not free, and that is the only moment
+    the cache can grow.
+    """
+    if DEPS_CACHE_MAX_MB <= 0:
+        return False
+    if _dir_size_mb(cache) <= DEPS_CACHE_MAX_MB:
+        return False
+    # Rename aside, THEN delete. Another run of this conversation may have this directory
+    # bind-mounted into a live container (the analysis peer and the code peer share the
+    # ::codeexec session); rmtree in place pulls site-packages out from under a running
+    # import, while a rename leaves that container holding the old directory unharmed.
+    try:
+        doomed = cache.with_name(f"{cache.name}.evict.{uuid.uuid4().hex[:8]}")
+        cache.rename(doomed)
+    except OSError:
+        return False
+    shutil.rmtree(doomed, ignore_errors=True)
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return True
+
+
+def _evict_torn_cache(cache: Optional[Path]) -> None:
+    """Drop the cache after an install that did not finish.
+
+    pip moves a package tree and its .dist-info into --target as separate steps, so a kill on
+    the install timeout or an OOM leaves the cache half-written. Rebuilding a cache costs one
+    install; carrying a torn one costs every later run in the conversation, silently.
+    """
+    if cache is None or not cache.is_dir():
+        return
+    try:
+        doomed = cache.with_name(f"{cache.name}.torn.{uuid.uuid4().hex[:8]}")
+        cache.rename(doomed)
+    except OSError:
+        return
+    shutil.rmtree(doomed, ignore_errors=True)
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
+def _normalize_dist(name: str) -> str:
+    """PEP 503 normalisation, so ``scikit_learn`` and ``scikit-learn`` compare equal."""
+    return re.sub(r"[-_.]+", "-", str(name or "")).strip().lower()
+
+
+def cached_dep_names(cache: Optional[Path]) -> frozenset:
+    """Distribution names already installed in *cache*, from their ``.dist-info`` dirs."""
+    if cache is None:
+        return frozenset()
+    names = set()
+    try:
+        for item in cache.iterdir():
+            if not item.is_dir():
+                continue
+            for suffix in (".dist-info", ".egg-info"):
+                if not item.name.endswith(suffix):
+                    continue
+                # RECORD is written at the END of an install, so its presence is the cheap
+                # test that the package beside this metadata actually arrived. pip's --target
+                # handling moves `numpy/` and `numpy-2.3.0.dist-info/` as SEPARATE entries,
+                # across a bind-mount boundary (so a copy, not a rename) — an install killed
+                # on the timeout or by the OOM killer leaves metadata with no package, and
+                # trusting the name alone would suppress the reinstall forever.
+                if not (item / "RECORD").is_file():
+                    continue
+                names.add(_normalize_dist(item.name[: -len(suffix)].rsplit("-", 1)[0]))
+    except OSError:
+        return frozenset()
+    return frozenset(names)
 
 
 def session_workspace_listing(session: Optional[str], *, limit: int = 25) -> List[Dict[str, Any]]:
@@ -716,6 +860,72 @@ def session_workspace_listing(session: Optional[str], *, limit: int = 25) -> Lis
     return items
 
 
+# Directories inside a workspace that belong to the machinery, not to the conversation.
+# Writing into .deps would let one run leave a shadowing module for the next one to import,
+# which is the same durable-poisoning path the read-only cache mount closes.
+RESERVED_DIRS = {DEPS_DIRNAME, PIPTMP_DIRNAME, "__pycache__"}
+
+
+def resolve_workspace_file(session: Optional[str], path: str) -> Path:
+    """A host path inside this conversation's workspace, or ValueError explaining why not.
+
+    The peer edits files here between runs, so this is the boundary that keeps "patch line 40
+    of main.py" from becoming "write anywhere the agent process can reach".
+    """
+    workspace = _session_workspace(session)
+    if workspace is None:
+        raise ValueError(
+            "this conversation has no durable working directory, so there is no file to edit; "
+            "pass the whole program to execute_code as `code` instead")
+    raw = str(path or "").strip()
+    if not raw:
+        raise ValueError("no file named; pass a path relative to the working directory, e.g. 'main.py'")
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        raise ValueError(f"{raw!r} is an absolute path; use a path relative to the working directory")
+    root = workspace.resolve()
+    target = (root / candidate).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"{raw!r} points outside the working directory")
+    rel = target.relative_to(root)
+    # Compared case-INSENSITIVELY: Path.resolve() does not canonicalise case, so on a
+    # case-insensitive filesystem (macOS, and a Windows bind mount) '.DEPS/numpy.py' resolves
+    # with parts[0] == '.DEPS', slips an exact-match check, and lands in the cache anyway.
+    if rel.parts and rel.parts[0].lower() in RESERVED_DIRS:
+        raise ValueError(
+            f"{rel.parts[0]!r} holds this conversation's installed packages and is not writable; "
+            "put your code in a file at the top level, e.g. 'main.py'")
+    return target
+
+
+def _stat_map(directory: Path) -> Dict[str, Tuple[int, int]]:
+    """(size, mtime_ns) per relative path — used to tell new/changed files from carried ones."""
+    out: Dict[str, Tuple[int, int]] = {}
+    for p in directory.rglob("*"):
+        if p.is_file():
+            try:
+                st = p.stat()
+                out[str(p.relative_to(directory))] = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                continue
+    return out
+
+
+def _copy_tree(src: Path, dst: Path, *, skip: Optional[set] = None) -> None:
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(src))
+        if (skip and rel in skip) or rel.split(os.sep)[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}:
+            continue
+        target = dst / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, target)
+        except OSError:
+            continue
+
+
 def _host_user() -> Optional[str]:
     getuid = getattr(os, "getuid", None)
     getgid = getattr(os, "getgid", None)
@@ -733,49 +943,112 @@ class CodeExecutor:
 
     backend = "base"
 
+    def _log_image_choice(self, names: frozenset) -> None:
+        """Say once which sandbox image is in play, and what it costs.
+
+        The pre-baked image shipped, was built, and was then inert in production for two days:
+        the deployment still set the slim default, so every session re-installed the scientific
+        stack into its own .deps tree (measured: 22 workspaces, 454 MB) while a 1.24 GB
+        iguide-codeexec image sat unused on the same host. Nothing said so — the install phase
+        succeeding looks identical to not needing one. This makes the choice legible.
+
+        Takes the resolved probe result rather than reading ``_probe_cache``: called before the
+        probe populates it, this warned that a correctly-baked image had no stack at all.
+        """
+        if self.image in _image_logged:
+            return
+        _image_logged.add(self.image)
+        if names:
+            _LOG.info("code sandbox image %s: %d packages pre-installed, no install phase "
+                      "needed for them", self.image, len(names))
+        else:
+            _LOG.warning(
+                "code sandbox image %s has no pre-installed scientific stack, so every session "
+                "pays a pip install for pandas/geopandas/etc. Build the baked image and point "
+                "AGENT_CODE_EXEC_IMAGE at it: docker build -t iguide-codeexec sandbox/",
+                self.image)
+
+    def preinstalled(self) -> frozenset:
+        """pip names importable in this sandbox with no install phase.
+
+        Empty by default: a backend that cannot verify what it ships must not be able to
+        suppress an install, because the failure would surface as ModuleNotFoundError inside
+        the user's code rather than as a sandbox problem.
+        """
+        override = _preinstalled_override()
+        return override if override is not None else frozenset()
+
+    def preinstalled_versions(self) -> Dict[str, str]:
+        """{pip name: version} for what this sandbox ships. Empty means "not known"."""
+        return {}
+
     def execute(self, code: str, *, language: str = "python", timeout: Optional[int] = None,
                 env: Optional[Dict[str, str]] = None,
                 dependencies: Optional[List[Any]] = None,
                 input_files: Optional[List[Dict[str, str]]] = None,
-                session_id: Optional[str] = None,
-                tier: Optional[str] = None,
                 label: Optional[str] = None,
-                session: Optional[str] = None) -> ExecResult:
-        """Run *code* in the sandbox.
-
-        With a ``session_id`` the workspace PERSISTS between calls, so a multi-step workflow
-        can build state: step 2 reads what step 1 wrote. Without one the old behaviour is
-        kept exactly — a throwaway dir removed afterwards — because sessionless runs sharing
-        a directory would leak between unrelated turns.
-
-        ``session`` is an accepted alias for ``session_id``. Both branches grew workspace
-        persistence independently under different names; the directory is mounted directly
-        rather than copied forward, so staged inputs and the gate's report live with the files
-        instead of being copied around each run.
-
-        ``tier`` selects the resource budget (quick | standard | heavy); see ``EXEC_TIERS``.
-        ``label`` names the saved source artifact.
-        """
-        session_id = session_id or session
+                session: Optional[str] = None,
+                entrypoint: Optional[str] = None) -> ExecResult:
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
+        timeout = int(timeout or DEFAULT_TIMEOUT)
+        entrypoint = (str(entrypoint).strip() if entrypoint else "") or None
+        if not (code or "").strip() and not entrypoint:
+            return ExecResult(
+                exit_code=None, backend=self.backend, code="",
+                error=("nothing to run: pass `code` with the program to run, or `entrypoint` "
+                       "naming a file already in the working directory"))
+        if entrypoint and (code or "").strip():
+            # Both would silently mean "run the file, ignore the code" — and the code would
+            # still be saved as this run's source, so the transcript would show a program that
+            # never ran next to output that came from a different one.
+            return ExecResult(
+                exit_code=None, backend=self.backend, code=(code or ""),
+                error=("pass either `code` (run this program) or `entrypoint` (run a file "
+                       "already in the working directory), not both. To run edited code, "
+                       "write it with write_workspace_file first, then pass `entrypoint`."))
 
-        tier_name, limits = resolve_tier(tier)
-        # An explicit timeout still wins: callers that know their workload override the tier.
-        timeout = int(timeout or limits.get("timeout") or DEFAULT_TIMEOUT)
+        workspace = _session_workspace(session)
+        deps_cache = workspace_deps_dir(session, workspace=workspace)
+        # Evict BEFORE deciding what to install, never after: the decision below drops every
+        # package the cache already holds, so an eviction later in the run would delete
+        # exactly the packages nothing is going to install any more.
+        if deps_cache is not None:
+            reset_deps_cache_if_oversized(deps_cache)
+
+        # An entrypoint run has no inline source, so infer its imports from the file itself —
+        # otherwise re-running a script would install nothing and die on ModuleNotFoundError.
+        source_for_deps = code or ""
+        if entrypoint:
+            # Validated, and the failure is REPORTED rather than swallowed. This is the path
+            # that actually runs: an unchecked `entrypoint` of '../x.py' or '/etc/x.py' is a
+            # way out of the workspace, and inferring deps from a file we refused to resolve
+            # would have run it anyway.
+            try:
+                resolved = resolve_workspace_file(session, entrypoint)
+            except ValueError as exc:
+                return ExecResult(exit_code=None, backend=self.backend, code="", error=str(exc))
+            entrypoint = resolved.relative_to(workspace.resolve()).as_posix()
+            try:
+                source_for_deps = resolved.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                source_for_deps = ""
+
         deps, rejected = _sanitize_deps(dependencies)
-
-        persistent = bool((session_id or "").strip())
-        auto = _infer_deps(code, deps)
+        auto = _infer_deps(source_for_deps, deps)
         if auto:
             deps = [*deps, *auto]
+        # Anything the image already ships is free; installing it again into /work/.deps would
+        # shadow the baked copy with an identical one and charge the run for the privilege.
+        have = self.preinstalled()
+        deps, preinstalled = _drop_preinstalled(deps, have)
+        auto = [a for a in auto if a not in preinstalled]
+        # …and what an earlier run in this same conversation already installed.
+        deps, cached = _drop_preinstalled(deps, cached_dep_names(deps_cache))
+        auto = [a for a in auto if a not in cached]
         try:
-            if persistent:
-                sweep_workspaces()
-                work = session_work_dir(session_id or "")
-            else:
-                work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
+            work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
         except OSError as exc:
             # A missing/unwritable work root (e.g. the AGENT_CODE_EXEC_WORK_ROOT bind mount not
             # present in this deployment) must surface as a TOOL error the agent can report —
@@ -787,35 +1060,70 @@ class CodeExecutor:
                 backend=self.backend, code=(code or ""),
             )
         try:
-            # The invariant gate runs as an epilogue on the SAME interpreter, so it inspects
-            # the live frames the code produced rather than its source text — the only way to
-            # know what CRS a frame was actually in when .buffer() was called. Appended to the
-            # written script but NOT to `code`, so the source persisted as an artifact and
-            # echoed back to the model stays exactly what the model wrote.
-            script = (code or "")
-            if invariant_gate_enabled():
-                from agent_runtime.sandbox_verify import epilogue_source, prologue_source
-
-                # PROLOGUE first: it patches the library module, so the user's
-                # `from iguide_methods.X.v_sha import symbol` binds the guarded version. Any
-                # other order and the import would capture the original and the contract would
-                # go unchecked while appearing to be enforced.
-                script = prologue_source(contracts_for_code(code or "")) + script + epilogue_source()
-            (work / "script.py").write_text(script, encoding="utf-8")
+            # Continue this conversation's work: bring forward what earlier runs left.
+            carried = {}
+            if workspace:
+                _copy_tree(workspace, work)
+                carried = _stat_map(work)
+            if entrypoint:
+                # The file lives in the workspace and was just carried in; if it is not here,
+                # say what IS, so the next call is a correction rather than another guess.
+                target = work / entrypoint
+                if not target.is_file():
+                    present = sorted(
+                        str(f.relative_to(work)) for f in work.rglob("*")
+                        if f.is_file() and f.relative_to(work).parts[0] not in RESERVED_DIRS)
+                    shutil.rmtree(work, ignore_errors=True)
+                    return ExecResult(
+                        exit_code=None, backend=self.backend, code="",
+                        error=(f"no file {entrypoint!r} in the working directory. "
+                               f"Files here: {present[:25] or 'none yet'}. "
+                               "Write it first with write_workspace_file, or pass the program "
+                               "inline as `code`."))
+            else:
+                # The invariant gate runs on the SAME interpreter, so it inspects the live frames
+                # the code produced rather than its source text. Wrapped into the written
+                # script but NOT into `code`, so the persisted source stays what the model wrote.
+                # PROLOGUE first: it patches imported library units so the contract is enforced.
+                script = code or ""
+                if invariant_gate_enabled():
+                    from agent_runtime.sandbox_verify import epilogue_source, prologue_source
+                    script = prologue_source(contracts_for_code(code or "")) + script + epilogue_source()
+                (work / "script.py").write_text(script, encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
-            staged, stage_errors = _stage_inputs(work, input_files)
+            staged, stage_errors, shadowed = _stage_inputs(work, input_files)
             try:
                 os.chmod(work, 0o777)  # let a non-root container user write outputs
             except OSError:
                 pass
-            exit_code, stdout, stderr, timed_out, error = self._run(work, timeout, deps, limits=limits)
+            from agent_runtime.sandbox_verify import CHECKS_FILENAME
+            try:
+                (work / CHECKS_FILENAME).unlink()
+            except OSError:
+                pass
+            exit_code, stdout, stderr, timed_out, error = self._run(
+                work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint)
             # Output files the run produced, plus the executed source itself (downloadable).
             # Staged input files are excluded so uploads aren't re-persisted as outputs.
-            # A persistent workspace MUST persist incrementally: this walk stops at
-            # MAX_ARTIFACTS, so step 1's leftovers would otherwise consume the budget in
-            # sorted-path order and step 5's real output would never be persisted at all.
-            artifacts = [*_persist_source(code or "", label=label),
-                         *_persist_artifacts(work, {"script.py", *staged}, incremental=persistent)]
+            unchanged = {rel for rel, sig in _stat_map(work).items()
+                         if carried.get(rel) == sig}  # carried in and untouched -> not an output
+            source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
+            artifacts = [*source_artifacts,
+                         *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, *staged, *unchanged})]
+            verification = _read_checks(work)
+            # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
+            # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
+            # run dir before it is carried back, so it lands in the durable workspace beside the
+            # files it describes; guarded inside emit() so provenance can never fail an analysis.
+            # This call existed (M2.8) and the 2026-08-27 merge dropped it without a test noticing.
+            if artifacts_enabled():
+                from agent_runtime import artifacts as _artifacts
+                _artifacts.emit(code=(code or ""), work=work,
+                                image=getattr(self, "image", ""), backend=self.backend,
+                                dependencies=deps, staged=sorted(staged),
+                                verification=verification)
+            if workspace:
+                _copy_tree(work, workspace, skip={"script.py", CHECKS_FILENAME, *staged})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if auto:
@@ -826,28 +1134,22 @@ class CodeExecutor:
                 stderr = (str(stderr or "") + "\n" + size_note).strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
-            if persistent:
-                size_mb = _dir_size_mb(work)
-                if size_mb > WORKSPACE_MAX_MB:
-                    stderr = (str(stderr or "") + f"\n[workspace {size_mb:.0f}MB exceeds "
-                              f"{WORKSPACE_MAX_MB:.0f}MB cap; older files may be reclaimed]").strip()
+            if shadowed:
+                stderr = (str(stderr or "") + f"\n[an attached upload was used for {shadowed} "
+                          "rather than the file of that name in the working directory; write "
+                          "your version under a different name to read it back]").strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.
             error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
-            verification = _read_checks(work)
-            # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
-            # environment, input hashes, library slice_shas) + inputs.jsonl. Emitted before
-            # returning so it lands beside the run, and guarded inside emit() so a failure to
-            # write provenance can never fail a successful analysis.
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps,
                               verification=verification)
         finally:
-            if not persistent:
-                shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
     def _run(self, work: Path, timeout: int,
              dependencies: Optional[List[str]] = None,
-             *, limits: Optional[Dict[str, str]] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
+             deps_cache: Optional[Path] = None,
+             entrypoint: Optional[str] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
         raise NotImplementedError
 
 
@@ -865,39 +1167,118 @@ class DockerCodeExecutor(CodeExecutor):
         self.pids = pids
         self.install_memory = install_memory
 
-    def build_argv(self, work: Path, name: str,
-                   *, limits: Optional[Dict[str, str]] = None) -> List[str]:
-        """Execution phase: NO network, read-only rootfs, deps importable via PYTHONPATH.
+    def preinstalled(self) -> frozenset:
+        """Probe the image once per process (results cached per image tag)."""
+        override = _preinstalled_override()
+        if override is not None:
+            return override
+        with _probe_lock:
+            cached = _probe_cache.get(self.image)
+        if cached is not None:
+            self._log_image_choice(frozenset(cached))
+            return frozenset(cached)
+        found = self._probe_versions()
+        if found is None:
+            # A FAILED probe is deliberately not cached. Caching it would serve the empty set
+            # for the life of the process, so one slow first pull (the image not yet local on
+            # a Docker-out-of-Docker host) would permanently disable the optimisation with
+            # nothing in the logs saying why. An image that genuinely has nothing caches fine
+            # — that is an empty frozenset, not None.
+            return frozenset()
+        with _probe_lock:
+            _probe_cache[self.image] = found
+        self._log_image_choice(frozenset(found))
+        return frozenset(found)
 
-        ``limits`` comes from the execution tier and overrides the constructor defaults, so a
-        real analysis run is not held to the quick-tool budget of 512m/1cpu.
+    def preinstalled_versions(self) -> Dict[str, str]:
+        """{pip name: version} for what the image ships, or {} when that is unknown."""
+        if _preinstalled_override() is not None:
+            return {}                      # an explicit list carries no versions to pin to
+        self.preinstalled()                # populates the cache
+        with _probe_lock:
+            return dict(_probe_cache.get(self.image) or {})
+
+    def _probe_versions(self) -> Optional[Dict[str, str]]:
+        """Which auto-installable modules the image can already import, or None if unknown.
+
+        Runs under the same no-network/read-only posture and the same resource limits as a
+        real run, so the probe can neither widen the sandbox nor become the unbounded
+        container that starves it. Returns None — distinct from "the image has nothing" — on
+        every failure path, so the caller can decline to cache a failure.
         """
-        limits = limits or {}
+        name = f"agentexec_probe_{uuid.uuid4().hex[:12]}"
+        argv = [
+            "docker", "run", "--rm", "--init", "--name", name,
+            "--network", "none", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--memory", self.memory, "--cpus", self.cpus, "--pids-limit", self.pids,
+            "--tmpfs", "/tmp:rw,size=64m", "--env", "HOME=/tmp",
+            self.image, "python", "-c", _PROBE_SCRIPT, json.dumps(_IMPORT_TO_PIP),
+        ]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # --name exists for exactly this: without the kill the container keeps running
+            # after we stop waiting for it. The kill is best-effort — a probe that cannot
+            # clean up still has to return "unknown" rather than raise into the caller's run.
+            try:
+                subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
+            except Exception:
+                pass
+            return None
+        except (FileNotFoundError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        try:
+            found = json.loads(lines[-1])
+        except ValueError:
+            return None
+        if not isinstance(found, dict):
+            return None
+        return {str(k).lower(): str(v or "") for k, v in found.items()}
+
+    def build_argv(self, work: Path, name: str,
+                   deps_cache: Optional[Path] = None,
+                   entrypoint: Optional[str] = None) -> List[str]:
+        """Execution phase: NO network, read-only rootfs, deps importable via PYTHONPATH."""
         argv = [
             "docker", "run", "--rm", "--init", "--name", name,
             "--network", "none",            # no network during execution
             "--read-only",                  # read-only root fs
             "--cap-drop", "ALL",            # drop all capabilities
             "--security-opt", "no-new-privileges",
-            "--memory", str(limits.get("memory") or self.memory),
-            "--cpus", str(limits.get("cpus") or self.cpus),
+            "--memory", self.memory,
+            "--cpus", self.cpus,
             "--pids-limit", self.pids,
             "--workdir", "/work",
             "--tmpfs", "/tmp:rw,size=64m,exec",
             "--env", "HOME=/tmp",
-            "--env", f"PYTHONPATH=/work/{DEPS_DIRNAME}:{METHOD_LIBRARY_MOUNT}",
             "-v", f"{work}:/work:rw",       # only writable mount
         ]
         lib = method_library_dir()
+        pythonpath = f"/work/{DEPS_DIRNAME}"
         if lib:
             argv += ["-v", f"{lib}:{METHOD_LIBRARY_MOUNT}:ro"]
+            pythonpath = f"{METHOD_LIBRARY_MOUNT}:{pythonpath}"
+        argv += ["--env", f"PYTHONPATH={pythonpath}"]
+        if deps_cache is not None:
+            # READ-ONLY on purpose. The cache outlives the run, so code that could write to it
+            # could leave a poisoned `numpy.py` for the NEXT turn of the conversation to
+            # import. Mounting it ro keeps a per-run sandbox escape from becoming a durable one.
+            argv += ["-v", f"{deps_cache}:/work/{DEPS_DIRNAME}:ro"]
         user = _host_user()
         if user:
             argv += ["--user", user]
-        argv += [self.image, "python", "/work/script.py"]
+        argv += [self.image, "python", f"/work/{entrypoint or 'script.py'}"]
         return argv
 
-    def build_install_argv(self, work: Path, deps: List[str], name: str) -> List[str]:
+    def build_install_argv(self, work: Path, deps: List[str], name: str,
+                           deps_cache: Optional[Path] = None,
+                           constraints: Optional[str] = None) -> List[str]:
         """Install phase: network ON, pip install into the shared work dir (/work/.deps)."""
         argv = [
             "docker", "run", "--rm", "--init", "--name", name,
@@ -913,38 +1294,57 @@ class DockerCodeExecutor(CodeExecutor):
             "--env", f"TMPDIR=/work/{PIPTMP_DIRNAME}",
             "-v", f"{work}:/work:rw",
         ]
+        if deps_cache is not None:
+            argv += ["-v", f"{deps_cache}:/work/{DEPS_DIRNAME}:rw"]
         user = _host_user()
         if user:
             argv += ["--user", user]
-        argv += [self.image, "pip", "install", "--no-cache-dir", "--target", f"/work/{DEPS_DIRNAME}", *deps]
+        # --upgrade matters once the target can be pre-populated: pip leaves an existing copy
+        # in a --target directory alone and only warns, so without it a cached package would
+        # silently pin whatever version got there first and a pinned spec would never apply.
+        argv += [self.image, "pip", "install", "--no-cache-dir", "--upgrade",
+                 "--target", f"/work/{DEPS_DIRNAME}"]
+        if constraints:
+            # Lives under .piptmp because that directory is already excluded from artifacts
+            # and from the workspace copy-out — a constraints file is machinery, not output.
+            argv += ["--constraint", f"/work/{PIPTMP_DIRNAME}/{constraints}"]
+        argv += [*deps]
         return argv
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             *, limits: Optional[Dict[str, str]] = None):
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
         # Phase 1 (deps): a separate container WITH network installs into /work/.deps.
-        # With a persistent workspace .deps survives, so a session installs geopandas once
-        # instead of once per call -- the single largest latency win of the workspace change.
-        if dependencies and _deps_satisfied(work, dependencies):
-            logger.debug("deps already present in %s; skipping install", work / DEPS_DIRNAME)
-            dependencies = []
+        # Nothing to install is the common case once the image is baked and the cache is warm,
+        # and then this phase — a whole container start — is skipped entirely.
         if dependencies:
-            (work / PIPTMP_DIRNAME).mkdir(parents=True, exist_ok=True)  # pip TMPDIR (real disk)
+            piptmp = work / PIPTMP_DIRNAME
+            piptmp.mkdir(parents=True, exist_ok=True)  # pip TMPDIR (real disk)
+            constraints_name = None
+            text = _constraints_text(self.preinstalled_versions())
+            if text:
+                constraints_name = "image-constraints.txt"
+                try:
+                    (piptmp / constraints_name).write_text(text, encoding="utf-8")
+                except OSError:
+                    constraints_name = None
             iname = f"agentexec_pip_{uuid.uuid4().hex[:12]}"
             try:
-                inst = subprocess.run(self.build_install_argv(work, dependencies, iname),
-                                      capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT + 5)
+                inst = subprocess.run(
+                    self.build_install_argv(work, dependencies, iname, deps_cache, constraints_name),
+                    capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT + 5)
             except subprocess.TimeoutExpired as exc:
                 subprocess.run(["docker", "kill", iname], capture_output=True)
+                _evict_torn_cache(deps_cache)
                 return None, (exc.stdout or ""), (exc.stderr or ""), True, "dependency install timed out"
             except FileNotFoundError:
                 return None, "", "", False, "docker executable not found"
             if inst.returncode != 0:
+                _evict_torn_cache(deps_cache)
                 return None, inst.stdout, _clip(inst.stderr), False, "dependency install failed"
-            _record_deps(work, dependencies)
         # Phase 2 (exec): NO network.
         name = f"agentexec_{uuid.uuid4().hex[:12]}"
         try:
-            proc = subprocess.run(self.build_argv(work, name, limits=limits),
+            proc = subprocess.run(self.build_argv(work, name, deps_cache, entrypoint),
                                   capture_output=True, text=True, timeout=timeout + 5)
             return proc.returncode, proc.stdout, proc.stderr, False, None
         except subprocess.TimeoutExpired as exc:
@@ -961,35 +1361,60 @@ class LocalSubprocessExecutor(CodeExecutor):
 
     backend = "local-unsafe"
 
+    def preinstalled(self) -> frozenset:
+        """The host interpreter's own packages — no container to probe, so ask it directly."""
+        override = _preinstalled_override()
+        if override is not None:
+            return override
+        return frozenset(self.preinstalled_versions())
+
+    def preinstalled_versions(self) -> Dict[str, str]:
+        override = _preinstalled_override()
+        if override is not None:
+            return {}
+        import importlib
+        from importlib.metadata import version as _dist_version
+
+        found: Dict[str, str] = {}
+        for mod, pip in _IMPORT_TO_PIP.items():
+            try:
+                importlib.import_module(mod)     # a real import, for the reason above
+            except Exception:
+                continue
+            try:
+                found[pip.lower()] = _dist_version(pip)
+            except Exception:
+                found[pip.lower()] = ""
+        return found
+
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             *, limits: Optional[Dict[str, str]] = None):
-        deps_dir = work / DEPS_DIRNAME
-        # Same as the docker backend: a persistent workspace keeps .deps, so skip a
-        # reinstall the session has already paid for.
-        requested = list(dependencies or [])
-        if requested and _deps_satisfied(work, requested):
-            logger.debug("deps already present in %s; skipping install", deps_dir)
-            dependencies = []
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
+        # No container to mount into, so the durable cache IS the target directory.
+        deps_dir = deps_cache if deps_cache is not None else (work / DEPS_DIRNAME)
         if dependencies:
             try:
                 inst = subprocess.run(
                     [sys.executable or "python", "-m", "pip", "install", "--no-cache-dir",
-                     "--target", str(deps_dir), *dependencies],
+                     "--upgrade", "--target", str(deps_dir), *dependencies],
                     capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT,
                 )
             except subprocess.TimeoutExpired as exc:
                 return None, (exc.stdout or ""), (exc.stderr or ""), True, "dependency install timed out"
             if inst.returncode != 0:
                 return None, inst.stdout, _clip(inst.stderr), False, "dependency install failed"
-            _record_deps(work, dependencies)
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(work)}
-        # PYTHONPATH must be set whenever deps exist on disk, not only when we just
-        # installed them -- otherwise a skipped reinstall would make the imports fail.
-        if requested or deps_dir.exists():
-            env["PYTHONPATH"] = str(deps_dir)
+        # Also when this run installed nothing: an earlier run in the conversation may have.
+        paths = []
+        lib = method_library_dir()
+        if lib:
+            paths.append(str(lib))
+        if dependencies or deps_cache is not None:
+            paths.append(str(deps_dir))
+        if paths:
+            env["PYTHONPATH"] = os.pathsep.join(paths)
         try:
             proc = subprocess.run(
-                [sys.executable or "python", "script.py"],
+                [sys.executable or "python", entrypoint or "script.py"],
                 cwd=str(work), env=env, capture_output=True, text=True, timeout=timeout,
             )
             return proc.returncode, proc.stdout, proc.stderr, False, None
@@ -1008,7 +1433,7 @@ class DisabledExecutor(CodeExecutor):
         self._reason = reason
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             *, limits: Optional[Dict[str, str]] = None):
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
         return None, "", "", False, self._reason
 
 

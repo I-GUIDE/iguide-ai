@@ -4419,3 +4419,37 @@ rather than from the previous one.
 **Not done** libpysal, esda, spreg and pygeoda are in `requirements.txt` but not in the lock, so
   CI resolves libpysal 4.14.1 / esda 2.9.0 where dev runs 4.15.0 / 2.10.0. Pinning them is a
   measured step by this file's own rule, not a CI fix.
+
+## 2026-10-01 · M8.56 · Prototype merged into the extraction work, and what each conflict became
+
+**Change** `claude/extraction-integration` = `backend_swap` (628d3b0) + `origin/prototype` (5ae6d92).
+  Ten files conflicted (38 hunks). Every resolution below is a decision the agent designer and the
+  maintainer should see before this reaches a PR.
+
+  | area | resolution |
+  |---|---|
+  | `code_execution.py` | Prototype's file is the base: durable per-conversation workspace by copy-in/copy-out, read-only `.deps` cache, preinstalled probe, `entrypoint` runs (D3). Ported onto it: the read-only library mount, AHEAD of `/work/.deps` on `PYTHONPATH`; the invariant gate around inline code with `checks.json` never carried between runs or persisted as an output; `contracts_for_code`; run-artifact emission. **Dropped:** `backend_swap`'s execution tiers, deps marker and run-in-place session dir. |
+  | staging | Writes into prototype's durable workspace (`session_workspace_dir`), keyed `"codeexec"` like both peers' `execute_code` — prototype's key, which deployed conversations already use. |
+  | auth (`api/server.py`) | Prototype's model wins: verified user, service key or demo mode as alternatives; an unset key leaves the check open outside token mode. `/query` and `/query/batch` keep `backend_swap`'s decorator, now running prototype's checks. The file routes lose it: download is not key-gated by design (map sources cannot send a header). **Dropped:** fail-closed-when-unset. |
+  | supervisor | Peer containment is `backend_swap`'s `_run_peer` (fatal detection, error budget, decider fallback) returning prototype's degraded results; prototype's re-grounding edge plus `backend_swap`'s checkpointer, now opt-in at build and supplied by `run_supervisor`; the code peer's KB tools are the union with web search; the partial-answer disclosure is kept. |
+  | registry | Staging is described to the supervisor, and the retrieval clause names the method library (S2). |
+
+**Why** The extraction work existed only on `backend_swap`, and nothing on prototype could reach it.
+  Prototype's designs won wherever both branches had built the same thing, because prototype's
+  are the deployed, reviewed ones. Extraction's pieces were ported onto them rather than kept
+  beside them.
+
+**Measured** Merged suite, local: **2,990 passed, 0 failed**. On the deployed stack (CPython 3.11,
+  pandas 3.0.5, the agent-api freeze): 2 failures, both known — the temporal tool's `Beat`
+  misdetection (prototype's, queued for the maintainer) and the networkx pin (next commit).
+
+**Surprised by** The previous merge (2026-08-27) silently dropped `_artifacts.emit(...)` from
+  `execute()`: no run has produced its reproducible record since, the comment describing the call
+  stayed behind, and CI's replay step found nothing to replay. Restored here. The same merge kept
+  the prototype tests it could not satisfy by retargeting them onto its own design; their
+  originals are restored. And `method_library_dir()` returned any existing directory, empty or
+  not, despite its docstring; it now requires the package.
+
+**Not done** S3 (method tools as citable evidence), S4 (tier routing for extraction's OpenSearch
+  reads and staging's backend URL), S5 (null-tolerant wrappers on the new tools), one extraction
+  flag defaulting the bundle OFF, and the lock regenerated from the deployed freeze.

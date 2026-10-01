@@ -55,7 +55,9 @@ def test_the_grant_is_taken_from_the_function_not_the_constant():
 
     source = inspect.getsource(graph)
     body = source.split("def _peer_kb_tools", 1)[1]
-    assert body.count("enabled_search_methods=sorted(_peer_kb_tools())") == 2
+    # Prefix match: the code peer unions in prototype's web_search/web_fetch, so its call reads
+    # `sorted(_peer_kb_tools() | {"web_search"})`. What matters is the function, not the constant.
+    assert body.count("enabled_search_methods=sorted(_peer_kb_tools()") == 2
     assert "enabled_search_methods=sorted(_CODE_PEER_KB_TOOLS)" not in body
 
 

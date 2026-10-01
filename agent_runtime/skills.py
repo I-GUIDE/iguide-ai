@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from agent_runtime.tool_args import accept_null_defaults
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -487,8 +488,7 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
         return registry.load_skill_json(skill_name=normalized_name, resource_path=normalized_resource)
 
     return [
-        StructuredTool.from_function(
-            func=list_available_skills,
+        StructuredTool.from_function(func=accept_null_defaults(list_available_skills),
             name="list_available_skills",
             description=(
                 "List local agent skills available for this run. "
@@ -496,8 +496,7 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
             ),
             metadata={"category": "skill"},
         ),
-        StructuredTool.from_function(
-            func=load_skill,
+        StructuredTool.from_function(func=accept_null_defaults(load_skill),
             name="load_skill",
             description=(
                 "Load instructions for a relevant local agent skill by skill_name — ONLY when a "

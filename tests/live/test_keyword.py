@@ -38,6 +38,18 @@ logging.basicConfig(level=logging.WARNING)
 from rag_pipeline.search.keyword import get_keyword_search_results
 from rag_pipeline.langchain_granular_tools import keyword_search_tool
 
+# These exercise LIVE backends. Without them the suite used to report FAILURES rather than
+# skips, which is worse than useless: eight red lines became background noise that a real
+# regression could hide inside. Skipping states the same fact without camouflaging anything.
+import pytest as _pytest
+
+_MISSING = [v for v in ("OPENSEARCH_NODE", "OPENSEARCH_INDEX") if not (os.getenv(v) or "").strip()]
+pytestmark = _pytest.mark.skipif(
+    bool(_MISSING),
+    reason="live backend not configured: " + ", ".join(_MISSING) + " unset (no repo-root .env)",
+)
+
+
 
 def _banner(title: str) -> None:
     print("\n" + "=" * 65)

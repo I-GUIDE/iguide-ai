@@ -62,7 +62,6 @@ def test_known_methods_match_the_actual_registry():
 def test_api_layer_returns_400_for_an_unknown_method(monkeypatch):
     import api.server as srv
     monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)
-    monkeypatch.setenv("AGENT_CHAT_AUTH_OPTIONAL", "1")  # auth fails closed; opt out explicitly
     client = srv.app.test_client()
     resp = client.post("/agent/chat", json={"userQuery": "hi", "enabledSearchMethods": ["keywrd"]})
     assert resp.status_code == 400

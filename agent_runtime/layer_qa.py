@@ -184,4 +184,44 @@ def inspect_image(path: str) -> Dict[str, Any]:
     return out
 
 
-__all__ = ["inspect_geojson", "inspect_image"]
+# Extensions worth checking, and which checker reads them.
+_GEO_SUFFIXES = {".geojson", ".json"}
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
+
+def inspect_artifacts(directory: str, filenames: List[str]) -> List[Dict[str, Any]]:
+    """Run the delivery checks over files a CLI code peer left behind.
+
+    The tool path gets these checks inside ``add_map_layer``. A sandboxed CLI peer has
+    NO tools — it writes files and returns prose — so nothing between it and the user
+    ever looked at what it produced. That is precisely where a blank figure or an empty
+    layer survives to be described as a result, because the peer's own summary is the
+    only account of it and the peer is not the one that would notice.
+
+    Returns one entry per file that fails, with the same wording the tool path uses, so
+    the answer can say what is wrong instead of presenting it. Empty means nothing
+    detectable is wrong — not that the output is good.
+    """
+    findings: List[Dict[str, Any]] = []
+    base = Path(directory)
+    for name in filenames or []:
+        path = base / str(name)
+        suffix = path.suffix.lower()
+        try:
+            if not path.is_file():
+                continue
+            if suffix in _GEO_SUFFIXES:
+                report = inspect_geojson(str(path))
+            elif suffix in _IMAGE_SUFFIXES:
+                report = inspect_image(str(path))
+            else:
+                continue
+        except Exception as exc:  # pragma: no cover - a checker must never break delivery
+            logger.debug("layer_qa: could not inspect %s: %s", name, exc)
+            continue
+        if not report.get("ok") and report.get("problems"):
+            findings.append({"file": str(name), "problems": list(report["problems"])})
+    return findings
+
+
+__all__ = ["inspect_geojson", "inspect_image", "inspect_artifacts"]
