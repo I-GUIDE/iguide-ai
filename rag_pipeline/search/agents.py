@@ -777,8 +777,11 @@ _OS_FORBIDDEN_KEYS = {"delete", "update", "script", "bulk", "reindex", "indices"
 @lru_cache(maxsize=1)
 def _os_client() -> OpenSearch:
     node = _getenv("OPENSEARCH_NODE")
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+    # The credential through the same tiered resolution as the node, as keyword.py does. These
+    # read the bare names, so a tiered deployment sent the untiered pair to the tier's cluster,
+    # and that pair measured 401 against dev's on 2026-09-22.
+    user = _getenv("OPENSEARCH_USERNAME", required=False, default="")
+    pwd = _getenv("OPENSEARCH_PASSWORD", required=False, default="")
     return OpenSearch(
         hosts=[node],
         http_auth=(user, pwd) if (user or pwd) else None,

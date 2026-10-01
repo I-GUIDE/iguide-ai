@@ -4691,3 +4691,60 @@ rather than from the previous one.
   construction. A test pins it equal to the code peer's full view, because which cut the
   answerer reads is B3's to settle. CI-style suite: **3,033 passed, 1 failed** (prototype's
   `Beat`).
+
+## 2026-10-01 · M8.65 · The agent KB reads the cluster the platform's search reads (S4)
+
+**Change**
+  - `platform_endpoints.search_cluster()` returns `(node, user, password)` for the SEARCH tier's
+    cluster.
+    - The node resolves in platform search's own order: `OPENSEARCH_NODE_<SEARCH_TIER>`, then
+      `OPENSEARCH_NODE`, then the tier's table entry.
+    - The credential FOLLOWS THE NODE. A tiered node takes the tiered pair or none. A bare node
+      takes `opensearch_credentials`' rule, now `_credentials_for(tier, node)`.
+  - The agent KB (`_os_client` and its "is a cluster configured?" checks) and the extraction's
+    emitter both use it, so an ingest lands where the agent reads.
+  - The emitter's delete guard now protects the platform index under its tiered name
+    (`search_index()`) as well as the bare one.
+  - `platform_endpoints.backend_url()` follows `SEARCH_TIER`, and `IGUIDE_BACKEND_URL[_<TIER>]`
+    still wins. Staging fetches element records from it. With nothing set anywhere it is prod's
+    backend, as before.
+  - A drift guard fails on any module in `search/` or `extractors/emitters/` that reads the bare
+    cluster names. Its first catch was prototype's `search/agents.py`, which resolved its node tiered
+    but its credential bare, sending the untiered pair to the tier's cluster. Fixed to match
+    `keyword.py`.
+
+**Why** The agent KB and its emitter read raw environment names while keyword and semantic search
+  followed the tier. The developer `.env` this checkout runs against defines all three forms of the
+  node (bare, `_DEV`, `_PROD`). So under `SEARCH_TIER=prod`, platform search used
+  `OPENSEARCH_NODE_PROD` while the agent KB used the bare `OPENSEARCH_NODE`: possibly another
+  cluster, with another credential. A refused agent-KB query reads as "no results". Staging also
+  resolved element ids against prod's backend whatever tier the ids came from. The agent designer
+  corrected the urgency: this is LATENT, not live, because the deployed agent KB backend is `local`.
+
+  Two designs were weighed against each other:
+  - The agent designer proposed `opensearch_url()` / `opensearch_credentials()`, as `memory_module`
+    uses. That keeps the credential-follows-host rule. But those follow PLATFORM_TIER and return the
+    BARE node, so the agent KB would follow the conversation store rather than the search its
+    results are joined to.
+  - Raw per-variable tiering (`search/utils.getenv`) follows the search, but falls back to the
+    untiered pair beside a tiered node. That pair measured 401 against dev's cluster on 09-22.
+
+  `search_cluster` keeps the node of the second and the credential rule of the first.
+
+**Measured**
+  - `test_tier_routing.py`: 15 tests.
+    - The agent KB's client equals `keyword.py`'s, and the emitter's equals the agent KB's, under
+      four configurations, the deployed shape among them.
+    - Beside a tiered node holding only the bare pair, the agent KB sends no credential at all,
+      where `keyword.py` sends the wrong one; that difference is left for the maintainer.
+    - Also covered: the tiered-node-alone check, the emitter guard, the drift guard, and staging's
+      resolver and request.
+  - Also added: `test_a_failed_library_import_alone_also_brings_the_warning`, the agent designer's
+    check on M8.64's second route, where the package name appears only in a traceback in
+    tool_results. It passes, because the check scans the whole analysis text.
+  - CI-style suite: **3,049 passed, 1 failed** (prototype's `Beat`).
+
+**Surprised by** My first version failed four tests in the full run, and passed them alone. The
+  anchored edit began at `def _os_client():`, so the `@lru_cache(maxsize=1)` above it moved onto the
+  new helper. It cached a SETTING: one read with the variable unset pinned `""` for the next test,
+  and the client lost its cache. Order-dependent, and invisible in a targeted run.

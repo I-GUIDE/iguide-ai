@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import os
 from urllib.parse import quote
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +284,26 @@ def tiered_env(name: str, default: Optional[str] = None,
     return os.getenv(name, default)
 
 
+def backend_url() -> str:
+    """The platform backend holding the elements that the SEARCHED knowledge base describes.
+
+    Staging resolves an element id that came out of a search, so it must ask the search tier's
+    backend. An id from dev's knowledge base, looked up on prod's backend, is either unknown there
+    or, resolved by its 8-character prefix against prod's listing, a different element. So this
+    follows ``SEARCH_TIER`` (falling back to ``PLATFORM_TIER``), as the index names do.
+
+    An explicit ``IGUIDE_BACKEND_URL`` still wins, in its tiered form ``IGUIDE_BACKEND_URL_<TIER>``
+    first. With no tier at all, the default stays prod's backend, which is what staging always
+    used. A bad ``SEARCH_TIER`` raises, as it does for the index name: staging from the wrong
+    platform would hand the sandbox the wrong file.
+    """
+    tier = search_tier()
+    explicit = str(tiered_env("IGUIDE_BACKEND_URL", tier=tier) or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return _TIERS[tier or PROD]["backend"]
+
+
 def search_index() -> str:
     """The knowledge-base index for the SEARCH tier. See :func:`search_tier`.
 
@@ -357,6 +377,49 @@ def opensearch_credentials() -> tuple:
         if user or pwd:
             return (user or "").strip(), (pwd or "")
     return (os.getenv("OPENSEARCH_USERNAME") or "").strip(), (os.getenv("OPENSEARCH_PASSWORD") or "")
+
+
+def _credentials_for(tier: Optional[str], node: str) -> Tuple[str, str]:
+    """The pair that belongs with *node* on *tier*: ``opensearch_credentials``' rule, for any tier."""
+    if tier:
+        expected = (_TIERS[tier].get("opensearch") or "").rstrip("/")
+        if not (expected and node.rstrip("/") != expected):
+            user = os.getenv(f"OPENSEARCH_USERNAME_{tier.upper()}")
+            pwd = os.getenv(f"OPENSEARCH_PASSWORD_{tier.upper()}")
+            if user or pwd:
+                return (user or "").strip(), (pwd or "")
+    return (os.getenv("OPENSEARCH_USERNAME") or "").strip(), (os.getenv("OPENSEARCH_PASSWORD") or "")
+
+
+def search_cluster() -> Tuple[str, str, str]:
+    """``(node, username, password)`` for the SEARCH tier's cluster. Values are never logged.
+
+    This is where knowledge-base indices are read, the agent's own included. The node resolves in
+    the order the platform's search clients use (``rag_pipeline.search.utils.getenv``):
+    ``OPENSEARCH_NODE_<SEARCH_TIER>``, then ``OPENSEARCH_NODE``, then the tier's table entry. So the
+    agent KB reads the cluster that the keyword and semantic search its results are joined to read.
+    ``opensearch_url`` would not do: it follows PLATFORM_TIER and returns the bare node, which is
+    the conversation store's answer, not the search's.
+
+    The credential FOLLOWS THE NODE, as ``opensearch_credentials`` keeps it for the platform tier,
+    and there is no bare fallback beside a tiered node:
+    - A node named in the tiered variable takes the tiered pair or nothing. The untiered pair
+      measured 401 against dev's cluster on 2026-09-22, and a refused query reads as "no results".
+    - A bare node takes the tiered pair when the tier names no cluster of its own to conflict
+      with (prod today), and the bare pair otherwise.
+
+    A bad ``SEARCH_TIER`` raises, as it does for the index name.
+    """
+    tier = search_tier()
+    if tier:
+        tiered = str(os.getenv(f"OPENSEARCH_NODE_{tier.upper()}") or "").strip()
+        if tiered:
+            return (tiered, (os.getenv(f"OPENSEARCH_USERNAME_{tier.upper()}") or "").strip(),
+                    os.getenv(f"OPENSEARCH_PASSWORD_{tier.upper()}") or "")
+    node = str(os.getenv("OPENSEARCH_NODE") or "").strip()
+    if not node and tier:
+        node = _TIERS[tier].get("opensearch") or ""
+    return (node, *_credentials_for(tier, node))
 
 
 def opensearch_credential_warning() -> Optional[str]:

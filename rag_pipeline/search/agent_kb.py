@@ -199,12 +199,23 @@ def group_by_parent(docs: List[Dict[str, Any]]) -> Dict[str, List[str]]:
 # --------------------------------------------------------------------------- #
 # I/O
 # --------------------------------------------------------------------------- #
+def _cluster() -> tuple:
+    """``(node, username, password)`` of the cluster the agent KB reads.
+
+    The SEARCH tier's (``platform_endpoints.search_cluster``): the cluster the keyword and semantic
+    search beside it read, with the credential that follows that node. This read the bare names,
+    so under a tier it could address a different cluster, with a different credential, from the
+    search its results are joined to, and a refused query here reads as "no results".
+    """
+    from agent_runtime.platform_endpoints import search_cluster
+
+    return search_cluster()
+
+
 @lru_cache(maxsize=1)
 def _os_client():
     from opensearchpy import OpenSearch
-    node = os.getenv("OPENSEARCH_NODE", "")
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+    node, user, pwd = _cluster()
     return OpenSearch(
         hosts=[node], http_auth=(user, pwd) if (user or pwd) else None,
         use_ssl=node.lower().startswith("https"), verify_certs=False,
@@ -346,7 +357,7 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
             hits = kb_store.local_search(query, all_agent_indices(), size)
             docs = normalize_hits(hits, [], size)
             elements = resolve_parent_elements_local(hits) if resolve_parents else {}
-            if os.getenv("OPENSEARCH_NODE"):
+            if _cluster()[0]:
                 # The default is local so tests and offline runs never touch the cluster, and
                 # that default is right. But it means a server that simply does not set the
                 # variable reads a file-backed store scored by token overlap instead of the
@@ -361,7 +372,7 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
                                 "AGENT_KB_BACKEND=opensearch to search the indexed corpus")
                 _warn_local_backend_once()
         else:
-            if client is None and not os.getenv("OPENSEARCH_NODE"):
+            if client is None and not _cluster()[0]:
                 return {**base, "note": "AGENT_KB_BACKEND=opensearch but OPENSEARCH_NODE not set"}
             client = client or _os_client()
             index = ",".join(all_agent_indices())

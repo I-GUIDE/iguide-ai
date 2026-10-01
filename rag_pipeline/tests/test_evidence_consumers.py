@@ -103,6 +103,17 @@ def test_library_code_from_the_analyze_peer_comes_with_a_warning():
     assert "not available in this container" not in _build_peer_prompt("map", None, plain)
 
 
+def test_a_failed_library_import_alone_also_brings_the_warning():
+    """The case a user actually hits (the agent designer's check): the package name appears ONLY
+    in a tool RESULT, the traceback of an import that failed, not in any code the brief shows."""
+    from agent_runtime.opencode_peer import _build_peer_prompt
+
+    results = {"tool_calls": [{"name": "execute_code", "args": {"code": "run()"}}],
+               "tool_results": [{"name": "execute_code", "content":
+                                 "ModuleNotFoundError: No module named 'iguide_methods'"}]}
+    assert "not available in this container" in _build_peer_prompt("map thefts", None, results)
+
+
 # ------------------------------------------------------------------ the rows match the builders
 
 GRAPH = (REPO / "agent_runtime" / "supervisor" / "graph.py").read_text(encoding="utf-8")

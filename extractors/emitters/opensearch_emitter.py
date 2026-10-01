@@ -184,9 +184,13 @@ def build_docs(manifest: UnifiedManifest) -> List[DocTuple]:
 @lru_cache(maxsize=1)
 def _os_client():
     from opensearchpy import OpenSearch
-    node = os.getenv("OPENSEARCH_NODE", "")
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+
+    # Where the agent KB READS (platform_endpoints.search_cluster), so an ingest lands on the
+    # cluster the agent will search. Bare names here wrote one cluster while a tiered deployment
+    # read another, and sent the untiered credential to a tier's node.
+    from agent_runtime.platform_endpoints import search_cluster
+
+    node, user, pwd = search_cluster()
     return OpenSearch(
         hosts=[node],
         http_auth=(user, pwd) if (user or pwd) else None,
@@ -341,11 +345,20 @@ def _assert_agent_indices(indices) -> None:
     """
     from ..indices import is_agent_index
 
-    general = os.getenv("OPENSEARCH_INDEX") or ""
+    # The platform's index under EVERY name it goes by: the bare variable and the search tier's
+    # (`search_index`). Checking only the bare one guarded the wrong index on a tiered deployment.
+    general = {os.getenv("OPENSEARCH_INDEX") or ""}
+    try:
+        from agent_runtime.platform_endpoints import search_index
+
+        general.add(search_index())
+    except Exception:  # a bad SEARCH_TIER must not disarm the guard; the bare name still counts
+        pass
+    general.discard("")
     for name in indices:
         if not is_agent_index(name):
             raise RuntimeError(f"refusing to write/delete in non-agent index {name!r}")
-        if general and name == general:
+        if name in general:
             raise RuntimeError(f"agent index {name!r} collides with OPENSEARCH_INDEX")
 
 

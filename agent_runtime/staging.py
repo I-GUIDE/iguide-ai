@@ -293,7 +293,10 @@ def _element_index() -> Dict[str, str]:
     try:
         import requests
 
-        backend = os.getenv("IGUIDE_BACKEND_URL", "https://backend.i-guide.io").rstrip("/")
+        from agent_runtime.platform_endpoints import backend_url
+
+        # The SEARCH tier's backend: these ids came out of that tier's knowledge base.
+        backend = backend_url()
         # `size`, not `limit`: `limit` is accepted and ignored, returning the default page of 10,
         # which would silently resolve only the first ten elements on the platform.
         resp = requests.get(f"{backend}/api/elements", params={"size": 2000}, timeout=60)
@@ -340,7 +343,9 @@ def _element_metadata(element_id: str) -> Dict[str, Any]:
     try:
         import requests
 
-        backend = os.getenv("IGUIDE_BACKEND_URL", "https://backend.i-guide.io").rstrip("/")
+        from agent_runtime.platform_endpoints import backend_url
+
+        backend = backend_url()
         resp = requests.get(f"{backend}/api/elements/{resolve_element_id(element_id)}", timeout=30)
         if resp.status_code == 200 and isinstance(resp.json(), dict):
             return resp.json()
