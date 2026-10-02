@@ -185,6 +185,17 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
                 # one that is slightly too generous.
                 thresh = float(weights.min_threshold_distance(
                     [(geom.x, geom.y) for geom in frame.geometry]))
+                # That guarantee holds only up to rounding. min_threshold_distance returns the
+                # critical pair's distance as sqrt(d2), but DistanceBand admits a pair when
+                # d2 <= threshold**2, and squaring the rounded root can come back one ulp short.
+                # Which way it rounds is a property of the platform: on the 8x8 test lattice it
+                # leaves one island on Linux/x86-64 and none on macOS/arm64, with the same
+                # libpysal, scipy and numpy. A relative pad of 1e-9 (about 0.1 mm at 100 km,
+                # millions of ulps) makes "no island" hold by construction, not by rounding luck.
+                # The note below therefore reports a distance a hair above the strict minimum,
+                # far below its metre precision. Its wording stands, because the unpadded value
+                # is not reliably island-free.
+                thresh *= 1.0 + 1e-9
                 notes.append(f"threshold_km not given; used the smallest distance that leaves no "
                              f"island ({thresh / 1000.0:.3f} km)")
             else:
