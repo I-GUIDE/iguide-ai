@@ -634,10 +634,11 @@ def qgis_metric_buffer_tool(
     }
     if final_output.exists():
         try:
+            # A new file every run, never overwrite=True. A re-run can differ (a corrected
+            # distance), and the earlier answer's link must keep serving the buffer it showed.
             payload["managed_output"] = create_output_file_from_path(
                 final_output,
                 filename=final_output.name,
-                overwrite=True,
             )
         except Exception as exc:
             payload["managed_output_error"] = str(exc)
@@ -766,10 +767,10 @@ def pyqgis_render_map_tool(
     output_path = result.get("output_path")
     if result.get("ok") and output_path:
         try:
+            # A new file every run, as in qgis_metric_buffer: an earlier answer embeds this image.
             record = create_output_file_from_path(
                 output_path,
                 filename=Path(str(output_path)).name,
-                overwrite=True,
             )
             result["managed_output"] = record
         except Exception as exc:

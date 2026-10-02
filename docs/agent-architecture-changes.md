@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 15 | [A file_id names one write](#stage-15) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,107 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 15 — A file_id names one write {#stage-15}
+
+*2026-10-01. Branch `claude/output-overwrite-scope`.*
+
+S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
+the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
+`claude/layer-identity-by-inputs` (its S13.6) lists it among what it did not fix.
+
+### Stage S15.1 What overwrite did
+
+`create_output_file` and `create_output_file_from_path` each scanned every metadata record and took
+the first output with the same filename, in directory order, from any conversation and any owner.
+They then reused its file_id, copied the new bytes over the old file and re-stamped the record
+with the current session and owner.
+
+Of the 44 producer call sites, two hard-coded it: `qgis_metric_buffer` and `pyqgis_render_map`.
+Their model-facing defaults are `buffer.geojson` and `map.png`, and the supervisor's own QGIS
+workflow passes `buffer.geojson` and `qgis_map.png` for every caller. Two more passed the model's
+flag through: `write_output_file`, and `write_text_file` given a bare filename. The other 40
+always write a new file.
+
+So the second person to buffer anything took over the first person's file. The first person's
+link served the second person's buffer, and their record no longer said it was theirs.
+`find_files` then hid it from the conversation that made it. In token mode their own link
+answered 404: the download endpoint's `may_read` check found a record that named someone else.
+
+Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
+(`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
+re-grounding pass (the S13.1 table on that branch). That pass repeated the same buffer. A re-run
+with a corrected distance would have changed what the first answer's link served, with nothing in
+the transcript to show it.
+
+`overwrite=True` arrived in `8dc7f25` (2026-05-07), before conversations or owners existed, when
+the store was one namespace anyway. Reason not recorded.
+
+### Stage S15.2 What changed
+
+- `file_store._output_to_replace` is now the single scan behind both create functions. It reuses
+  only an output that THIS conversation wrote for THIS caller. The session must match, and a
+  session must be bound: with none, the records that match are the unstamped legacy pool every
+  conversation reads. The owner must match exactly, because the conversation id arrives from the
+  client and a borrowed one must not reach another user's file. In dev and demo it is None on
+  both sides. Of several matches, the newest is replaced, in the same order `find_files` uses.
+  Directory order was no order: on prototype the new test of it failed on one run and passed on
+  the next.
+- `qgis_metric_buffer` and `pyqgis_render_map` no longer pass `overwrite`, so every run is a new
+  file. An earlier answer links to the buffer or embeds the map image, and a re-run can differ.
+- `test_no_producer_hard_codes_overwrite` walks the producers' source and fails on any
+  `create_output_file*` call with a literal `overwrite=True`. Passing the caller's own flag through
+  is still allowed.
+
+### Stage S15.3 Why both halves
+
+Two fixes were offered: drop the flag in the tool, or scope the reuse. They fail different tests
+in `test_output_overwrite_scope.py` (19 tests):
+
+| | fail |
+|---|---|
+| prototype | 14 every run, plus the newest-match test on some runs; the 4 that pin a conversation still overwriting its own file pass |
+| scoping alone | 2: the same-conversation re-run (the 2026-10-01 case) and the guard |
+| dropping the flag alone | 10, plus the newest-match test on some runs: the model's write tools still reach another conversation's file |
+
+Scoping alone leaves a real case open. Inside one conversation, two different buffers under the
+default name, or a corrected re-run under the old name, still share one file_id.
+
+### Stage S15.4 Layer identity, and the merge order
+
+This depends on `claude/layer-identity-by-inputs`, and must merge after it. On prototype,
+`add_map_layer` called without a `name` builds its layer id from the input's on-disk stem, and that
+stem carries the buffer's file_id. Measured on two identical buffers written as separate files:
+`agent-file_524b820f3452_buffer` and `agent-file_f5deaf380dcc_buffer`. File reuse was what kept
+a repeated buffer on one layer. With a `name`, both are `agent-2_km_buffer`, and nothing changes.
+
+With the two branches combined, a re-grounded buffer is a new file (`file_04a5ecb661d2`, then
+`file_6463dacb8698`) and still the same layer (`agent-map-shapes-d6163870f2`), because the layer
+is keyed on `file_content_key`. In code the two branches conflict in one hunk, at the buffer's
+call to `create_output_file_from_path`. The resolution keeps `content_key=key` and drops
+`overwrite=True`.
+
+### Stage S15.5 Verification
+
+- `test_output_overwrite_scope.py`: 19 pass, stable over five runs.
+- The full suite: 1664 passed, 4 skipped, against a baseline of 1645 and 4.
+- Combined with `claude/layer-identity-by-inputs` in a throwaway worktree, with the conflict
+  resolved as above: this file, that branch's `test_layer_identity_by_inputs.py`, and the QGIS,
+  map-layer-identity and file-ownership tests, 89 passed.
+
+### Stage S15.6 What this stage did not fix
+
+- `read_text_file` and `inspect_file_for_analysis` resolve a bare filename through
+  `_find_managed_file_by_name`, which scans every conversation's uploads and outputs. In a probe,
+  bob read alice's `summary.md` by name while `find_files` correctly hid it from him. This is the
+  read-side twin of this stage, and a separate change.
+- The write tools report `"overwritten": true` whenever the model asked for it, not when a file
+  was actually replaced.
+- Every buffer and map is now kept. The only collection is the opt-in TTL sweep
+  (`AGENT_FILE_RETENTION_DAYS`, off by default).
+- On `claude/layer-identity-by-inputs`, the docstring of `_content_digest` gives "qgis_metric_buffer
+  overwrites by name" as its example of a file rewritten in place. The example goes stale here. The
+  reason stands, because a conversation's own `write_output_file(overwrite=True)` still rewrites in
+  place.
