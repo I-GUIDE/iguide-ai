@@ -483,6 +483,30 @@ def test_csv_with_coordinates_flows_through(store):
     assert len(gpd.read_file(_read_output(sliced["file_id"]))) == 2
 
 
+def test_csv_beat_cannot_outrank_a_date_with_a_blank_row(store):
+    """The deployed failure in full: one blank date, and the beats became THE time column.
+
+    GDAL hands the blank cell over as "", which counts against Date: 3 of 4 rows parse. On
+    pandas 3, before the name gate covered a CSV's numbers, the beats parsed 4 of 4 as the years
+    1234-1237 and outranked it. The test above, whose Date has no gap, could only ever catch the
+    beats as a runner-up, because there the name hint broke a 1.0 against 1.0 tie.
+    """
+    path = store / "crimes_with_gap.csv"
+    pd.DataFrame({
+        "ID": [1, 2, 3, 4],
+        "Date": ["07/26/2026 08:00:00 PM", "07/27/2026 01:00:00 AM", None,
+                 "01/02/2026 08:00:00 AM"],
+        "Latitude": [41.900, 41.901, 41.902, 41.903],
+        "Longitude": [-87.660, -87.661, -87.662, -87.663],
+        "Beat": [1234, 1235, 1236, 1237],
+    }).to_csv(path, index=False)
+    detected = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert detected["ok"] is True and detected["time_column"] == "Date"
+    assert "Beat" not in [c["column"] for c in detected["candidates"]]
+    date = detected["candidates"][0]
+    assert date["parsed_rows"] == 3 and date["failed_rows"] == 1   # the blank is reported, not hidden
+
+
 def test_csv_code_columns_are_never_time_candidates(store):
     """Every kind of code column a crime CSV carries, read the way GDAL reads them: as text.
 
@@ -503,6 +527,37 @@ def test_csv_code_columns_are_never_time_candidates(store):
     res = _call(_tools()["detect_time_column"], file_id=_upload(path))
     assert res["ok"] is True and res["time_column"] == "Date"
     assert [c["column"] for c in res["candidates"]] == ["Date"]
+
+
+@pytest.mark.parametrize("column, suffix", [
+    pytest.param("yr", ".csv", id="csv-yr"),             # the text ladder read it with no hint
+    pytest.param("YRBUILT", ".csv", id="csv-YRBUILT"),   # run-together, so the hint is a substring
+    pytest.param("yr", ".geojson", id="geojson-yr"),     # typed integers: never even tried before
+])
+def test_year_column_named_yr_is_a_time_column(store, column, suffix):
+    """A year column's name is all that gets it past the name gate, so yr has to be a hint.
+
+    These beats sit inside 1678-2262, so the year window cannot be what keeps them out: only the
+    gate does, and the year column faces the same gate. Without the hint, both CSV shapes came
+    back with no time column at all, where the text ladder used to read them as years.
+    """
+    path = store / f"annual{suffix}"
+    frame = pd.DataFrame({
+        column: [2019, 2020, 2021],
+        "Beat": [1834, 2011, 2012],
+        "Latitude": [41.900, 41.901, 41.902],
+        "Longitude": [-87.660, -87.661, -87.662],
+    })
+    if suffix == ".csv":
+        frame.to_csv(path, index=False)
+    else:
+        gpd.GeoDataFrame(frame, geometry=gpd.points_from_xy(frame["Longitude"], frame["Latitude"]),
+                         crs="EPSG:4326").to_file(path, driver="GeoJSON")
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == column
+    assert [c["column"] for c in res["candidates"]] == [column]
+    best = res["candidates"][0]
+    assert best["parse_method"] == "year number" and best["granularity"] == "year"
 
 
 def test_csv_year_column_is_still_a_time_column(store):
