@@ -1884,7 +1884,7 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
 
-def _capability_inventory(capability: str) -> str:
+def _capability_inventory(capability: str, skill_roots: Optional[List[str]] = None) -> str:
     """What a peer can actually do, from ``agent_runtime.capability_registry``.
 
     GENERATED rather than written here on purpose. The hand-written version drifted behind the
@@ -1892,10 +1892,13 @@ def _capability_inventory(capability: str) -> str:
     were all bound to a peer while the supervisor's description of it never mentioned them, and
     a DEM request became a knowledge-base search as a direct result. The reasoning guidance in
     this prompt stays hand-written, because that is judgement rather than inventory.
+
+    ``skill_roots`` are the request's. The analyze peer loads skills from them, so its skills
+    clause is decided by discovery over them, not over the defaults.
     """
     try:
         from agent_runtime.capability_registry import describe
-        return describe(capability)
+        return describe(capability, skill_roots=skill_roots)
     except Exception:  # noqa: BLE001 - a prompt must still be produced
         logger.exception("capability inventory unavailable; falling back to a generic phrase")
         return "geospatial analysis over the evidence or uploaded files"
@@ -1979,7 +1982,8 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
     """LLM-driven next-action chooser with a deterministic heuristic fallback.
 
     ``code_peer`` and ``skill_roots`` are the request's, the same two values ``default_code_fn``
-    is built with, so the ``code`` line describes the peer that will actually run.
+    is built with, so the ``code`` line describes the peer that will actually run. The
+    ``analyze`` line reads ``skill_roots`` too, because that peer binds the same skill loaders.
     """
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
@@ -1992,7 +1996,7 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
             "- analyze: run a workflow with EXISTING purpose-built tools over the evidence or "
             "uploaded files. It can currently do: "
-            + _capability_inventory("analyze") + ". "
+            + _capability_inventory("analyze", skill_roots) + ". "
             "Anything in that list is analyze work, not a retrieval question — a DEM, a "
             "boundary and a geocode all come from live services, not from the knowledge base, "
             "so searching for them finds writing ABOUT them and never the thing itself. "
