@@ -1490,33 +1490,56 @@ next deploy there is no deployed version to pin the newcomer to.
 
 ### Stage S13.3 What the first Linux run found
 
-Before the first CI run, the workflow's steps were run verbatim in a `python:3.11-slim`
-container on x86-64, with CPython 3.11.16, the deployed interpreter. All 175 installed packages
-matched the lock. The two lock entries left uninstalled are the spaCy model and py-spy, which
-`requirements.txt` never requests. Three findings:
+The first run (`36943761445`, on `ubuntu-24.04` with CPython 3.11.16, the deployed interpreter
+exactly) installed all 175 packages at the deployed versions and reported:
 
-* **rasterio and fiona need a system library the base image lacks.** Their wheels bundle GDAL
-  but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so `import rasterio`
-  fails. Under pytest 9 a module that is present but cannot load is a collection error, not a
-  skip, so the whole session stopped at `test_raster_routing.py` with no test run. The deployed
-  image has the library only as an automatic dependency of its GDAL and QGIS apt layers
-  (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others). Dropping
-  those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and fiona
-  unimportable. GitHub's Ubuntu runner has the library as a dependency of its own base packages
-  (git and the system Python), so CI on the runner does not see this; a job built on the slim
-  image would.
-* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
-  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
-  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
-  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
-  them a PDF, a .docx or a NetCDF file. A green run does not mean the
-  deployment can read those formats. Declaring them is a separate change.
+| | passed | failed | skipped |
+|---|---|---|---|
+| development Mac, its own versions | 1645 | 0 | 4 |
+| CI, the deployed versions | 1643 | 2 | 4 |
+
+The four skips are the same opt-in live-service tests in both. Before the push, the workflow's
+steps were run verbatim in a `python:3.11-slim` container on x86-64, which gave the same counts
+once it had the system library described below.
+
+**The Mac's baseline was measured on a stack that is not deployed.** Of ten version-sensitive
+packages, eight differ: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6, scipy 1.15.3
+against 1.17.1, libpysal 4.15.0 against 4.14.1, and fiona is not installed there at all. One of
+the two failures comes from that difference rather than from the platform, and it is the one
+that matters in production:
+
+* **pandas 3 parses years before 1677, so four-digit codes became dates.**
+  `test_csv_with_coordinates_flows_through` expects `detect_time_column` to ignore `Beat`, a
+  column of police beat numbers; on the deployed versions it lists it as a time candidate. Two
+  things combine. GDAL reads a CSV's columns as text, so the guard in `_candidate_columns` that
+  skips numeric columns without a time-like name never sees a number. And
+  `pd.to_datetime(..., errors="coerce")` turns `"1234"` into NaT on pandas 2, whose nanosecond
+  timestamps cannot reach before 1677, but into 1234-01-01 on pandas 3, which infers microsecond
+  resolution. Ranking sorts by parse rate before the name hint, so the code column wins whenever
+  the real date has a gap. Measured on the deployed versions: with one blank date in four rows,
+  `detect_time_column` chooses `Beat` (parse rate 1.0) over `Date` (0.75); pandas 2.2.3 chooses
+  `Date`. The deployed agent does this today. The fix is a separate change.
 * **The distance band sits on a tie.** `test_distance_band_without_a_threshold_leaves_no_island`
   passes on macOS/arm64 and leaves one island on Linux x86-64 with identical libpysal 4.14.1,
   scipy 1.17.1 and numpy 2.4.6; it was reproduced inside the deployed container on 2026-10-01.
   `analysis_spatial_stats_tools.py` passes `min_threshold_distance` to `DistanceBand` exactly,
   and the margin on the test lattice is 0.0 m. The fix (pad the threshold by a relative 1e-9) is
   a separate change, and the test is deliberately not skipped in the meantime.
+* **rasterio and fiona need a system library the slim base image lacks.** Their wheels bundle
+  GDAL but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so
+  `import rasterio` fails there. Under pytest 9 a module that is present but cannot load is a
+  collection error, not a skip, so that session stopped at `test_raster_routing.py` with no test
+  run. The deployed image has the library only as an automatic dependency of its GDAL and QGIS
+  apt layers (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others).
+  Dropping those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and
+  fiona unimportable. GitHub's runner has the library (both import there), so CI on the runner
+  does not see this; a job built on the slim image would.
+* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
+  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
+  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
+  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
+  them a PDF, a .docx or a NetCDF file. A green run does not mean the deployment can read those
+  formats. Declaring them is a separate change.
 
 The workflow also imports every module the suite `importorskip`s before running it. That call
 skips when a module is absent, so a package dropped from the install would turn whole spatial
@@ -1534,5 +1557,6 @@ modules into skips and leave the job green with far fewer tests.
   libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
   the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
   neither runs for real anywhere in CI.
-* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has,
-  not 3.11.16. The install step prints which one it got.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
