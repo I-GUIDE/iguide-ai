@@ -381,6 +381,19 @@ the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
 
+**Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
+once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
+fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close
+through `os_log`, and `os_log` reads a mapping the child never inherited. On the maintainer's Mac
+every later `qgis_process` returned -11 with empty output and every `execute_code` "failed during
+dependency installation", and neither program ever ran. `fork_safe.run` starts the child with
+`posix_spawn`, which runs no fork handler; off macOS it is `subprocess.run` unchanged, and the
+deployed Linux container is unaffected, so no CI run will show this. A source scan in
+`test_fork_safe.py` fails on a direct `subprocess`, `os.fork` or `multiprocessing` start, and a
+test fake has to replace `fork_safe.run`, the function the module calls. A library that forks on
+its own is not covered: joblib's loky pool calls `os.fork()`, and `esda.G_Local` starts one by
+default (`n_jobs=-1`). `scripts/repro_macos_fork_crash.py` reproduces the crash in under a second.
+
 **A baked image saves nothing on its own.** `pip install --target` sets
 `ignore_installed=True` — pip does not consult the image's site-packages — so a package baked
 into `AGENT_CODE_EXEC_IMAGE` is reinstalled on every run regardless. `sandbox/Dockerfile`
