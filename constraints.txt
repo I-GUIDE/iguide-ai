@@ -13,9 +13,20 @@
 #     pip install -r requirements.txt -c constraints.txt
 # so the suite tests the versions that are actually running, not latest-at-run-time.
 #
-# What it does NOT do. rag_pipeline/Dockerfile does not install through this file, so the next
-# image rebuild resolves fresh versions again and this file goes stale. Retake it after every
-# deploy that rebuilds the image. CI warns about any installed package this file does not list.
+# The images install through it as well. rag_pipeline/Dockerfile, MCP_server/Dockerfile and
+# metadata-extraction-server/Dockerfile pass `-c constraints.txt` to every pip install, so a
+# rebuild reproduces the versions below instead of resolving that day's newest, and
+# rag_pipeline/tests/test_image_installs_through_lock.py fails if one of them stops.
+#
+# A new requirement floats until this file is retaken. A constraint binds only a name it lists,
+# so a package added to requirements.txt after the freeze, and any new dependency it brings,
+# resolves at build time to its newest version that fits the pins below. Nothing listed here
+# moves to make room: if no version fits, the build fails with ResolutionImpossible. CI's drift
+# step names every floating package in a warning. After the deploy that ships it, retake this
+# file from the rebuilt container (command below); that pins it and clears the warning. To move
+# a listed package on purpose, edit its line here in the same change. A later retake should
+# then reproduce this file exactly, apart from packages that floated; any other difference
+# means the image did not install what this file says.
 #
 # Regenerate from the deployment (read-only there), never from a development machine:
 #     { sed -n '1,/^# ---- pip freeze/p' constraints.txt
@@ -32,10 +43,12 @@
 #   torch==...+cpu   exists only on the PyTorch CPU index, which requirements.txt adds with
 #                    --extra-index-url. There is no +cpu wheel for macOS, so this file
 #                    installs on Linux only. That is the point: it describes the deployment.
-#   en_core_web_sm   is installed by `spacy download` in the Dockerfile, hence the URL form.
+#   en_core_web_sm   is spaCy's English model, which is not on PyPI. rag_pipeline/Dockerfile
+#                    installs it by name through this file, and this line supplies the wheel's
+#                    URL and sha256, which pip verifies.
 #   py-spy           is installed in its own Dockerfile layer, for the watchdog.
-# requirements.txt requests neither of the last two, so as constraints they are inert; they stay
-# because they are part of what is deployed.
+# requirements.txt requests neither of the last two, so CI's install ignores them; they pin the
+# agent-api image's own layers.
 #
 # ---- pip freeze of the agent-api container, 2026-10-01 (everything below is generated) ----
 affine==3.0.1

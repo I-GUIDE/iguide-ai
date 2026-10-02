@@ -564,4 +564,14 @@ state, and `py-spy` stacks for every thread. If you are debugging a hang, look t
 restarting anything, and never recover with `--force-recreate`: it deletes the container and the
 evidence with it. `journalctl -u iguide-agent-watchdog` is every decision it has made.
 
+**The images install through `constraints.txt`, the deployed image's own `pip freeze`.** Every
+`pip install` in `rag_pipeline/Dockerfile`, `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` passes `-c constraints.txt`, so a rebuild reproduces the
+running versions instead of that day's newest. A package you add to `requirements.txt` floats
+(to its newest version that fits the lock) until the lock is retaken after the deploy that ships
+it, with the command in its header; CI's drift step warns until then. If the build fails with
+`ResolutionImpossible`, the newcomer needs a locked package at another version: change that one
+line of the lock on purpose, never drop `-c`. Never regenerate the lock on a development machine.
+`rag_pipeline/tests/test_image_installs_through_lock.py` fails if an install goes around it.
+
 Never commit `.env`, API keys, or Earth Engine credentials.

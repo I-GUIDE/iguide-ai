@@ -1560,3 +1560,127 @@ modules into skips and leave the job green with far fewer tests.
 * **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
   On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
   install step prints which one it got.
+
+### Stage S13.5 The images install through the lock
+
+This closes the first gap in S13.4. `rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile`
+and `metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside
+`requirements.txt` and pass `-c constraints.txt` to every `pip install`. A rebuild therefore
+reproduces the versions the deployment runs. Before, each rebuild resolved that day's newest, and
+nine days after the 2026-09-22 build 42 of 175 packages had already moved (S13.1).
+
+**What the next deploy installs changes in one direction: it stops upgrading.** On 2026-10-02 the
+deployed agent-api container still matched the lock line for line, so the rebuild that ships this
+change reinstalls the same 177 versions. Its pip layer reruns once, because the `COPY` above it
+changed. Without this change, the next deploy that touches `requirements.txt` re-resolves the
+whole stack. For PR #36's seven new packages that meant 42 moved packages; with it, the same
+deploy adds the new packages and moves nothing else. The cost is that upstream fixes no longer
+arrive by accident of build day. An upgrade is now a change to the lock, and CI tests it like any
+other change.
+
+**The spaCy model goes through the lock too.** `python -m spacy download en_core_web_sm` became
+`pip install -c constraints.txt en_core_web_sm`. `spacy download` fetches spaCy's compatibility
+table from GitHub at build time and installs whichever model version that table names for the
+installed spaCy, with no lock and no hash check. A bare name constrained by the lock's direct-URL
+line installs exactly that wheel instead, and pip checks the sha256 the URL carries. With one
+digit of the hash changed, the image's pip 24.0 refused: `Expected sha256 0000… Got 1932…`. Today
+both routes give the same wheel. The table lists only 3.8.0 for spaCy 3.8, and the wheel declares
+no dependencies of its own. So the switch changes nothing now; it stops a future model release
+from changing the image unannounced. py-spy likewise installs at its locked 0.4.2.
+
+**MCP_server follows the same rule, because it installs the same file.** Its running container
+was built in the same compose build as agent-api on 2026-09-22. Its `pip freeze` is the lock minus
+exactly `en_core_web_sm` and `py-spy`: 175 packages, each at the locked version. So locking it
+changes nothing it runs. It also keeps the two images on the same versions whenever either is
+rebuilt, including the usual `up -d --build agent-api`, which rebuilds only one.
+`metadata-extraction-server/Dockerfile` installs the same root `requirements.txt` and gets the
+same change. It is not deployed: the VM has only a stopped container from 2026-06-12, and the
+service sits outside compose's default profile.
+
+**libexpat1 is named in all three apt layers.** `python:3.11-slim` for amd64 does not have the
+package: not the tag cached here since 2026-09-19 (CPython 3.11.16, Debian 13.7), and not the one
+the build pulled on 2026-10-02 (3.11.17). With the locked wheels installed on the first,
+`import rasterio` and `import fiona` both fail with
+`libexpat.so.1: cannot open shared object file`. The two libraries that need it are the GDALs
+those wheels bundle,
+`rasterio.libs/libgdal-c8c9c467.so.36.3.10.3` and `fiona.libs/libgdal-fiona-e8f6bdb0.so.35.3.9.2`.
+`apt-get install libexpat1` alone fixes both. pyogrio 0.13.0 imports without it. The images keep
+their GDAL and QGIS packages, which pull it in anyway, so nothing they contain changes. In the
+deployed agent-api it was an automatic package that 16 others depend on, libgdal36,
+libqgis-core3.40.6, python3.13-minimal and the mesa libraries among them. Naming it puts the
+dependency where the next person to trim those layers will read it.
+
+**How a new requirement is handled: it floats until the lock is retaken.** A constraint binds only
+a name it lists. A package added to `requirements.txt` after the freeze resolves at build time to
+its newest version that fits the pins, and so does any new dependency it brings. Nothing already
+pinned moves to make room; if no version fits, the build fails with `ResolutionImpossible`. CI's
+drift step (S13.2) names each floating package in a warning. After the deploy that ships it, the
+lock is retaken from the running container with the command in its header. That pins the
+newcomer and clears the warning. Otherwise the retake is a check: it should change nothing below
+the marker, and any other difference means the image did not install what the lock says.
+
+The newcomer is not pinned in the lock at once because its lines would be a guess. The lock's
+lines come from an image's own `pip freeze`, and a newcomer usually brings dependencies of its
+own: IPython brought twelve in PR #36. Writing that closure by hand predicts a resolution the
+build performs anyway. Two things narrow the window instead:
+
+* Pin the newcomer itself in `requirements.txt` when the version CI tests must be the version
+  deployed, as PR #36 does. Then only its new dependencies float.
+* To move a package the lock already lists, edit that one line in the same change. CI installs
+  and tests it, and the retake after the deploy reproduces it.
+
+**A package a Dockerfile installs by name must be in the lock already.** CI installs only what
+`requirements.txt` asks for, so its drift step never sees py-spy or the model, and a floating one
+would never be flagged. `rag_pipeline/tests/test_image_installs_through_lock.py` fails in that
+case. It also fails for any `pip install` without `-c constraints.txt` or before the lock is
+copied in, for `spacy download`, and for an image without `libexpat1` in an apt layer. It reads
+the Dockerfiles as text and finds the images itself, so a new image is covered as soon as it
+copies `requirements.txt`. Run against prototype's three Dockerfiles, it reports the five unlocked
+installs (three in agent-api's) and the missing `libexpat1` in all three. Fourteen synthetic
+Dockerfiles, and five for the apt reader, check that it rejects each wrong answer and accepts
+each right one.
+
+### Stage S13.6 Verified on local builds, not by a deploy
+
+All three images were built from this change on the development Mac with
+`docker build --platform linux/amd64 --pull`, emulated, on 2026-10-02. The agent-api build took
+2,257 s, mcp-server 1,330 s and metadata-extraction-server 1,495 s, the three running at once.
+
+| image | `pip freeze` inside it | against the deployment |
+|---|---|---|
+| agent-api | the lock's 177 lines, byte for byte, including `torch==2.14.0+cpu` and the model's URL line with its sha256 | identical to the running agent-api; the lock, the running container and the build hash alike (sha256 `ea8da91e6ce73d84…`) |
+| mcp-server | 175 lines: the lock minus `en_core_web_sm` and `py-spy`, which it does not install | identical to the running mcp-server |
+| metadata-extraction-server | the same 175 lines | not deployed |
+
+Every line of each freeze is a line of the lock, so CI's drift step has nothing to report for
+any of them; run inside the mcp-server image, it printed nothing. The model layer resolved the
+bare name straight to the lock's URL. It read no compatibility table, installed 3.8.0 in 10 s,
+and `spacy.load("en_core_web_sm")` works. `apt-mark` lists `libexpat1` as manually installed in
+agent-api and metadata-extraction-server, and mcp-server names it on the same kind of install
+line. In agent-api the same 16 packages depend on it as in the deployed container, and both
+bundled GDALs resolve `libexpat.so.1` to `/lib/x86_64-linux-gnu/libexpat.so.1`.
+
+The test suite was started inside the built agent-api image and did not finish. Docker Desktop
+on the Mac stopped answering partway through, while other work loaded the machine, so no result
+from that run is recorded here. CI runs the suite on Linux under the same lock.
+
+**The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
+deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
+every compiled wheel here is built for cp311, not for a patch release. It is the float this stage
+leaves, below.
+
+### Stage S13.7 What this stage did not fix
+
+* **The base image and the apt layers still float.** `FROM python:3.11-slim` is a moving tag, as
+  S13.6 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
+  build day. None of that shows in `pip freeze`. Pinning the base by digest is a separate
+  decision, with its own cost: security updates to the base stop arriving by themselves.
+* **pip, setuptools and wheel come from the base image, not the lock.** `pip freeze` omits them,
+  so the lock cannot pin them. Today they agree: 24.0, 79.0.1 and 0.46.3 in the deployed image and
+  in both base tags above. torch requires `setuptools>=77.0.3`, which the base satisfies. A base
+  with an older setuptools would let pip upgrade it unpinned and unreported.
+* **The lock aligns versions, not the set of packages.** A requirement added later reaches only
+  the images that are rebuilt. `up -d --build agent-api` leaves mcp-server without it.
+* **Other images are outside this lock.** `embedding-server/` installs its own `requirements.txt`,
+  and `sandbox/Dockerfile`, `Dockerfile.claude` and `Dockerfile.opencode` install bare names. The
+  lock describes the root `requirements.txt` stack only.
