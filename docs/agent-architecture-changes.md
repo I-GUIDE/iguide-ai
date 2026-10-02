@@ -26,7 +26,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
 | 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
-| 13 | [A promise kept by rounding luck](#stage-13) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
+| 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1440,16 +1440,21 @@ credential-selection fix in S12.6 first.
 
 ---
 
-## Stage 13 — A promise kept by rounding luck {#stage-13}
+## Stage 14 — A promise kept by rounding luck {#stage-14}
 
 `spatial_weights` with `weights='distance_band'` and no `threshold_km` tells the user it *"used
 the smallest distance that leaves no island"*. On the deployed Linux image that was false: the
 test lattice came back with one island. The test that checks the promise arrived with the tool
 (`7cb9f47`, 2026-08-19) and passes on a Mac, so nobody saw it fail until the suite ran on
-Linux: in `backend_swap`'s CI (fixed there in `4e8d327`), as the one failure in the
-extraction-integration branch's CI, and inside the deployed `agent-api` container on 2026-10-01.
+Linux: in `backend_swap`'s CI, which fixed it in `4e8d327`; in the deployed-version CI being
+added to `prototype` (`460cd25`, branch `claude/ci-deployed-constraints`); and inside the deployed
+`agent-api` container on 2026-10-01.
 
-### Stage S13.1 Where the island came from
+This is stage 14 because that CI change opens stage 13, *Testing what is deployed*. Its first
+Linux run found this tie, recorded it, and left the test failing for a separate change. This is
+that change.
+
+### Stage S14.1 Where the island came from
 
 The automatic threshold is `libpysal.weights.min_threshold_distance`, which returns the critical
 pair's distance as a square root. `DistanceBand` then admits a pair when its **squared** distance
@@ -1481,13 +1486,19 @@ coordinates met the Mac's arithmetic. These two machines also run different libr
 but the session working on the extraction branch pinned CI's exact versions on a Mac and still got
 no island, so the split follows the platform rather than a version.
 
-### Stage S13.2 The fix, and what it costs
+### Stage S14.2 The fix, and what it costs
 
 One line after `min_threshold_distance`: `thresh *= 1.0 + 1e-9`. That is about 0.1 mm at 100 km
 and 7.6 million ulps at this threshold, so it absorbs any last-bit disagreement while staying far
 below any distance an analysis could care about. It is the line `backend_swap` carries in
 `4e8d327`, after which that branch's Linux CI went green. This is the only place the code derives
 a band from `min_threshold_distance`.
+
+**Revised during the work:** the line and its comment are now copied from `4e8d327` verbatim.
+The first version reworded the comment, and the extraction-integration branch already carries
+`4e8d327`, so a test merge of `prototype` into it conflicted in this file. With identical lines
+the same test merge has no conflict at all. The note's caveat is a separate comment two lines
+further down, where it cannot collide.
 
 What it changes, measured on the lattice: nothing on the Mac (146 links before and after), and on
 Linux exactly the dropped pair (144 links and 1 island before, 146 and 0 after). Only two
@@ -1507,7 +1518,7 @@ against the deployed module, byte-identical to `prototype`'s; after ran against 
 `test_spatial_stats_tools.py` went from 2 failed and 33 passed to 35 passed. The Mac's full suite
 went from 1645 passed and 4 skipped to 1646 and 4, the difference being the new test.
 
-### Stage S13.3 The reason worth keeping
+### Stage S14.3 The reason worth keeping
 
 A correctness promise was being met by rounding luck, and only a Linux run could show it. The
 developer's machine was the one platform where the luck held, so the test that encoded the
