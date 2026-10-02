@@ -45,6 +45,15 @@ geopandas
 shapely
 fiona
 rasterio
+# GeoParquet. REQUIRED although nothing imports it by name: pandas and geopandas load it on
+# demand inside to_parquet/read_parquet, so an import grep never finds it. reproject_vector
+# writes parquet on every call and vector_spatial_join above AGENT_GEOJSON_MAX_FEATURES
+# (agent_runtime/langchain_geo_tools.py); read_vector, the temporal tools and
+# extractors/geo_handles.py read it back. Never declared until 2026-10-01: in the deployed
+# image every reproject_vector call failed with "Missing optional dependency
+# 'pyarrow.parquet'", while dev machines, which have it, passed. Pinned to the sandbox
+# image's version, which reads the same files.
+pyarrow==25.0.1
 
 # Spatial statistics (agent_runtime/analysis_spatial_stats_tools.py).
 # libpysal = spatial weights, esda = Moran/Geary/LISA/Getis-Ord, spreg = spatial regression.
@@ -60,6 +69,16 @@ pygeoda
 pandas
 matplotlib
 nbformat
+
+# Extraction readers. Each is imported lazily by an extractor that degrades instead of failing
+# when it is missing, which is why the absence went unnoticed: publication_extractor reads every
+# .pdf as empty text without pypdf and every .docx as empty without python-docx, and
+# data_extractor cannot open NetCDF/HDF/GRIB without xarray. Dev machines had all three; the
+# image had none. xarray brings only its scipy engine, so NetCDF3 opens and NetCDF4/HDF5 still
+# does not: that needs netCDF4 or h5netcdf, which neither dev nor the image has.
+pypdf==6.6.2
+python-docx==1.2.0
+xarray==2026.7.0
 
 # Storage / cloud
 boto3

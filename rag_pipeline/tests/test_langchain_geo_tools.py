@@ -129,6 +129,41 @@ def test_graceful_failure_no_raise():
     assert r["ok"] is False and r.get("error")
 
 
+
+# --- GeoParquet: the write path no test reached ----------------------------------------
+# reproject_vector writes parquet on EVERY call, and vector_spatial_join does above
+# AGENT_GEOJSON_MAX_FEATURES, yet nothing above reaches either: test_spatial_join's three
+# points stay under the limit and come back as GeoJSON. So this module passed inside the
+# deployed image, which had no pyarrow, while every reproject_vector call there answered
+# "Missing optional dependency 'pyarrow.parquet'". pyarrow is a declared requirement now, and
+# there is deliberately no importorskip("pyarrow"): a skip would hide the failure these exist for.
+
+def test_reproject_writes_geoparquet_the_other_tools_read_back(shapefile):
+    from agent_runtime.file_store import resolve_file_id
+    tools = _tools()
+    r = json.loads(tools["reproject_vector"].invoke(
+        {"file_id": shapefile["zip_id"], "target_crs": "EPSG:5070"}))
+    assert r["ok"] is True, r.get("error")
+    assert r["filename"].endswith(".parquet") and r["crs"] == "EPSG:5070"
+    back = gpd.read_parquet(resolve_file_id(r["file_id"]))
+    assert len(back) == 3 and back.crs.to_epsg() == 5070
+    # ...and through the tool set's own reader, which is what the next tool call goes through.
+    i = json.loads(tools["inspect_vector"].invoke({"file_id": r["file_id"]}))
+    assert i["ok"] is True and i["driver"] == "Parquet"
+    assert i["feature_count"] == 3 and i["crs"] == "EPSG:5070"
+
+
+def test_spatial_join_over_the_geojson_limit_writes_parquet_that_reads_back(shapefile, monkeypatch):
+    import agent_runtime.langchain_geo_tools as geo
+    monkeypatch.setattr(geo, "_GEOJSON_MAX_FEATURES", 0)   # any non-empty join is now "large"
+    tools = _tools()
+    r = json.loads(tools["vector_spatial_join"].invoke(
+        {"left_file_id": shapefile["zip_id"], "right_file_id": shapefile["zip_id"]}))
+    assert r["ok"] is True, r.get("error")
+    assert r["format"] == "parquet" and r["on_map"] is False and r["feature_count"] == 3
+    i = json.loads(tools["inspect_vector"].invoke({"file_id": r["file_id"]}))
+    assert i["ok"] is True and i["feature_count"] == 3
+
 # --- wiring into the peers -------------------------------------------------
 
 def test_geo_tools_wired_into_peers_only_with_files(monkeypatch):

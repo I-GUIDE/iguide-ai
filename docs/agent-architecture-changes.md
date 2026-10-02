@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on the health check; logs outlive the container |
+| 13 | [The image installs a list, not a laptop](#stage-13) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,103 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+## Stage 13 — The image installs a list, not a laptop {#stage-13}
+
+`reproject_vector` failed on every call in the deployed agent, and nobody had noticed. It writes
+GeoParquet, which needs pyarrow, and the image had no pyarrow. Chasing that turned up more
+packages the code reaches for and the image lacks, most of them latent, because only ingestion
+uses them and ingestion does not run in the container yet.
+
+### Stage S13.1 Why a missing declaration shows only in production
+
+`rag_pipeline/Dockerfile` installs `requirements.txt` and nothing else. A development machine has
+far more: anaconda's own packages, plus whatever `pip install --user` left in `~/.local`. Code
+that reaches for a package the file never names therefore passes every local test and every
+manual check, and fails only in the container.
+
+Two properties of the code hid it further. None of these packages is imported at module scope,
+and pyarrow is never imported *by name*: pandas and geopandas load it inside `to_parquet` and
+`read_parquet`, where an import grep cannot see it. And where the absence does bite, most of the
+code degrades instead of raising: a pickle instead of parquet, an empty string instead of a
+PDF's text, a note instead of a NetCDF file's variables.
+
+| package | reached from | in the deployed image, without it |
+|---|---|---|
+| pyarrow | `reproject_vector` on every call; `vector_spatial_join` above `AGENT_GEOJSON_MAX_FEATURES`; `read_vector`, the temporal tools and `extractors/geo_handles.py` reading parquet back | `reproject_vector` answered `Missing optional dependency 'pyarrow.parquet'` every time; `geo_handles` silently wrote pickles that only it can open |
+| pypdf | `publication_extractor` | every PDF read as empty text, filed under the note `no_text_extracted`, which does not say why |
+| python-docx | `publication_extractor` | every `.docx` read as empty text, the same way |
+| xarray | `data_extractor` | every NetCDF, HDF or GRIB file answered `raster reader unavailable/failed` |
+
+All four were confirmed inside the deployed `agent-api` container on 2026-10-01: each import
+raises `ModuleNotFoundError`, and `GeoDataFrame.to_parquet` raises the error above. pyarrow was
+never declared. No commit ever added it to `requirements.txt`, and a local image built on
+2026-06-25 lacks it too. The parquet writes date from `421fc8da` (2026-06-12).
+
+### Stage S13.2 Why the suite never caught one
+
+A replica of the deployed environment was built by installing `requirements.txt` into
+`python:3.11-slim` (amd64), with the deployed container's own `pip freeze` as constraints. Its
+freeze matches production's in 175 of 176 packages; the one missing, py-spy, comes from a later
+layer of the real Dockerfile. The full suite inside it gave **5 failed, 1640 passed, 4 skipped,
+and not one failure was an import error.** Nothing in the suite reached any of the four:
+
+- `test_spatial_join`'s three points stay under the GeoJSON limit and come back as GeoJSON, and
+  no test called `reproject_vector`. So the vector tools' tests pass without pyarrow, in the
+  replica as on dev. Dev's pyarrow was never what made them pass.
+- No test touched `publication_extractor`, `data_extractor` or `geo_handles` at all.
+
+A CI job pinned to the deployed freeze would therefore have caught none of them. Two tests in
+`test_langchain_geo_tools.py` now cover the parquet round trip: `reproject_vector` writes it and
+`inspect_vector` reads it back, and a spatial join over the limit does the same.
+`test_declared_dependencies.py` covers the rest. **None of them uses `importorskip`,
+deliberately:** a skip is exactly how a missing package passes. In the replica all six fail, and
+none skips:
+
+| test | in the replica |
+|---|---|
+| reproject round trip; spatial join over the limit | `ImportError: Missing optional dependency 'pyarrow.parquet'` |
+| `geo_handles` frame passing | `assert '.pkl' == '.parquet'` |
+| PDF text | `assert 'Flood exposure by census tract' in ''` |
+| `.docx` text | `ModuleNotFoundError: No module named 'docx'` |
+| NetCDF metadata | `raster reader unavailable/failed: ModuleNotFoundError: No module named 'xarray'` |
+
+With the four packages added, all six pass.
+
+The five replica-only failures are the same gap running the other way: there, dev is *older*
+than production. They are not fixed here, and a CI job pinned to the deployed freeze will see all
+five. Each was checked by changing one package in the replica to dev's version.
+
+| failing test | dev | deployed | swap that makes it pass |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through`, a stray `Beat` column | pandas 2.2.3 | pandas 3.0.5 | pandas 2.2.3 |
+| three in `test_spatial_locations.py`, e.g. `'the Great Plains' == 'Great Plains'` | no spaCy model, so the regex fallback | `en_core_web_sm` | removing the model |
+| `test_distance_band_without_a_threshold_leaves_no_island` | | | **none found.** Dev's pandas, numpy, scipy, esda, libpysal, geopandas, pyogrio and scikit-learn each still fail. Cause not established. |
+
+### Stage S13.3 The pins
+
+The four are pinned, unlike most of the file, because each version was checked against what
+production runs. Installed on top of the replica, with the deployed freeze as constraints, they
+add exactly four packages and move none of production's. pyarrow 25.0.1 is the sandbox image's
+version (`iguide-codeexec`), which reads the same files. pypdf 6.6.2, python-docx 1.2.0 and
+xarray 2026.7.0 are the versions `backend_swap`'s lock pinned when its Linux CI went green at
+`4e8d327`.
+
+### Stage S13.4 What this stage did not fix
+
+- **xarray opens NetCDF3 and nothing newer.** Its only file engine in the image is scipy.
+  NetCDF4/HDF5 needs `netCDF4` or `h5netcdf`, GRIB needs `cfgrib`, and neither dev nor the image
+  has any of them, so this is a format `data_extractor` has never read rather than a missing
+  declaration. rasterio's GDAL in the image does have netCDF, HDF5 and GRIB drivers, but
+  `data_extractor` sends those extensions to xarray alone.
+- **`data_extractor` reads `ds.dims` as a mapping**, which xarray 2026.7 warns will become a set
+  of names. The pin holds it. A bump past that change would fail silently into the same
+  `raster reader unavailable` note; `ds.sizes` is the fix.
+- **pystac-client** is on dev and not in the image, but nothing reaches it: STAC is commented out
+  of `_DEFAULT_PROVIDERS`, and neither caller of `get_opengeodata_results` passes providers.
+- **colbert** is imported at module scope by `rag_pipeline/reranker.py`, which only
+  `scripts/demo_reranker.py` imports, and `scripts/` is not copied into the image.
+- **Twelve packages are imported directly but declared nowhere**, arriving only as somebody
+  else's dependency: numpy, pyproj, pyogrio, pillow, scikit-learn, Werkzeug, uvicorn, PyYAML,
+  anthropic, affine, langgraph-checkpoint and langgraph-prebuilt. None is missing today; each
+  stays only as long as its parent keeps bringing it.
