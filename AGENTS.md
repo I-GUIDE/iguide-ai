@@ -44,6 +44,22 @@ python3 -m pytest rag_pipeline/tests/ -q
 
 Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
 
+**A passing run says nothing about whether the suite stayed offline.** Until 2026-10-02 every
+run reached eight search engines (the supervisor's web fallback, through `ddgs`), the Census
+TIGERweb service, and whatever listened on localhost:8077 and 127.0.0.1:8000, and every test
+passed, because each of those paths degrades quietly when its service does not answer.
+`rag_pipeline/tests/conftest.py` now stubs the three the code reaches on its own
+(`_no_live_services`), and `test_admin_boundary_area_arg.py` stubs TIGERweb at `_query`, as
+`test_admin_boundary.py` always did. A new test whose code path calls another live service
+stubs it at the point of use the same way. The conftest also takes back the one `.env` it cannot
+prevent: `rag_pipeline/__init__.py` loads the repo root's `.env` by explicit path, and pytest
+imports that package before it can import a conftest inside it. In a copy laid out like the main
+checkout, 56 of that file's variables reached the tests, the three self-skipping live tests ran,
+and seven tests failed. To check a change, deny the network to the whole process and count what
+was attempted. A probe on Python's `socket` module is not enough, because `ddgs` sends through
+`primp`, a Rust client, and its requests never pass through that module. `sandbox-exec` with
+outbound IP denied catches them on macOS, and `docker run --network none` on Linux.
+
 That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
 is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
 non-spatial retrieval sources so it can assert every document came from the spatial one. It
