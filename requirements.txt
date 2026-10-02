@@ -70,15 +70,28 @@ pandas
 matplotlib
 nbformat
 
+# Excel. pandas loads openpyxl on demand inside read_excel, the same blind spot as pyarrow.
+# detect_time_column and time_series fall back to read_excel for a .xlsx with no coordinate
+# columns (analysis_temporal_tools._read_plain_table); without it every such upload
+# answered "ImportError: `Import openpyxl` failed". Matches the sandbox image.
+openpyxl==3.1.5
+
+# Classification schemes for choropleth_image(scheme=...) in extractors/geo_handles.py, which
+# silently drew a continuous ramp instead when this was missing. Matches the sandbox image.
+mapclassify==2.10.0
+
 # Extraction readers. Each is imported lazily by an extractor that degrades instead of failing
 # when it is missing, which is why the absence went unnoticed: publication_extractor reads every
-# .pdf as empty text without pypdf and every .docx as empty without python-docx, and
-# data_extractor cannot open NetCDF/HDF/GRIB without xarray. Dev machines had all three; the
-# image had none. xarray brings only its scipy engine, so NetCDF3 opens and NetCDF4/HDF5 still
-# does not: that needs netCDF4 or h5netcdf, which neither dev nor the image has.
+# .pdf as empty text without pypdf and every .docx as empty without python-docx, data_extractor
+# cannot open NetCDF/HDF/GRIB without xarray, and notebook_extractor falls back to a regex that
+# cannot parse `obj?` or a `!command` inside a block, where IPython's own transformer can. Dev
+# machines had all four; the image had none. xarray brings only its scipy engine, so NetCDF3
+# opens and NetCDF4/HDF5 still does not: that needs netCDF4 or h5netcdf, which neither dev nor
+# the image has.
 pypdf==6.6.2
 python-docx==1.2.0
 xarray==2026.7.0
+ipython==8.30.0
 
 # Storage / cloud
 boto3

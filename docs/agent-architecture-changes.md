@@ -1537,3 +1537,58 @@ xarray 2026.7.0 are the versions `backend_swap`'s lock pinned when its Linux CI 
   else's dependency: numpy, pyproj, pyogrio, pillow, scikit-learn, Werkzeug, uvicorn, PyYAML,
   anthropic, affine, langgraph-checkpoint and langgraph-prebuilt. None is missing today; each
   stays only as long as its parent keeps bringing it.
+
+### Stage S13.5 Three more, found by scanning against the replica
+
+The replica's suite raised no import errors, so the rest came from a static pass over every
+import in the five packages the image ships, plus every pandas or xarray call that loads an engine
+on demand (`to_parquet`, `read_parquet`, `read_excel`, `open_dataset`), each checked in the
+replica. Three more packages are reached by the code, present on dev, and absent from the image:
+
+| package | reached from | in the image, without it | on dev |
+|---|---|---|---|
+| openpyxl | `detect_time_column` and `time_series` on a `.xlsx` with no coordinate columns. GDAL opens the file, `read_vector` refuses a table without coordinates, and `_read_plain_table` falls back to `pd.read_excel`. | ``ImportError: `Import openpyxl` failed``. With it, the same upload gives three monthly periods. | 3.1.5, from anaconda |
+| mapclassify | `choropleth_image(scheme=...)`, which the analysis peer binds whether or not files are attached | the scheme is dropped and a continuous ramp drawn, and nothing in the result says so | 2.10.0, from `~/.local` |
+| IPython | `notebook_extractor`, at ingestion | a regex fallback. Of seven typical cells, `np.mean?` and a `!command` inside a loop fail to parse; IPython parses all seven. | 8.30.0, from anaconda |
+
+openpyxl and mapclassify are live on the deployed agent's path; IPython is latent, like the
+readers. openpyxl 3.1.5 and mapclassify 2.10.0 match the sandbox image. IPython 8.30.0 is dev's
+version, the one the notebook front end was written against. Each has a test in
+`test_declared_dependencies.py` that fails in the replica: the spreadsheet test cannot even write
+its fixture without openpyxl, `choropleth_image` never passes `scheme` to the plot, and
+`transform_cell` cannot parse either cell. With all seven pins on top of the replica, the install
+adds 20 packages, the seven plus 13 dependencies (12 of them IPython's), and moves none of
+production's.
+
+Not declared, because it never worked on dev either: `.xls` needs xlrd, which neither dev nor the
+image has, and the GDAL inside the pyogrio wheel has no XLS driver.
+
+### Stage S13.6 Building it, and what the next deploy will change
+
+The real `rag_pipeline/Dockerfile`, built from this `requirements.txt` on `python:3.11-slim` for
+amd64, installs all seven, and a GeoParquet round trip works inside the result. The full suite
+inside that image gives **6 failed, 1648 passed, 4 skipped.** Every new test passes and no failure
+is an import error. The six are the replica's five plus `test_pyqgis_available_probes_worker_python`,
+which fails in any image with QGIS installed, with or without this change: it points
+`QGIS_PYTHON_BIN` at a missing interpreter and expects "unavailable", while
+`qgis_python_candidates()` deliberately falls back to `/usr/bin/python3`, which has QGIS. It fails
+the same way with the unmodified tree, and in a local image built on 2026-06-25.
+
+**Deploying this changes more than these seven packages.** A changed `requirements.txt`
+invalidates the image's pip layer, so the build that ships it re-resolves every unpinned name in
+the file to whatever is newest that day. Against the deployed freeze, the fresh build changes 42
+packages, none by a major version, and adds 21: the 20 above, plus opentelemetry-api, now pulled
+in by an upgraded dependency. The moves most likely to change behaviour:
+
+| package | deployed | fresh build |
+|---|---|---|
+| openai | 3.14.1 | 3.23.0 |
+| anthropic | 1.6.0 | 1.11.0 |
+| langsmith | 0.12.6 | 0.14.3 |
+| langchain, langchain-core, langchain-openai | 1.4.1, 1.6.3, 1.6.2 | 1.4.3, 1.6.6, 1.6.7 |
+| geopandas | 1.1.4 | 1.2.0 |
+| sentence-transformers | 6.0.1 | 6.1.0 |
+
+Installing with the deployed freeze as constraints ships only the additions, as the replica
+shows. That is the job of a lock file, like the one on `backend_swap`; this stage does not add
+one.

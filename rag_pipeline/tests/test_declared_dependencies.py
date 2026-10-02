@@ -1,13 +1,15 @@
 """Packages the code reaches for only at call time, exercised so that a missing one FAILS.
 
-None of these is imported at module scope, and pyarrow is never imported by name at all:
-pandas and geopandas load it inside to_parquet/read_parquet, where an import grep cannot see
-it. The code around each one degrades instead of raising. write_geodata falls back to a pickle
-no other tool can open, publication_extractor reads a PDF as empty text, data_extractor returns
-a "reader unavailable" note. So the suite passed on every machine that happened to have them,
-while the deployed image, which installs requirements.txt and nothing else, had none of them
-(measured 2026-10-01 by running this suite inside a replica of that image). The
-reproject_vector and spatial-join parquet paths are covered in test_langchain_geo_tools.py.
+None of these is imported at module scope, and two are never imported by name at all: pandas
+and geopandas load pyarrow inside to_parquet/read_parquet, and pandas loads openpyxl inside
+read_excel, where an import grep cannot see either. The code around each one degrades instead
+of raising. write_geodata falls back to a pickle no other tool can open, publication_extractor
+reads a PDF as empty text, data_extractor returns a "reader unavailable" note, and
+choropleth_image draws a continuous ramp in place of the scheme it was asked for. So the suite
+passed on every machine that happened to have them, while the deployed image, which installs
+requirements.txt and nothing else, had none of them (measured 2026-10-01 by running this suite
+inside a replica of that image). The reproject_vector and spatial-join parquet paths are
+covered in test_langchain_geo_tools.py.
 
 There is deliberately no importorskip anywhere in this file. Every package exercised here is a
 declared requirement, and a skip would turn its absence back into the silent pass this module
@@ -15,6 +17,8 @@ exists to prevent.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -65,7 +69,8 @@ def _one_page_pdf(text: str) -> bytes:
     xref = len(out)
     out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
     out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    trailer = b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+    out += trailer % (len(objects) + 1, xref)
     return bytes(out)
 
 
@@ -110,3 +115,64 @@ def test_data_extractor_opens_a_netcdf_file(tmp_path):
     # NetCDF4/HDF5 would need netCDF4 or h5netcdf, which nothing declares.
     assert "note" not in meta, meta.get("note")
     assert meta["variables"] == ["precip"] and meta["dims"] == {"time": 4}
+
+
+# --- openpyxl ------------------------------------------------------------------------------
+
+def test_time_series_reads_a_spreadsheet_with_no_coordinates(store):
+    import pandas as pd
+    from werkzeug.datastructures import FileStorage
+
+    from agent_runtime.analysis_temporal_tools import make_temporal_tools
+    from agent_runtime.file_store import save_uploaded_file
+
+    xlsx = store / "daily_counts.xlsx"
+    pd.DataFrame({"date": pd.date_range("2025-01-01", periods=90, freq="D"),
+                  "count": range(90)}).to_excel(xlsx, index=False)
+    with open(xlsx, "rb") as fh:
+        fid = save_uploaded_file(FileStorage(stream=fh, filename=xlsx.name))["file_id"]
+    tools = {t.name: t for t in make_temporal_tools([fid])}
+    # GDAL opens a .xlsx, but read_vector refuses a table with no coordinates, so this falls
+    # back to pandas.read_excel, which loads openpyxl. Without it the tool answers
+    # "ImportError: `Import openpyxl` failed".
+    out = json.loads(tools["time_series"].invoke({"file_id": fid, "freq": "month"}))
+    assert out["ok"] is True, out.get("error")
+    assert out["periods"] == 3
+
+
+# --- mapclassify ---------------------------------------------------------------------------
+
+def test_choropleth_image_applies_the_requested_scheme(store, monkeypatch):
+    import geopandas as gpd
+    import geopandas.plotting
+    from shapely.geometry import box
+
+    from extractors.geo_handles import choropleth_image, write_geodata
+
+    seen = {}
+    real_plot = geopandas.plotting.plot_dataframe
+
+    def spy(df, *args, **kwargs):
+        seen.update(kwargs)
+        return real_plot(df, *args, **kwargs)
+
+    monkeypatch.setattr(geopandas.plotting, "plot_dataframe", spy)
+    zones = gpd.GeoDataFrame({"n": [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]},
+                             geometry=[box(i, 0, i + 1, 1) for i in range(10)], crs="EPSG:4326")
+    out = json.loads(choropleth_image(write_geodata(zones, "zones"), "n", scheme="Quantiles"))
+    assert out.get("png_file_id"), out
+    # Without mapclassify the tool drops the scheme and draws a continuous ramp, and nothing in
+    # its result says so.
+    assert seen.get("scheme") == "Quantiles"
+
+
+# --- IPython -------------------------------------------------------------------------------
+
+def test_notebook_cells_go_through_ipythons_own_transformer():
+    from extractors.r1_ipython_frontend import transform_cell
+
+    # Both parse only through IPython; the regex fallback leaves them as SyntaxErrors.
+    for cell in ("np.mean?", "for f in ['a', 'b']:\n    !echo {f}"):
+        _, parse_ok, note = transform_cell(cell)
+        assert parse_ok, note
+        assert note != "ipython_unavailable_fallback"
