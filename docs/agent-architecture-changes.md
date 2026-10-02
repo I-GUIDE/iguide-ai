@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | the health check is acted on; evidence and logs outlive the container |
+| 13 | [What counts as a date is decided here, not by pandas](#stage-13) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,113 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 13 — What counts as a date is decided here, not by pandas {#stage-13}
+
+*2026-10-01, `claude/temporal-numeric-code-columns`.*
+
+A pandas major upgrade silently widened what counts as a date, and only a run on the deployed
+versions could show it. `test_csv_with_coordinates_flows_through` failed inside the deployed
+`agent-api` container (Python 3.11.16, pandas 3.0.5) and passed on the development machine
+(pandas 2.2.3), with nothing in the repository changed: `requirements.txt` names `pandas`
+without a version, so the image takes whatever is current when it is built. `prototype` has no
+lock file and no CI; separate tasks cover both.
+
+### Stage S13.1 The mechanism, and why the obvious fix would have missed it
+
+The test's `Beat` column (1234, 1235, 1236) was offered as a time column beside `Date`. The
+diagnosis this work started from suspected the numeric path, numbers falling through to the
+text ladder where pandas 3 infers formats differently, and proposed skipping that ladder for
+numeric columns. It also flagged that 1234 sits inside the year branch's range, so which branch
+fired had to be checked first. Checked in a replica of the deployed image, built from the
+container's own `pip freeze`, the numeric path was not involved and the version difference was
+not format inference:
+
+* **`Beat` was never numeric.** GDAL's CSV reader types every field as text, so the column
+  reached `parse_time_series` as `"1234"` (dtype `str` on pandas 3, `object` on pandas 2). The
+  year branch never ran. The name gate in `_candidate_columns`, which skips a numeric column
+  without a time-ish name, asked the dtype, so for a CSV upload it never fired. Skipping the
+  text ladder for numeric series would not have touched this fixture.
+* **Format inference did not change; resolution did.** On each version the three text
+  strategies agree with one another. pandas 3 parses strings at microsecond resolution, so
+  `"1234"` became 1234-01-01. pandas 2 parsed at nanoseconds, whose range starts at 1677-09-21,
+  and coerced it to NaT. The test had been passing on an accident of `datetime64[ns]`.
+
+Across 31 column shapes, every difference between the two versions but one is a year outside
+1678–2262; the exception is in S13.4. Measured on the two versions:
+
+| input | pandas 2.2.3 | pandas 3.0.5, deployed |
+|---|---|---|
+| CSV: `incident_id` 1001–1005 beside a clean `Date` | `Date` | **`incident_id`** chosen as the time column |
+| CSV: IUCR-style codes (`0486`, `0820`, `1310`, `041A`, `2820`) beside a `Date` with two unusable rows | `Date` | **`IUCR`** chosen, 0.8 against 0.6 |
+| Chicago-style beats 111–2535, 40 values | 5 read as years | 20 read as years |
+| CSV: `Year` beside a `Beat` holding 1711–2212 | **crash**, `OutOfBoundsDatetime` in `_span` | `Beat` offered beside `Year` |
+
+The last row is pandas 2's own failure: the beats parse as years there too, and their 501-year
+span overflows its nanosecond `Timedelta`.
+
+### Stage S13.2 Three rules, each stated where pandas used to decide
+
+1. **A column is numeric by what it holds, not by its dtype.** `_as_numbers` accepts typed
+   numbers, and text in which every value is a plain number; blanks and the NA markers
+   `read_csv` would read as NaN are allowed. The name gate now treats a CSV's numbers exactly as
+   it always treated typed ones.
+2. **A number gets only numeric readings:** a four-digit year, YYYYMMDD (19000101–21001231),
+   epoch seconds or milliseconds. It no longer falls through to the text ladder, and a number
+   that fits none of them is a code and stays unparsed. YYYYMMDD is a new explicit branch; it
+   used to work only because the text ladder happened to infer `%Y%m%d`.
+3. **Every inferred time must fall in 1678–2262** (`_YEAR_FLOOR`, `_YEAR_CEILING`), on the text
+   ladder too. That is the window pandas 2 enforced implicitly, and stating it keeps the verdict
+   from moving with the pandas version. It is the rule that stops the IUCR column, which `041A`
+   keeps from counting as numeric. A column the source already typed as datetime is not clamped.
+
+After the change the 31 shapes give identical results on both versions, apart from S13.4, and
+every CSV in the table detects `Date` (or `Year`) alone.
+
+### Stage S13.3 Behaviour that changed on purpose
+
+* A CSV column of epoch seconds now parses. It parsed as nothing on either version.
+* A CSV year column with a gap, which `to_csv` writes as `2019.0` and an empty cell, now reads as
+  years: 2 of 3 values, where both versions read 0.
+* An 8-digit date held as digits in a CSV column **without** a time-ish name is no longer
+  auto-detected. That is the treatment a typed integer column always had; `time_column=` still
+  reads it.
+* Text dates outside 1678–2262, which pandas 3 had started parsing, are unparsed again, as on
+  pandas 2.
+* `parse_method` has a new value, `YYYYMMDD number`.
+
+Cost, measured on the development machine with both versions interleaved in one process: a
+million Chicago-format dates took 1.83 s against 1.77 s, with identical results. The added work
+is 0.04 s for the number check and 0.04 s per strategy for the window, so the slowest case, a
+column whose blank cells force the whole 22-strategy ladder, pays under a second on top of about
+43 s. A million beats held as text got cheaper, 0.74 s against 1.39 s, because the text ladder no
+longer runs on them; before the change pandas 2.2.3 read 125,531 of them as years.
+
+### Stage S13.4 Found here, not fixed
+
+* **Mixed UTC offsets stopped parsing on pandas 3.** An ISO column mixing `Z` and `+01:00`, or a
+  US daylight-saving pair such as `-06:00` and `-05:00`, parses 2 of 2 on pandas 2.2.3 and 0 of 2
+  on 3.0.5. pandas 3 raises `Mixed timezones detected` unless given `utc=True`, every strategy
+  fails, and the column reads as having no time at all. It is the same upgrade moving the line
+  the other way, so dates that should parse no longer do. It is open.
+* **`_span` overflows on pandas 2** when parsed times span more than about 292 years, and the
+  whole `detect_time_column` call then fails. This affects the development machine only.
+* **A code column inside 1678–2262 with a time-ish name** still parses as years: a `Report Area`
+  holding 1711–2212 would. Only the name tells it from a year column, and here the name says time.
+
+### Stage S13.5 Verified where the failure lives
+
+| | unfixed | fixed |
+|---|---|---|
+| deployed container, `test_csv_with_coordinates_flows_through` | fails | passes |
+| deployed container, the 35 temporal tests | 7 fail | all pass |
+| local replica of the deployed versions, the 35 temporal tests | the same 7 fail | all pass |
+| development machine (pandas 2.2.3), the 35 temporal tests | 4 fail | all pass |
+| development machine, full suite | 1645 passed, 4 skipped | 1651 passed, 4 skipped |
+
+In the deployed container each version of `agent_runtime/` was imported from `/tmp` ahead of
+`/app`, whose copy of the module is identical to `prototype`'s; nothing was deployed. The six new
+tests pin the three rules, the YYYYMMDD and bare-year readings, and the CSV shapes above. The
+original test is unchanged.
