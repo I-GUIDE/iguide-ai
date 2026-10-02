@@ -30,6 +30,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from agent_runtime.map_layers import content_layer_id
 from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
@@ -467,14 +468,12 @@ def _layer_id(kind: str, hint: Any = None, /, **content: Any) -> str:
     ``hint`` is legibility only, for logs and the DOM. It is itself content-derived — a
     rounded centre, a file id — so it cannot drift while the content stands still. Uniqueness
     never rests on it: two layers with the same hint are still told apart by the digest.
+
+    The rule now lives in ``map_layers.content_layer_id`` so that every tool's layers follow
+    it, not only these. This keeps the ``embed-`` namespace, and the ids it returned before the
+    move are pinned by test so that no existing embedding layer changes its id.
     """
-    blob = json.dumps(content, sort_keys=True, default=str)
-    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
-    bits = ["embed", _slug(kind)]
-    if hint is not None and str(hint).strip():
-        bits.append(_slug(str(hint)))
-    bits.append(digest)
-    return "-".join(bits)
+    return content_layer_id("embed", kind, hint, **content)
 
 
 def _layer_label(base: str, tag: str) -> str:

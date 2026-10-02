@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a failing health check is acted on, and its evidence kept |
+| 13 | [A layer is what went into it](#stage-13) | `claude/layer-identity-by-inputs` | layer ids from the inputs that made them, not the files they wrote |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,108 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 13 — A layer is what went into it {#stage-13}
+
+*2026-10-01. Branch `claude/layer-identity-by-inputs`.*
+
+S7.7 made the embedding layers' ids a digest of the inputs that decide what they show. Every
+other layer kept an id derived from its label or from the file it had just written, and one
+re-grounded turn showed both kinds failing.
+
+### Stage S13.1 A re-ground stacked a city on itself
+
+A real browser run, on a local server built from prototype plus the extraction branch (the
+layer code was prototype's), asked to buffer the Champaign city boundary by 2 km. The turn
+re-grounded once and re-ran `admin_boundary`, `qgis_metric_buffer` and `add_map_layer`. That
+run's file store and the browser's saved session record what happened:
+
+| | first pass | re-ground |
+|---|---|---|
+| boundary file | `file_0224334ad1dd`, 85,497 bytes | `file_37778aec7010`, 85,497 bytes, byte-identical |
+| boundary layer id | `boundary-file_0224334ad1dd` | `boundary-file_37778aec7010` |
+| QGIS buffer output | `file_7e8178fd7165` | the same id, rewritten (`overwrite=True` reuses by filename) |
+| `add_map_layer` copy | `file_04535529a562` | `file_33c7d10f5c71`, identical but for GDAL's `"name"` member |
+| buffer layer id | `agent-champaign_city_2_km_buffer` | the same |
+
+The session saved at the end of that turn held three layers: two identical outlines and one
+buffer. The report from the run counted four. The saved state shows the buffer escaped only by
+luck. `add_map_layer` set no id, so `build_map_layer` derived one from the label, and the model
+happened to pass the same `name` on both passes. A renamed repeat stacks it, and the new test
+reproduces four layers on prototype. The label-derived id also fails the other way: four
+different buffers named "2 km buffer" (two distances, two places, one dissolved) collapse into
+one layer, `agent-2_km_buffer`.
+
+**The reason, which is general.** An identity keyed on an output artefact stacks identical
+results, because every repeat writes a new artefact: a file_id, a filename, a label the model
+words differently. An identity keyed on the inputs that produced the result replaces, because a
+repeat has the same inputs. Those inputs must exclude everything the model words and include
+everything that decides the content.
+
+### Stage S13.2 What changed
+
+- `map_layers.content_key` and `content_layer_id` hold the S7.7 rule, moved out of
+  `rs_embed_tools._layer_id`, which now delegates. Seven golden ids pin that no embedding layer
+  moved.
+- `file_store.file_content_key(ref)` says what a file holds. It returns the `content_key` the
+  producer recorded, else a digest of the bytes, else the reference itself. The byte digest skips
+  GDAL's top-level layer-name member, which was the only difference between the run's two buffer
+  copies. Producers record a key through `create_output_file_from_path(..., content_key=)`.
+- `admin_boundary` records a key of the resolved level, GEOIDs, subdivision and truncation.
+  `boundary_layer_id(file_id)` now keys on the file's content key, so a repeat lands on the same
+  id, and `embed_zones` still rebuilds that id from either copy.
+- `qgis_metric_buffer` records a key of its input's key, the distance, both CRSs, `dissolve` and
+  `segments`. It still emits no layer of its own; `add_map_layer` draws it.
+- `add_map_layer` and `buffer_layer` set explicit ids from their inputs. For the first these are
+  the source as read, the render, the column and any sampling. For the second they are the
+  source, the distance in metres, the measuring CRS and `dissolve`. `name` is excluded from both.
+
+### Stage S13.3 Revised during the work: what counts as the input
+
+The first version put `sibling_file_ids` in the key, and the live check in Chrome caught it. One
+`add_map_layer` call passed the boundary as a "sibling" of the GeoJSON buffer, its repeat passed
+none, and the same buffer drew as two layers. Siblings matter only when they are read, which is
+when a shapefile is rebuilt from its parts. `langchain_geo_tools.source_content_key` now
+identifies an input as it was read. A self-contained file is its content key. A shapefile is a
+digest of every part staged beside its `.shp`, whichever file_ids those parts arrived under.
+
+### Stage S13.4 Why not at the boundary, and why not suppress the repeat
+
+`build_map_layers` is the one place every layer crosses, and the obvious home for a uniform rule.
+It was rejected because only the OUTPUT is visible there. An id derived from output content
+merges two different analyses that happen to produce the same features: "within 2 km" and
+"within 3 km" selecting the same five hospitals would become one layer. The inputs are known only
+inside the tool.
+
+Suppressing the re-run was rejected too. The re-ground exists to recover from a wrong first pass,
+and its result sometimes differs. With input-derived ids, a repeat that produces the same thing
+replaces its layer, and one that differs gets its own.
+
+### Stage S13.5 Verification
+
+- `test_layer_identity_by_inputs.py`, 25 tests. On prototype 15 fail: 7 on the defect itself, as
+  stacked or merged ids, and 8 because the new helpers do not exist there.
+- The full suite: 1670 passed, 4 skipped, against a baseline of 1645 and 4.
+- In Chrome, against a local server on this branch, a forced re-run of all three tools with new
+  output names and a new layer name. Two layers before, two after, with the same two ids, both
+  now drawn from the new files, and the buffer relabelled.
+
+The live run also hit an unrelated local defect. After the server's first PROJ lookup, every
+subprocess it forked crashed in PROJ's fork handler before exec. macOS logged eleven such crashes
+between 19:11 and 19:15, and both QGIS and code execution failed until the server restarted. The
+verification restarted the server between turns. This stage does not fix it.
+
+### Stage S13.6 What this stage did not fix
+
+- The rest of the spatial toolkit still takes layer ids from labels: clip, dissolve, intersect,
+  erase, simplify and geometry summary, the aggregate, spatial-statistics and temporal tools, and
+  `layers_for_artifacts` for the CLI peers. So does the client's artifact fallback
+  (`artifact-<filename>`). Each has both failure modes.
+- The embedding, terrain and prediction layers digest their input FILE ids, so a re-ground that
+  re-fetches their input stacks them. `file_content_key` is the drop-in.
+- `qgis_metric_buffer` writes with `overwrite=True`. That reuses the file_id of any existing output
+  with the same filename, from any session, and rewrites that record's session and owner.
+- In a restored session, a layer saved under an old id stacks once with its re-run under the new
+  id.
