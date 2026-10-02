@@ -25,6 +25,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 17 | [A filename names this conversation's file](#stage-17) | 2026-10-02 | a bare filename resolves through `find_files`: this conversation, this caller, the exact name |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1436,114 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 17 — A filename names this conversation's file {#stage-17}
+
+*2026-10-02. Branch `claude/read-by-name-scoping`.*
+
+S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 15 on
+`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S15.6).
+
+### Stage S17.1 What a read by name did
+
+`read_text_file` and `inspect_file_for_analysis` resolve `path` through `_resolve_allowed_path`. A
+file_id goes to the store. Anything else went to `_resolve_local_allowed_path`, which first called
+`_find_managed_file_by_name`: for a bare filename, the newest file in `uploads/` or `outputs/` whose
+on-disk name ended in `__<filename>`. It read no record, so it never saw `session` or `owner_id`.
+
+Measured with a probe on prototype `5ae6d92`, first on 2026-10-01 and again on 2026-10-02. Alice
+wrote `summary.md` in `conv-alice`. Bob, in `conv-bob`, read `ALICE PRIVATE` back by name through
+both tools, while `find_files("summary.md")` returned `[]` for him. The same read worked from
+alice's other conversation, and in dev mode from any conversation. The scan had four more
+consequences:
+
+- `execute_code(input_files=["summary.md"])` staged alice's file into bob's sandbox, because
+  `_resolve_input_file` falls back to `_resolve_allowed_path`. It went in under its on-disk name,
+  `file_<id>__summary.md`, so even alice's own `open("summary.md")` would have found nothing.
+- `write_text_file` sends a name that starts with "." down its path branch,
+  `_resolve_allowed_path(..., must_exist=False)`. The scan matched a suffix of the on-disk name, so
+  `".md"` found alice's `notes__.md` (on disk `file_<id>__notes__.md`) and overwrote it.
+  `secure_filename` strips leading dots, so only a stored name containing `__.` can be reached this
+  way. It is narrow, but it is a write into another user's file.
+- The suffix is not the filename: `"summary.md"` also matched `final__summary.md`.
+- A conversation's own file lost to a newer one elsewhere. Once alice had written a newer
+  `summary.md`, bob's read returned hers instead of his own.
+
+The scan arrived in `1017671` (2026-04-28), four months before records carried a session
+(`9b83546`), when the store was one namespace anyway. Reason not recorded.
+
+### Stage S17.2 What changed
+
+- `_find_managed_record_by_name` replaces the scan. It calls `find_files(name=...)`, which applies
+  both scopes and orders newest first, and keeps only a record whose `filename` is exactly the
+  name given, case included.
+- It asks for every match, with no page. `find_files` sorts all substring matches newest first and
+  only then cuts its page of 20. With 25 newer `draft*_summary.md` files, the exact `summary.md`
+  was not on that page.
+- `_resolve_allowed_path` tries it after the file_id and before a raw path, and returns the
+  record. A read by name now reports the `file_id` and `download_url` it resolved, where both were
+  null. `execute_code` stages the file under its filename as well as its id.
+- A refusal is the "file does not exist" error a missing name gets, word for word apart from the
+  name. The download endpoint answers 404 rather than 403 for the same reason (S9.3): a different
+  answer would tell bob that alice has a file by that name.
+
+### Stage S17.3 The unowned legacy pool, decided
+
+A record with no session and no owner stays readable by name, from any conversation. That is the
+answer `find_files` already gives, because the pool is reused, and `may_read`'s docstring keeps the
+opposite answer for a browser download, which is a different caller.
+
+It competes on recency like everything else. Ranking this conversation's own files first looked
+safer and was rejected. **An upload carries no conversation.** The upload route binds the user and
+not the thread, and the map UI posts only the files. Measured through the route in dev mode, with a
+`thread_id` sent in the query, the form and a header, the record was stored with `session: null`.
+So "own first" cannot tell a legacy record from this conversation's upload. It would rank an earlier
+turn's output above the corrected file the user had just uploaded under the same name. That is the
+wrong-file bug `_build_staging` was already fixed for, in the comment above its second pass.
+`test_a_newer_upload_outranks_an_older_output_of_the_same_name` pins this choice.
+
+### Stage S17.4 Verification, and what it costs
+
+- `test_read_by_name_scope.py`, 26 tests. On prototype 17 fail and 9 pass. The 9 are what scoping
+  must not break: a conversation's own file, the same in dev mode, and the legacy pool, each
+  through both tools, plus three ordering cases (the newest of several, the newer upload, and the
+  near-misses a page would hide). With the fix, 26 pass.
+- Re-running the probe on the branch, every by-name case is refused, and the raw paths in S17.5
+  still get through.
+- That file and eight neighbouring modules (file ownership, conversation listing, input staging,
+  the ledger's file rows, code execution, upload ownership, the download route and the sweep):
+  168 pass.
+- The full suite: 1671 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus
+  this file's 26.
+
+The price is a parse of every metadata record on each by-name read, since the store has no index.
+On a synthetic store of 1,400 records (the store's own comments count 1,325 legacy ones), a
+by-name read took 74 to 91 ms against 9 to 14 ms for the scan. At 5,000 records it was 460 ms against 45 ms. These are
+medians of 30 warm runs on the Mac, three runs at 1,400 and one at 5,000. `list_conversation_files`,
+`resolve_file_ref` and `overwrite=True` already pay for the same scan. If it starts to matter, the
+fix is an index, not an unscoped scan.
+
+### Stage S17.5 What this stage did not fix
+
+This change scopes a bare filename and nothing else. Two other routes reach a stored file without
+passing through `find_files`, and each needs a decision of its own:
+
+- **Raw paths.** The storage root is an allowed root, so a path into it is resolved with no session
+  or owner check, for reads and for writes. That leaves open whether a managed file should be
+  reachable by raw path at all, once it can be named by id or by filename.
+- **File ids.** A read by file_id is not checked against the owner. Outside the store itself,
+  `may_read` is called only by the download endpoint. Whether an id should then be honoured across
+  all of its owner's conversations, or only inside its own, is undecided.
+
+Two scoping gaps sit upstream of the lookup:
+
+- **Uploads are never stamped with a conversation** (S17.3). In dev and demo mode an upload is in
+  the pool every conversation reads by name, and `list_conversation_files` does not list it even
+  in the conversation that uploaded it. In token mode the owner check still confines it to its
+  user.
+- **A request with no `thread_id` binds no conversation**, and `find_files` then searches all of
+  them, though the owner check still applies. The map UI mints its thread id before the first turn
+  (from reading the code, not measured). Other API clients may not.
