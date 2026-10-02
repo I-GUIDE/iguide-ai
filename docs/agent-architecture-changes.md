@@ -1596,8 +1596,7 @@ moves one shape, the wrong way; it is the first item under *Found here, not fixe
   the column with its own `pd.to_datetime`. A daylight-saving column fails there on both versions,
   with `Can only use .dt accessor with datetimelike values` on 2.2.3 and `Mixed timezones
   detected` on 3.0.5. A single offset is bucketed by local clock time: `2026-01-31T20:00:00-06:00`
-  counts in January there and in February in `time_series`, which works in UTC. Routing it
-  through `parse_time_series` is the likely fix, and a separate change.
+  counts in January there and in February in `time_series`, which works in UTC. Fixed in S13.6.
 * **Abbreviated zone names** (`CST`, `CDT`) parse on neither version, fixed or not.
 
 **Cost**, as the best of interleaved rounds in one process, with every value distinct so that
@@ -1620,8 +1619,8 @@ timed, because other work held its load average at 63, so pandas 2.2.3's cost is
 | deployed container (pandas 3.0.5), the 38 temporal tests | the 2 new mixed-offset tests fail | all pass |
 | development machine (pandas 2.2.3), the 38 temporal tests | all pass | all pass |
 
-The live module in the same container, `prototype`'s, fails 9 of the 38: the 7 of S13.6 and the
-same 2. On the development machine the full suite gives 1654 passed and 4 skipped: S13.6's 1651
+The live module in the same container, `prototype`'s, fails 9 of the 38: the 7 of S13.7 and the
+same 2. On the development machine the full suite gives 1654 passed and 4 skipped: S13.7's 1651
 and the three new tests.
 
 Three tests are new. Two fail unfixed on pandas 3: offsets that differ (the daylight-saving pair,
@@ -1629,10 +1628,130 @@ Three tests are new. Two fail unfixed on pandas 3: offsets that differ (the dayl
 times through `detect_time_column` and `filter_by_time`, whose window is checked in UTC. The third
 is a guard that passes either way: one offset is still converted, and text without one keeps its
 clock time. The development machine passes all three unfixed, so it cannot show this failure. As
-in S13.6, each version of `agent_runtime/` was imported from `/tmp` ahead of `/app` in the
+in S13.7, each version of `agent_runtime/` was imported from `/tmp` ahead of `/app` in the
 deployed container; nothing was deployed.
 
-### Stage S13.6 Verified where the failure lives
+### Stage S13.6 `summary_statistics` reads a date the way the temporal tools do
+
+*2026-10-02, `claude/summary-statistics-utc-periods`, stacked on `claude/temporal-mixed-utc-offsets`.*
+
+This fixes the second item in S13.5's *Found here, not fixed*. `summary_statistics(by=<column>,
+period=day|week|month|quarter|year)` read the `by` column with its own
+`pd.to_datetime(errors="coerce")`, so none of this stage's rules reached it: an offset was not
+converted to UTC, a number got pandas' default reading, and nothing held the years to 1678–2262.
+Through the tool, on CSVs of points:
+
+* **A daylight-saving column failed on both versions**: `Can only use .dt accessor with
+  datetimelike values` on 2.2.3, `Mixed timezones detected` on 3.0.5. `Z` beside `+01:00` failed
+  the same way.
+* **One offset was bucketed by local clock time.** `2026-01-31T20:00:00-06:00` is 02:00 UTC on
+  February 1, so the same three rows gave January 1 and February 2 here and February 3 in
+  `time_series`.
+* **On pandas 3 a CSV's beats became years.** `"1234"`, `"1235"` and `"1236"` grouped by year came
+  back as the years 1234, 1235 and 1236. pandas 2.2.3 refused the column.
+
+Two more turned up, the first while checking what a numeric `by` does, and a GeoJSON input showed
+where the daylight-saving failure lives:
+
+* **A typed number was read as nanoseconds since 1970**, `pd.to_datetime`'s default for an
+  integer. A GeoJSON's years (2019, 2020), its beat codes (1234–1236) and its epoch seconds each
+  came back as a single `1970` or `1970-01` bucket, with `ok: true`, on both versions.
+* **An undated row's group was named by the pandas version**: `NaT` on 2.2.3, `(missing)` on
+  3.0.5. pandas 3's `astype(str)` keeps a missing value missing, so the `fillna("(missing)")`
+  after it worked there only.
+* **GDAL types a GeoJSON's ISO date-times itself**, so the daylight-saving failure was a CSV one.
+  One offset arrives as `datetime64[ms, UTC-06:00]` and was bucketed by local clock too; offsets
+  that differ arrive already converted to UTC, and were right before.
+
+**The change:** the `period` branch reads the column with `parse_time_series`, so it gets the
+reading every temporal tool gets: an offset converted to UTC, a number only numeric readings, a
+year in 1678–2262. The import sits inside the branch, not at the top of the module. The supervisor
+imports each analysis factory separately so that one module's failure costs only its own tools,
+and `analysis_spatial_stats_tools` imports this module when it loads, so a top-level import would
+have tied both to the temporal module. An undated row is grouped as `(missing)` on both versions
+and counted in a note; `time_series` drops such rows instead and reports them as
+`excluded_unparsed_time`. The tool description, which the model reads, and the docstring now say
+that the buckets are in UTC when the dates carry an offset.
+
+Through the tool on both versions, 16 column shapes:
+
+| shapes | 2.2.3, before | 3.0.5, before | after, both versions |
+|---|---|---|---|
+| 2 CSVs whose offsets differ (`-06:00` and `-05:00`; `Z` and `+01:00`) | `.dt` error | `Mixed timezones` error | UTC buckets |
+| 2 with one offset, CSV and GeoJSON | local clock | local clock | UTC buckets |
+| beats as text, `"1234"`–`"1236"`, by year | refused | the years 1234–1236 | refused |
+| epoch seconds as text | refused | refused | their dates |
+| 3 typed numbers: years, beat codes, epoch seconds | all `1970` | all `1970` | years; refused; dates |
+| one row reading `not a date` | group `NaT` | group `(missing)` | group `(missing)`, and a note |
+| 6 others: ISO, Chicago format, years as text, weeks, GeoJSON dates, GeoJSON offsets that differ | | | unchanged |
+
+After the change the two versions agree on all 16; before, they disagreed on 4, two of them only in
+the error message. The tool now gives `time_series`'s buckets on 12 of the 16, against 5. The other
+4 differ on purpose or from before: both tools refuse the two code columns, in different words; the
+undated row is kept here and dropped there; and a week is the same bucket in both, labelled
+`2026-01-05/2026-01-11` here and `2026-01-05` in `time_series`.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ is bucketed, in UTC, on both versions.
+* One offset is bucketed in UTC, as in `time_series`, so a row within a few hours of midnight UTC
+  can move to the next or the previous bucket.
+* Typed years give their years and typed epoch seconds their dates, where both gave `1970`; epoch
+  seconds held as text, which were refused, read as dates too.
+* A code column outside 1678–2262, such as the beats 1234–1236, is refused with *"could not be
+  read as dates"*, typed or as text, where a typed one gave `1970` and, on pandas 3, a text one
+  gave years.
+* On 2.2.3 an undated row's group is `(missing)`, no longer `NaT`, and on both versions a note
+  counts those rows.
+
+**Found here, not fixed:**
+
+* **`time_series`' hour-of-day profile calls UTC hours local.** Its axis reads *"hour of day
+  (local clock time)"*, but a time that carried an offset is in UTC by then: `09:00:00-06:00`
+  counts at hour 15. For a Chicago feed the peak moves by six hours in winter and five in
+  summer, under a label that says it did not.
+* **A code column inside 1678–2262 is read as years**, typed or as text, whatever its name: beats
+  1711, 1712 and 2212 grouped by year come back as those years. S13.4 records the same ambiguity
+  for detection. Here the caller has named the column and asked for periods, and only the values
+  could say otherwise.
+* **A week has two labels for one bucket**, as above. Each label is part of its tool's output,
+  so neither was changed here.
+
+**Cost** of parsing and bucketing the column, without reading the file, interleaved in one
+process, the median of three rounds, every date distinct:
+
+| 100,000 values, deployed container (3.0.5) | before | after |
+|---|---|---|
+| ISO, no offset | 0.03 s | 0.06 s |
+| ISO, one offset | 0.40 s | 0.43 s |
+| Chicago format | 5.19 s | 5.23 s |
+| ISO with 1 value in 100 unreadable | 0.06 s | 1.94 s |
+
+A column that reads in full stops at the first strategy and costs about 0.03 s more. The last row
+is the slowest case S13.3 describes for blank cells: a column holding any value no strategy reads
+runs all 22 strategies, which `time_series` already does on the same column. Only the deployed
+container was timed, at a load average under 0.7 on 8 cores.
+
+**Verified where the failure lives:**
+
+| | before (`claude/temporal-mixed-utc-offsets`) | after |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 36 aggregate tests | the 4 new tests fail | all pass |
+| deployed container, the 38 temporal tests | | all pass |
+| development machine (pandas 2.2.3), the 36 aggregate tests | the 4 new tests fail | all pass |
+| development machine, full suite | 1654 passed, 4 skipped | 1658 passed, 4 skipped |
+
+Four tests are new, and each fails before on both versions: a daylight-saving CSV grouped by month,
+whose buckets are UTC ones; a CSV with one offset, whose months are the ones `time_series` counts;
+typed years and epoch seconds read as dates and the beats 1234–1236 refused, typed and as text; and
+an undated row grouped as `(missing)` with a note, which fails at the label on 2.2.3 and at the
+note on 3.0.5. In the deployed container *before* was `/app`'s `agent_runtime/` with S13.5's
+`analysis_temporal_tools.py`, and *after* was that plus this module. Each was imported from `/tmp`
+ahead of `/app`, `diff -rq` named only those files, and it was the same container from the first
+run to the last. `prototype`'s `summary_statistics`, live in the same container, gives *before*'s
+answer on all 16 shapes. Nothing was deployed.
+
+### Stage S13.7 Verified where the failure lives (S13.1–S13.4)
 
 | | unfixed | fixed |
 |---|---|---|
