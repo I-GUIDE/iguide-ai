@@ -13,18 +13,32 @@ claim names a file so you can verify it rather than trust it.
 Agent API (Flask + gunicorn in prod, `app.run` locally):
 
 ```bash
-PYTHONPATH="$PWD" PORT=5055 AGENT_PUBLIC_BASE_URL= AGENT_CHAT_API_KEY= python3 api/server.py
+PYTHONPATH="$PWD" PORT=5055 AGENT_MODE=local AGENT_CHAT_API_KEY= python3 api/server.py
 ```
 
-All four matter, and each failure is silent or misleading:
+**`AGENT_MODE=local` is not optional on a laptop.** The main checkout's `.env` points at shared
+infrastructure — the PRODUCTION OpenSearch cluster among it — and every `load_dotenv` in the code
+walks up from a worktree and finds it. Without the mode, a local turn writes its conversation,
+snapshot and trace into prod, and nothing errors: on 2026-10-01 seven test conversations landed
+there unnoticed. Local mode closes the conversation store entirely (whatever the request asks —
+the map UI always asks for memory), keeps knowledge-base search READING, ignores
+`AGENT_PUBLIC_BASE_URL`, and gives dev-style access. It must be set on the command line or in the
+environment: `.env` loads with `override=False`, so the command line wins over the `.env`'s own
+`AGENT_MODE=token`.
+
+**Read the boot banner.** In local mode the server logs every endpoint it can still reach, tagged
+`[local ]` or `[REMOTE]` — the remote embedding server, the LLM, rs-embed, the KB cluster (marked
+READ ONLY). Anything `[REMOTE]` there is a real network call your test will make.
+
+The rest still matters, and each failure is silent or misleading:
 
 - no `PYTHONPATH` → `ModuleNotFoundError: rag_pipeline` (`api/server.py` imports it, and running
   a script puts only `api/` on `sys.path`)
-- `AGENT_PUBLIC_BASE_URL` inherited from a deployment `.env` → every `download_url` becomes
-  absolute against the *remote* host, so local downloads 404 with `unknown file_id`
 - `AGENT_CHAT_API_KEY` set → `/agent/chat*` answers 403 (`_get_agent_chat_api_key`); empty
   disables the gate
 - `PORT` defaults to 5002; the compose deployment maps host 3500 → container 5002
+- outside local mode, an inherited `AGENT_PUBLIC_BASE_URL` makes every `download_url` absolute
+  against the *remote* host, so local downloads 404 with `unknown file_id`
 
 Map UI prototype (`map-ui-prototype/`, Vite + React + MapLibre + deck.gl):
 
