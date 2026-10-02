@@ -254,6 +254,25 @@ def test_getis_ord_non_star_variant(lattice):
     assert r["ok"] is True and r["statistic"] == "Gi"
 
 
+def test_permutation_inference_starts_no_process_pool(lattice, monkeypatch):
+    """esda.G_Local defaults to n_jobs=-1, a joblib/loky pool of one fresh interpreter per core,
+    each forked from the agent process. Every esda statistic here runs in this process instead;
+    Stage 19 in docs/agent-architecture-changes.md has why, and what that costs on large layers.
+    esda imports Parallel inside the call, so patching joblib itself is patching it where it is
+    used."""
+    joblib = pytest.importorskip("joblib")
+
+    def no_pool(*args, **kwargs):
+        raise AssertionError("esda started a joblib process pool")
+
+    monkeypatch.setattr(joblib, "Parallel", no_pool)
+    tools = _tools()
+    for tool, extra in (("local_getis_ord", {}), ("local_getis_ord", {"star": False}),
+                        ("local_moran_lisa", {}), ("global_spatial_autocorrelation", {})):
+        r = json.loads(tools[tool].invoke({"file_id": lattice, "column": "gradient", **extra}))
+        assert r["ok"] is True, (tool, extra, r.get("error"))
+
+
 # --- Moran scatterplot ----------------------------------------------------------------
 
 

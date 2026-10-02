@@ -665,7 +665,13 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 island_idx = set(int(i) for i in w.islands)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42)
+                    # n_jobs=1, explicitly: G_Local is the one esda call here that defaults to -1,
+                    # a joblib/loky pool of one fresh interpreter per core, each forked from the
+                    # agent process. Below about 10,000 areas that pool saves a fraction of a
+                    # second at best, and the seeded result is identical either way. The cost on
+                    # larger layers: docs/agent-architecture-changes.md, Stage 19.
+                    g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42,
+                                     n_jobs=1)
 
             z = np.asarray(g.Zs, dtype="float64")
             p = np.asarray(g.p_sim, dtype="float64")

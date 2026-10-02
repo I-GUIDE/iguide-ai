@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 19 | [Permutations run in the agent's own process](#stage-19) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,168 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 19 — Permutations run in the agent's own process {#stage-19}
+
+`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S16.6 (branch
+`claude/fork-safe-subprocess`) named this call as the one known fork of the agent process that
+`fork_safe` cannot cover, because a library makes it. S16.6 left it for a separate change,
+because it changes how a statistics tool computes rather than how a child is started. This is
+that change. It is a trade, not a free win. At the sizes this tool usually sees, the worker pool
+costs more than it saves: about a quarter of a second per cold call on the image, and 20 to
+150 s on the Mac. On layers of tens of thousands of areas the pool is faster: at 85,000 cells on
+the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. Stages 13 to 18 are
+claimed by open, unpushed or uncommitted branches (17 three times and 18 twice when this was
+written); this takes the next free number.
+
+### Stage S19.1 Which calls start a pool
+
+Every esda constructor the module calls, with its default in esda 2.9.0 (the image) and 2.10.0
+(the Mac). The two versions agree:
+
+| call | tool | `n_jobs` default | change |
+|---|---|---|---|
+| `esda.Moran`, `esda.Geary`, `esda.G` | `global_spatial_autocorrelation`, `moran_scatterplot` | no such parameter: a Python loop over `np.random.permutation`, in-process | none |
+| `esda.Moran_Local` | `local_moran_lisa` | 1 | none |
+| `esda.G_Local` | `local_getis_ord` | **-1** | `n_jobs=1` |
+
+The other engines start nothing either. Under a counter of every Python-level child start, the two
+`spatial_regression` tests that fit models (spreg `OLS`, and the spatial model `model="auto"` chose)
+and the SKATER and max-p `regionalize` tests started none. spreg's multiprocessing lives only in its
+`*_Regimes` models, which no tool uses, and pygeoda's `cpu_threads` are threads.
+
+With `-1`, esda's `crand` cuts the areas into one chunk per `os.cpu_count()` and hands the
+chunks to `joblib.Parallel` on the loky backend. loky starts a fresh interpreter per chunk, and
+each must import esda before it can work. A cold call started 10 children on the image (8 cores)
+and 16 on the Mac (14 cores). Traced on the Mac, those are the 14 workers, loky's resource
+tracker, and CPython's multiprocessing resource tracker.
+
+S16.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
+joblib 1.4.2 (loky 3.4.1), and it is where the 15 `os.fork` audit events in
+`test_getis_ord_finds_hot_and_cold_ends` come from: the 14 workers and loky's tracker. The
+image's joblib 1.6.0 (loky 3.6.0) calls `_posixsubprocess.fork_exec` instead, which raises no
+`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S16.5). On
+macOS it is a plain `fork()`, because CPython 3.13 defines `VFORK_USABLE` only under
+`__linux__`. Upgrading joblib on the Mac would therefore hide these forks from an `os.fork` audit
+hook without removing them.
+
+### Stage S19.2 What the pool costs, and when it pays
+
+The measured call is `G_Local(y, w, permutations=999, star=True, seed=42)` exactly as the tool
+makes it, on queen weights. Inputs are the suite's `_lattice()` at 8×8 (the test's 64 cells) and
+12×12 (S16.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
+85,000 cells. The tessellation is tract-like, about six neighbours a cell and at most 13; Illinois
+has 3,265 tracts, and 85,000 is roughly every US tract. "Cold" is a fresh process, with `-1` and
+`1` interleaved. CPU counts the process plus its reaped workers.
+
+On the image (`agent-api`, Python 3.11, no numba, 8 vCPU, 1-minute load 0.4–2.5), the code ran from
+a throwaway copy in the container's `/tmp`, with nothing deployed. Each cold cell is six runs across
+two containers of the same image, which was recreated without a rebuild between the two sets of
+runs. "Warm" is the second and third call in one process, the way a long-lived server makes them.
+loky keeps a pool's workers for 300 s after a call (joblib's `idle_worker_timeout` default, in both
+versions):
+
+| cells | cold, `n_jobs=-1` | cold, `n_jobs=1` | warm, `-1` | warm, `1` |
+|---|---|---|---|---|
+| 64 | 0.23–0.30 s | 0.016–0.017 s | not run | not run |
+| 144 | 0.28–0.30 s | 0.024–0.025 s | 0.035–0.038 s | 0.021 s |
+| 3,000 | 0.49–0.62 s | 0.30–0.38 s | 0.16 s | 0.25 s |
+| 10,000 | 0.94–1.27 s | 0.93–1.08 s | 0.64–0.65 s | 0.95–1.01 s |
+| 30,000 | 2.57–3.77 s | 3.43–3.84 s | 2.22–2.23 s | 3.37–3.42 s |
+| 85,000 | 8.41–12.28 s | 13.27–14.59 s | 8.2–9.0 s | 13.0–13.1 s |
+
+So on the image the pool costs a start-up of about 0.25 s, paid on the first call and again after
+each 300 s idle, and it pays back only on large layers. Cold, the two are even at 10,000 cells; the
+pool is ahead by about 0.5 s at 30,000 and 3.9 s at 85,000 (medians). Warm, it is behind at 144
+cells and ahead at 3,000 (nothing in between was measured): by 0.09 s there, 0.3–0.4 s at 10,000 and
+4–5 s at 85,000. It always uses more CPU in total. Cold at 30,000, for example, the pool took
+12.7–13.9 CPU seconds against 9.5–10.7.
+
+On the Mac (Python 3.13, numba 0.61, 14 cores), cold, under a 1-minute load of 32–77 throughout.
+Readings at the end of serial runs were 32–67, so the load was mostly other sessions; the highest
+readings include the pool's own 14 workers:
+
+| cells | `n_jobs=-1` | `n_jobs=1` | CPU seconds, `-1` against `1` |
+|---|---|---|---|
+| 64 | 50–65 s | 8.8–13 s | 276–286 against 13–15 |
+| 144 | 47–77 s | 7.1–39 s | 272–288 against 12–17 |
+| 3,000 | 47–86 s | 11–13 s | 289–306 against 14–16 |
+| 10,000 | 43–162 s | 10–31 s | 280–356 against 16–19 |
+
+With numba, serial costs about the same at every size, because almost all of it is compiling
+esda's kernels, once per process. The pool compiles them again in all 14 workers, at 19–25 CPU
+seconds each. Blocking numba with an import shim on the same Mac separates the two costs: serial
+falls to 0.016–1.4 s, and the pool still takes 6.0–12.4 s and 32–74 CPU seconds to start its
+interpreters. The image has no numba, which `requirements.txt` does not ask for, so esda and
+libpysal fall back to plain-Python loops. At these sizes that is the faster stack by far: 0.31 s
+at 3,000 cells against 11–13 s on the Mac. The Mac's numbers measure numba's compiler, not
+production.
+
+End to end through `local_getis_ord` on the image, the before module is the deployed one, which
+is byte-identical to `prototype`'s, and the after module is this change. Runs are interleaved and
+start with esda already imported, because the first call in a process also pays 1.1–1.2 s for
+that import either way:
+
+| cells | before | after | of which `G_Local`, before against after |
+|---|---|---|---|
+| 144 | 0.35–0.36 s | 0.066–0.069 s | 0.31 s against 0.023 s |
+| 3,000 | 0.81–0.94 s | 0.62–0.64 s | 0.51–0.62 s against 0.32–0.33 s |
+| 10,000 | 2.06–2.14 s | 2.13–2.17 s | 0.96–1.02 s against 1.02–1.03 s |
+| 85,000 (two runs each) | 17.7–18.1 s | 22.8–23.5 s | 7.9–8.0 s against 12.7–13.2 s |
+
+For `test_getis_ord_finds_hot_and_cold_ends`, the call phase went from 0.47–0.52 s to 0.23–0.25 s
+on the image. On the Mac, under a load of 34–62, it went from 60–75 s and 299–311 CPU seconds to
+13–43 s and 17–20 CPU seconds. Children started during the test went from 10 to none on the
+image, and from 16 to none on the Mac.
+
+**Revised during the work.** A first draft of this entry, the code comment and the test said the
+pool was "never faster up to 10,000 areas". That came from cold runs in a single container. In
+the recreated container, the pool's cold median was 17–19% lower at 30,000 and 85,000 cells, and
+serial's was 12% higher at 10,000, which made 10,000 even rather than a win for serial. Warm runs
+then put the crossover somewhere between 144 and 3,000 cells. The claim was wrong, and the trade
+above replaces it.
+
+### Stage S19.3 The same answer
+
+`crand` draws the whole permutation matrix from the seed (`vec_permutations(max_card, n,
+permutations, seed)`) before it branches on `n_jobs`. The workers only split the areas.
+Measured: `p_sim`, `z_sim`, `Zs` and `rGs` were hash-identical between `-1` and `1` in every run
+and at every size, on the image, on the Mac with numba, and on the Mac without it. `p_sim` and
+`rGs`, the two hashed in the warm runs, were also identical across the warm calls and matched the
+cold runs. Through the tool on the image, the per-feature `hotspot_class`,
+`gi_z` and `gi_p`, and the whole JSON result (ids and urls aside), were identical before and
+after at 144, 3,000, 10,000 and 85,000 cells.
+
+The hashes also showed something about the two stacks. The permutation matrix itself is
+bit-identical with and without numba (`vec_permutations` with the same seed, compared directly at
+3,000 cells), so `p_sim` agrees between the Mac and the image at every size compared. The
+statistics differ in the last bits between stacks: `rGs` by at most one ulp between numba and
+plain Python on the Mac, and `Zs`, `z_sim` and `rGs` between the Mac and the image even with
+numba blocked, so not all of the Mac–image difference is numba's.
+
+### Stage S19.4 The guard
+
+`test_permutation_inference_starts_no_process_pool` replaces `joblib.Parallel` with a function
+that raises, then runs `local_getis_ord` (Gi* and Gi), `local_moran_lisa` and
+`global_spatial_autocorrelation`. esda imports `Parallel` inside `parallel_crand` at call time,
+so patching `joblib` is patching it where it is used. Against the deployed module the test fails
+with *"esda started a joblib process pool"* from `local_getis_ord`, both in the image and on the
+Mac. With this change it passes. It would also catch a future esda that flipped `Moran_Local`'s
+default.
+
+### Stage S19.5 What this does not cover
+
+* **National-scale layers pay for it.** At 85,000 cells, `local_getis_ord` takes about 5 s longer
+  on the image (22.8–23.5 s against 17.7–18.1 s). At 30,000 cells the statistic alone takes
+  about 0.5 s longer cold and 1.2 s longer warm. If layers that size matter, the pool could come
+  back off macOS and above a size threshold, for example `n_jobs=-1` when
+  `sys.platform != "darwin"` and the layer has 10,000 or more areas. That keeps the fork off the
+  Mac and the start-up off small layers. It is not done here, for two reasons. It adds a
+  platform branch to a statistics call. And every pool, once started, keeps eight interpreters
+  in the agent container for 300 s.
+* The fork half is prevention by mechanism, not a fix for an observed crash. As S16.6 records,
+  this route was not reproduced in a realistic order.
+* `Moran`, `Geary` and `G` take no seed, so `global_spatial_autocorrelation`'s p-values still
+  vary between runs. That is unchanged here.
