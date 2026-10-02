@@ -713,6 +713,18 @@ def _normalize_uploaded_files():
     return [item for item in files if getattr(item, "filename", None)]
 
 
+def _upload_thread_id() -> Optional[str]:
+    """The conversation an upload belongs to: `threadId`/`thread_id` in the form, else the query.
+
+    The same field under the same two spellings that the chat routes bind around a turn, and
+    normalised the same way, so an upload and the turns that use it carry one id. The form wins
+    because it is what the client composed for this upload. None when the client sent none.
+    """
+    value = _coalesce(request.form.get("threadId"), request.form.get("thread_id"),
+                      request.args.get("threadId"), request.args.get("thread_id"))
+    return str(value).strip() if value is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1153,6 +1165,11 @@ def upload_agent_files():
     The returned `file_id` values can be passed to `/agent/chat` or
     `/agent/chat/stream` via the JSON field `fileIds`.
 
+    Send the conversation's `threadId` with the upload, the same one its chat turns send. It
+    stamps the file with that conversation, so `list_conversation_files` lists it there and
+    other conversations cannot find it by name. Without one the file is stored with no
+    conversation, as every upload was before the field existed.
+
     ---
     tags:
       - Agent Files
@@ -1171,6 +1188,11 @@ def upload_agent_files():
         type: file
         required: false
         description: Multi-file upload (repeat this field per file).
+      - in: formData
+        name: threadId
+        type: string
+        required: false
+        description: The conversation these files belong to, as sent on its chat turns. `thread_id` is accepted too, and either may be sent in the query string instead; the form wins.
     responses:
       200:
         description: Upload succeeded.
@@ -1197,6 +1219,10 @@ def upload_agent_files():
                   download_url:
                     type: string
                     example: /agent/files/file_0123456789ab/download
+                  session:
+                    type: string
+                    example: agent-thread-1
+                    description: The conversation the file was stamped with; null when no `threadId` was sent.
             count:
               type: integer
               example: 2
@@ -1234,10 +1260,24 @@ def upload_agent_files():
         # owner_id: None, which made AGENT_TOKEN_STRICT=1 unreachable in practice: a user could
         # not download their own attachment.
         _upload_token = identity.set_user(_upload_user)
+        # And the conversation, for the same reason one axis over. Without it every upload was
+        # written session: None, the legacy pool, so list_conversation_files never listed one,
+        # not even where it was made, and in dev/demo any conversation found it by name.
+        #
+        # No thread id leaves the record exactly as it was before: there is no conversation to
+        # name, a minted one would hide the file from the conversation that later attaches it,
+        # and refusing would break every client that does not send one yet.
+        thread_id = _upload_thread_id()
+        _session_token = set_file_store_session(thread_id)
         try:
             uploaded = [save_uploaded_file(file_storage) for file_storage in files]
         finally:
+            reset_file_store_session(_session_token)
             identity.reset_user(_upload_token)
+        if not thread_id:
+            # Counted, because this fallback can only be tightened once nothing relies on it.
+            logger.info("Upload with no thread id: %d file(s) stored with no conversation",
+                        len(uploaded))
         return jsonify({"files": uploaded, "count": len(uploaded)}), 200
     except ValueError as e:
         logger.error(f"Agent file upload validation error: {str(e)}")
@@ -2127,7 +2167,9 @@ def agent_chat_stream():
     **Uploading files**
 
     1. POST the file(s) to `/agent/files/upload` (multipart/form-data, form field `file` or
-       `files`); the response returns a `file_id` for each file.
+       `files`), with the conversation's `threadId` as a form field; the response returns a
+       `file_id` for each file. The `threadId` is what lets `list_conversation_files` list the
+       upload in this conversation and keeps other conversations from finding it by name.
     2. Send those ids here as `fileIds`, with your `userQuery` and (for continuity) a stable
        `threadId`/`memoryId`. The agent stages each file into its code/geo tools — inside
        `execute_code` the file is reachable via the `input_files` argument and appears in the
