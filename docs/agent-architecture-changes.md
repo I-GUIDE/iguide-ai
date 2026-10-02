@@ -1660,9 +1660,10 @@ agent-api and metadata-extraction-server, and mcp-server names it on the same ki
 line. In agent-api the same 16 packages depend on it as in the deployed container, and both
 bundled GDALs resolve `libexpat.so.1` to `/lib/x86_64-linux-gnu/libexpat.so.1`.
 
-The test suite was started inside the built agent-api image and did not finish. Docker Desktop
-on the Mac stopped answering partway through, while other work loaded the machine, so no result
-from that run is recorded here. CI runs the suite on Linux under the same lock.
+The test suite was started inside the built agent-api image and did not finish. Partway through,
+the Mac's disk filled and Docker Desktop stopped ("no space left on device"). The disk held
+several sessions' amd64 images, these three among them, at 4 to 7 GB each. No result from that
+run is recorded here. CI runs the suite on Linux under the same lock.
 
 **The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
 deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
