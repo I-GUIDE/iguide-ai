@@ -1545,29 +1545,15 @@ The workflow also imports every module the suite `importorskip`s before running 
 skips when a module is absent, so a package dropped from the install would turn whole spatial
 modules into skips and leave the job green with far fewer tests.
 
-### Stage S13.4 What this stage did not fix
+### Stage S13.4 The images install through the lock
 
-* **The image still installs unpinned.** `rag_pipeline/Dockerfile` does not read
-  `constraints.txt`, so the lock describes the image as it was on 2026-10-01 and goes stale at
-  the next rebuild. Retake it after every deploy that rebuilds the image. Installing through the
-  lock in the Dockerfile would make the image reproducible, but it changes what the next deploy
-  installs, so it is a separate decision.
-* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
-  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
-  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
-  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
-  neither runs for real anywhere in CI.
-* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
-  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
-  install step prints which one it got.
-
-### Stage S13.5 The images install through the lock
-
-This closes the first gap in S13.4. `rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile`
-and `metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside
-`requirements.txt` and pass `-c constraints.txt` to every `pip install`. A rebuild therefore
-reproduces the versions the deployment runs. Before, each rebuild resolved that day's newest, and
-nine days after the 2026-09-22 build 42 of 175 packages had already moved (S13.1).
+The first version of this stage left the image installing unpinned, because installing through
+the lock changes what the next deploy installs. That decision is taken here.
+`rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside `requirements.txt` and
+pass `-c constraints.txt` to every `pip install`. A rebuild therefore reproduces the versions the
+deployment runs. Before, each rebuild resolved that day's newest, and nine days after the
+2026-09-22 build 42 of 175 packages had already moved (S13.1).
 
 **What the next deploy installs changes in one direction: it stops upgrading.** On 2026-10-02 the
 deployed agent-api container still matched the lock line for line, so the rebuild that ships this
@@ -1640,7 +1626,7 @@ installs (three in agent-api's) and the missing `libexpat1` in all three. Fourte
 Dockerfiles, and five for the apt reader, check that it rejects each wrong answer and accepts
 each right one.
 
-### Stage S13.6 Verified on local builds, not by a deploy
+### Stage S13.5 Verified on local builds, not by a deploy
 
 All three images were built from this change on the development Mac with
 `docker build --platform linux/amd64 --pull`, emulated, on 2026-10-02. The agent-api build took
@@ -1668,12 +1654,12 @@ run is recorded here. CI runs the suite on Linux under the same lock.
 **The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
 deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
 every compiled wheel here is built for cp311, not for a patch release. It is the float this stage
-leaves, below.
+leaves, in S13.6.
 
-### Stage S13.7 What this stage did not fix
+### Stage S13.6 What this stage did not fix
 
 * **The base image and the apt layers still float.** `FROM python:3.11-slim` is a moving tag, as
-  S13.6 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
+  S13.5 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
   build day. None of that shows in `pip freeze`. Pinning the base by digest is a separate
   decision, with its own cost: security updates to the base stop arriving by themselves.
 * **pip, setuptools and wheel come from the base image, not the lock.** `pip freeze` omits them,
@@ -1685,3 +1671,11 @@ leaves, below.
 * **Other images are outside this lock.** `embedding-server/` installs its own `requirements.txt`,
   and `sandbox/Dockerfile`, `Dockerfile.claude` and `Dockerfile.opencode` install bare names. The
   lock describes the root `requirements.txt` stack only.
+* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
+  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
+  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
+  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
+  neither runs for real anywhere in CI.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
