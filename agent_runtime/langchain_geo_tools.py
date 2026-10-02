@@ -166,6 +166,30 @@ def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]],
     return str(path), None
 
 
+def input_content_key(ref: Any, sibling_file_ids: Optional[List[str]] = None,
+                      attached: Optional[List[Dict[str, Any]]] = None) -> str:
+    """:func:`source_content_key` for a tool whose reader has already deleted its staged copy.
+
+    The aggregate, spatial-statistics and temporal readers stage an input, read it, and remove
+    the staging directory before they return the frame. By the time such a tool builds its
+    layer key, the read path that source_content_key needs is gone. This stages the input again
+    with the same rules and keys what that staging reads. Staging a self-contained file is only
+    a path lookup, so the second pass copies nothing unless the input is a shapefile assembled
+    from its parts.
+    """
+    from agent_runtime.file_store import file_content_key
+
+    try:
+        read_path, tmp = _stage_vector_source(str(ref), sibling_file_ids, attached)
+    except Exception:  # noqa: BLE001 - the tool's own read already failed or succeeded
+        return file_content_key(ref)
+    try:
+        return source_content_key(ref, read_path)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def artifact_name(stem: Optional[str], suffix: str, *, source: Optional[str] = None,
                   default: str = "output") -> str:
     """A short, purpose-bearing filename: ``<stem>.<suffix>``.
@@ -831,7 +855,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         tmp = None
         try:
             from agent_runtime.file_store import create_output_file_from_path
-            from agent_runtime.map_layers import content_key
+            from agent_runtime.map_layers import drawn_layer_key
 
             redirect = _unmappable_input(file_id)
             if redirect:
@@ -910,8 +934,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             # layer. The same data drawn as a heatmap and as points stays two layers, because
             # render, column and sampling are part of the key. The input counts as what was READ
             # (source_content_key), so a sibling that changes nothing read changes nothing here.
-            key = content_key("map", mode, input=source_content_key(file_id, read_path),
-                              render=mode, column=column, sample=ceiling if sampled else None)
+            key = drawn_layer_key(source_content_key(file_id, read_path), mode, column=column,
+                                  sample=ceiling if sampled else None)
             rec = create_output_file_from_path(out, filename=fname, content_key=key)
             # Look at what was actually written before calling it a visual. A choropleth over a
             # constant column, a styling column that did not survive the write, or geometry in

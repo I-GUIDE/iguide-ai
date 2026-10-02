@@ -41,8 +41,10 @@ from agent_runtime.langchain_geo_tools import (  # reuse, do not reinvent
     _resolve,
     _stage_vector_source,
     artifact_name,
+    input_content_key,
     read_vector,
 )
+from agent_runtime.map_layers import content_key
 from agent_runtime.tool_args import accept_null_defaults
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -512,14 +514,16 @@ def _stringify(gdf: Any) -> Any:
     return out
 
 
-def _publish_geojson(gdf: Any, filename: str) -> Dict[str, Any]:
+def _publish_geojson(gdf: Any, filename: str, key: Optional[str] = None) -> Dict[str, Any]:
+    """``key``, the content key of the inputs, is recorded on the file for whatever reads it
+    next (see file_store.file_content_key)."""
     from agent_runtime.file_store import create_output_file_from_path
 
     tmpdir = Path(tempfile.mkdtemp(prefix="temporal_gj_"))
     try:
         out = tmpdir / filename
         _stringify(gdf).to_file(out, driver="GeoJSON")
-        return create_output_file_from_path(out, filename=filename)
+        return create_output_file_from_path(out, filename=filename, content_key=key)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -638,6 +642,10 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
     def _load(ref: str, siblings: Optional[List[str]] = None, *, layer: Optional[str] = None,
               need_geometry: bool = True) -> Tuple[Any, str]:
         return _read_frame(ref, siblings, _attached, layer=layer, need_geometry=need_geometry)
+
+    def _input_key(ref: str, siblings: Optional[List[str]] = None) -> str:
+        """What an input IS, as _load reads it: its content, never its file_id."""
+        return input_content_key(ref, siblings, _attached)
 
     # -------------------------------------------------------------- detect
     def detect_time_column(file_id: str, time_column: Optional[str] = None,
@@ -764,8 +772,15 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
             ceiling = int(max_features) if max_features else _MAP_MAX_FEATURES
             subset, sampled, total = _sample_for_map(subset, ceiling)
+            # The window as PARSED, so "2026-07" and "2026-07-01".."2026-07-31" are one slice,
+            # and the time column as resolved, so naming the column auto-detection picks is the
+            # same slice as not naming it.
+            layer_key = content_key("time_window", input=_input_key(file_id, sibling_file_ids),
+                                    layer=layer, time_column=report["column"],
+                                    window=[window["start"], window["end"]], render=mode,
+                                    style_by=style_by, sample=ceiling if sampled else None)
             fname = artifact_name(name, "geojson", source=source, default="time_window")
-            record = _publish_geojson(subset, fname)
+            record = _publish_geojson(subset, fname, key=layer_key)
             label_bits = [w for w in (window["start"], window["end"]) if w]
             label = (name or "").replace("_", " ").strip() or (
                 " to ".join(b[:10] for b in label_bits) if label_bits else "time window")
@@ -775,7 +790,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 "feature_count": int(len(subset)), "features_total": total,
                 "sampled": bool(sampled), "on_map": True,
                 "crs": _epsg(getattr(subset, "crs", None)),
-                "map_layer": {"url": record.get("download_url"), "label": label, "render": mode,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": record.get("download_url"), "label": label, "render": mode,
                               "style_by": style_by, "source": "analysis",
                               "count": int(len(subset)), "sampled": bool(sampled),
                               "total": total},
@@ -1016,8 +1032,17 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             })
             csv_rec = _publish_table(csv_frame, artifact_name(name, "csv", source=areas_source,
                                                               default="period_comparison"))
+            # Both periods as parsed and in order (a -> b is the opposite change of b -> a),
+            # and the label column as resolved, because it is carried into the layer.
+            layer_key = content_key(
+                "period_change", events=_input_key(file_id, sibling_file_ids),
+                areas=_input_key(areas_file_id, areas_sibling_file_ids),
+                time_column=report["column"],
+                period_a=[a_start.isoformat(), a_end.isoformat()],
+                period_b=[b_start.isoformat(), b_end.isoformat()], predicate=pred,
+                label_column=label_col)
             gj_name = artifact_name(name, "geojson", source=areas_source, default="period_change")
-            gj_rec = _publish_geojson(out, gj_name)
+            gj_rec = _publish_geojson(out, gj_name, key=layer_key)
 
             ranked = csv_frame.sort_values("change", ascending=False)
             top_up = [{"area": str(r["area"]), "a": int(r["a"]), "b": int(r["b"]),
@@ -1051,7 +1076,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 "method": (f"records counted per area with a spatial join (predicate={pred}); "
                            "change = count in period_b minus count in period_a; pct_change is "
                            "null where period_a was zero (no baseline to divide by)"),
-                "map_layer": {"url": gj_rec.get("download_url"), "label": label,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": gj_rec.get("download_url"), "label": label,
                               "render": "choropleth", "style_by": "change",
                               "source": "analysis", "count": int(len(out)),
                               # Hints for a diverging ramp: 0 is the neutral middle.
@@ -1173,8 +1199,13 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             csv_frame = pd.DataFrame(grid.drop(columns="geometry"))
             csv_rec = _publish_table(csv_frame, artifact_name(name, "csv", source=source,
                                                               default="temporal_hotspots"))
+            layer_key = content_key("temporal_hotspots", f"{code}_{size_km:g}km",
+                                    input=_input_key(file_id, sibling_file_ids), layer=layer,
+                                    time_column=report["column"], freq=code,
+                                    cell_m=round(size_m, 3), min_events=floor)
             gj_rec = _publish_geojson(grid, artifact_name(name, "geojson", source=source,
-                                                          default="temporal_hotspots"))
+                                                          default="temporal_hotspots"),
+                                      key=layer_key)
 
             ranked = grid.sort_values("shift", ascending=False)
             def _cell_rows(rows: Any) -> List[Dict[str, Any]]:
@@ -1208,7 +1239,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     f"shift = count in the latest period ({latest}) minus the mean count across the "
                     f"{len(earlier)} earlier period(s) {earlier[0]}..{earlier[-1]}, where a period "
                     "with no records in a cell counts as 0; pct_shift is null when the baseline was 0"),
-                "map_layer": {"url": gj_rec.get("download_url"), "label": label,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": gj_rec.get("download_url"), "label": label,
                               "render": "choropleth", "style_by": "shift",
                               "source": "analysis", "count": int(len(grid)),
                               "diverging": True, "midpoint": 0,
