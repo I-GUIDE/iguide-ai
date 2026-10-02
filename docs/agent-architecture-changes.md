@@ -26,7 +26,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
 | 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
-| 17 | [Six tests only the Mac passed](#stage-17) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
+| 20 | [Six tests only the Mac passed](#stage-20) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1438,7 +1438,7 @@ Still true and not fixed by any of this: prod's OpenSearch host is deliberately 
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
 
-## Stage 17 — Six tests only the Mac passed {#stage-17}
+## Stage 20 — Six tests only the Mac passed {#stage-20}
 
 A replica of the deployed `agent-api` Python environment was built on 2026-10-01 and again on
 2026-10-02: `python:3.11-slim` for linux/amd64, the image's GDAL apt layer, `requirements.txt`
@@ -1452,9 +1452,9 @@ production has, or has something production does not.
 | test | why the Mac passed it | which side was wrong | fixed in |
 |---|---|---|---|
 | `test_csv_with_coordinates_flows_through` | pandas 2.2.3, whose nanosecond range turns `"1234"` into NaT | **the code**. In the replica, a CSV with one blank date in four rows gets `Beat` as its time column, and `filter_by_time(start="2026-07")` answers `ok` with 0 matches | `claude/temporal-numeric-code-columns` (stage 13 there) |
-| three in `test_spatial_locations.py` | no spaCy model, so the capitalization fallback ran | **the code**. Production's NER path skipped the vocabulary and the normalization the fallback applies | this stage, S17.1 |
+| three in `test_spatial_locations.py` | no spaCy model, so the capitalization fallback ran | **the code**. Production's NER path skipped the vocabulary and the normalization the fallback applies | this stage, S20.1 |
 | `test_distance_band_without_a_threshold_leaves_no_island` | the Mac's floating point kept a pair that sits exactly on the threshold | **the code**. The threshold had no margin | `claude/distance-band-no-island` (stage 14) |
-| `test_pyqgis_available_probes_worker_python` | no QGIS installed | **the test**. It assumed the machine had no QGIS | this stage, S17.2 |
+| `test_pyqgis_available_probes_worker_python` | no QGIS installed | **the test**. It assumed the machine had no QGIS | this stage, S20.2 |
 
 The island's cause was measured again in the replica rather than taken from the stage 14 branch.
 The automatic threshold, 110,884.46616304158 m, is bit-identical on both machines. The Mac
@@ -1464,7 +1464,7 @@ distance as Python computes it. The Mac's KD-tree keeps the pair anyway and the 
 it: 146 links and no island against 144 links and one. With stage 14's relative pad of 1e-9,
 both give 146 links and no island.
 
-### Stage S17.1 Production's NER path never saw the fallback's filters
+### Stage S20.1 Production's NER path never saw the fallback's filters
 
 `extract_locations_from_query` (`rag_pipeline/search/spatial.py`) turns a question into the
 place names it geocodes. It has two paths. Where `en_core_web_sm` is installed, as in the agent
@@ -1528,7 +1528,7 @@ Found and **not** fixed, because each needs its own measurement:
   The freeze's `en_core_web_sm @ <url>` line constrains a package that nothing requests, so pip
   installs no model. The new NER tests are what cover production's path there.
 
-### Stage S17.2 A test that assumed QGIS was absent
+### Stage S20.2 A test that assumed QGIS was absent
 
 `test_pyqgis_available_probes_worker_python` set `QGIS_PYTHON_BIN` to a nonexistent path and
 expected `pyqgis_available()` to be False. But `qgis_python_candidates()` falls back to
@@ -1542,7 +1542,7 @@ environment variable. No production behaviour changes.
 In an image built from `rag_pipeline/Dockerfile` (linux/amd64, 2026-10-02),
 `test_qgis_headless_tools.py` went from 1 failed and 20 passed to 21 passed.
 
-### Stage S17.3 Verification, and what is not deployed
+### Stage S20.3 Verification, and what is not deployed
 
 | where | tree | failed | passed | skipped |
 |---|---|---|---|---|
