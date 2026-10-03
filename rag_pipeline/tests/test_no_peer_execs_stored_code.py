@@ -17,6 +17,10 @@ A name check alone would only stop this one function coming back, so there are t
   function-local imports, closures, ``functools.wraps`` chains and nested functions. Running code
   in ANOTHER process is out of scope by design: that is how ``execute_code`` reaches its per-run
   sandbox container, the one sanctioned route for stored code.
+* **The MCP local-import fallback**, which imports MCP tool modules into this process when the
+  MCP server is unreachable. It must never import one whose tools exec stored code, whether by
+  default or because a request's ``mcpModules`` named it, so the scan also runs over a request
+  naming every MCP module there is.
 
 The scan cannot see through an attribute call on an object it cannot type (``obj.run(src)``).
 The positive controls at the bottom pin what it DOES see, so an interpreter upgrade that renamed
@@ -164,6 +168,12 @@ _SPLIT = {**_STATE, "unified_peer": False}
 _UNIFIED = {**_STATE, "unified_peer": True}
 
 
+def _every_mcp_module() -> list:
+    """Every tool module under MCP_server/tools: what a request's ``mcpModules`` can name."""
+    return sorted(p.stem for p in (REPO / "MCP_server" / "tools").glob("*.py")
+                  if not p.name.startswith("_"))
+
+
 def _peer_builds() -> dict:
     from agent_runtime.supervisor import graph as g
 
@@ -173,12 +183,19 @@ def _peer_builds() -> dict:
         # what the API passes: include_mcp_tools defaults ON there, with no module list
         "search+mcp": lambda: g.default_search_fn(llm=object(), include_mcp_tools=True)(
             "q", dict(_STATE)),
+        # what a request can ask for instead: mcpModules naming every MCP tool module there is
+        "search+mcpModules": lambda: g.default_search_fn(
+            llm=object(), include_mcp_tools=True, mcp_modules=_every_mcp_module())(
+            "q", dict(_STATE)),
         "analyze": lambda: g.default_analyze_fn(llm=object(), code_exec=True)(
             "q", [], dict(_SPLIT)),
         "analyze+upload": lambda: g.default_analyze_fn(
             llm=object(), code_exec=True, input_file_ids=["file_abc"])("q", [], dict(_SPLIT)),
         "analyze+unified": lambda: g.default_analyze_fn(llm=object(), code_exec=True)(
             "q", [], dict(_UNIFIED)),
+        "analyze+mcpModules": lambda: g.default_analyze_fn(
+            llm=object(), code_exec=True, mcp_modules=_every_mcp_module())(
+            "q", [], dict(_SPLIT)),
         "code": lambda: g.default_code_fn(llm=object(), code_exec=True, code_peer="langchain")(
             "q", [], dict(_STATE)),
         "code+upload": lambda: g.default_code_fn(
@@ -187,8 +204,8 @@ def _peer_builds() -> dict:
     }
 
 
-PEERS = ("search", "search+mcp", "analyze", "analyze+upload", "analyze+unified",
-         "code", "code+upload")
+PEERS = ("search", "search+mcp", "search+mcpModules", "analyze", "analyze+upload",
+         "analyze+unified", "analyze+mcpModules", "code", "code+upload")
 
 
 class _Built(Exception):
@@ -229,16 +246,10 @@ def _names(tools) -> set:
 
 #: In-process paths that exist today and are NOT this change's to fix, with why. The scan skips
 #: these names; ``test_the_known_gaps_are_still_real`` fails once one stops being real, so a
-#: closed gap cannot linger here. ``kb_run_geofunction`` may never be added.
-KNOWN_IN_PROCESS_PATHS = {
-    "mcp_create_notebook_workflow_tool": (
-        "Only under the MCP local-import fallback (the MCP server unreachable when tools are "
-        "built) with MCP tools on and no module list, which is the API's default for the search "
-        "peer. It registers a generated tool whose body exec()s notebook-derived source, and the "
-        "next tool build binds that tool in this process. Remotely, the same code runs in the MCP "
-        "server's container instead. Found by this guard; not fixed by the kb_run_geofunction "
-        "change."),
-}
+#: closed gap cannot linger here. ``kb_run_geofunction`` may never be added. The first entry,
+#: ``mcp_create_notebook_workflow_tool``, left when the MCP local-import fallback stopped
+#: importing modules that exec stored code (stage 13 of docs/agent-architecture-changes.md).
+KNOWN_IN_PROCESS_PATHS: dict = {}
 
 
 def test_every_peer_configuration_was_captured(offered):
@@ -287,6 +298,45 @@ def test_the_known_gaps_are_still_real(offered):
     assert not stale, (
         f"{stale} no longer reach in-process execution from any peer. Delete them from "
         "KNOWN_IN_PROCESS_PATHS so the guard covers them again.")
+
+
+# ---------------------------------------------------------------------------------------------
+# The MCP local-import fallback
+# ---------------------------------------------------------------------------------------------
+
+#: For each module the fallback refuses to import, one tool that shows why: imported, it would
+#: reach exec() in this process.
+_WHY_THE_FALLBACK_SKIPS = {
+    "notebook_workflow_tools": "create_notebook_workflow_tool",
+    "generated_notebook_tools": "register_generated_tool_from_manifest",
+    "generic_executor_tools": "run_notebook_workflow",
+}
+
+
+@pytest.mark.parametrize("peer", PEERS)
+def test_no_peer_is_offered_code_from_a_module_the_fallback_skips(offered, peer):
+    """By provenance, not by sink: this holds even where the scan is blind, and it covers a
+    generated notebook tool, whose name no list could hold in advance."""
+    from agent_runtime.langchain_mcp_tools import _STORED_CODE_EXEC_MODULES
+
+    skipped = {f"tools.{m}" for m in _STORED_CODE_EXEC_MODULES}
+    leaked = sorted(str(t.name) for t in offered[peer]
+                    if {inspect.unwrap(f).__module__ for f in _tool_functions(t)} & skipped)
+    assert not leaked, f"the {peer} peer was offered {leaked} through the local-import fallback"
+
+
+def test_each_module_the_fallback_skips_does_exec():
+    """The skip is load-bearing, and the scan sees it. A module with no witness here does not
+    belong on the list. If a witness stops reaching exec because its code moved into the sandbox,
+    take its module off; if the exec only moved somewhere the scan cannot see, teach the scan."""
+    from agent_runtime import langchain_mcp_tools as mcp
+
+    assert set(mcp._STORED_CODE_EXEC_MODULES) == set(_WHY_THE_FALLBACK_SKIPS)
+    mcp._ensure_mcp_import_path()
+    mcp._ensure_server_stub()
+    for module, witness in _WHY_THE_FALLBACK_SKIPS.items():
+        fn = getattr(importlib.import_module(f"tools.{module}"), witness)
+        assert [s for f in _functions_in(fn) for s in _in_process_sinks(f)], f"{module}.{witness}"
 
 
 # ---------------------------------------------------------------------------------------------

@@ -32,7 +32,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
 | 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
 | 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
-| 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
+| 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 → 2026-10-02 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -3070,3 +3070,91 @@ notebook workflow builder is live work, and whether to unbind it is not this cha
 
 Still true: `agent-api` runs as root with the Docker socket. Every in-process tool inherits that
 blast radius. This stage removes one way in, not the exposure.
+
+### Stage S19.5 The MCP fallback stops importing tools that exec
+
+S19.4's gap, closed on 2026-10-02. The local-import fallback in `make_langchain_mcp_tools` now
+refuses three modules: `notebook_workflow_tools`, `generated_notebook_tools` and
+`generic_executor_tools`. It refuses them whether they come from `DEFAULT_MCP_MODULES` (the first
+two were on it) or from a request's `mcpModules`. Their tools still exist on the MCP server, and
+the agent still binds them from there. Only the copies that ran inside `agent-api` are gone.
+
+The path was reproduced before the fix. With the remote server forced unreachable, a one-cell
+notebook wrote the id of the process that ran it to a file. The fallback bound
+`mcp_create_notebook_workflow_tool`. Calling it registered `mcp_probe_nb` in the module globals
+of `generated_notebook_tools`. The next build bound that tool (the 60 s cache TTL was cleared in
+the probe), and calling it ran the notebook in the agent's own process: the id written was the
+probe's own. The reproduction showed two things S19.4 had not said:
+
+* The registered tool lives in module state. Every later request in that worker would have been
+  offered it, whoever uploaded the notebook.
+* `mcpModules` reaches the analysis peer's fallback unchanged, so that peer was exposed too, and
+  `generic_executor_tools` could be named into either peer. Its `AGENT_ALLOW_WORKFLOW_EXEC` gate
+  is an environment variable, not a sandbox.
+
+| local-fallback configuration | tools offered before → after | MCP tools | tools reaching an in-process `exec` |
+|---|---|---|---|
+| search peer, MCP on, no module list (the API default) | 35 → 33 | 10 → 8 | 1 → 0 |
+| search peer, `mcpModules` naming every MCP module | 39 → 35 | 14 → 10 | 3 → 0 |
+| analysis peer, `mcpModules` naming every MCP module | 48 → 44 | 14 → 10 | 3 → 0 |
+
+The other six configurations the guard captures are unchanged. The gap was latent in the
+deployment. Its journal from 2026-09-22 to 2026-10-02 15:15 UTC records 35 remote MCP builds of
+14 tools each and not one fallback build.
+
+This fix was chosen over the two alternatives:
+
+* **Unbinding by name** (`_DEFAULT_UNBOUND_MCP_TOOLS`) would also drop the remote builder. That
+  builder is live work, and it runs in `mcp-server`, not here. A name list also cannot hold a
+  generated tool in advance, because each one is named after its notebook. And
+  `AGENT_MCP_UNBIND` replaces the default list wholesale, so `AGENT_MCP_UNBIND=none` would have
+  bound everything back.
+* **Routing generated tools through the sandbox** is where notebook-derived code should
+  eventually run. The extraction plan already reserves that for generated tools (its B7). It does
+  not fix the fallback, though. The same code runs in `mcp-server`, which has no Docker socket to
+  reach a sandbox through.
+
+The set is fixed in code and is not a setting, because an override is exactly what would bring
+S19.4's path back. Whether to unbind the remote builder as well was put to the maintainer and
+declined. What this costs: with the MCP server unreachable, the agent has no
+`mcp_create_notebook_workflow_tool` or `mcp_list_generated_notebook_workflow_tools`, and a request
+naming `generic_executor_tools` gets nothing from it. With the server reachable, which covers
+every build in that journal, nothing changes.
+
+Changes to the guard:
+
+* **The gap left `KNOWN_IN_PROCESS_PATHS`.** On the fixed code, `test_the_known_gaps_are_still_real`
+  failed until the entry was deleted, which is the exit S19.4 built in for it.
+* **Two configurations were added.** A request naming every module under `MCP_server/tools` is
+  now captured for the search and analysis peers. The path through a named module was outside
+  what the guard captured before.
+* **A provenance check was added.** No peer is offered code defined in a skipped module. It holds
+  where the sink scan is blind, and it covers a generated tool by module, not by name.
+* **Each skipped module has a witness.** One tool per module shows that it reaches `exec`. This
+  keeps the list from growing into a general switch, and from keeping a module whose `exec` has
+  moved into the sandbox.
+
+Mutation-checked:
+
+* Removing the request-name filter fails 4 tests.
+* Restoring the original behaviour (filter off, both modules back on the default list) fails 6:
+  the scan and the provenance check, each for the API default and for both request-named
+  configurations.
+* Putting the two modules back on the default list, with the filter in place, still passes,
+  because the filter alone holds.
+* An unexplained module on the list fails the witness test.
+
+The file has 58 tests, up from 42.
+
+Found, and not fixed here:
+
+* **Scoping still imports named modules.** When the remote server answers, a request's
+  `mcpModules` still makes the agent import the named modules (`_allowed_remote_tool_names`) to
+  learn which remote tools to keep. Nothing imported there is bound or called in this process.
+* **`mcp-server` is unchanged.** It runs the same tools, loads `.env` and mounts the shared file
+  volume. S19.4's path is closed for `agent-api` only.
+* **`AGENT_MCP_UNBIND` cannot unbind some tools.** It fails for any tool whose name begins with
+  `c`, `m`, `p` or `_`, which includes this builder. `lstrip("mcp_")` strips characters, not a
+  prefix, so `create_notebook_workflow_tool` becomes `reate_notebook_workflow_tool` and matches
+  nothing. The default list never passes through that code, and neither of its two names begins
+  with one of those letters, so only an operator's override is affected.
