@@ -139,6 +139,62 @@ def test_parse_time_series_reads_epoch_and_years():
     assert years.dt.year.tolist() == [2019, 2020, 2021]
 
 
+def test_parse_time_series_never_reads_codes_as_years():
+    """Beats, ids and clock times are numbers, not dates, whether typed or CSV text.
+
+    The deployed failure: pandas 3 parses text at microsecond resolution, so "1234" became the
+    year 1234 where pandas 2 had returned NaT. Chicago's real beats run 111-2535, so the year
+    branch declines them, and they used to fall through to the text ladder instead.
+    """
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    chicago_beats = [111, 112, 1011, 1834, 2535, 421, 631, 1124] * 5
+    for values in ([1234, 1235, 1236],      # the failing fixture: inside the year branch's range
+                   chicago_beats,           # below 1000: only the text fall-through could take them
+                   [1001, 1002, 1003],      # incident ids
+                   [830, 1415, 2359, 5]):   # HHMM clock times
+        for series in (pd.Series(values), pd.Series([str(v) for v in values])):
+            parsed, method = parse_time_series(series)
+            assert method == "unparsed" and parsed.isna().all(), (values[:4], str(series.dtype), method)
+
+
+def test_parse_time_series_reads_yyyymmdd_numbers():
+    """An 8-digit date stored as a number still parses, typed or as CSV text, by an explicit rule."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    expected = [pd.Timestamp("2019-01-01"), pd.Timestamp("2019-02-15"), pd.Timestamp("2020-12-31")]
+    for series in (pd.Series([20190101, 20190215, 20201231]),
+                   pd.Series(["20190101", "20190215", "20201231"])):
+        parsed, method = parse_time_series(series)
+        assert list(parsed) == expected and method == "YYYYMMDD number"
+    parsed, _ = parse_time_series(pd.Series([20190101, 20191340]))   # month 13 is a failed row
+    assert parsed.iloc[0] == pd.Timestamp("2019-01-01") and pd.isna(parsed.iloc[1])
+
+
+def test_parse_time_series_reads_numbers_that_arrive_as_text():
+    """GDAL hands every CSV field over as text: a year column, one with a gap, epoch seconds."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    years, method = parse_time_series(pd.Series(["2019", "2020", "2021"]))
+    assert method == "year number" and years.dt.year.tolist() == [2019, 2020, 2021]
+    gappy, method = parse_time_series(pd.Series(["2019.0", "", "2021.0"]))   # how to_csv writes NaN
+    assert method == "year number" and gappy.dt.year.tolist()[::2] == [2019, 2021]
+    assert pd.isna(gappy.iloc[1])
+    epoch, method = parse_time_series(pd.Series(["1767225600", "1769904000"]))
+    assert method == "epoch seconds" and epoch.dt.year.tolist() == [2026, 2026]
+
+
+def test_parse_time_series_year_window_does_not_move_with_pandas():
+    """1678-2262 on every pandas version: the window pandas 2 enforced implicitly, now explicit."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    edges, method = parse_time_series(pd.Series([1677, 1678, 2262, 2263]))
+    assert method == "year number"
+    assert [None if pd.isna(v) else v.year for v in edges] == [None, 1678, 2262, None]
+    text, _ = parse_time_series(pd.Series(["1556-01-23", "1700-01-26"]))   # text is held to it too
+    assert pd.isna(text.iloc[0]) and text.iloc[1] == pd.Timestamp("1700-01-26")
+
+
 # ----------------------------------------------------------------- detect_time_column
 def test_detect_time_column(incidents):
     res = _call(_tools()["detect_time_column"], file_id=incidents)
@@ -425,6 +481,45 @@ def test_csv_with_coordinates_flows_through(store):
     assert sliced["ok"] is True and sliced["matched"] == 2
     assert sliced["map_layer"]["render"] == "points"
     assert len(gpd.read_file(_read_output(sliced["file_id"]))) == 2
+
+
+def test_csv_code_columns_are_never_time_candidates(store):
+    """Every kind of code column a crime CSV carries, read the way GDAL reads them: as text.
+
+    On the deployed image (pandas 3) the unfixed tool picked incident_id as THE time column,
+    and the IUCR codes tied this Date column, which has one dirty row.
+    """
+    path = store / "codes.csv"
+    pd.DataFrame({
+        "incident_id": [1001, 1002, 1003, 1004, 1005],    # time-ish name, so it IS tried, and fails
+        "Date": ["07/26/2026 08:00:00 PM", "07/27/2026 01:00:00 AM", "01/02/2026 08:00:00 AM",
+                 "02/03/2026 09:30:00 AM", "not a date"],
+        "IUCR": ["0486", "0820", "1310", "041A", "2820"],  # mostly digits, so still text
+        "Beat": [111, 1834, 2535, 421, 1124],
+        "Ward": [1, 2, 3, 4, 5],
+        "Latitude": [41.90, 41.91, 41.92, 41.93, 41.94],
+        "Longitude": [-87.66, -87.67, -87.68, -87.69, -87.70],
+    }).to_csv(path, index=False)
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == "Date"
+    assert [c["column"] for c in res["candidates"]] == ["Date"]
+
+
+def test_csv_year_column_is_still_a_time_column(store):
+    """A CSV's year column is text holding numbers too; its NAME is what keeps it detectable."""
+    path = store / "annual.csv"
+    pd.DataFrame({
+        "Year": [2019, 2020, 2021],
+        "Beat": [1234, 1235, 1236],
+        "Latitude": [41.900, 41.901, 41.902],
+        "Longitude": [-87.660, -87.661, -87.662],
+    }).to_csv(path, index=False)
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == "Year"
+    assert [c["column"] for c in res["candidates"]] == ["Year"]
+    best = res["candidates"][0]
+    assert best["parse_method"] == "year number" and best["granularity"] == "year"
+    assert best["span"]["start"].startswith("2019-01-01") and best["span"]["end"].startswith("2021-01-01")
 
 
 def test_unknown_file_id_fails_cleanly():
