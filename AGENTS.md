@@ -75,10 +75,16 @@ stubs it at the point of use the same way. The conftest also takes back the one 
 prevent: `rag_pipeline/__init__.py` loads the repo root's `.env` by explicit path, and pytest
 imports that package before it can import a conftest inside it. In a copy laid out like the main
 checkout, 56 of that file's variables reached the tests, the three self-skipping live tests ran,
-and seven tests failed. To check a change, deny the network to the whole process and count what
-was attempted. A probe on Python's `socket` module is not enough, because `ddgs` sends through
-`primp`, a Rust client, and its requests never pass through that module. `sandbox-exec` with
-outbound IP denied catches them on macOS, and `docker run --network none` on Linux.
+and seven tests failed. A warm cache hid one more call. `test_context_budget.py` downloaded
+tiktoken's `o200k_base` on every CI run and wherever the file was not cached, but never on a
+machine that had fetched it once, which is why the development Mac never showed it. It now
+reads tiktoken's cache or skips, and CI fetches the file in its own step before the suite. To
+check a change, deny the network to the whole process, in an environment without the
+development machine's caches, and count what was attempted. A probe on Python's `socket` module
+is not enough, because `ddgs` sends through `primp`, a Rust client, and its requests never pass
+through that module. On macOS, `sandbox-exec` with outbound IP denied blocks them, but its
+kernel log drops reports, so it cannot count them. On Linux, `docker run --network none` blocks
+them, and an `LD_PRELOAD` shim on libc's `getaddrinfo`, `connect` and `sendto` counts them.
 
 **On Windows, nine more fail for platform reasons, not code** (measured 2026-09-23, on the
 suite of the time). Five call `.read_text()` with no `encoding=` on a file holding a non-ASCII
