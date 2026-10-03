@@ -30,6 +30,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
 | 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
 | 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
+| 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1939,3 +1940,157 @@ passed, 4 skipped). Its pip layer resolved that day's versions rather than the d
 it is the reference only for the QGIS test.
 
 Nothing was deployed. The running image still offers "GeoJSON" to the geocoder.
+## Stage 17 — The image installs a list, not a laptop {#stage-17}
+
+`reproject_vector` failed on every call in the deployed agent, and nobody had noticed. It writes
+GeoParquet, which needs pyarrow, and the image had no pyarrow. Chasing that turned up more
+packages the code reaches for and the image lacks, most of them latent, because only ingestion
+uses them and ingestion does not run in the container yet.
+
+### Stage S17.1 Why a missing declaration shows only in production
+
+`rag_pipeline/Dockerfile` installs `requirements.txt` and nothing else. A development machine has
+far more: anaconda's own packages, plus whatever `pip install --user` left in `~/.local`. Code
+that reaches for a package the file never names therefore passes every local test and every
+manual check, and fails only in the container.
+
+Two properties of the code hid it further. None of these packages is imported at module scope,
+and pyarrow is never imported *by name*: pandas and geopandas load it inside `to_parquet` and
+`read_parquet`, where an import grep cannot see it. And where the absence does bite, most of the
+code degrades instead of raising: a pickle instead of parquet, an empty string instead of a
+PDF's text, a note instead of a NetCDF file's variables.
+
+| package | reached from | in the deployed image, without it |
+|---|---|---|
+| pyarrow | `reproject_vector` on every call; `vector_spatial_join` above `AGENT_GEOJSON_MAX_FEATURES`; `read_vector`, the temporal tools and `extractors/geo_handles.py` reading parquet back | `reproject_vector` answered `Missing optional dependency 'pyarrow.parquet'` every time; `geo_handles` silently wrote pickles that only it can open |
+| pypdf | `publication_extractor` | every PDF read as empty text, filed under the note `no_text_extracted`, which does not say why |
+| python-docx | `publication_extractor` | every `.docx` read as empty text, the same way |
+| xarray | `data_extractor` | every NetCDF, HDF or GRIB file answered `raster reader unavailable/failed` |
+
+All four were confirmed inside the deployed `agent-api` container on 2026-10-01: each import
+raises `ModuleNotFoundError`, and `GeoDataFrame.to_parquet` raises the error above. pyarrow was
+never declared. No commit ever added it to `requirements.txt`, and a local image built on
+2026-06-25 lacks it too. The parquet writes date from `421fc8da` (2026-06-12).
+
+### Stage S17.2 Why the suite never caught one
+
+A replica of the deployed environment was built by installing `requirements.txt` into
+`python:3.11-slim` (amd64), with the deployed container's own `pip freeze` as constraints. Its
+freeze matches production's in 175 of 176 packages; the one missing, py-spy, comes from a later
+layer of the real Dockerfile. The full suite inside it gave **5 failed, 1640 passed, 4 skipped,
+and not one failure was an import error.** Nothing in the suite reached any of the four:
+
+- `test_spatial_join`'s three points stay under the GeoJSON limit and come back as GeoJSON, and
+  no test called `reproject_vector`. So the vector tools' tests pass without pyarrow, in the
+  replica as on dev. Dev's pyarrow was never what made them pass.
+- No test touched `publication_extractor`, `data_extractor` or `geo_handles` at all.
+
+A CI job pinned to the deployed freeze would therefore have caught none of them. Two tests in
+`test_langchain_geo_tools.py` now cover the parquet round trip: `reproject_vector` writes it and
+`inspect_vector` reads it back, and a spatial join over the limit does the same.
+`test_declared_dependencies.py` covers the rest. **None of them uses `importorskip`,
+deliberately:** a skip is exactly how a missing package passes. In the replica all six fail, and
+none skips:
+
+| test | in the replica |
+|---|---|
+| reproject round trip; spatial join over the limit | `ImportError: Missing optional dependency 'pyarrow.parquet'` |
+| `geo_handles` frame passing | `assert '.pkl' == '.parquet'` |
+| PDF text | `assert 'Flood exposure by census tract' in ''` |
+| `.docx` text | `ModuleNotFoundError: No module named 'docx'` |
+| NetCDF metadata | `raster reader unavailable/failed: ModuleNotFoundError: No module named 'xarray'` |
+
+With the four packages added, all six pass.
+
+The five replica-only failures are the same gap running the other way: there, dev is *older*
+than production. They are not fixed here, and a CI job pinned to the deployed freeze will see all
+five. Each was checked by changing one package in the replica to dev's version.
+
+| failing test | dev | deployed | swap that makes it pass |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through`, a stray `Beat` column | pandas 2.2.3 | pandas 3.0.5 | pandas 2.2.3 |
+| three in `test_spatial_locations.py`, e.g. `'the Great Plains' == 'Great Plains'` | no spaCy model, so the regex fallback | `en_core_web_sm` | removing the model |
+| `test_distance_band_without_a_threshold_leaves_no_island` | | | **none found.** Dev's pandas, numpy, scipy, esda, libpysal, geopandas, pyogrio and scikit-learn each still fail. Cause not established. |
+
+### Stage S17.3 The pins
+
+The four are pinned, unlike most of the file, because each version was checked against what
+production runs. Installed on top of the replica, with the deployed freeze as constraints, they
+add exactly four packages and move none of production's. pyarrow 25.0.1 is the sandbox image's
+version (`iguide-codeexec`), which reads the same files. pypdf 6.6.2, python-docx 1.2.0 and
+xarray 2026.7.0 are the versions `backend_swap`'s lock pinned when its Linux CI went green at
+`4e8d327`.
+
+### Stage S17.4 What this stage did not fix
+
+- **xarray opens NetCDF3 and nothing newer.** Its only file engine in the image is scipy.
+  NetCDF4/HDF5 needs `netCDF4` or `h5netcdf`, GRIB needs `cfgrib`, and neither dev nor the image
+  has any of them, so this is a format `data_extractor` has never read rather than a missing
+  declaration. rasterio's GDAL in the image does have netCDF, HDF5 and GRIB drivers, but
+  `data_extractor` sends those extensions to xarray alone.
+- **`data_extractor` reads `ds.dims` as a mapping**, which xarray 2026.7 warns will become a set
+  of names. The pin holds it. A bump past that change would fail silently into the same
+  `raster reader unavailable` note; `ds.sizes` is the fix.
+- **pystac-client** is on dev and not in the image, but nothing reaches it: STAC is commented out
+  of `_DEFAULT_PROVIDERS`, and neither caller of `get_opengeodata_results` passes providers.
+- **colbert** is imported at module scope by `rag_pipeline/reranker.py`, which only
+  `scripts/demo_reranker.py` imports, and `scripts/` is not copied into the image.
+- **Twelve packages are imported directly but declared nowhere**, arriving only as somebody
+  else's dependency: numpy, pyproj, pyogrio, pillow, scikit-learn, Werkzeug, uvicorn, PyYAML,
+  anthropic, affine, langgraph-checkpoint and langgraph-prebuilt. None is missing today; each
+  stays only as long as its parent keeps bringing it.
+
+### Stage S17.5 Three more, found by scanning against the replica
+
+The replica's suite raised no import errors, so the rest came from a static pass over every
+import in the five packages the image ships, plus every pandas or xarray call that loads an engine
+on demand (`to_parquet`, `read_parquet`, `read_excel`, `open_dataset`), each checked in the
+replica. Three more packages are reached by the code, present on dev, and absent from the image:
+
+| package | reached from | in the image, without it | on dev |
+|---|---|---|---|
+| openpyxl | `detect_time_column` and `time_series` on a `.xlsx` with no coordinate columns. GDAL opens the file, `read_vector` refuses a table without coordinates, and `_read_plain_table` falls back to `pd.read_excel`. | ``ImportError: `Import openpyxl` failed``. With it, the same upload gives three monthly periods. | 3.1.5, from anaconda |
+| mapclassify | `choropleth_image(scheme=...)`, which the analysis peer binds whether or not files are attached | the scheme is dropped and a continuous ramp drawn, and nothing in the result says so | 2.10.0, from `~/.local` |
+| IPython | `notebook_extractor`, at ingestion | a regex fallback. Of seven typical cells, `np.mean?` and a `!command` inside a loop fail to parse; IPython parses all seven. | 8.30.0, from anaconda |
+
+openpyxl and mapclassify are live on the deployed agent's path; IPython is latent, like the
+readers. openpyxl 3.1.5 and mapclassify 2.10.0 match the sandbox image. IPython 8.30.0 is dev's
+version, the one the notebook front end was written against. Each has a test in
+`test_declared_dependencies.py` that fails in the replica: the spreadsheet test cannot even write
+its fixture without openpyxl, `choropleth_image` never passes `scheme` to the plot, and
+`transform_cell` cannot parse either cell. With all seven pins on top of the replica, the install
+adds 20 packages, the seven plus 13 dependencies (12 of them IPython's), and moves none of
+production's.
+
+Not declared, because it never worked on dev either: `.xls` needs xlrd, which neither dev nor the
+image has, and the GDAL inside the pyogrio wheel has no XLS driver.
+
+### Stage S17.6 Building it, and what the next deploy will change
+
+The real `rag_pipeline/Dockerfile`, built from this `requirements.txt` on `python:3.11-slim` for
+amd64, installs all seven, and a GeoParquet round trip works inside the result. The full suite
+inside that image gives **6 failed, 1648 passed, 4 skipped.** Every new test passes and no failure
+is an import error. The six are the replica's five plus `test_pyqgis_available_probes_worker_python`,
+which fails in any image with QGIS installed, with or without this change: it points
+`QGIS_PYTHON_BIN` at a missing interpreter and expects "unavailable", while
+`qgis_python_candidates()` deliberately falls back to `/usr/bin/python3`, which has QGIS. It fails
+the same way with the unmodified tree, and in a local image built on 2026-06-25.
+
+**Deploying this changes more than these seven packages.** A changed `requirements.txt`
+invalidates the image's pip layer, so the build that ships it re-resolves every unpinned name in
+the file to whatever is newest that day. Against the deployed freeze, the fresh build changes 42
+packages, none by a major version, and adds 21: the 20 above, plus opentelemetry-api, now pulled
+in by an upgraded dependency. The moves most likely to change behaviour:
+
+| package | deployed | fresh build |
+|---|---|---|
+| openai | 3.14.1 | 3.23.0 |
+| anthropic | 1.6.0 | 1.11.0 |
+| langsmith | 0.12.6 | 0.14.3 |
+| langchain, langchain-core, langchain-openai | 1.4.1, 1.6.3, 1.6.2 | 1.4.3, 1.6.6, 1.6.7 |
+| geopandas | 1.1.4 | 1.2.0 |
+| sentence-transformers | 6.0.1 | 6.1.0 |
+
+Installing with the deployed freeze as constraints ships only the additions, as the replica
+shows. That is the job of a lock file, like the one on `backend_swap`; this stage does not add
+one.
