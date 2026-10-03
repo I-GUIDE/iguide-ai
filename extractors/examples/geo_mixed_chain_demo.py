@@ -4,6 +4,10 @@ Division of labor:
   - reusable / expensive GIS ops  → executed tools (kb_run_geofunction, heatmap_image)
   - small bespoke transforms      → code-gen (execute_code) — e.g. the violent-crime filter
 
+kb_run_geofunction is called DIRECTLY here, as a development demo. It is not offered to any agent
+peer: it exec()s the block's third-party source in this process, so it refuses to run unless
+AGENT_CODE_EXEC_BACKEND=local (set below; see docs/agent-architecture-changes.md, stage 13).
+
 Everything is passed by file_id (GeoParquet), so code-gen output flows into the next tool
 and vice-versa. This is the "code gen as an intermediate step" design.
 
@@ -67,6 +71,9 @@ def main() -> int:
 
     # 1) TOOL: load (extracted spatial function executed)
     r1 = json.loads(kb_run_geofunction(doc_id, "load_chicago_crime_data", "{}"))
+    if "file_id" not in r1:
+        print("1. [TOOL]    kb_run_geofunction refused or failed:", r1.get("error"))
+        return 1
     crime_fid = r1["file_id"]
     print(f"1. [TOOL]    kb_run_geofunction(load_chicago_crime_data) → {crime_fid}  ({r1['rows']} rows)")
 
