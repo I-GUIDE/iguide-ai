@@ -42,6 +42,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 26 | [Permutations run in the agent's own process](#stage-26) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
 | 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
 | 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope that matches nothing binds nothing |
+| 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1904,10 +1905,10 @@ no code standing between them. One was a model id that only a remote catalogue d
 an initialisation path written twice. One was the moment a config change becomes an outage. Each
 broke silently, and in each the visible symptom pointed somewhere other than the cause.
 
-> **On numbering.** This is Stage 13 on `prototype` because it merged first. At the time of
-> writing, nine open PRs also call themselves Stage 13 (#32, #34, #36, #37, #38, #40, #44, #45,
-> #46), several with different content under the same `{#stage-13}` anchor, and #30 and #31 both
-> claim S12.8. Whoever lands them must renumber; merged order is the honest sequence.
+> **On numbering.** This is Stage 13 on `prototype` because it merged first. When it was
+> written, nine open PRs also called themselves Stage 13, several with different content under
+> the same `{#stage-13}` anchor, and #30 and #31 both claimed S12.8. They were renumbered as they
+> landed, in merged order; [Stage 29](#stage-29) maps every PR to the stage it became.
 
 ### Stage S13.1 The download panel is whatever the tools emit
 
@@ -2067,7 +2068,7 @@ Unchanged:
   `rs_embed_tools.py` and `predictions_file_id` at one. These files are not unnamed; they are
   absent. Making them appear changes what users see, so that is a decision rather than a fix.
 - **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
-- **This file's numbering**, as noted at the top of the stage.
+- **This file's numbering** — resolved on 2026-10-03; see [Stage 29](#stage-29).
 
 ---
 
@@ -4745,3 +4746,108 @@ Suite: 1688 passed and 4 skipped before, on `cd664cb`; 1696 passed and 4 skipped
   `_make_image_tools` returns, which have none. The server's names (`describe_image`) also differ
   from the fallback's (`describe_image_b64`). Measured: `include_modules=["image_tools"]` binds all
   14 remote tools.
+
+---
+
+## Stage 29 — Thirty-five branches into one log {#stage-29}
+
+On 2026-10-03 everything finished was landed in one pass: 35 branches, as 36 merges. That was
+20 of the 21 PRs open at the start, the three that other sessions opened while it ran (#48,
+#49, #51), and 12 finished branches that had never been opened as PRs (#50, #52–#60, #62,
+#63). The 21st, #12, targeted the wrong branch and was ported instead (#61). Every merge
+gated on the full suite, and every one after #32 also gated on CI (Linux, Python 3.11, the
+deployed image's versions). The suite went from 1648 to 2048 passing.
+
+### Stage S29.1 Why the stage numbers here differ from the PRs' own
+
+Each branch had appended its stage to the end of this file as it stood when the branch was cut.
+So nine called themselves Stage 13, two called themselves S12.8, and others jumped to 20 or 22
+to stay clear of the collision. Each was renumbered to the next free number **in merged order**,
+which is the honest chronology of what is on `prototype`. Only lines the branch itself added
+were renumbered, never text already on `prototype`. Sub-stages went to the end of their parent,
+not the end of the file.
+
+| PR | claimed | landed as | | PR | claimed | landed as |
+|---|---|---|---|---|---|---|
+| #35 | 14 | **14** | | #34, #42 | 13, S13.5 | **19**, S19.5 |
+| #37, #40, #45, #46, #51 | 13 + subs | **15**, S15.1–S15.9 | | #38, #50 | 13 + subs | **20**, S20.1–S20.11 |
+| #30, #31, #39 | S12.8, S12.8, S12.9 | S12.8, **S12.9**, **S12.10** | | #52 | 17 | **21** |
+| #43 | 20 | **16** | | #53 | 15 | **22** |
+| #36 | 13 | **17** | | #54 | 21 | **23** |
+| #32, #44 | 13 + subs | **18**, S18.1–S18.6 | | #47 | 22 | **24** |
+| #33, #41 | S8.5, S8.6 | S8.5, S8.6 | | #57 | 16 | **25** |
+| #48 | S13.5 | S13.5 (extends Stage 13) | | #58 | 19 | **26** |
+| #62 | S9.8 | S9.8 | | #59 | 18 | **27** |
+| | | | | #63 | 23 | **28** |
+
+Stacked branches (#40 on #37, #41 on #33, #42 on #34, #44 on #32, #50 on #38, #45 on #40) were
+diffed from the **original** tip of the branch they contained. The tip as it stood after landing
+already included `prototype`, and diffing against it would have re-added everything.
+
+### Stage S29.2 Four conflicts git merged cleanly and got wrong
+
+Each pair passed its tests apart and failed together. Git reported no conflict in three of the
+four; the fourth was a textual conflict whose right answer was neither side alone.
+
+- **A lenient assertion hid a stale fake** (`rag-tests-offline` × #50). Layer identity gave
+  `_write_layer` a `key` argument. A test's fake still took two arguments, so inside the tool the
+  call raised `TypeError`. The assertion `in (None, "my_county")` passed anyway, "None if the
+  lookup failed first". Once TIGERweb was stubbed offline the lookup could not fail, the
+  assertion became exact, and the break showed. The fake now matches the signature.
+- **A fake on the old seam** (`fork-safe-subprocess` × #53). The QGIS tools moved from
+  `subprocess.run` to `fork_safe.run`. #53's test still patched `subprocess.run`, so the real
+  interpreter started. The fake was re-pointed the way the fork-safe branch had re-pointed the
+  code-execution tests.
+- **Two edits to one call that do not compete** (#53 × #38/#50). One dropped `overwrite=True`
+  so an earlier answer's link keeps its bytes; the other added `content_key=key`. Both were kept.
+  Layer identity by input is precisely what makes a fresh file per run safe: a re-run makes a new
+  file and replaces its layer.
+- **Two fixes for one cause** (#62 × #54). Both sessions found that `secure_filename` renames an
+  upload, so "My Data.geojson" comes back "My_Data.geojson". #54 registered ids so the upload is
+  not drawn twice; #62 paired previews by position so the url attaches. The merge kept both and
+  dropped the name match that each had replaced.
+
+### Stage S29.3 A live vulnerability, ported from a PR to the wrong branch
+
+#12 targeted `main`, which is eleven months behind `prototype`, the default branch. It fixed a
+path traversal in the metadata extractor that `prototype` still had in a changed form:
+`os.path.join("/tmp", key)` followed a caller-controlled key out of `/tmp`. A new test shows
+`'/etc/escape.py'` downloading to `/etc/escape.py` on the unpatched code. Only #12's own commit
+was ported, as #61, so `main`'s other commits did not come with it, and #12 was closed with a
+pointer.
+
+### Stage S29.4 Corrections made on landing
+
+A branch that corrects documentation goes stale like any other, so each claim was re-measured
+rather than merged as written:
+
+- #60's "53 tools" was **52**: `kb_run_geofunction` had since left the analysis peer (Stage 19).
+  Its line reference had also moved, and is now a search hint.
+- #27's tier paragraph read as though the repo supplies a credential. It does not: the
+  precedence reverses, so the tier-specific variable wins over the bare one. Prod's cluster is
+  deliberately absent from `_TIERS`.
+- #32's record of its two Linux failures now points to Stages 14 and 15. Those fixes landed
+  first, so the workflow's first run on `prototype` was green.
+
+This file had defects of its own, now checked mechanically on every merge, and fixed:
+
+- a duplicate Stage 12 index row
+- missing `---` separators before stages 5, 14, 15, 16 and 17
+- missing index rows for 13 and 24
+- a sub-stage that landed ahead of its predecessor (caught before it was pushed)
+
+### Stage S29.5 What was deliberately not merged
+
+- `claude/benchmark`: its documentation was asked to stay on that branch only.
+- Large, never-pushed lines that change behaviour rather than fix it, each needing a decision of
+  its own:
+  - `claude/extraction-integration` (146 commits; its session was running a dev server at the
+    time) and `claude/extraction-review-response`
+  - `claude/decision-trace-export` (the decision-model research) and `claude/heuristic-menu-fix`
+  - three `worktree-agent-*` workflow scratch branches
+- #22 (closed on purpose), and local review copies of merged PRs.
+- About two dozen branches 120 to 450 commits behind. Merging them would reintroduce code
+  `prototype` deliberately left behind.
+
+Dependabot alert #1 (MapLibre attribution XSS) is fixed on `prototype` by #49: it declares
+`^6.11.2` against a vulnerable range of `<= 6.4.0`. The alert stays open until GitHub rescans.
