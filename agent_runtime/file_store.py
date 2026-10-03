@@ -484,20 +484,49 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
     return _with_public_url(_write_record(record))
 
 
+def _output_to_replace(safe_name: str) -> Optional[Dict[str, Any]]:
+    """The record ``overwrite=True`` may reuse: an output named ``safe_name`` that THIS
+    conversation wrote for THIS caller, the newest if there are several. None otherwise.
+
+    This used to be the first output with that name in directory order, from any conversation
+    and any owner, and the write then re-stamped it with the current ones. qgis_metric_buffer
+    passed overwrite=True under its default name "buffer.geojson", so one user's buffer took over
+    another's file_id: the first user's link served the second user's bytes, and the record left
+    the conversation that made it. find_files was scoped to the conversation and the owner; this
+    scan never was.
+
+    Nothing is reused when no conversation is bound, because the records that would match are
+    the unstamped legacy pool that every conversation reads. The owner must match exactly, so a
+    borrowed conversation id does not reach another user's file. In dev and demo nobody is
+    identified and the owner is None on both sides.
+    """
+    session = current_session()
+    if not session:
+        return None
+    owner = current_owner()
+    candidates: List[Tuple[float, str, Dict[str, Any]]] = []
+    for meta_path in _metadata_dir().glob("*.json"):
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written record must not break a write
+            continue
+        if (record.get("kind") != "output" or record.get("filename") != safe_name
+                or record.get("session") != session or record_owner(record) != owner):
+            continue
+        try:
+            mtime = _record_path(record).stat().st_mtime
+        except Exception:  # noqa: BLE001 - its data is gone, so there is nothing to replace
+            continue
+        candidates.append((mtime, str(record.get("file_id")), record))
+    # Newest first, as find_files and resolve_file_ref order them, so the file replaced is the
+    # one a lookup by this name finds and the link the model gave last.
+    return max(candidates, key=lambda c: c[:2])[2] if candidates else None
+
+
 def create_output_file(filename: str, content: str, overwrite: bool = False) -> Dict[str, Any]:
     maybe_sweep_expired_files()
     safe_name = secure_filename(filename or "agent_output.txt") or "agent_output.txt"
-    existing_record: Optional[Dict[str, Any]] = None
-
-    if overwrite:
-        for meta_path in _metadata_dir().glob("*.json"):
-            try:
-                record = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if record.get("kind") == "output" and record.get("filename") == safe_name:
-                existing_record = record
-                break
+    existing_record = _output_to_replace(safe_name) if overwrite else None
 
     if existing_record:
         file_id = str(existing_record["file_id"])
@@ -537,17 +566,7 @@ def create_output_file_from_path(
         raise ValueError(f"source file does not exist: {source}")
 
     safe_name = secure_filename(filename or source.name or "agent_output.bin") or "agent_output.bin"
-    existing_record: Optional[Dict[str, Any]] = None
-
-    if overwrite:
-        for meta_path in _metadata_dir().glob("*.json"):
-            try:
-                record = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if record.get("kind") == "output" and record.get("filename") == safe_name:
-                existing_record = record
-                break
+    existing_record = _output_to_replace(safe_name) if overwrite else None
 
     if existing_record:
         file_id = str(existing_record["file_id"])
