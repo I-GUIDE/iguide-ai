@@ -1554,7 +1554,54 @@ has a different cost. Two habits are now written down. Check for streams in flig
 recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
 `embedding-server`, and agent-api then waited on their health checks.
 
-### Stage S13.5 What this stage did not fix
+### Stage S13.5 `AGENT_MCP_UNBIND`: an override that unbound nothing
+
+Found on 2026-10-02 and fixed on 10-03, after the four above were written up. It shares their
+silence but not their symptom: the deployment does not set the variable, so nobody saw it fail.
+
+`AGENT_MCP_UNBIND` names MCP tools the agent should not bind. Its parser was meant to accept
+either `create_notebook_workflow_tool` or `mcp_create_notebook_workflow_tool`, the name the agent
+sees, and it removed the prefix with `lstrip("mcp_")`. `lstrip` does not remove a prefix. It
+removes leading characters drawn from a set, here m, c, p and _. Every name that starts with one
+of them was mangled, with or without the prefix:
+
+```
+mcp_create_notebook_workflow_tool,create_notebook_workflow_tool,mcp_count_crimes_per_community
+  -> {reate_notebook_workflow_tool, ount_crimes_per_community}
+```
+
+The mangled names match no tool, and nothing is logged when a name matches nothing. Two of the 16
+tools defined under `MCP_server/tools/` could not be unbound under either spelling:
+`create_notebook_workflow_tool` and `count_crimes_per_community`. The same held for any generated
+tool given a name that starts with m, c or p; the default name, `notebook_<stem>`, was safe.
+`create_notebook_workflow_tool` is the remote notebook builder that #42 asked the maintainer about
+unbinding, so the override is how an operator would unbind it if that decision is reversed.
+
+The override also replaces the default list rather than adding to it. Setting it to that one name
+therefore left the builder bound and bound the two web-search tools again: two tools added, none
+removed.
+
+The test could not catch it. `test_the_unbind_list_is_overridable` checked both spellings with
+`describe_image`, and d is not in the set, so `lstrip` and a prefix removal agree on that name.
+The default list never reaches the parser, and neither of its names starts with one of the four
+characters. `printenv` in the `agent-api` container on 10-03 found the variable unset, so the
+defect was latent in the deployment.
+
+The fix is `removeprefix("mcp_")`, which needs Python 3.9; the images run 3.11. One new test
+parses the string above, then names starting with c (the two real tools), m and p, each written
+both ways. The other builds through `_make_remote_mcp_tools` with the listing stubbed, because
+that is the path the deployment takes. Restoring `lstrip` fails both, and the old test still
+passes.
+
+Unchanged:
+
+- **The override still replaces the default list**, as its test asserts. An operator who unbinds
+  one more tool and wants the two web-search tools to stay unbound must name all three.
+- **A name that matches no tool is still silent**, so a typo fails the way this bug did.
+- **#42 lists this bug under "Found, and not fixed here".** It was still open when this was
+  written. Whichever of the two merges second should update that bullet.
+
+### Stage S13.6 What this stage did not fix
 
 - **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
   The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
