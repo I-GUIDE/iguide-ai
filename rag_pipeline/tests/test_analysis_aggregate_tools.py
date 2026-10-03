@@ -389,6 +389,86 @@ def test_summary_statistics_period_buckets_a_date_column(incidents):
     assert bad["ok"] is False and "month" in bad["hint"]
 
 
+def _dated_csv(tmp_path, column, values):
+    """A CSV of points whose `column` holds `values`; GDAL reads every field back as text."""
+    path = tmp_path / f"{column}.csv"
+    rows = [f"{v},{i},{41.90 + i / 100:.2f},{-87.66 - i / 100:.2f}" for i, v in enumerate(values)]
+    path.write_text("\n".join([f"{column},value,Latitude,Longitude", *rows]) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _buckets(res, by):
+    assert res["ok"] is True, res
+    return {g[by]: g["n"] for g in res["summary"]["groups"]}
+
+
+def test_summary_statistics_period_reads_a_daylight_saving_csv_in_utc(tmp_path):
+    """A US feed's local times, -06:00 in winter and -05:00 in summer.
+
+    Read with a plain pd.to_datetime this failed on both pandas versions: pandas 2 returned
+    objects and `.dt` raised, pandas 3 raised "Mixed timezones detected".
+    """
+    path = _dated_csv(tmp_path, "reported_at", [
+        "2026-01-31T20:00:00-06:00",   # 02:00 UTC on February 1
+        "2026-07-26T20:00:00-05:00",
+        "2026-07-31T20:00:00-05:00",   # 01:00 UTC on August 1
+    ])
+    res = _call("summary_statistics", file_id=path, column="value", by="reported_at",
+                period="month", statistic="count", chart=False)
+    assert _buckets(res, "reported_at") == {"2026-02": 1, "2026-07": 1, "2026-08": 1}
+
+
+def test_summary_statistics_period_buckets_the_months_time_series_counts(tmp_path):
+    """One offset throughout. By local clock the first row fell in January, so one dataset gave
+    January 1 and February 2 here and February 3 in time_series, which buckets in UTC."""
+    pytest.importorskip("matplotlib")
+    from agent_runtime.analysis_temporal_tools import make_temporal_tools
+
+    path = _dated_csv(tmp_path, "reported_at", [
+        "2026-01-31T20:00:00-06:00", "2026-02-05T09:00:00-06:00", "2026-02-06T09:00:00-06:00"])
+    res = _call("summary_statistics", file_id=path, column="value", by="reported_at",
+                period="month", statistic="count", chart=False)
+    series = json.loads({t.name: t for t in make_temporal_tools()}["time_series"].func(
+        file_id=path, time_column="reported_at", freq="month"))
+    assert series["ok"] is True, series
+    assert _buckets(res, "reported_at") == {"2026-02": 3}
+    assert _buckets(res, "reported_at") == {r["period"]: r["count"] for r in series["series"]}
+
+
+def test_summary_statistics_period_gives_a_number_only_numeric_readings(tmp_path):
+    """pd.to_datetime reads a typed number as NANOSECONDS, so years, codes and epoch seconds all
+    landed in 1970; and pandas 3 read a CSV's beat "1234" as the year 1234. Now a year is a year
+    and a code outside 1678-2262 is refused, on either pandas."""
+    typed = tmp_path / "typed.geojson"
+    gpd.GeoDataFrame(
+        {"year": [2019, 2020, 2020], "beat": [1234, 1235, 1236],
+         "epoch": [1767225600, 1769904000, 1769990400], "value": [1, 2, 3]},
+        geometry=[Point(-88.28, 40.10), Point(-88.26, 40.11), Point(-88.24, 40.12)],
+        crs="EPSG:4326",
+    ).to_file(typed, driver="GeoJSON")
+    by_year = _call("summary_statistics", file_id=str(typed), column="value", by="year",
+                    period="year", chart=False)
+    assert _buckets(by_year, "year") == {"2019": 1, "2020": 2}
+    by_epoch = _call("summary_statistics", file_id=str(typed), column="value", by="epoch",
+                     period="month", chart=False)
+    assert _buckets(by_epoch, "epoch") == {"2026-01": 1, "2026-02": 2}
+    for ref in (str(typed), _dated_csv(tmp_path, "beat", ["1234", "1235", "1236"])):
+        codes = _call("summary_statistics", file_id=ref, column="value", by="beat",
+                      period="year", chart=False)
+        assert codes["ok"] is False and "could not be read as dates" in codes["error"], codes
+
+
+def test_summary_statistics_period_groups_an_undated_row_the_same_on_any_pandas(tmp_path):
+    """pandas 2 labelled an undated row's group "NaT" and pandas 3 "(missing)"; now it is
+    "(missing)" on both, and a note counts the rows."""
+    path = _dated_csv(tmp_path, "reported_at",
+                      ["2026-01-05T09:00:00", "not a date", "2026-02-05T09:00:00"])
+    res = _call("summary_statistics", file_id=path, column="value", by="reported_at",
+                period="month", statistic="count", chart=False)
+    assert _buckets(res, "reported_at") == {"2026-01": 1, "2026-02": 1, "(missing)": 1}
+    assert any(n.startswith("1 of 3 rows have no readable date") for n in res["notes"]), res
+
+
 def test_summary_statistics_bad_columns_list_candidates(incidents):
     res = _call("summary_statistics", file_id=incidents, column="valu")
     assert res["ok"] is False and "val" in res["numeric_columns"]

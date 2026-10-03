@@ -31,7 +31,7 @@ def clean_env(monkeypatch):
 def test_anvilgpt_is_off_unless_explicitly_selected(clean_env, monkeypatch):
     """Configuring the variables must not be enough to move every request onto another model."""
     monkeypatch.setenv("ANVILGPT_KEY", "k")
-    monkeypatch.setenv("ANVILGPT_MODEL", "qwen3.6:27b")
+    monkeypatch.setenv("ANVILGPT_MODEL", "qwen3.8:27b")
     assert _anvilgpt_settings() is None
     assert active_llm_description()["provider"] == "openai"
 
@@ -40,16 +40,16 @@ def test_selecting_anvilgpt_resolves_model_and_base_url(clean_env, monkeypatch):
     monkeypatch.setenv("AGENT_LLM_PROVIDER", "anvilgpt")
     monkeypatch.setenv("ANVILGPT_KEY", "k")
     monkeypatch.setenv("ANVILGPT_URL", ANVIL_CHAT_URL)
-    monkeypatch.setenv("ANVILGPT_MODEL", "qwen3.6:27b")
+    monkeypatch.setenv("ANVILGPT_MODEL", "qwen3.8:27b")
 
     cfg = _anvilgpt_settings()
-    assert cfg["model"] == "qwen3.6:27b"
+    assert cfg["model"] == "qwen3.8:27b"
     # Open WebUI serves chat at /api/chat/completions, so the OpenAI-compatible base is /api
     assert cfg["base_url"] == "https://anvilgpt.rcac.purdue.edu/api"
     assert "max_tokens" not in cfg, "no invented ceiling — a cap truncates reasoning"
 
     desc = active_llm_description()
-    assert desc["provider"] == "anvilgpt" and desc["model"] == "qwen3.6:27b"
+    assert desc["provider"] == "anvilgpt" and desc["model"] == "qwen3.8:27b"
 
 
 def test_no_token_ceiling_is_imposed(clean_env, monkeypatch):
@@ -67,11 +67,21 @@ def test_a_missing_key_fails_with_the_fix_not_a_traceback(clean_env, monkeypatch
     assert "anvilgpt.rcac.purdue.edu" in str(err.value), "say where to get a key"
 
 
-def test_the_model_defaults_to_the_verified_id(clean_env, monkeypatch):
-    """qwen3.6:27b is the id AnvilGPT actually serves — NOT the HuggingFace Qwen/... form."""
+def test_the_model_defaults_to_an_open_webui_style_id(clean_env, monkeypatch):
+    """The default must be an id AnvilGPT can serve, in Open WebUI's `name:tag` form — NOT the
+    HuggingFace `Qwen/...` form a vLLM server uses, which 404s.
+
+    The exact id is deliberately NOT what this asserts as a fact about the world. It was
+    qwen3.6:27b until Purdue withdrew that model (verified gone 2026-10-01, replaced by
+    qwen3.8:27b), and an earlier version of this test read "qwen3.6:27b is the id AnvilGPT
+    actually serves" — a claim the test could never have caught becoming false, because nothing
+    here talks to Purdue. So it pins the SHAPE, and the live roster is probed instead.
+    """
     monkeypatch.setenv("AGENT_LLM_PROVIDER", "anvilgpt")
     monkeypatch.setenv("ANVILGPT_KEY", "k")
-    assert _anvilgpt_settings()["model"] == "qwen3.6:27b"
+    model = _anvilgpt_settings()["model"]
+    assert model == "qwen3.8:27b"
+    assert ":" in model and "/" not in model, "Open WebUI name:tag form, not HuggingFace"
 
 
 def test_open_webui_url_normalisation():
