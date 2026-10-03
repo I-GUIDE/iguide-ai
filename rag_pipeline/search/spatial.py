@@ -235,6 +235,25 @@ def _feature_phrase(doc, ent) -> Optional[str]:
     return None
 
 
+def _without_article(ent):
+    """``ent`` minus a leading lowercase "the" ("the Great Plains" -> "Great Plains").
+
+    en_core_web_sm, the model production loads, keeps the article inside many entities: "the Great
+    Plains", "the Chesapeake Bay", "the United States", "the Gulf of Mexico". The fallback never
+    offered it, so the same place reached the geocoder and its cache under two spellings depending
+    on which path ran. Only a LOWERCASE "the" goes. A capitalized one can belong to the name ("The
+    Hague"), or is the query's first word, where the two cannot be told apart.
+    """
+    if len(ent) > 1 and ent[0].text == "the":
+        return ent[1:]
+    return ent
+
+
+def _only_non_places(text: str) -> bool:
+    """Whether every word of *text* is one ``_NOT_PLACES`` excludes ("GeoJSON", "NetCDF", "MODIS")."""
+    return all(word.lower() in _NOT_PLACES for word in text.split())
+
+
 def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
     """Fallback place candidates from capitalization, for when NER finds nothing.
 
@@ -274,7 +293,8 @@ def extract_locations_from_query(user_query: str) -> List[str]:
     """Place names in *user_query*, best candidate first.
 
     A named entity is emitted WITH its feature word when it has one, because that is the form the
-    geocoder can resolve. When NER yields nothing usable, capitalized phrases are offered instead.
+    geocoder can resolve, and without a leading lowercase "the". When NER finds no place entity at
+    all, capitalized phrases are offered instead.
     """
     if nlp is None:
         logger.debug("Spacy model unavailable; skipping spatial entity extraction.")
@@ -282,15 +302,28 @@ def extract_locations_from_query(user_query: str) -> List[str]:
 
     doc = nlp(user_query)
     ordered: List[str] = []
+    found_place_entity = False
     for ent in doc.ents:
         if ent.label_ not in ("GPE", "LOC", "FAC"):
+            continue
+        found_place_entity = True
+        ent = _without_article(ent)
+        # NER does not know a file format from a place. en_core_web_sm tags "GeoJSON" as GPE in
+        # "convert a GeoJSON to a COG with GDAL", and "NetCDF", "MODIS", "USGS", "LAS" and "Python"
+        # elsewhere, so production offered them to the geocoder. The fallback's vocabulary applies
+        # here as well.
+        if _only_non_places(ent.text):
             continue
         phrase = _feature_phrase(doc, ent)
         # Prefer the fuller phrase, but keep the bare entity as a fallback candidate after it.
         for value in ((phrase, ent.text) if phrase else (ent.text,)):
             if value and value not in ordered:
                 ordered.append(value)
-    if not ordered:
+    # The fallback is for text NER could not parse, like the keyword form _capitalized_candidates
+    # describes. When NER found place entities and every one was a technical term, the query names
+    # no place, and the fallback would offer its capitalized words instead: "Convert" from "Convert
+    # a GeoJSON to a COG with GDAL".
+    if not ordered and not found_place_entity:
         return _capitalized_candidates(user_query)
     return ordered
 
