@@ -91,15 +91,22 @@ def test_no_key_configured_is_open_with_or_without_demo_mode(monkeypatch):
 
 
 # --- what it tells the browser --------------------------------------------------
+# The WHOLE body is pinned, not just the fields under test. /agent/ui-config is unauthenticated,
+# so anything added to it is readable by anyone who asks; an exact-shape assertion makes every new
+# field a deliberate edit here rather than something that slips out unreviewed. persistent_memory
+# was added that way (it is False only in AGENT_MODE=local — see test_local_mode.py).
+
 def test_ui_config_says_a_key_is_required_when_one_is_enforced(monkeypatch):
     monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
-    assert _ui_config() == {"mode": "dev", "demo_mode": False, "api_key_required": True}
+    assert _ui_config() == {"mode": "dev", "demo_mode": False, "api_key_required": True,
+                            "persistent_memory": True}
 
 
 def test_ui_config_stops_asking_for_a_key_in_demo_mode(monkeypatch):
     monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
     monkeypatch.setenv("DEMO_MODE", "true")
-    assert _ui_config() == {"mode": "demo", "demo_mode": True, "api_key_required": False}
+    assert _ui_config() == {"mode": "demo", "demo_mode": True, "api_key_required": False,
+                            "persistent_memory": True}
 
 
 def test_ui_config_needs_no_key_of_its_own(monkeypatch):
