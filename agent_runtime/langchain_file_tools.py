@@ -4,10 +4,13 @@ import csv
 import io
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .file_store import create_output_file, get_file_record, resolve_file_id, storage_root
+from .file_store import (create_output_file, current_session, find_files, get_file_record,
+                         resolve_file_id, storage_root)
+from agent_runtime.tool_args import accept_null_defaults
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -25,30 +28,33 @@ def _allowed_roots() -> List[Path]:
     return sorted(roots)
 
 
-def _find_managed_file_by_name(filename: str) -> Optional[Path]:
+def _find_managed_record_by_name(filename: str) -> Optional[Dict[str, Any]]:
+    """The stored file a bare ``filename`` names for THIS caller, or None: the newest record
+    with exactly that name among those ``find_files`` lets this conversation and this user see.
+
+    This was a scan of every conversation's uploads/ and outputs/ for an on-disk name ending in
+    ``__<filename>``, and it checked neither the conversation nor the owner, so bob read alice's
+    ``summary.md`` by name while find_files hid it from him. find_files is where both scopes are
+    applied, so a name goes through it.
+
+    The unowned legacy pool stays readable, because find_files keeps it for reuse, and it competes
+    on recency like everything else. Uploads carry no conversation either (the upload route binds
+    the user, not the thread), so ranking this conversation's own files first would put an older
+    output above the file the user just re-uploaded under the same name.
+    """
     if not filename or any(sep in filename for sep in ("/", "\\")):
         return None
-
-    candidates: List[Path] = []
-    root = storage_root()
-    for folder in (root / "uploads", root / "outputs"):
-        if not folder.exists():
-            continue
-        for path in folder.iterdir():
-            if path.is_file() and path.name.endswith(f"__{filename}"):
-                candidates.append(path)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+    # find_files matches a substring, so only the exact name counts: "summary.md" is neither
+    # "old_summary.md" nor "final__summary.md", which the suffix scan matched. And no page, since
+    # find_files sorts every match before cutting one, and newer near-misses would fill it.
+    for record in find_files(name=filename, limit=sys.maxsize):
+        if record.get("filename") == filename:
+            return record
+    return None
 
 
 def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
     ref = str(path or "").strip()
-    matched_managed_file = _find_managed_file_by_name(ref)
-    if matched_managed_file is not None:
-        return matched_managed_file
-
     raw_candidate = Path(ref).expanduser()
     if raw_candidate.is_absolute():
         candidates = [raw_candidate.resolve()]
@@ -81,6 +87,10 @@ def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, 
     record = get_file_record(ref)
     if record:
         return resolve_file_id(ref), record
+
+    record = _find_managed_record_by_name(ref)
+    if record:
+        return resolve_file_id(str(record["file_id"])), record
 
     return _resolve_local_allowed_path(ref, must_exist=must_exist), None
 
@@ -226,6 +236,46 @@ def write_output_file_tool(filename: str, content: str, overwrite: bool = False)
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
+
+# How many of this conversation's files to describe. Generous: the point of the tool is that the
+# answer is COMPLETE, and a turn that produced twelve artifacts must not be told about ten.
+_CONVERSATION_FILE_MAX = 200
+
+
+def list_conversation_files_tool(name: Optional[str] = None, limit: int = 50) -> str:
+    """Every file THIS conversation has made or been given, newest first."""
+    session = current_session()
+    capped = max(1, min(int(limit or 50), _CONVERSATION_FILE_MAX))
+    # include_unowned=False: records written before sessions existed belong to no conversation,
+    # and answering "what have you saved for me" with the deployment's whole history would be
+    # worse than answering with nothing.
+    records = find_files(name, limit=capped + 1, include_unowned=False)
+    files = [{
+        "file_id": r.get("file_id"),
+        "filename": r.get("filename"),
+        "kind": r.get("kind"),
+        "size_bytes": r.get("size_bytes"),
+        "download_url": r.get("download_url"),
+    } for r in records[:capped]]
+
+    payload: Dict[str, Any] = {"ok": True, "count": len(files), "files": files}
+    if len(records) > capped:
+        payload["truncated"] = f"showing the {capped} newest; ask for more with a higher limit"
+    if not session:
+        # No conversation bound (a CLI run, or a request that never went through the API edge).
+        # Saying "you have no files" would be a lie of a different kind, so name the reason.
+        payload["scope_unknown"] = ("No conversation is bound to this request, so files cannot "
+                                    "be attributed to it. This list is not authoritative.")
+    elif not files:
+        payload["note"] = ("Nothing has been saved in this conversation yet. Files from other "
+                           "conversations are deliberately not listed.")
+    else:
+        payload["note"] = ("This is the complete list for this conversation. Quote these "
+                           "filenames and links rather than any remembered from the transcript, "
+                           "and do not describe a file as saved unless it appears here.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
 def make_langchain_file_tools() -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
@@ -235,8 +285,7 @@ def make_langchain_file_tools() -> List[Any]:
         ) from exc
 
     return [
-        StructuredTool.from_function(
-            func=read_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(read_text_file_tool),
             name="read_text_file",
             description=(
                 "Read a UTF-8 text-like file from an allowed local path and return its contents. "
@@ -245,8 +294,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=inspect_file_for_analysis_tool,
+        StructuredTool.from_function(func=accept_null_defaults(inspect_file_for_analysis_tool),
             name="inspect_file_for_analysis",
             description=(
                 "Load a local file or uploaded file_id into an LLM-friendly JSON payload for interpretation. "
@@ -255,8 +303,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_text_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_text_file_tool),
             name="write_text_file",
             description=(
                 "Write text output to a local file under an allowed root. "
@@ -264,8 +311,7 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
-        StructuredTool.from_function(
-            func=write_output_file_tool,
+        StructuredTool.from_function(func=accept_null_defaults(write_output_file_tool),
             name="write_output_file",
             description=(
                 "Write downloadable output for the user into managed agent storage using only a filename. "
@@ -273,11 +319,37 @@ def make_langchain_file_tools() -> List[Any]:
             ),
             metadata={"category": "io"},
         ),
+        StructuredTool.from_function(func=accept_null_defaults(list_conversation_files_tool),
+            name="list_conversation_files",
+            description=(
+                "List the files THIS conversation has produced or been given, newest first, with "
+                "file_id, filename and download_url. USE IT whenever the user asks what files "
+                "exist, what was saved, or for a link to something made earlier — the transcript "
+                "is not a reliable record of that and earlier links may have been dropped from "
+                "context. Optional `name` filters by filename substring."
+            ),
+            metadata={"category": "io"},
+        ),
     ]
+
+
+def make_conversation_file_tools() -> List[Any]:
+    """Just the listing, for turns with no upload.
+
+    The full file toolset is attached only when the user uploaded something, which is the wrong
+    condition for this one tool: a turn creates files without any upload — a boundary, an
+    embedding, a plot — and it is exactly then that "what did you save?" gets asked. Without it
+    the analyse peer reached for `execute_code` and listed the sandbox working directory instead,
+    inventing its own scratch script as one of the conversation's artifacts.
+    """
+    tools = make_langchain_file_tools()
+    return [t for t in tools if str(getattr(t, "name", "")) == "list_conversation_files"]
 
 
 __all__ = [
     "inspect_file_for_analysis_tool",
+    "make_conversation_file_tools",
+    "list_conversation_files_tool",
     "make_langchain_file_tools",
     "read_text_file_tool",
     "write_output_file_tool",

@@ -116,7 +116,6 @@ def build_orchestrator_graph(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
-    use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
     code_peer: Optional[str] = None,
     code_peer_model: Optional[str] = None,
@@ -125,8 +124,6 @@ def build_orchestrator_graph(
 ) -> Any:
     """Compile the hybrid orchestrator graph for one request's configuration.
 
-    ``use_supervisor`` overrides the orchestrate strategy for this request
-    (None falls back to the ``AGENT_SUPERVISOR`` env default, which is on).
     """
 
     def triage_node(state: OrchestratorState) -> Dict[str, Any]:
@@ -145,9 +142,18 @@ def build_orchestrator_graph(
             {"stage": "triage", "message": "Routing the request"},
             node="triage",
         )
+        # `fast` / `capabilities` / `orchestrate` are node names in THIS graph. "Routed to
+        # orchestrate" told the reader which node was next, which is not a fact about their
+        # request — and for the other two it also duplicated the destination's own first line.
+        _ROUTE_NAMES = {
+            "orchestrate": "Routed to the full agent",
+            "fast": "Routed to a direct answer",
+            "capabilities": "Routed to the capability summary",
+        }
         emit_trace_event(
             "node_completed",
-            {"stage": "triage", "route": route, "message": f"Routed to {route}"},
+            {"stage": "triage", "route": route,
+             "message": _ROUTE_NAMES.get(route, f"Routed to {route}")},
             node="triage",
         )
         return {"route": route}
@@ -204,7 +210,6 @@ def build_orchestrator_graph(
         # Single fork between the two INDEPENDENT paths, resolved via the strategy registry.
         # Each path owns its entrypoint (agent_runtime.{legacy,supervisor}.orchestration) and
         # returns the same OrchestratorState key set, so the public contract is path-agnostic.
-        # Per-request override via use_supervisor; global default via AGENT_SUPERVISOR.
         from agent_runtime.strategy import OrchestrationConfig, get_orchestration_strategy
 
         cfg = OrchestrationConfig(
@@ -217,7 +222,7 @@ def build_orchestrator_graph(
             code_peer_model=code_peer_model,
             unified_peer=unified_peer,
         )
-        strategy = get_orchestration_strategy(use_supervisor)
+        strategy = get_orchestration_strategy()
         return strategy(state.get("query", ""), state.get("chat_history") or None, cfg)
 
     builder = StateGraph(OrchestratorState)

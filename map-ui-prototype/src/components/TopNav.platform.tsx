@@ -6,6 +6,7 @@
 // I-GUIDE platform chrome so the chat matched the platform when the map was hidden.
 //
 // Selected by VITE_UI_VARIANT=platform — see TopNav.tsx.
+import { AccountBadge, accountNeedsAttention } from './AccountBadge';
 import type { TopNavProps } from './TopNav';
 // The reference I-GUIDE platform chrome. Nav items / search / account are PLACEHOLDERS
 // (non-functional) so the chat matches the platform look when the map isn't shown.
@@ -30,9 +31,23 @@ export function TopNavPlatform(p: TopNavProps) {
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
-        <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        {/* Gated the same way as the rs-embed header: in DEMO_MODE there is no key to enter
+            and no endpoint worth changing. This variant is selected at BUILD time and Rollup
+            drops it from the default bundle, so the gap was latent rather than live — but a
+            platform build with DEMO_MODE on would have shown the dialog the switch exists to
+            hide, and the two headers must not disagree about that. */}
+        {!p.demoMode && (
+          <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
+        )}
         <span className="jpy" title="Jupyter (placeholder)">jpy</span>
-        <span className="avatar" title="Account (placeholder)" />
+        {/* The real account control, added for the same reason the gear gained a condition
+            above: the two headers must not disagree about identity. The placeholder avatar
+            stands down only when the badge has something to say — since the badge stopped
+            rendering for a working account, asking `p.me` here would blank the avatar out of
+            this header for everyone signed in, which is not a removal anybody asked for. */}
+        {accountNeedsAttention(p.me)
+          ? <AccountBadge me={p.me ?? null} />
+          : <span className="avatar" title="Account (placeholder)" />}
       </div>
     </header>
   );

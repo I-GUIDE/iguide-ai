@@ -59,12 +59,11 @@ log = logging.getLogger("search_agents")
 # ---------------------------------------------------------------------------
 
 def _getenv(name: str, required: bool = True, default: Optional[str] = None) -> str:
-    value = os.getenv(name, default)
-    if required and (value is None or value == ""):
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    if value and len(value) >= 2 and value[0] == value[-1] in ('"', "'"):
-        value = value[1:-1]
-    return value or ""
+    """Delegates to the shared helper. This was a verbatim copy of it, which meant the tier
+    rule would have applied to every search module except this one — and this one resolves
+    OPENSEARCH_INDEX."""
+    from .utils import getenv as _shared
+    return _shared(name, required=required, default=default)
 
 
 def _retry(times: int = 3, base_delay: float = 0.25, exc: Tuple = (Exception,)):
@@ -760,8 +759,11 @@ _OS_FORBIDDEN_KEYS = {"delete", "update", "script", "bulk", "reindex", "indices"
 @lru_cache(maxsize=1)
 def _os_client() -> OpenSearch:
     node = _getenv("OPENSEARCH_NODE")
-    user = os.getenv("OPENSEARCH_USERNAME", "")
-    pwd = os.getenv("OPENSEARCH_PASSWORD", "")
+    # The credential through the same tiered resolution as the node, as keyword.py does. These
+    # read the bare names, so a tiered deployment sent the untiered pair to the tier's cluster,
+    # and that pair measured 401 against dev's on 2026-09-22.
+    user = _getenv("OPENSEARCH_USERNAME", required=False, default="")
+    pwd = _getenv("OPENSEARCH_PASSWORD", required=False, default="")
     return OpenSearch(
         hosts=[node],
         http_auth=(user, pwd) if (user or pwd) else None,

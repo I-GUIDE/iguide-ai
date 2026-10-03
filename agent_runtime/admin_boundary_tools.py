@@ -26,7 +26,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent_runtime.map_layers import boundary_layer_id
+from agent_runtime.map_layers import boundary_layer_id, content_key
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +154,11 @@ def resolve_state(text: str) -> Tuple[Optional[str], List[str]]:
     return None, near[:8]
 
 
-def _write_layer(features: List[Dict[str, Any]], stem: str) -> Dict[str, Any]:
-    """Persist a FeatureCollection to the file store; returns its record."""
+def _write_layer(features: List[Dict[str, Any]], stem: str,
+                 key: Optional[str] = None) -> Dict[str, Any]:
+    """Persist a FeatureCollection to the file store; returns its record. ``key`` is what the
+    file holds (see _boundary_key), recorded so that the layer drawn from it, and every later
+    step that reads it, identifies it by content rather than by this write's file_id."""
     from agent_runtime.file_store import create_output_file_from_path
 
     fname = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_")[:60] or "boundary"
@@ -163,7 +167,25 @@ def _write_layer(features: List[Dict[str, Any]], stem: str) -> Dict[str, Any]:
     out = Path(tempfile.mkdtemp(prefix="admin_boundary_")) / fname
     out.write_text(json.dumps({"type": "FeatureCollection", "features": features}),
                    encoding="utf-8")
-    return create_output_file_from_path(out, filename=fname)
+    return create_output_file_from_path(out, filename=fname, content_key=key)
+
+
+def _boundary_key(level: str, geoids: List[str], subdivide: Optional[str],
+                  limit: Optional[int]) -> str:
+    """What a boundary result IS: its resolved level and GEOIDs, plus what it was cut into.
+
+    The question as worded is left out on purpose. "Champaign", "Champaign city" and
+    name='Champaign' resolve to one place, so they must produce one key, and therefore one
+    map layer (see map_layers.boundary_layer_id). So are the output name and the file_id: a
+    re-grounding pass that asked again wrote a byte-identical file under a new id, and a key
+    built from either would have stacked a second copy of the outline (2026-10-01).
+
+    ``limit`` is set only when MAX_FEATURES actually truncated the result. In that case it
+    decides the content, and otherwise it does not.
+    """
+    ids = sorted(str(g or "") for g in geoids)
+    return content_key(subdivide or level, ids[0] if len(ids) == 1 else f"{len(ids)}_places",
+                       level=level, geoids=ids, subdivide=subdivide, limit=limit)
 
 
 def _bbox(features: List[Dict[str, Any]]) -> Optional[List[float]]:
@@ -192,10 +214,21 @@ def make_admin_boundary_tools() -> List[Any]:
 
     meta = {"category": "geo"}
 
-    def admin_boundary(area: str, state: Optional[str] = None, level: str = "county",
-                       subdivide: Optional[str] = None, name: Optional[str] = None) -> str:
+    # Words that name a KIND of place. An `area` holding one of these is a mis-slotted level.
+    _LEVEL_WORDS = {"city", "cities", "county", "counties", "state", "states", "place", "places",
+                    "town", "towns", "municipality", "cdp", "tract", "tracts", "block_group",
+                    "block_groups"}
+
+    def admin_boundary(area: Optional[str] = None, state: Optional[str] = None,
+                       level: str = "county", subdivide: Optional[str] = None,
+                       name: Optional[str] = None,
+                       output_name: Optional[str] = None) -> str:
         """Look up a US state, county or city BY NAME, draw it on the map, and return it as a
         polygon file other tools can use — no upload required.
+
+        `area` is the PLACE NAME — "Urbana", "Champaign County", "Illinois". `name` means the
+        same thing and either will do. The KIND of place goes in `level`, never in `area`.
+        The output filename stem is `output_name`.
 
         This is how to answer "the embeddings for Champaign County" or "show me Cook County"
         when the user has attached nothing. `level`: "county" (default), "state", "city"
@@ -210,6 +243,51 @@ def make_admin_boundary_tools() -> List[Any]:
 
         US only; it reads the Census TIGERweb service.
         """
+        # `area` is the place NAME but reads like the KIND of place, and `name` — which used to
+        # mean the output filename — reads like exactly what a caller is trying to say. Both
+        # mistakes were measured live with gpt-oss:120b:
+        #
+        #   area='city', name='Urbana'                      -> 3 failures before it guessed right
+        #   area omitted, name='Champaign', level='county'  -> ValidationError, area required
+        #
+        # The second is the more natural error and the harder one: it fails in pydantic before
+        # any of this runs, so no amount of in-body recovery could have caught it. A parameter
+        # a model reaches for twice is not the model being careless — `name` was the wrong word
+        # for a filename. It now means the PLACE, `output_name` means the file, and `area` is
+        # no longer required so an otherwise-correct call reaches this code at all.
+        swap_note = None
+        place = str(area or "").strip()
+        given = str(name or "").strip()
+
+        if place.lower() in _LEVEL_WORDS:
+            if given and given.lower() not in _LEVEL_WORDS:
+                swap_note = (f"`area` was {area!r}, a kind of place rather than a name; used "
+                             f"{given!r} as the place and {area!r} as the level.")
+                level = area
+                place, given = given, ""
+            else:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"`area` is the place NAME, not the kind of place — {area!r} is a "
+                             f"level.",
+                    "hint": "Call it as admin_boundary(area='Urbana', level='city', "
+                            "state='Illinois'). `level` takes city/county/state/cdp."})
+        elif not place and given:
+            # `name` alone. Not an error worth reporting — it is the same request, said the
+            # other way round, and both words mean the place now.
+            place, given = given, ""
+
+        if not place:
+            return json.dumps({
+                "ok": False, "error": "no place named",
+                "hint": "Pass the place as `area` (or `name`): admin_boundary(area='Champaign "
+                        "County', state='IL'). `level` takes the kind of place; `output_name` "
+                        "names the output file."})
+
+        area = place
+        # Whatever is LEFT in `name` was meant as a filename, which is what it used to mean.
+        output_name = output_name or (given or None)
+
         lvl = str(level or "county").strip().lower()
         if lvl in {"place", "town", "municipality"}:
             lvl = "city"
@@ -217,10 +295,7 @@ def make_admin_boundary_tools() -> List[Any]:
             return json.dumps({"ok": False,
                                "error": f"unknown level {level!r}",
                                "hint": f"use one of: {', '.join(sorted(_LEVELS))}"})
-        area_text = str(area or "").strip()
-        if not area_text:
-            return json.dumps({"ok": False, "error": "no area named",
-                               "hint": "pass the name of a state, county or city"})
+        area_text = area
 
         # --- resolve the state qualifier ------------------------------------------------
         state_fips = None
@@ -293,6 +368,7 @@ def make_admin_boundary_tools() -> List[Any]:
 
         # --- optionally return what is INSIDE it, which is what embed_zones wants ---------
         zone_note = None
+        sub: Optional[str] = None
         if subdivide:
             sub = str(subdivide).strip().lower().rstrip("s").replace(" ", "_")
             layer = {"tract": _TRACTS_LAYER, "block_group": _BG_LAYER,
@@ -326,10 +402,13 @@ def make_admin_boundary_tools() -> List[Any]:
             feats = inner["features"][:MAX_FEATURES]
             zone_note = f"{len(feats)} {sub}s inside {matched[0]['name']}"
 
-        stem = name or (zone_note and f"{matched[0]['name']}_{subdivide}") or \
+        stem = output_name or (zone_note and f"{matched[0]['name']}_{subdivide}") or \
             (matched[0]["name"] if len(matched) == 1 else f"{area_text}_{lvl}")
+        key = _boundary_key(lvl, [str(m.get("geoid") or "") for m in matched],
+                            {"blockgroup": "block_group"}.get(sub or "", sub),
+                            MAX_FEATURES if truncated else None)
         try:
-            rec = _write_layer(feats, str(stem))
+            rec = _write_layer(feats, str(stem), key)
         except Exception as exc:  # noqa: BLE001
             return json.dumps({"ok": False,
                                "error": f"could not save the boundary: {type(exc).__name__}: {exc}"})
@@ -338,6 +417,7 @@ def make_admin_boundary_tools() -> List[Any]:
                               else f"{area_text} ({len(matched)})")
         result: Dict[str, Any] = {
             "ok": True,
+            **({"note": swap_note} if swap_note else {}),
             "level": lvl,
             "matched": matched[:12],
             "feature_count": len(feats),
@@ -353,11 +433,12 @@ def make_admin_boundary_tools() -> List[Any]:
                           "zone_id_field='GEOID') embeds each of these polygons"),
             # Drawn as an OUTLINE: a boundary is a frame for whatever is analysed inside it,
             # and a filled polygon would hide the raster embed_zones puts underneath.
-            # Keyed on the FILE, not on the label. embed_zones redraws these same polygons
-            # with what it found inside them, and it knows this file_id — so an explicit id
-            # lets it take this layer's place instead of adding a second outline of the same
-            # city. Without one, build_map_layer invents `agent-<slug of the label>`, which
-            # nothing downstream can reconstruct.
+            # Keyed on what the FILE HOLDS, not on the label. embed_zones redraws these same
+            # polygons with what it found inside them, and it knows this file_id — so an
+            # explicit id lets it take this layer's place instead of adding a second outline of
+            # the same city. Without one, build_map_layer invents `agent-<slug of the label>`,
+            # which nothing downstream can reconstruct. boundary_layer_id reads the key
+            # recorded above, so asking for the same place again REPLACES this layer.
             "map_layer": {"url": rec.get("download_url"), "label": label, "render": "shapes",
                           "id": boundary_layer_id(str(rec.get("file_id") or "")),
                           "source": "analysis", "count": len(feats), "outline": True},
@@ -380,8 +461,7 @@ def make_admin_boundary_tools() -> List[Any]:
                               "are included")
         return json.dumps(result, default=str)
 
-    return [StructuredTool.from_function(
-        func=admin_boundary, name="admin_boundary", metadata=meta,
+    return [StructuredTool.from_function(func=accept_null_defaults(admin_boundary), name="admin_boundary", metadata=meta,
         description=(
             "THE tool for the boundary of a named US state, county or city — 'show me "
             "Champaign County on the map', 'the outline of Cook County, Illinois', 'the "

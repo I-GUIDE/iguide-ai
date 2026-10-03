@@ -22,7 +22,10 @@ DEFAULT_AGENT_PROMPT = (
     "2. If the tool output does not support a claim, explicitly say you do not have enough information.\n"
     "3. Cite only doc_ids that appear in the tool response.\n"
     "4. Never invent titles, sources, or citation ids.\n"
-    "5. Prefer calling tools over guessing."
+    "5. Prefer calling tools over guessing.\n"
+    "6. The transcript is NOT a record of what files exist. When asked what was saved, or for a "
+    "link to something made earlier, call `list_conversation_files` and answer from it — never "
+    "from memory of an earlier answer, which may have been trimmed from context."
 )
 
 # SearchAgent — built by build_search_agent_executor; used by the legacy search_agent_evidence

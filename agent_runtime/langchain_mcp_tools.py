@@ -16,6 +16,7 @@ import requests
 from pydantic import create_model
 
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,19 @@ DEFAULT_MCP_MODULES = (
     "data_tools",
     "spatial_analysis_tools",
     "image_tools",
+)
+# Tool modules whose tools exec() stored code. The local-import fallback below runs MCP tool code
+# INSIDE agent-api, which is root with the host's Docker socket mounted, so it never imports
+# these — not by default, and not when a request's mcpModules names them. Remotely they run in
+# the mcp-server container and stay bound. create_notebook_workflow_tool registers a generated
+# tool whose body exec()s notebook-derived source, and the next build would bind that tool here;
+# run_notebook_workflow / run_code_element exec() ingested manifests. Deliberately not
+# overridable. See docs/agent-architecture-changes.md, stage 13.
+_STORED_CODE_EXEC_MODULES = frozenset({
     "notebook_workflow_tools",
     "generated_notebook_tools",
-)
+    "generic_executor_tools",
+})
 DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp/")
 
 
@@ -393,7 +404,9 @@ def _unbound_mcp_tool_names() -> frozenset:
         return frozenset(_DEFAULT_UNBOUND_MCP_TOOLS)
     if raw.lower() in {"none", "0", "false", "off"}:
         return frozenset()
-    return frozenset(n.strip().lstrip("mcp_") for n in raw.split(",") if n.strip())
+    # removeprefix, not lstrip: lstrip("mcp_") strips the CHARACTERS m/c/p/_, so
+    # "create_notebook_workflow_tool" became "reate_notebook_workflow_tool" and matched nothing.
+    return frozenset(n.strip().removeprefix("mcp_") for n in raw.split(",") if n.strip())
 
 
 def _is_unbound_mcp_tool(bare_name: str) -> bool:
@@ -452,8 +465,7 @@ def _make_remote_mcp_tools(url: str) -> List[Any]:
 
         try:
             tools.append(
-                StructuredTool.from_function(
-                    func=remote_tool_runner_sync,
+                StructuredTool.from_function(func=accept_null_defaults(remote_tool_runner_sync),
                     coroutine=remote_tool_runner_async,
                     name=tool_name,
                     description=description,
@@ -609,6 +621,10 @@ def make_langchain_mcp_tools(
     tools: List[Any] = []
 
     for module_name in modules:
+        if module_name in _STORED_CODE_EXEC_MODULES:
+            logger.warning("Not importing MCP module %s into the agent process: its tools exec() "
+                           "stored code, so they run only on the MCP server.", module_name)
+            continue
         if module_name == "image_tools":
             _ensure_fastapi_stub()
         try:
@@ -630,8 +646,7 @@ def make_langchain_mcp_tools(
             tool_name = f"mcp_{func.__name__}"
             try:
                 tools.append(
-                    StructuredTool.from_function(
-                        func=func,
+                    StructuredTool.from_function(func=accept_null_defaults(func),
                         name=tool_name,
                         description=_tool_description(func),
                         metadata=_tool_metadata(func),

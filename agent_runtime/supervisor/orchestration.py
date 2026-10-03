@@ -19,14 +19,23 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
     from agent_runtime.supervisor.graph import (
         default_analyze_fn,
         default_code_fn,
+        default_decide_fn,
         default_search_fn,
         run_supervisor,
     )
 
+    # This said "Orchestrator agent started" for years. It was copied from the agents-as-tools
+    # arm, where an orchestrator LLM really was wrapped over the sub-agents as tools and the
+    # string was true. Here it names nothing: this function builds three peer callables and the
+    # decider and hands them to run_supervisor — it calls no LLM and decides nothing. The pair
+    # was asymmetric too, opening as the orchestrator and closing as the supervisor graph.
+    # Renamed rather than deleted, because every node_started has a node_completed and other
+    # clients read that lifecycle.
+    # The arm that made it true was removed in 2026-09; see docs/agent-architecture-changes.md.
     emit_trace_event(
         "node_started",
-        {"stage": "orchestrate", "message": "Orchestrator agent started"},
-        agent_role="orchestrator_agent",
+        {"stage": "orchestrate", "message": "Supervisor started"},
+        agent_role="supervisor",
         node="orchestrate",
     )
     sup_state = run_supervisor(
@@ -34,6 +43,13 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         chat_history=chat_history,
         llm=cfg.llm,
         thread_id=cfg.thread_id,
+        # The decider is built from the same code_peer and skill_roots as code_fn below, so its
+        # `code` line describes the backend that will run, and its `code` and `analyze` lines the
+        # skills those peers will actually have (all three peers get these same skill_roots).
+        # Left to build_supervisor_graph's default, it would describe the env default instead.
+        decide_fn=default_decide_fn(
+            llm=cfg.llm, code_peer=cfg.code_peer, skill_roots=cfg.skill_roots,
+        ),
         search_fn=default_search_fn(
             llm=cfg.llm,
             tool_strategy=cfg.tool_strategy,
@@ -66,8 +82,8 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
     )
     emit_trace_event(
         "node_completed",
-        {"stage": "orchestrate", "message": "Supervisor graph completed"},
-        agent_role="orchestrator_agent",
+        {"stage": "orchestrate", "message": "Supervisor finished"},
+        agent_role="supervisor",
         node="orchestrate",
     )
     return {

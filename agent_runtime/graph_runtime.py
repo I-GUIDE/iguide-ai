@@ -2,13 +2,14 @@
 
 This is the main entry point for the agent runtime.  It exposes
 ``run_agent_query``, ``stream_agent_query_events``, and
-``run_code_agent_query`` which are called by the chat service and
+which are called by the chat service and
 the Flask API layer.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import os
 import queue
@@ -24,9 +25,6 @@ from agent_runtime.executor_factory import (
     child_thread_id,
     invoke_agent_with_payload_fallback,
     resolve_thread_id,
-)
-from agent_runtime.graph_nodes import (
-    make_search_agent_evidence_tool,
 )
 from agent_runtime.runtime_utils import (
     build_orchestration_trace,
@@ -101,7 +99,6 @@ def run_agent_query(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
-    use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
     code_peer: Optional[str] = None,
     code_peer_model: Optional[str] = None,
@@ -123,7 +120,6 @@ def run_agent_query(
         thread_id=effective_thread_id,
         checkpointer=checkpointer,
         skill_roots=skill_roots,
-        use_supervisor=use_supervisor,
         code_exec=code_exec,
         code_peer=code_peer,
         code_peer_model=code_peer_model,
@@ -183,18 +179,21 @@ def stream_agent_query_events(
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
     agent_dev: Optional[bool] = None,
-    use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
     code_peer: Optional[str] = None,
     code_peer_model: Optional[str] = None,
     unified_peer: Optional[bool] = None,
     input_file_ids: Optional[List[str]] = None,
+    trace_recorder: Optional[Any] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
     ``agent_dev`` controls whether detail-tier events (tool I/O, LLM
     interactions, routing detail) are streamed in addition to the always-on
     execution-state status events.  None falls back to the ``AGENT_DEV`` env var.
+
+    ``trace_recorder`` is a callable receiving EVERY event regardless of ``agent_dev`` -- the
+    durable record of the turn, as opposed to what this particular viewer asked to watch.
     """
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
     dev_enabled = agent_dev if agent_dev is not None else is_agent_dev()
@@ -206,12 +205,10 @@ def stream_agent_query_events(
             "tool_strategy": tool_strategy,
         },
     }
-    # Advertise the agents that will ACTUALLY run: the supervisor path executes
-    # search/analyze/code peers, not the legacy agents-as-tools names.
-    from agent_runtime.supervisor_graph import is_supervisor_enabled
-
-    supervisor_on = use_supervisor if use_supervisor is not None else is_supervisor_enabled()
-    available_agent_names = ["search", "analyze", "code"] if supervisor_on else list(ORCHESTRATOR_AGENT_NAMES)
+    # Advertise the agents that will ACTUALLY run. There is one orchestration path, and it
+    # executes search/analyze/code peers — the agents-as-tools names it used to be able to
+    # advertise instead went with that arm.
+    available_agent_names = ["search", "analyze", "code"]
     skill_registry = SkillRegistry.discover(skill_roots)
     yield {
         "event": "status",
@@ -238,7 +235,8 @@ def stream_agent_query_events(
             # this thread, and it has to happen at all: a gunicorn sync worker reuses its thread
             # across requests, so without a reset the previous turn's spend would starve this one.
             web_utils.begin_turn()
-            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev):
+            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev,
+                               recorder=trace_recorder):
                 graph = build_orchestrator_graph(
                     llm=llm,
                     verbose=verbose,
@@ -252,7 +250,6 @@ def stream_agent_query_events(
                     thread_id=effective_thread_id,
                     checkpointer=checkpointer,
                     skill_roots=skill_roots,
-                    use_supervisor=use_supervisor,
                     code_exec=code_exec,
                     code_peer=code_peer,
                     code_peer_model=code_peer_model,
@@ -356,7 +353,14 @@ def stream_agent_query_events(
         finally:
             _enqueue({"event": "__worker_done__", "data": {}})
 
-    worker = threading.Thread(target=_worker, name="agent-stream-worker", daemon=True)
+    # The worker inherits the REQUEST's context. ContextVars do not cross threads, so anything
+    # bound at the edge for the duration of a turn — the file store's session, and any future
+    # per-request scope — was simply absent in the code that does the work: a file written by a
+    # tool came out with session=None while the request had one bound. copy_context() takes a
+    # snapshot here, on the caller's side, and ctx.run executes the worker inside it.
+    _ctx = contextvars.copy_context()
+    worker = threading.Thread(target=lambda: _ctx.run(_worker),
+                              name="agent-stream-worker", daemon=True)
     worker.start()
 
     # Emit a keepalive whenever the agent goes quiet (long LLM turn / sandbox run) so no
@@ -397,81 +401,6 @@ def stream_agent_query_events(
 # Code agent query
 # ---------------------------------------------------------------------------
 
-def run_code_agent_query(
-    query: str,
-    *,
-    chat_history: Optional[List[Any]] = None,
-    llm: Optional[Any] = None,
-    verbose: bool = False,
-    return_intermediate_steps: bool = True,
-    tool_strategy: str = "granular",
-    include_mcp_tools: bool = False,
-    mcp_modules: Optional[List[str]] = None,
-    smart_tool_routing: bool = True,
-    forced_intent: Optional[str] = None,
-    thread_id: Optional[str] = None,
-    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
-    skill_roots: Optional[List[str]] = None,
-    input_file_ids: Optional[List[str]] = None,
-) -> dict:
-    """Run one query through CodeAgent, with SearchAgent available as a tool."""
-    effective_thread_id = resolve_thread_id(thread_id, checkpointer)
-    search_invocations: List[Dict[str, Any]] = []
-    search_tool = make_search_agent_evidence_tool(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-        enabled_search_methods=None,
-        smart_tool_routing=smart_tool_routing,
-        forced_intent=forced_intent,
-        search_invocations=search_invocations,
-        thread_id=effective_thread_id,
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-    from agent_runtime.skills import make_skill_tools
-
-    code_tools = [*make_skill_tools(skill_roots=skill_roots), search_tool]
-    from agent_runtime.code_execution import is_code_exec_enabled
-
-    if is_code_exec_enabled():
-        from agent_runtime.langchain_exec_tools import make_code_execution_tools
-
-        code_tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
-    code_executor = build_code_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tools=code_tools,
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-    code_response = invoke_agent_with_payload_fallback(
-        code_executor,
-        query=query,
-        chat_history=chat_history,
-        config=agent_config(effective_thread_id),
-    )
-
-    response: Dict[str, Any] = {
-        "code_result": code_response,
-        "code_agent_search_invocations": search_invocations,
-        "available_skills": SkillRegistry.discover(skill_roots).catalog(),
-    }
-    final_answer = extract_final_answer(code_response)
-    if final_answer:
-        response["final_answer"] = final_answer
-    if effective_thread_id:
-        response["thread_id"] = effective_thread_id
-    return response
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def _print_tool_trace(result: Any) -> None:
     if not isinstance(result, dict):
@@ -580,8 +509,8 @@ def main() -> None:
     parser.add_argument(
         "--tool-strategy",
         default="granular",
-        choices=["full_pipeline", "granular"],
-        help="Tool mode: granular uses keyword/semantic/neo4j/spatial/opengeodata tools; full_pipeline uses rag_tool.",
+        choices=["granular"],
+        help="Tool mode: granular (the only mode; full_pipeline was removed).",
     )
     parser.add_argument(
         "--include-mcp-tools",
@@ -615,7 +544,7 @@ def main() -> None:
     if args.skill_paths:
         selected_skill_paths = [item.strip() for item in args.skill_paths.split(",") if item.strip()]
 
-    runner = run_code_agent_query if args.agent_mode == "code" else run_agent_query
+    runner = run_agent_query
     try:
         result = runner(
             args.query,

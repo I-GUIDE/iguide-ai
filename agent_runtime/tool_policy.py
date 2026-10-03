@@ -81,22 +81,21 @@ def collect_tools(
     from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
     from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
     from agent_runtime.langchain_quality_tools import make_quality_tools
-    from agent_runtime.langchain_tool import make_langchain_rag_tool
     from agent_runtime.skills import make_skill_tools
 
-    # Default to the granular tool set: full_pipeline (rag_tool) is the deprecated
-    # path and must never be the silent fallback for a missing/empty strategy.
+    # One tool set. `full_pipeline` — a single rag_tool wrapping the whole stage-1 pipeline —
+    # was removed with the agents-as-tools arm: the granular tools are its superset, and a
+    # strategy that bypasses them also bypasses everything built on them.
     strategy = (tool_strategy or "granular").strip().lower()
-    if strategy == "granular":
-        tools = make_langchain_granular_tools(
-            enabled_search_methods=enabled_search_methods,
-            include_file_tools=include_file_tools,
-            session_id=session_id,
-        )
-    elif strategy == "full_pipeline":
-        tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]
-    else:
-        raise ValueError("tool_strategy must be either 'full_pipeline' or 'granular'.")
+    if strategy != "granular":
+        raise ValueError(
+            f"tool_strategy must be 'granular'; {tool_strategy!r} is no longer supported "
+            "(full_pipeline was removed — the granular tools cover it).")
+    tools = make_langchain_granular_tools(
+        enabled_search_methods=enabled_search_methods,
+        include_file_tools=include_file_tools,
+        session_id=session_id,
+    )
     if include_mcp_tools:
         tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules))
     tools.extend(make_quality_tools())

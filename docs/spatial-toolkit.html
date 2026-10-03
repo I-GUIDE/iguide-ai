@@ -15,6 +15,8 @@
     --map-bg:     #dcefeb;
     --file:       #3d5488;   /* delivery: downloadable file / static image */
     --file-bg:    #e2e7f4;
+    --text:       #6b4a6e;   /* delivery: numbers in the reply, no artifact */
+    --text-bg:    #efe4f0;
     --warn:       #8a5a12;
     --warn-bg:    #f6ecd8;
     --shadow:     0 1px 2px rgba(18,38,43,.06), 0 8px 24px -16px rgba(18,38,43,.28);
@@ -36,6 +38,8 @@
       --map-bg:    #10322f;
       --file:      #9db1e0;
       --file-bg:   #1a2340;
+      --text:      #d3a8d8;
+      --text-bg:   #2c1d2e;
       --warn:      #e0b463;
       --warn-bg:   #33280f;
       --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
@@ -54,6 +58,8 @@
     --map-bg:    #10322f;
     --file:      #9db1e0;
     --file-bg:   #1a2340;
+      --text:      #d3a8d8;
+      --text-bg:   #2c1d2e;
     --warn:      #e0b463;
     --warn-bg:   #33280f;
     --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
@@ -98,6 +104,7 @@
   }
   .chip.map  { color: var(--map);  background: var(--map-bg); }
   .chip.file { color: var(--file); background: var(--file-bg); }
+  .chip.text { color: var(--text); background: var(--text-bg); }
 
   /* ---- families ---- */
   section { display: flex; flex-direction: column; gap: 16px; }
@@ -137,7 +144,7 @@
   <header>
     <div class="eyebrow">I-GUIDE agent · deployed capability inventory</div>
     <h1>What this agent can analyse, and what it hands back</h1>
-    <p class="standfirst">Fifty-one spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
+    <p class="standfirst">Fifty-seven spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
       <em>both</em> an interactive map layer and downloadable files where the operation produces geometry — the map is the
       deliverable, not a screenshot of one. Enumerated from the running container, not from documentation.</p>
   </header>
@@ -147,16 +154,18 @@
     <div class="count"><b>6</b><span>aggregation</span></div>
     <div class="count"><b>7</b><span>spatial stats</span></div>
     <div class="count"><b>5</b><span>temporal</span></div>
-    <div class="count"><b>9</b><span>embeddings</span></div>
+    <div class="count"><b>13</b><span>embeddings</span></div>
     <div class="count"><b>8</b><span>vector + map</span></div>
-    <div class="count"><b>4</b><span>KB + renders</span></div>
+    <div class="count"><b>3</b><span>filter + renders</span></div>
     <div class="count"><b>5</b><span>QGIS</span></div>
+    <div class="count"><b>3</b><span>workspace</span></div>
     <div class="count"><b>20</b><span>RS models</span></div>
   </div>
 
   <div class="legend">
     <span class="chip map">Map</span> lands on the interactive map — pan, zoom, click a feature for its attributes
     <span class="chip file">File</span> downloadable GeoJSON, CSV or PNG
+    <span class="chip text">Text</span> numbers in the reply — nothing to download
   </div>
 
   <section>
@@ -236,7 +245,7 @@
 
   <section>
     <div class="fam-head">
-      <h2>Satellite embeddings</h2><span class="n">9 tools</span>
+      <h2>Satellite embeddings</h2><span class="n">13 tools</span>
       <span class="src">rs_embed_tools → rs-embed service</span>
     </div>
     <p class="fam-note">Remote-sensing foundation models over a region you draw, a region you name, or every polygon in
@@ -246,13 +255,17 @@
       return in seconds; the other seventeen are computed on the fly, and each takes either a single image or a
       timeseries.</p>
     <div class="tools">
+      <div class="tool"><code>add_raster_layer</code><p>Drape a georeferenced image the agent produced itself &mdash; a clustering, a difference surface, anything computed in <code>execute_code</code> &mdash; over its extent. Without it, pixels computed outside the embedding tools had no way onto the map.</p><div class="out"><span class="chip map">Map</span></div></div>
       <div class="tool"><code>embed_region</code><p>Embed a region with one or more models and put the result on the map as a raster layer, plus the vectors to download.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>embed_zones</code><p>One embedding vector <em>per polygon</em> for a whole layer &mdash; census tracts, catchments, parcels &mdash; keyed by an id column, optionally clustered into look-alike groups and mapped as categories. This is the many-polygon counterpart to <code>embed_region</code>; a date range narrows the imagery for on-the-fly models. Tile budget is finite, so it reports how many zones actually received pixels rather than silently embedding a subset.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>fit_zone_model</code><p>Fit a model on zone embeddings against a column you supply &mdash; the supervised step after <code>embed_zones</code>, for when no pretrained head fits your target.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>segment_region</code><p>Unsupervised segmentation into <em>k</em> look-alike zones from the embedding — land-cover-style, without labels.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>embedding_change</code><p>How much a region changed year over year, measured in embedding space rather than raw pixels.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
+      <div class="tool"><code>predict_for_region</code><p>Run a pretrained downstream head on an embedding to predict a value — the "use the embedding" step, starting from a region rather than a saved package.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
+      <div class="tool"><code>align_embedding_colors</code><p>Re-colour several already-embedded regions on ONE shared PCA basis, so similar colour means similar ground <em>across</em> the layers. Each embedding is otherwise fitted and stretched on its own, which makes two maps individually meaningful and mutually incomparable. Same model only &mdash; two models’ embeddings are different spaces. Reuses embeddings already paid for.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>compare_regions</code><p>Cosine similarity between two regions: 1.0 means indistinguishable from space.</p><div class="out"><span class="chip file">File</span></div></div>
-      <div class="tool"><code>predict_for_region</code><p>Run a pretrained downstream head on an embedding to predict a value — the "use the embedding" step.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
+      <div class="tool"><code>predict_from_package</code><p>Run the pretrained heads on an embedding package you already have &mdash; the weights live on the service and are never exported, so this is the only route to them. Does not re-embed.</p><div class="out"><span class="chip text">Text</span></div></div>
+      <div class="tool"><code>list_embedding_packages</code><p>Which embeddings have already been saved, newest first, with each one&rsquo;s region, months and models. An embedding from an earlier turn can be reused instead of paying for the region again; it lists this conversation&rsquo;s packages alongside the deployment&rsquo;s shared older ones, so match on region and months rather than on a name.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>list_embedding_models</code><p>Which models are available and whether each is precomputed or run on the fly.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>list_prediction_heads</code><p>Which pretrained heads exist for turning an embedding into a prediction.</p><div class="out"><span class="chip file">File</span></div></div>
     </div>
@@ -286,16 +299,18 @@
 
   <section>
     <div class="fam-head">
-      <h2>Knowledge-base functions &amp; static renders</h2><span class="n">4 tools</span>
+      <h2>Row filter &amp; static renders</h2><span class="n">3 tools</span>
       <span class="src">geo_analysis_tools</span>
     </div>
-    <p class="fam-note">A second route into analysis: instead of a curated tool, run a spatial
-      function that was <em>extracted from a knowledge-base notebook</em>, chaining steps by
-      passing one step&rsquo;s <code>file_id</code> into the next. The two renderers here are
-      deliberate fallbacks &mdash; a robust plot for when an extracted notebook&rsquo;s own
-      plotting code fails on the installed matplotlib.</p>
+    <p class="fam-note">Steps that chain by passing one step&rsquo;s <code>file_id</code> into the
+      next. The two renderers are deliberate fallbacks &mdash; a robust plot for when a
+      notebook&rsquo;s own plotting code fails on the installed matplotlib. This family used to
+      run functions <em>extracted from knowledge-base notebooks</em> as well
+      (<code>kb_run_geofunction</code>). That was withdrawn on 2026-10-01 because it executed the
+      notebook&rsquo;s third-party code inside the agent&rsquo;s own process instead of the
+      sandbox. Knowledge-base code now runs only through <code>get_kb_block</code> and
+      <code>execute_code</code>.</p>
     <div class="tools">
-      <div class="tool"><code>kb_run_geofunction</code><p>Execute a named spatial function from a knowledge-base block by <code>doc_id</code> + <code>function_name</code>, passing (Geo)DataFrames as file ids. Returns a file id, so steps chain: load data &rarr; join and count &rarr; render.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>kb_select_rows</code><p>Filter a (Geo)DataFrame file to rows whose column matches a value set &mdash; violent crime types out of all crime types &mdash; returning a new file id for the next step.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>heatmap_image</code><p>A hexbin point-density PNG from a points file. This is the &ldquo;heat map&rdquo; render, distinct from a choropleth &mdash; and distinct from <code>add_map_layer</code>&rsquo;s live density surface, which is what you want if the result should be explorable.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>choropleth_image</code><p>A shaded-polygon PNG coloured by a column, with NaturalBreaks (Jenks) or Quantile classing. Static: for a document or a printout.</p><div class="out"><span class="chip file">File</span></div></div>
@@ -304,7 +319,7 @@
 
   <section>
     <div class="fam-head">
-      <h2>QGIS &amp; the escape hatch</h2><span class="n">6 tools</span>
+      <h2>QGIS &amp; the escape hatch</h2><span class="n">9 tools</span>
       <span class="src">langchain_granular_tools · langchain_exec_tools</span>
     </div>
     <p class="fam-note">When the toolkit doesn't cover it, the agent writes and runs code. Execution is a per-run Docker
@@ -317,6 +332,9 @@
       <div class="tool"><code>qgis_metric_buffer</code><p>A true metric buffer computed by QGIS in a projected CRS, then returned in WGS84.</p><div class="out"><span class="chip map">Map</span><span class="chip file">File</span></div></div>
       <div class="tool"><code>qgis_map_image</code><p>A headless PyQGIS render over an OSM basemap — a cartographic PNG rather than a plot.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>pyqgis_layer_summary</code><p>Inspect one vector or raster layer through standalone headless PyQGIS.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>write_workspace_file</code><p>Write a file into the conversation&rsquo;s working directory, so a script can be run by name instead of pasted whole into every call.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>read_workspace_file</code><p>Read one back &mdash; the script as it currently stands, or an output a run left behind.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>edit_workspace_file</code><p>Replace an exact snippet in a workspace file. A fix is a patch, not a re-emitted program: changing line 40 of a 200-line script costs one replacement rather than sending the whole script again. A snippet that does not appear exactly once is refused, because replacing one of three identical lines produces code that runs and is wrong.</p><div class="out"><span class="chip file">File</span></div></div>
     </div>
   </section>
 
@@ -332,17 +350,36 @@
         no spatial panel or discrete-choice models, and join counts, quantile LISA and local Geary have no curated tool.
         The PySAL stack and <code>pygeoda</code> are installed in the sandbox too, so those run through
         <code>execute_code</code> &mdash; but without the automatic map layer the curated tools deliver.</li>
-      <li><strong>Prediction heads are not cached.</strong> <code>predict_for_region</code> and
-        <code>list_prediction_heads</code> report none available until the demo head cache is built; embedding,
-        segmentation, change and comparison are unaffected.</li>
-      <li><strong>Prerequisites are real, but a region no longer has to be drawn.</strong> The analysis tools still
-        load only once files are attached to the conversation &mdash; and if every attached file is a
+      <li><strong>An embedding package is the reusable artifact.</strong> <code>embed_region</code> saves the real
+        vectors (<code>grid__&lt;model&gt;</code> per pixel, <code>pooled__&lt;model&gt;</code> for the region), and
+        <code>list_embedding_packages</code> &rarr; <code>predict_from_package</code> or
+        <code>align_embedding_colors</code> reuse one without paying the imagery provider again. Anything the curated
+        tools do not cover &mdash; a different <em>k</em>, another metric, more than two periods &mdash; is written
+        against that package in <code>execute_code</code> and delivered by <code>add_map_layer</code> (polygonized,
+        for a legend and clickable zones) or <code>add_raster_layer</code> (the pixel array saved as an image &mdash; a
+        matplotlib <em>figure</em> misregisters the layer, because its axes and margins become part of it). The
+        exported grid above 90,000 cells is decimated, and the package states its <code>grid_stride</code>.</li>
+            <li><strong>Prediction coverage is narrow.</strong> One task (<code>corn_presence</code>, Illinois CDL 2022)
+        for three models &mdash; gse, satmae, dofa &mdash; out of twenty embedding models, and the best of the three
+        scores 0.667 accuracy on n=30. Quote the validation score: a confident number from a weak head is still a
+        weak number.</li>
+      <li><strong>Prerequisites are real, but a region no longer has to be drawn.</strong> Most analysis tools
+        load only once files are attached to the conversation &mdash; though not all: the satellite-embedding tools,
+        <code>admin_boundary</code>, <code>geocode_places</code>, <code>add_map_layer</code> and
+        <code>list_conversation_files</code> are available with nothing attached, because each can start from a place
+        name, a drawn region, or geometry the agent already holds. Among the upload-gated ones, if every attached file is a
         spreadsheet (<code>.csv</code>, <code>.tsv</code>, <code>.xlsx</code>), the four tools that need a
         <em>vector</em> file (<code>inspect_vector</code>, <code>vector_to_geojson</code>,
         <code>reproject_vector</code>, <code>vector_spatial_join</code>) are withheld rather than offered
         and left to fail. Everything else, including buffering and gridding a point CSV, stays available. The embedding tools need a geometry, and there are now
         two ways to give them one: right-drag the map to draw a region, or name a US state, county or city and let
         <code>admin_boundary</code> fetch the official boundary.</li>
+      <li><strong>Files belong to the conversation that made them.</strong> Ask
+        <code>list_conversation_files</code> for what a conversation has produced &mdash; it reads the store, which is
+        the record; the transcript is not, because earlier links get trimmed from context. Saved embedding packages are
+        the deliberate exception: those predate per-conversation files and stay reusable from anywhere, so
+        <code>list_embedding_packages</code> shows deployment-wide results and a package should be matched on its
+        region and months, not on its name. File downloads are not yet authenticated.</li>
       <li><strong>Verified unevenly.</strong> The heatmap, grid aggregation, attribute selection, buffer and satellite
         embedding paths have been driven end to end in a browser, as have the LISA, Gi* and regionalization maps,
         confirmed against planted hot and cold spots that the statistics had to recover in the right places. The
@@ -352,8 +389,9 @@
   </div>
 
   <footer>
-    <span>Enumerated from the running <code>agent-api</code> container, 2026-09-03</span>
+    <span>Enumerated from the running <code>agent-api</code> container, 2026-09-09</span>
+    <span>2026-10-01: <code>kb_run_geofunction</code> withdrawn, checked against the checkout, not the container</span>
     <span>Branch <code>prototype</code></span>
-    <span>51 tools in eight families, plus <code>execute_code</code> and four file tools</span>
+    <span>57 tools in eight families, plus <code>execute_code</code> and five file tools</span>
   </footer>
 </div>

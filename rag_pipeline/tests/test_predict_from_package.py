@@ -638,3 +638,39 @@ def test_the_match_is_an_exact_token_not_a_prefix():
     from agent_runtime.rs_embed_tools import _layer_label
 
     assert _layer_label("zone groups (k=6)", "gse zones") == "gse zones — zone groups (k=6)"
+
+
+# --- a package name that identifies the package --------------------------------
+def test_the_default_package_name_says_which_region_model_and_period():
+    """32 of the 73 stored packages were called `embedding_vectors.npz`, because that was the
+
+    default for every region the model did not name. A later turn naming one could not be
+    answered — which is why the ambiguity refusal had to exist at all.
+
+    A timestamp or a random id would make them unique and still unidentifiable: "which of these
+    32 is Champaign" is the question being asked, and only the region, model and period answer
+    it. All three are known where the name is built.
+    """
+    from agent_runtime.rs_embed_tools import _region_tag, _slug
+
+    box = [-88.2456, 40.1124, -88.2367, 40.1192]
+    unnamed = f"{_slug(None or _region_tag(None, box))}_{'-'.join(['gse'])}_2022-06_2022-09_vectors"
+    assert "40_116" in unnamed and "88_241" in unnamed, "the region has to be in it"
+    assert "gse" in unnamed and "2022-06" in unnamed
+    assert unnamed != "embedding_vectors"
+
+
+def test_two_regions_no_longer_collide_on_the_default_name():
+    from agent_runtime.rs_embed_tools import _region_tag, _slug
+
+    champaign = _slug(_region_tag(None, [-88.2456, 40.1124, -88.2367, 40.1192]))
+    urbana = _slug(_region_tag(None, [-88.2100, 40.1100, -88.2000, 40.1200]))
+    assert champaign != urbana
+
+
+def test_a_named_region_keeps_its_name_and_gains_the_rest():
+    from agent_runtime.rs_embed_tools import _slug
+
+    named = f"{_slug('downtown champaign')}_{'-'.join(['gse', 'satmae'])}_2022-06_2022-09_vectors"
+    assert named.startswith("downtown_champaign")
+    assert "gse-satmae" in named

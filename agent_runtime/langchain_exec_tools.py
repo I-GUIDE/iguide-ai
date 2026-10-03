@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from agent_runtime.tool_args import accept_null_defaults
 
 # Bounds on how much gets auto-staged into a sandbox run (conversation files +
 # explicitly requested files). Keeps a large session from blowing up disk/time.
@@ -316,8 +317,7 @@ def make_code_execution_tools(
             return _workspace_error(exc)
         return json.dumps({"ok": True, "path": path, "replacements": 1}, ensure_ascii=True)
 
-    tool = StructuredTool.from_function(
-        func=execute_code,
+    tool = StructuredTool.from_function(func=accept_null_defaults(execute_code),
         name="execute_code",
         description=(
             "Execute code in an isolated, sandboxed container and return JSON with "
@@ -328,8 +328,10 @@ def make_code_execution_tools(
             "they are installed with network in a separate step, then the code runs with NO "
             "network. Files attached to this conversation are AUTOMATICALLY available in the "
             "working directory under both their file_id and their original filename (e.g. "
-            "open('data.csv') or pd.read_csv('data.csv')). To read any other uploaded file, "
-            "add its file_id to `input_files`. Use this to RUN and DEBUG code: run, read "
+            "open('data.csv') or pd.read_csv('data.csv')). To read any OTHER file, add its "
+            "file_id to `input_files` — an upload, or a file_id an earlier TOOL returned in "
+            "this conversation (e.g. an embedding package's embedding_package.file_id, to "
+            "cluster or difference its vectors). Use this to RUN and DEBUG code: run, read "
             "stdout/stderr, fix, re-run. Files you write persist in this conversation's working "
             "directory, so a later run can open what an earlier one produced and keep building "
             "on it (the container itself is fresh each time). `label` is a short slug for what this particular run "
@@ -347,8 +349,7 @@ def make_code_execution_tools(
         # Only useful with a durable working directory to act on; without one they could
         # never do anything but explain that there is no workspace.
         tools += [
-            StructuredTool.from_function(
-                func=write_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(write_workspace_file),
                 name="write_workspace_file",
                 description=(
                     "Create or overwrite a file in this conversation's working directory — the "
@@ -358,8 +359,7 @@ def make_code_execution_tools(
                     "it in place. Also fine for data or config the code reads."
                 ),
             ),
-            StructuredTool.from_function(
-                func=read_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(read_workspace_file),
                 name="read_workspace_file",
                 description=(
                     "Read a file from this conversation's working directory, with line numbers. "
@@ -367,8 +367,7 @@ def make_code_execution_tools(
                     "at what a line says wastes the call. `offset`/`limit` window a long file."
                 ),
             ),
-            StructuredTool.from_function(
-                func=edit_workspace_file,
+            StructuredTool.from_function(func=accept_null_defaults(edit_workspace_file),
                 name="edit_workspace_file",
                 description=(
                     "Replace an exact snippet in a file in this conversation's working directory "

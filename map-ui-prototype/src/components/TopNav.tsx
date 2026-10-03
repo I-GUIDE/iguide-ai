@@ -1,12 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
+import { AccountBadge } from './AccountBadge';
 import { IGuideMark } from './IGuideMark';
 import { TopNavPlatform } from './TopNav.platform';
 import { isPlatformVariant, type AppTab } from '../uiVariant';
+import type { WhoAmI } from '../agentClient';
 
 export interface TopNavProps {
   /** Server-side DEMO_MODE: the deployment needs no key, so there is nothing to configure. */
   demoMode?: boolean;
+  /** Who the server says we are, in TOKEN mode only — null in dev and demo, which identify
+   *  nobody, and null until the answer lands. */
+  me?: WhoAmI | null;
   onToggleSettings: () => void;
   onToggleHistory: () => void;
   sessionCount: number;
@@ -16,7 +21,7 @@ export interface TopNavProps {
 
 const TABS: { id: AppTab; label: string; title: string }[] = [
   { id: 'chat', label: 'Chat', title: 'Ask anything — the map opens when an answer needs it' },
-  { id: 'rs', label: 'RS-Embed Demo', title: 'Draw a region and run satellite-embedding operations on it' },
+  { id: 'rs', label: 'rs-embed demo', title: 'Draw a region and run satellite-embedding operations on it' },
 ];
 
 // The header for the rs-embed deployment (issue #20). This used to mirror the I-GUIDE platform
@@ -29,7 +34,7 @@ const TABS: { id: AppTab; label: string; title: string }[] = [
 // placeholders that did nothing here.
 function TopNavRsEmbed(p: TopNavProps) {
   // One travelling lens rather than a background that blinks from one button to the other. The
-  // two labels are very different widths — "Chat" against "RS-Embed Demo" — so the lens resizes
+  // two labels are very different widths — "Chat" against "rs-embed demo" — so the lens resizes
   // as it moves, which is where most of the liquid character comes from; it also stretches along
   // the way and settles, the way a drop of glass would.
   const navRef = useRef<HTMLElement>(null);
@@ -104,6 +109,7 @@ function TopNavRsEmbed(p: TopNavProps) {
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
+        <AccountBadge me={p.me ?? null} />
         {/* In demo mode there is no key to enter and no endpoint worth changing, and the one
             control the dialog still offered — the mock/live switch — is not what an audience
             should find first. Hidden rather than disabled: a greyed gear invites a click that

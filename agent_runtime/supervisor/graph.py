@@ -16,8 +16,7 @@ Single-responsibility split:
 The supervisor only ever sees a *distilled* view (counts/flags), never the heavy
 documents. Everything is dependency-injected so the graph is unit-testable with no
 live LLM/backends. Default adapters wire to existing agents (best-effort; need
-live validation). Default ON; per-request override ``use_supervisor``; env opt-out
-``AGENT_SUPERVISOR=0``.
+live validation). It is the only orchestration path.
 """
 
 from __future__ import annotations
@@ -115,6 +114,7 @@ class SupervisorState(TypedDict, total=False):
     actions: List[str]             # supervisor decision history
     next_action: str
     step: int
+    evidence_summary: Optional[str]
     max_steps: int
     final_answer: str
     distilled: Dict[str, Any]
@@ -130,13 +130,6 @@ class SupervisorState(TypedDict, total=False):
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
 
 
-def is_supervisor_enabled() -> bool:
-    """Whether the orchestrate path should use the supervisor-over-peers graph.
-
-    Default **on**; set ``AGENT_SUPERVISOR`` to a falsy value (0/false/no/off) to
-    fall back to the legacy agents-as-tools orchestrator.
-    """
-    return (os.getenv("AGENT_SUPERVISOR") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +222,76 @@ def _min_coverage() -> float:
         return 0.34
 
 
+# ---------------------------------------------------------------------------
+# What the evidence SAYS, not just how much of it there is
+# ---------------------------------------------------------------------------
+# The decider sees titles, per-source counts, a top score and `topical_coverage`. Those are
+# cheap, deterministic and cannot be talked into anything — but they are all LEXICAL. They can
+# say "8 documents, 0.75 of them mention your subject terms" and still leave the decider unable
+# to tell a set of PySAL accessibility notebooks from a set of DEM sources, because both mention
+# "elevation". Measured live on a self-hosted model: two full search rounds where the second
+# added nothing the first had not, because "is this enough?" was being answered from counts.
+#
+# So the model that just read the documents writes a few lines about what is actually in them.
+#
+# Two rules keep this from making things worse:
+#
+#  * It DESCRIBES, and names gaps. It does not rule on sufficiency. That judgement belongs to
+#    the decider, which also sees the deterministic signals and the action history; a summary
+#    that announced "this is enough" would collapse two independent checks into one and give a
+#    weak model's opinion the final word.
+#  * It never REPLACES the lexical signals — it sits beside them. If the summary is wrong, the
+#    decider still has coverage, scores and titles to disagree with.
+#
+# Failure is always None: a summary is an aid to a decision, never a precondition for one.
+
+_EVIDENCE_SUMMARY_MAX_CHARS = 700
+_EVIDENCE_SUMMARY_DOCS = 8
+_EVIDENCE_SUMMARY_SNIPPET = 400
+
+
+def _evidence_summary_enabled() -> bool:
+    return str(os.getenv("AGENT_EVIDENCE_SUMMARY", "1")).strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+_EVIDENCE_SUMMARY_PROMPT = (
+    "You are helping an agent decide what to do next. Below are search results retrieved for a "
+    "user's request.\n\n"
+    "Write at most four sentences covering:\n"
+    "1. What these results actually contain — the kinds of things, not their titles restated.\n"
+    "2. Which parts of the request they DO address.\n"
+    "3. Which parts they do NOT address, or say 'they address the request directly' if nothing "
+    "is missing.\n\n"
+    "Describe only. Do NOT recommend an action, do not say whether to search again, and do not "
+    "say whether the evidence is sufficient — another step decides that and needs your "
+    "description, not your verdict. If the results are off-topic, say so plainly.\n\n"
+    "REQUEST: {query}\n\nRESULTS:\n{docs}"
+)
+
+
+def _summarize_evidence(llm: Any, query: str, docs: List[Any]) -> Optional[str]:
+    """A few lines on what the retrieved evidence contains. None if unavailable."""
+    if not llm or not docs or not _evidence_summary_enabled():
+        return None
+    lines: List[str] = []
+    for i, d in enumerate(docs[:_EVIDENCE_SUMMARY_DOCS], 1):
+        title = _doc_field(d, "title", "name", default="Untitled")
+        body = _doc_field(d, "contents", "content", "text", "abstract", "description", default="")
+        lines.append(f"[{i}] {title}\n{str(body)[:_EVIDENCE_SUMMARY_SNIPPET]}")
+    prompt = _EVIDENCE_SUMMARY_PROMPT.format(query=query, docs="\n\n".join(lines))
+    try:
+        resp = llm.invoke(prompt)
+    except Exception as exc:  # noqa: BLE001 - an aid to a decision, never a precondition
+        logger.warning("evidence summary failed, continuing without it: %s", exc)
+        return None
+    text = getattr(resp, "content", resp)
+    text = str(text or "").strip()
+    if not text:
+        return None
+    return text[:_EVIDENCE_SUMMARY_MAX_CHARS]
+
+
 def _results_are_poor(docs: List[Any], query: str) -> bool:
     """True when a search returned nothing, or nothing that mentions the request's subject."""
     if not docs:
@@ -293,7 +356,7 @@ _LEDGER_LOG = logging.getLogger(__name__)
 _LEDGER_ARGS = (
     "model", "area", "state", "level", "subdivide", "place", "feature", "query",
     "lon", "lat", "bbox", "start", "end", "year", "file_id", "zone_id_field", "zone_ids",
-    # embed_region / predict_for_region take LISTS; "model"/"year" above miss them entirely.
+    # embed_region takes a LIST of models; "model"/"year" above miss it entirely.
     "models", "years", "buffer_m", "max_tiles", "clusters",
     # WHICH variable, WHICH neighbours, WHICH estimator. Without these,
     # local_moran_lisa(column="income", weights="queen") recorded as
@@ -1100,10 +1163,21 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "evidence_titles": titles,
         "evidence_sources": sources,
         "topical_coverage": _term_coverage(docs, query),
+        # What the evidence SAYS. Written by the model that read it; descriptive, never a
+        # verdict on sufficiency. Sits beside the lexical signals so a wrong summary can be
+        # disagreed with rather than obeyed.
+        "evidence_summary": state.get("evidence_summary"),
         "top_score": round(max(scores), 3) if scores else None,
         "queries_searched": list(state.get("searched_queries") or []),
         "has_analysis": state.get("analysis_results") is not None,
         "analysis_summary": _peer_summary(state.get("analysis_results")),
+        # Whether the thing the user asked to SEE is already in front of them. The decider had
+        # no way to know this: `has_analysis` says a peer ran, `artifacts_produced` lists images,
+        # and neither answers "is the deliverable delivered?" — so after analyze put a DEM on the
+        # map it routed to code, which fetched the same DEM again. Measured: 266s and 16
+        # execute_code iterations to redo work already done in one call.
+        "map_layer_delivered": _map_delivered_this_turn(state.get("analysis_results"),
+                                                        state.get("code_result")),
         "has_code": state.get("code_result") is not None,
         "code_summary": _peer_summary(state.get("code_result")),
         "artifacts_produced": [a.get("filename") for a in artifacts],
@@ -1118,6 +1192,21 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "available_actions": _available_actions(state),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
+        # THIS turn's ledger, in the same rendering the answering model and the grounding
+        # auditor read. The rows were always kept — they are what the trace shows as
+        # "dem_for_region(...) -> 1 layer on the map" — but _ledger_lines had exactly two
+        # consumers and the decider was not one of them. It saw counts and flags about the
+        # current turn and the ledger only of PREVIOUS turns, so it could not tell that the
+        # tool it was about to route to had already run and produced the answer.
+        **({"this_turn": _ledger_lines([*_ledger_rows(state.get("analysis_results"),
+                                                      state.get("code_result")),
+                                        *(state.get("action_rows") or [])]),
+            "this_turn_note": (
+                "What THIS turn has already done, oldest first — the same record the answering "
+                "model and the auditor see. A line here is work that is DONE: routing to a peer "
+                "to redo it produces a second copy, not a better answer. A line marked FAILED "
+                "means the tool did not run and its result does not exist.")}
+           if for_decision else {}),
         **({"prior_turns_in_this_conversation": _budgeted(_prior_actions(state)),
             "prior_turns_note": (
                 "What THIS conversation already did, oldest first. If the user's question is "
@@ -1795,8 +1884,107 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
 
-def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
-    """LLM-driven next-action chooser with a deterministic heuristic fallback."""
+def _capability_inventory(capability: str, skill_roots: Optional[List[str]] = None) -> str:
+    """What a peer can actually do, from ``agent_runtime.capability_registry``.
+
+    GENERATED rather than written here on purpose. The hand-written version drifted behind the
+    peers three times without anyone noticing — terrain, administrative boundaries and geocoding
+    were all bound to a peer while the supervisor's description of it never mentioned them, and
+    a DEM request became a knowledge-base search as a direct result. The reasoning guidance in
+    this prompt stays hand-written, because that is judgement rather than inventory.
+
+    ``skill_roots`` are the request's. The analyze peer loads skills from them, so its skills
+    clause is decided by discovery over them, not over the defaults.
+    """
+    try:
+        from agent_runtime.capability_registry import describe
+        return describe(capability, skill_roots=skill_roots)
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        logger.exception("capability inventory unavailable; falling back to a generic phrase")
+        return "geospatial analysis over the evidence or uploaded files"
+
+
+def _code_peer_backend(code_peer: Optional[str] = None) -> str:
+    """Which code peer runs: ``"opencode"``, ``"claude"`` or ``"langchain"``.
+
+    The request's ``code_peer`` wins, falling back to ``AGENT_CODE_PEER``; anything neither CLI
+    accepts (``"langchain"`` included) is the built-in peer. ONE resolution, read by the code
+    node that runs the peer AND by the decider that describes it. Two copies would let the
+    supervisor describe one peer while another one runs, which is the drift this exists to end.
+    """
+    from agent_runtime.claude_peer import selects_claude
+    from agent_runtime.opencode_peer import CODE_PEER_ENV, selects_opencode
+
+    choice = code_peer if code_peer else os.getenv(CODE_PEER_ENV)
+    if selects_opencode(choice):
+        return "opencode"
+    if selects_claude(choice):
+        return "claude"
+    return "langchain"
+
+
+def _code_capability_line(code_peer: Optional[str] = None,
+                          skill_roots: Optional[List[str]] = None) -> str:
+    """The decider's ``code`` line, for the code peer THIS request will run.
+
+    Generated, like the ``analyze`` line, and for the same reason. The hand-written version told
+    every request that the code peer "binds the same toolkit as analyze, plus packaged skills and
+    saved workflows": it binds no tool that runs a saved workflow, the deployed image shipped no
+    skills, and a CLI peer has none of that toolkit. The inventory comes from
+    ``capability_registry`` keyed on the backend ``_code_peer_backend`` resolves, and the skills
+    clause from the same discovery over the same roots the peer's skill tools are built from.
+    """
+    head = "- code: produce and run NEW code for work no existing tool covers."
+    try:
+        from agent_runtime.capability_registry import (
+            CLI_PEER_NAMES, describe_code_peer, is_cli_code_peer,
+        )
+
+        backend = _code_peer_backend(code_peer)
+        inventory = describe_code_peer(backend, skill_roots=skill_roots)
+        cli = is_cli_code_peer(backend)
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        # No inventory rather than a guessed one: an unknown peer described as having tools it
+        # may lack is the failure this function exists to remove.
+        logger.exception("code peer description unavailable; the decider gets no inventory")
+        return head + "\n"
+    if not cli:
+        return f"{head} It can currently do: {inventory}\n"
+    return (
+        f"{head} For this request it is an agentic coding CLI ({CLI_PEER_NAMES[backend]}) in its "
+        f"own sandboxed container. It can currently do: {inventory}. It has none of the tools "
+        "listed for analyze and cannot request another capability mid-run, and what earlier "
+        "steps produced reaches it only as that abridged text, never as files. So work one of "
+        "those tools does — a boundary, a DEM, an embedding — is analyze's, and anything else "
+        "the CLI needs it fetches with its own code. Each run is a write-run-debug loop that can "
+        "take minutes.\n"
+    )
+
+
+def _capability_request_example(code_peer: Optional[str] = None) -> str:
+    """The example in the decider's "peers may REQUEST a capability" sentence.
+
+    It named the code peer unconditionally, and a CLI code peer has no ``request_capability``
+    tool, so for one the example names analyze, which always has it. Same resolution as the code
+    line, so the two sentences cannot disagree about which peer runs.
+    """
+    try:
+        from agent_runtime.capability_registry import is_cli_code_peer
+
+        cli = is_cli_code_peer(_code_peer_backend(code_peer))
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        cli = False
+    return "analyze needs evidence" if cli else "code needs evidence"
+
+
+def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = None,
+                      skill_roots: Optional[List[str]] = None) -> DecideFn:
+    """LLM-driven next-action chooser with a deterministic heuristic fallback.
+
+    ``code_peer`` and ``skill_roots`` are the request's, the same two values ``default_code_fn``
+    is built with, so the ``code`` line describes the peer that will actually run. The
+    ``analyze`` line reads ``skill_roots`` too, because that peer binds the same skill loaders.
+    """
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
         history = _format_chat_history(state.get("chat_history"))
@@ -1806,16 +1994,24 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
-            "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
-            "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
-            "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
+            "- analyze: run a workflow with EXISTING purpose-built tools over the evidence or "
+            "uploaded files. It can currently do: "
+            + _capability_inventory("analyze", skill_roots) + ". "
+            "Anything in that list is analyze work, not a retrieval question — a DEM, a "
+            "boundary and a geocode all come from live services, not from the knowledge base, "
+            "so searching for them finds writing ABOUT them and never the thing itself. "
             "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
             "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
             "it changed across years, comparing two areas, and running pretrained heads. "
-            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS to those "
-            "tools, not datasets to retrieve — a request naming one is analyze work, not search.\n"
-            "- code: produce and run NEW code for work no existing tool covers\n"
-            "- done: stop; a grounded final answer is composed automatically from the "
+            "Embedding also saves a package of the real vectors, so work those tools cannot "
+            "express — an unusual k, a metric of your own, more than two periods, a per-pixel "
+            "change surface — can be written against that package instead and delivered with "
+            "add_map_layer or add_raster_layer. That route needs code execution; the one-shot "
+            "tools do not. "
+            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS, not datasets "
+            "to retrieve — a request naming one is analyze work, not search.\n"
+            + _code_capability_line(code_peer, skill_roots)
+            + "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
             f"Actions available this step: {', '.join(available)}. "
             "Anything else has been ruled out already — a search whose sources are exhausted, or "
@@ -1827,8 +2023,23 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "already produced earlier (e.g. 'show me the code', 'explain that', 'what did you "
             "find'), the answer is composed from that conversation, so 'done' is enough unless "
             "genuinely new external information is needed.\n"
-            "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
-            "requests are fulfilled automatically before you are consulted again.\n\n"
+            "Peers may also REQUEST a capability they need (e.g. "
+            + _capability_request_example(code_peer) + "); such "
+            "requests are fulfilled automatically before you are consulted again.\n"
+            "`map_layer_delivered` in Progress means a layer is ALREADY on the user's map. When "
+            "the request was to see something and it is there, choose `done` — `code` exists for "
+            "work no existing tool covers, not for redoing work a tool has already done, and a "
+            "second pass fetches the same data again and draws a second copy of the same layer. "
+            "Choose `code` after a successful analyze only when the request asks for something "
+            "the delivered result does not contain.\n"
+            "`evidence_summary` in Progress is a DESCRIPTION of what was retrieved, written by "
+            "the model that read it. It deliberately does not say whether the evidence is "
+            "sufficient — that is your call. Search again only when it names a specific gap a "
+            "DIFFERENT query could fill; repeating a search because the count looks small "
+            "returns the same documents and wastes the step. And when the request is work for a "
+            "tool rather than a question about the literature — computing a DEM, buffering, "
+            "embedding a region — retrieval cannot help at all, however thin the evidence "
+            "looks.\n\n"
             "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
@@ -2734,8 +2945,8 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # than geometry. Filtering to add_map_layer alone left that work with nowhere to put its raster.
 _MAP_DELIVERY_TOOLS = ("add_map_layer", "add_raster_layer")
 
-_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
-                    "embed_region", "segment_region", "embed_zones",
+_MAP_LAYER_TOOLS = ("add_map_layer", "add_raster_layer", "overpass_search", "spatial_search",
+                    "embed_region", "embed_zones",
                     "fit_zone_model", "admin_boundary")
 _WANTS_MAP_RE = re.compile(
     r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
@@ -2827,7 +3038,7 @@ _MODEL_MISMATCH_OBSERVATION = (
     "the embedding tools default their model argument, so leaving it out silently embeds "
     "with something else. Call the embedding tool again naming {wanted} explicitly: "
     "embed_region takes models=['{wanted}'] (a LIST, and it accepts several at once), while "
-    "segment_region and the rest take model='{wanted}'. Then describe the model that actually ran."
+    "embed_zones takes model='{wanted}'. Then describe the model that actually ran."
 )
 
 # An answer that tells the user to add a layer they can already see. The map is delivered as
@@ -2943,6 +3154,32 @@ _RETRIEVAL_TOOLS = frozenset({
     "opengeodata_search", "neo4j_search", "neo4j_explore_related_nodes",
     "neo4j_get_element_by_id", "web_search",
 })
+
+
+def _decision_sentence(nxt: str, why: str) -> Optional[str]:
+    """A sentence for a supervisor decision a reader would otherwise misread, or None.
+
+    None for the ordinary case — the decider simply chose, and saying "(decision)" adds a row
+    without adding a fact. Everything else here is the loop declining to do the obvious thing,
+    which is exactly when a reader needs to be told why rather than left to guess.
+    """
+    if why == "decision":
+        return None
+    if why == "max_steps":
+        return "Stopping: this turn reached its step limit"
+    if why == "search exhausted":
+        return "Stopping: the knowledge base has nothing further to give"
+    if why == "nothing has run yet":
+        return f"Starting with {nxt}: nothing has run yet this turn"
+    if why.startswith("no-progress repeat"):
+        # The repeating action is named INSIDE the parens, and by this point `nxt` has already
+        # been overwritten with "done" — reading it here says "done would repeat", which is
+        # both wrong and confusing about what the loop declined to do.
+        repeated = why.partition("(")[2].rstrip(")").strip() or "that step"
+        return f"Stopping: {repeated} would repeat with nothing new to work from"
+    if why.startswith("request by "):
+        return f"Running {nxt}, asked for by {why[len('request by '):]}"
+    return f"{nxt}: {why}"
 
 
 def unified_peer_enabled(state: Optional[Dict[str, Any]] = None) -> bool:
@@ -3099,6 +3336,19 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                              if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
             pass
+        # The conversation's own file listing, on EVERY turn — not gated on an upload like the
+        # rest of the file toolset. Files get created without one (a boundary, an embedding, a
+        # plot), and that is precisely when "what have you saved?" is asked. Ungated, the peer
+        # answered it out of `execute_code` and listed the sandbox working directory. When an
+        # upload IS present the full toolset below carries this tool already, so add it only in
+        # the other case and no dedup is needed.
+        if not input_file_ids:
+            try:
+                from agent_runtime.langchain_file_tools import make_conversation_file_tools
+
+                tools.extend(make_conversation_file_tools())
+            except Exception:  # noqa: BLE001 - one optional tool must not break the peer
+                pass
         if input_file_ids:
             from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
@@ -3148,7 +3398,22 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         try:
             from agent_runtime.rs_embed_tools import make_rs_embed_tools
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
-        except Exception:
+        except Exception:  # noqa: BLE001 - a broken toolset must not take the whole turn down
+            # LOGGED, not swallowed. This guard exists for a missing optional dependency, but it
+            # catches everything: a NameError from a bad edit to rs_embed_tools silently removes
+            # all nine remote-sensing tools, and the turn then answers "I have no way to embed a
+            # region" — indistinguishable, from the outside, from the service being down. One
+            # such NameError reached a merge in this repo and only 32 unit tests caught it.
+            logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
+                             "this turn")
+        # Elevation, on the same footing as the remote-sensing tools and for the same reason:
+        # the region can arrive as a bbox from the map, a point, or a boundary this turn just
+        # fetched, so gating it on an upload would hide it from every request that names a
+        # place. Unlike those tools it costs nothing to run — USGS 3DEP takes no credential.
+        try:
+            from agent_runtime.terrain_tools import make_terrain_tools
+            tools.extend(make_terrain_tools(default_input_file_ids=input_file_ids))
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
             pass
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
@@ -3478,20 +3743,16 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # iterates internally — no request_capability, no nested tools. Two are
         # wired: `opencode` (OpenAI-compatible endpoint) and `claude` (Anthropic).
         # A per-request `code_peer` overrides the env default; anything else
-        # (including "langchain") means the built-in peer below.
-        import os as _os
-
-        from agent_runtime.opencode_peer import CODE_PEER_ENV, selects_opencode
-        from agent_runtime.claude_peer import selects_claude
-
-        choice = code_peer if code_peer else _os.getenv(CODE_PEER_ENV)
-        if selects_opencode(choice):
+        # (including "langchain") means the built-in peer below. The decider describes
+        # the peer through the same _code_peer_backend, so it cannot describe another.
+        backend = _code_peer_backend(code_peer)
+        if backend == "opencode":
             from agent_runtime.opencode_peer import run_opencode_code_peer
 
             return run_opencode_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
             )
-        if selects_claude(choice):
+        if backend == "claude":
             from agent_runtime.claude_peer import run_claude_code_peer
 
             return run_claude_code_peer(
@@ -3579,6 +3840,17 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                              if str(getattr(t, "name", "")) in _MAP_DELIVERY_TOOLS)
         except Exception:
             pass
+        # The conversation's own file listing, on EVERY turn — not gated on an upload like the
+        # rest of the file toolset. Files get created without one (a boundary, an embedding, a
+        # plot), and that is precisely when "what have you saved?" is asked. Ungated, the peer
+        # answered it out of `execute_code` and listed the sandbox working directory. When an
+        # This peer never attaches that toolset at all, so there is nothing to gate against.
+        try:
+            from agent_runtime.langchain_file_tools import make_conversation_file_tools
+
+            tools.extend(make_conversation_file_tools())
+        except Exception:  # noqa: BLE001 - one optional tool must not break the peer
+            pass
         if input_file_ids:
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
@@ -3622,7 +3894,22 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.rs_embed_tools import make_rs_embed_tools
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
-        except Exception:
+        except Exception:  # noqa: BLE001 - a broken toolset must not take the whole turn down
+            # LOGGED, not swallowed. This guard exists for a missing optional dependency, but it
+            # catches everything: a NameError from a bad edit to rs_embed_tools silently removes
+            # all nine remote-sensing tools, and the turn then answers "I have no way to embed a
+            # region" — indistinguishable, from the outside, from the service being down. One
+            # such NameError reached a merge in this repo and only 32 unit tests caught it.
+            logger.exception("remote-sensing toolset failed to build; those tools are UNAVAILABLE "
+                             "this turn")
+        # Elevation, on the same footing as the remote-sensing tools and for the same reason:
+        # the region can arrive as a bbox from the map, a point, or a boundary this turn just
+        # fetched, so gating it on an upload would hide it from every request that names a
+        # place. Unlike those tools it costs nothing to run — USGS 3DEP takes no credential.
+        try:
+            from agent_runtime.terrain_tools import make_terrain_tools
+            tools.extend(make_terrain_tools(default_input_file_ids=input_file_ids))
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
             pass
         # Per-zone embeddings + the model fitted on them. These used to be gated on attached
         # files, because a polygon layer could only arrive by upload. admin_boundary can now
@@ -3958,11 +4245,25 @@ def build_supervisor_graph(
                 and state.get("analysis_results") is None
                 and state.get("code_result") is None):
             nxt, why = "analyze", "nothing has run yet"
+        # `supervisor -> analyze (decision)` — an arrow, two internal node names, and a
+        # parenthetical whose commonest value means "no special reason". But the OTHER five
+        # values of `why` are the most informative thing in the whole trace: they say why the
+        # loop did something a reader would otherwise call a bug (stopped early, stopped
+        # without searching, ran analysis on a request that named no analysis). Those get a
+        # sentence AND their own event, so folding the routing ladder cannot hide them.
         emit_trace_event(
             "node_completed",
-            {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
+            {"stage": "supervisor", "route": nxt, "message": f"Next: {nxt}"},
             node="supervisor",
         )
+        _reason = _decision_sentence(nxt, why)
+        if _reason:
+            emit_trace_event(
+                "decision",
+                {"kind": "supervisor_decision", "route": nxt, "why": why,
+                 "message": _reason},
+                node="supervisor",
+            )
         return {
             "next_action": nxt,
             "actions": [*(state.get("actions") or []), nxt],
@@ -4071,6 +4372,7 @@ def build_supervisor_graph(
         prev_streak = state.get("search_empty_streak", 0)
         update: Dict[str, Any] = {
             "evidence": merged,
+            "evidence_summary": _summarize_evidence(llm, q, merged) or state.get("evidence_summary"),
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
             "searched_queries": tried,
@@ -4222,7 +4524,14 @@ def build_supervisor_graph(
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
             # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
             # execution only and flagged as unsupported.
+            # This turn's rows, rendered by the SAME function that renders earlier turns.
+            # _record_actions extracts these again on the way out (line ~4405) rather than
+            # taking them from here: extraction is a pure walk over dicts already in memory,
+            # and threading a value through the recording path to save it would couple the
+            # audit to the ledger write for no measurable gain.
+            _turn_rows = [*_ledger_rows(ar, cr), *(state.get("action_rows") or [])]
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
+                        "this_turn": _ledger_lines(_turn_rows),
                         "prior_actions": _ledger_text, "environment": _map_env}
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
@@ -4390,7 +4699,6 @@ __all__ = [
     "SupervisorState",
     "build_supervisor_graph",
     "run_supervisor",
-    "is_supervisor_enabled",
     "default_decide_fn",
     "default_search_fn",
     "default_analyze_fn",

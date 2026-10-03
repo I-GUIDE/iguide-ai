@@ -53,8 +53,8 @@ def test_a_weak_topic_match_cannot_read_as_the_whole_answer(introspect):
     tells the agent WHERE to look next."""
     out = json.loads(introspect.invoke({"topic": "satellite imagery"}))
     every = [n for a in out["areas"] for n in a["tool_names"]]
-    for want in ("embed_region", "embed_zones", "segment_region", "fit_zone_model",
-                 "predict_for_region", "embedding_change"):
+    for want in ("embed_region", "embed_zones", "align_embedding_colors", "fit_zone_model",
+                 "predict_from_package", "list_embedding_models"):
         assert want in every, f"{want} must stay discoverable on a weak match"
     assert "hint" in out
 

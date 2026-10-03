@@ -1,0 +1,182 @@
+"""`area` holds the place NAME, but it reads like the KIND of place.
+
+Measured live with gpt-oss:120b, asked for the DEM of Urbana:
+
+    admin_boundary({'state':'Illinois','level':'city','name':'Urbana','area':'city'})  failed
+    admin_boundary({'name':'Urbana','area':'city','state':'Illinois','level':'city'})  failed
+    admin_boundary({'area':'city','state':'Illinois'})                                  failed
+    admin_boundary({'area':'Urbana','state':'Illinois','level':'city'})                 worked
+
+Four calls, and the model had the right answer in `name` from the very first one — `name` is the
+output FILENAME stem, so it had the two slots exactly inverted. `level` already carries the kind
+of place, which makes an `area` holding a level word unambiguous rather than merely wrong: there
+is one sensible reading and the tool should take it.
+
+Same class as opengeodata_search's session_context_json — a parameter whose name invites the
+wrong value. The fix is the tool's, not the model's.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from agent_runtime import admin_boundary_tools as ab  # noqa: E402
+from agent_runtime.admin_boundary_tools import make_admin_boundary_tools  # noqa: E402
+
+
+def _feature(props):
+    return {"type": "Feature", "properties": props,
+            "geometry": {"type": "Polygon",
+                         "coordinates": [[[-88.4, 39.9], [-87.9, 39.9], [-87.9, 40.4],
+                                          [-88.4, 40.4], [-88.4, 39.9]]]}}
+
+
+# The two places these calls name, shaped as TIGERweb returns them (the fields
+# test_admin_boundary.py captured from the live service), keyed by the layer and the BASENAME
+# the tool asks for.
+_PLACES = {
+    (ab._LEVELS["city"][0], "URBANA"): _feature(
+        {"GEOID": "1777005", "NAME": "Urbana city", "BASENAME": "Urbana", "STATE": "17"}),
+    (ab._LEVELS["county"][0], "CHAMPAIGN"): _feature(
+        {"GEOID": "17019", "NAME": "Champaign County", "BASENAME": "Champaign", "STATE": "17"}),
+}
+
+
+def _tigerweb(layer, where, *args, **kwargs):
+    return {"features": [f for (lyr, base), f in _PLACES.items()
+                         if lyr == layer and f"UPPER(BASENAME)='{base}'" in where]}
+
+
+@pytest.fixture
+def boundary(tmp_path, monkeypatch):
+    """The tool, with TIGERweb stubbed at its HTTP seam the way test_admin_boundary.py does it.
+
+    The real service used to answer here: every test that got as far as resolving its state
+    queried tigerweb.geo.census.gov, six of them on every run (measured 2026-10-02). Offline, the
+    same six stopped at "unknown state", because the state list comes from TIGERweb too, and
+    there an absent note and an unwritten file are true anyway: they passed whether or not the
+    arguments were read right. Answering deterministically keeps the lookup succeeding, which is
+    what makes those assertions bite.
+    """
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ab, "_states_cache", [{"fips": "17", "name": "Illinois", "usps": "IL"}])
+    monkeypatch.setattr(ab, "_query", _tigerweb)
+    return {t.name: t for t in make_admin_boundary_tools()}["admin_boundary"]
+
+
+def call(boundary, **kwargs):
+    return json.loads(boundary.func(**kwargs))
+
+
+# --- recovery --------------------------------------------------------------------
+
+def test_the_inverted_call_is_understood(boundary):
+    """The exact first call from the trace. It should not need three more."""
+    out = call(boundary, state="Illinois", level="city", name="Urbana", area="city")
+    # What must NOT happen is the "no incorporated place named 'city'" dead end, which means it
+    # took the level as the name.
+    assert "named 'city'" not in json.dumps(out)
+    assert out["ok"] is True and out["matched"][0]["name"] == "Urbana city"
+
+
+def test_an_unrecoverable_swap_says_exactly_what_to_do(boundary):
+    """area='city' with no name to fall back on. Three of the four live calls looked like this,
+    and the old error ('no incorporated place named city') described the symptom, not the fix."""
+    out = call(boundary, area="city", state="Illinois")
+    assert out["ok"] is False
+    assert "place NAME" in out["error"] and "city" in out["error"]
+    assert "area='Urbana'" in out["hint"]           # shows the shape of a correct call
+    assert "level" in out["hint"]
+
+
+@pytest.mark.parametrize("word", ["city", "County", "STATE", "cdp", "town", "tracts"])
+def test_every_level_word_is_caught_not_just_city(boundary, word):
+    out = call(boundary, area=word, state="Illinois")
+    assert out["ok"] is False and "place NAME" in out["error"]
+
+
+# --- and does not break the ordinary call ----------------------------------------
+
+def test_a_real_place_name_is_left_alone(boundary):
+    """The fix must not touch a correct call. 'Urbana' is not a level word."""
+    out = call(boundary, area="Urbana", state="Illinois", level="city")
+    # Whatever the lookup finds, it must not be refused for looking like a level.
+    assert "place NAME" not in json.dumps(out)
+    assert out["ok"] is True
+
+
+def test_a_place_actually_named_like_a_level_still_needs_care(boundary):
+    """There are real places called 'Town' and 'State' — but `level` disambiguates, and an
+    explicit name is what the caller gets to use. Documents the known limit rather than
+    pretending it does not exist."""
+    out = call(boundary, area="town", state="Illinois")
+    assert out["ok"] is False          # refused, with instructions, not silently mis-resolved
+    assert "hint" in out
+
+
+# --- the second inversion, which validation refused before any code ran ------------
+
+def test_the_call_the_sweep_caught(boundary):
+    """area omitted, place in `name`:
+
+        admin_boundary({'state':'IL','level':'county','name':'Champaign','subdivide':'tracts'})
+        ValidationError: area — Field required
+
+    The more natural mistake of the two, and the harder one: it fails inside pydantic before
+    any in-body recovery can see it, which is why `area` had to stop being required.
+    """
+    out = call(boundary, state="IL", level="county", name="Champaign")
+    assert "validation" not in json.dumps(out).lower()
+    assert "no place named" not in json.dumps(out)
+    assert out["ok"] is True
+
+
+def test_name_alone_is_not_reported_as_a_correction(boundary):
+    """It is the same request said the other way round — both words mean the place now, so
+    there is nothing to warn about."""
+    out = call(boundary, name="Champaign", state="IL")
+    assert out["ok"] is True       # a refusal carries no note either
+    assert out.get("note") is None
+
+
+def test_neither_given_says_what_to_pass(boundary):
+    out = call(boundary, state="IL")
+    assert out["ok"] is False and out["error"] == "no place named"
+    assert "area='Champaign County'" in out["hint"] and "output_name" in out["hint"]
+
+
+# --- and the filename still works, by its new name --------------------------------
+
+def _capture_stem(monkeypatch):
+    written = {}
+
+    # _write_layer takes the layer's content_key since layer identity moved to inputs
+    # (`key`, stage 20). The fake used to take two arguments, so the tool's own call raised
+    # TypeError inside it — and the old assertion accepted the resulting None ("None if the
+    # lookup failed first"), so it passed while proving nothing. Offline, the lookup cannot
+    # fail, the assertion is exact, and a stale fake shows up as the failure it is.
+    def fake_write(feats, stem, key=None):
+        written["stem"] = stem
+        return {"file_id": "f", "download_url": "u", "filename": f"{stem}.geojson"}
+
+    monkeypatch.setattr("agent_runtime.admin_boundary_tools._write_layer", fake_write,
+                        raising=False)
+    return written
+
+
+def test_output_name_sets_the_file_stem(boundary, monkeypatch):
+    written = _capture_stem(monkeypatch)
+    call(boundary, area="Champaign", state="IL", output_name="my_county")
+    assert written.get("stem") == "my_county"
+
+
+def test_name_still_means_the_filename_when_area_is_given(boundary, monkeypatch):
+    """Backwards compatible: a caller passing BOTH meant `name` the old way."""
+    written = _capture_stem(monkeypatch)
+    call(boundary, area="Champaign", state="IL", name="legacy_stem")
+    assert written.get("stem") == "legacy_stem"

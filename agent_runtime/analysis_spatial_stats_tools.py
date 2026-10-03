@@ -67,7 +67,9 @@ from agent_runtime.analysis_aggregate_tools import (  # reuse, do not reinvent
     _write_csv,
     _write_geojson,
 )
-from agent_runtime.langchain_geo_tools import _index_attached, artifact_name
+from agent_runtime.langchain_geo_tools import _index_attached, artifact_name, input_content_key
+from agent_runtime.map_layers import content_key
+from agent_runtime.tool_args import accept_null_defaults
 
 # --- weights ------------------------------------------------------------------------
 
@@ -184,8 +186,19 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
                 # one that is slightly too generous.
                 thresh = float(weights.min_threshold_distance(
                     [(geom.x, geom.y) for geom in frame.geometry]))
+                # min_threshold_distance returns EXACTLY the critical neighbour distance, and
+                # DistanceBand recomputes that distance on its own code path. Whether the two
+                # agree to the last bit is a property of the platform: on the 8x8 test lattice
+                # the margin is 0.0 m, giving 0 islands on macOS/arm64 and 1 on Linux/x86-64
+                # with the same libpysal, scipy and numpy versions. A relative pad of 1e-9
+                # (about 0.1 mm at 100 km) makes "no island" hold everywhere.
+                thresh *= 1.0 + 1e-9
                 notes.append(f"threshold_km not given; used the smallest distance that leaves no "
                              f"island ({thresh / 1000.0:.3f} km)")
+                # The note reports the padded distance, a hair above the strict minimum and far
+                # below its metre precision. Its wording stands because the unpadded value is not
+                # reliably island-free (docs/agent-architecture-changes.md: "A promise kept by
+                # rounding luck").
             else:
                 thresh = float(threshold_km) * 1000.0
                 if not (thresh > 0) or not math.isfinite(thresh):
@@ -203,12 +216,26 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
     yield w
 
 
+def _weights_key(weights: Any, k: Any, threshold_km: Any) -> Dict[str, Any]:
+    """The weights a tool built, as part of its layer key: the scheme, plus only the parameter
+    that scheme reads. k means nothing to queen contiguity, so a queen run that also passed
+    k=8 draws the same map as one that did not, and the two must be one layer."""
+    kind = str(weights or "queen").strip().lower()
+    return {"weights": kind,
+            "k": int(k) if kind in {"knn", "kernel"} else None,
+            "threshold_km": (float(threshold_km) if kind == "distance_band"
+                             and threshold_km is not None else None)}
+
+
 def _weights_diagnostics(w: Any) -> Dict[str, Any]:
     """The connectivity facts that decide whether a result is trustworthy."""
     cards = list(w.cardinalities.values())
     return {
         "n": int(w.n),
         "islands": len(w.islands),
+        # Islands are not the only way a graph falls apart: a layer split by water or by sliver
+        # gaps can have none and still be several separate blocks. regionalize refuses that.
+        "components": int(w.n_components),
         "min_neighbors": int(min(cards)) if cards else 0,
         "max_neighbors": int(max(cards)) if cards else 0,
         "mean_neighbors": _fmt(w.mean_neighbors, 2),
@@ -225,6 +252,129 @@ def _island_note(w: Any, notes: List[str]) -> None:
             "spatial lag, so their local statistic is undefined and they pull the global "
             "statistic toward zero. Try weights='knn' (every feature then has exactly k "
             "neighbours) or a larger distance_band if this matters.")
+
+
+# --- connectedness: regionalization's precondition --------------------------------------
+
+# The most areas a refusal lists by id. One mainland plus a few islands or exclaves is the usual
+# split, and listing those few is what lets the next call select the mainland.
+_LISTED_AREAS = 50
+
+
+def _connected_parts(neighbours: List[Any]) -> List[List[int]]:
+    """The connected parts of a neighbour graph, largest first; an island is a part of one.
+
+    ``neighbours[i]`` holds the indices of area *i*'s neighbours, the shape pygeoda's
+    ``Weight.get_neighbors`` returns. Union-find rather than a walk, so an asymmetric list
+    still yields the weakly connected parts.
+    """
+    parent = list(range(len(neighbours)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, nbrs in enumerate(neighbours):
+        for j in nbrs:
+            a, b = root(i), root(int(j))
+            if a != b:
+                parent[a] = b
+    parts: Dict[int, List[int]] = {}
+    for i in range(len(neighbours)):
+        parts.setdefault(root(i), []).append(i)
+    # sort is stable, so equal-sized parts keep the order of their first area
+    return sorted(parts.values(), key=len, reverse=True)
+
+
+def _id_column(frame: Any, explicit: Optional[str], analysed: List[str]) -> Optional[str]:
+    """A column naming every area uniquely: what selecting a part by attribute needs.
+
+    The readable label column wins when it is unique (a tract NAME is within one county, and is
+    not across a state); otherwise the first text or integer column that is. Floats are skipped
+    because a value that does not survive a trip through text cannot be matched, and so are the
+    *analysed* columns: _prepare has coerced those to numbers, so "1,100" in the file is 1100
+    here and select_by_attribute, which reads the file, would match none of them.
+    """
+    import pandas as pd
+
+    types = pd.api.types
+    geom = _geom_name(frame)
+    for col in dict.fromkeys([_label_column(frame, explicit), *frame.columns]):
+        if col is None or col == geom or col in analysed:
+            continue
+        values = frame[col]
+        textual = types.is_string_dtype(values) or types.is_object_dtype(values)
+        if not (textual or types.is_integer_dtype(values)) or values.isna().any():
+            continue
+        if values.astype(str).is_unique:
+            return str(col)
+    return None
+
+
+def _disconnected(frame: Any, parts: List[List[int]], rule: str, queen_parts: Optional[int],
+                  label_column: Optional[str], analysed: List[str], notes: List[str]) -> str:
+    """The refusal for a contiguity graph in several parts: the parts, then the routes out."""
+    sizes = [len(p) for p in parts]
+    islands = sizes.count(1)
+    if islands == len(sizes):
+        shape = "every area is an island: no two of them share a border"
+    else:
+        shape = "sizes " + ", ".join(str(s) for s in sizes[:10]) + (", ..." if len(sizes) > 10
+                                                                    else "")
+        if islands:
+            shape += (f"; {islands} of them {'is an island' if islands == 1 else 'are islands'}, "
+                      "with no neighbour at all")
+    message = (f"the {rule} contiguity graph splits these {len(frame)} areas into {len(parts)} "
+               f"separate parts ({shape}). A region has to be one contiguous block, so no region "
+               "can take areas from two parts, and no method or n_regions gets around that")
+
+    routes: List[str] = []
+    if rule == "rook" and queen_parts == 1:
+        routes.append("weights='queen' joins this layer into one block (it also counts areas "
+                      "that meet only at a corner); rerun with that.")
+    elif rule == "rook" and queen_parts:
+        routes.append(f"weights='queen' does not join it either ({queen_parts} parts).")
+    extra: Dict[str, Any] = {}
+    others = parts[1:]
+    outside = [i for part in others for i in part]
+    col = _id_column(frame, label_column, analysed)
+    if col and len(outside) <= _LISTED_AREAS:
+        ids = frame[col].tolist()
+        extra = {"id_column": col, "outside_largest_part": [ids[i] for i in outside]}
+        # The rest is only one block when there is one other part; selecting several at once
+        # just hands back another split, so the route goes part by part.
+        usable = sum(1 for part in others if len(part) >= _MIN_OBS)
+        if not usable:
+            rest = (f"the other {len(outside)} area(s) form {len(others)} part(s) too small to "
+                    f"regionalize on their own (it takes {_MIN_OBS} areas), so keep them as "
+                    "blocks of their own or leave them out")
+        elif len(others) == 1:
+            rest = (f"op='in' with the same list selects the other part ({len(outside)} areas), "
+                    "which can be regionalized the same way")
+        else:
+            extra["smaller_parts"] = [[ids[i] for i in part] for part in others]
+            rest = ("op='in' with one list from smaller_parts selects that part alone, and the "
+                    f"{usable} with at least {_MIN_OBS} areas can be regionalized the same way")
+        routes.append(
+            f"To regionalize the largest part ({sizes[0]} areas) on its own, select it first: "
+            f"select_by_attribute on the same file_id with column='{col}', op='not_in', "
+            f"value=outside_largest_part, then regionalize that selection; {rest}.")
+    elif col:
+        routes.append(
+            f"To regionalize one part at a time, select it first with select_by_attribute: "
+            f"{len(outside)} areas lie outside the largest part, too many to list here, so "
+            "select on a column that separates the parts (an island, county or district name).")
+    else:
+        routes.append("To regionalize one part at a time, select it first with "
+                      "select_by_attribute; no column names every area uniquely, so the parts "
+                      "cannot be listed for it here.")
+    routes.append("If the parts are meant to touch (borders that miss by a sliver or a rounding "
+                  "error, not real water or open land), the boundaries need snapping before any "
+                  "contiguity rule counts them as neighbours.")
+    return _bad(message, hint=" ".join(routes), components=len(parts),
+                component_sizes=sizes[:20], islands=islands, **extra, notes=notes or None)
 
 
 def _prepare(gdf: Any, columns: List[str], notes: List[str]) -> Tuple[Any, Optional[str]]:
@@ -295,14 +445,14 @@ def _legend(colors: Dict[str, List[int]], present: Any) -> List[Dict[str, Any]]:
 
 
 def _categorical_layer(rec: Dict[str, Any], label: str, style_by: str, count: int,
-                       legend: List[Dict[str, Any]]) -> Dict[str, Any]:
+                       legend: List[Dict[str, Any]], key: Optional[str] = None) -> Dict[str, Any]:
     """A ``map_layer`` whose classes are CATEGORIES, not a number to ramp.
 
     ``render="categories"`` matters: the client's choropleth ramp coerces the style column with
     Number(), so a categorical column like "High-High" becomes NaN for every feature and the
     layer renders in one flat colour — a map that looks fine and says nothing.
     """
-    out = _map_layer(rec, label, "categories", style_by, count)
+    out = _map_layer(rec, label, "categories", style_by, count, key=key)
     out["legend"] = legend
     return out
 
@@ -328,6 +478,10 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
     def _open(ref, siblings=None, layer=None):
         return _open_vector(ref, siblings, attached, layer)
+
+    def _input_key(ref, siblings=None):
+        """What an input IS, as _open reads it: its content, never its file_id."""
+        return input_content_key(ref, siblings, attached)
 
     def _load(file_id, siblings, columns, notes, layer=None):
         """Open, validate CRS, coerce the needed columns, drop unusable rows.
@@ -424,7 +578,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "interpretation": (
                     f"each feature has {diag['min_neighbors']}-{diag['max_neighbors']} neighbours "
                     f"(mean {diag['mean_neighbors']})"
-                    + (f"; {diag['islands']} have NONE" if diag["islands"] else "; no islands")),
+                    + (f"; {diag['islands']} have NONE" if diag["islands"] else "; no islands")
+                    + (f"; the graph falls into {diag['components']} separate parts"
+                       if diag["components"] > 1 else "")),
             }
             if rec:
                 payload.update({"file_id": rec["file_id"], "filename": rec.get("filename"),
@@ -587,8 +743,13 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             for cls in classes:
                 counts[cls] = counts.get(cls, 0) + 1
 
+            # The permutation count and the significance level both move features between
+            # classes, so both are in the key. The seed is fixed above.
+            layer_key = content_key("lisa", column, input=_input_key(file_id, siblings),
+                                    column=column, **_weights_key(weights, k, threshold_km),
+                                    permutations=perms, significance=alpha)
             base = _stem(name, _source_stem(file_id), f"{column}_lisa")
-            rec = _write_geojson(out, base, _source_stem(file_id), "lisa")
+            rec = _write_geojson(out, base, _source_stem(file_id), "lisa", key=layer_key)
 
             label_col = _label_column(out, label_column)
             csv_cols = [c for c in ([label_col] if label_col else []) +
@@ -622,7 +783,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "csv": _asset(csv_rec),
                 "map_layer": _categorical_layer(rec, _label_for(name, rec) or f"{column} LISA",
                                                 "lisa_class", int(len(out)),
-                                                _legend(_LISA_COLORS, classes)),
+                                                _legend(_LISA_COLORS, classes), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -664,7 +825,13 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 island_idx = set(int(i) for i in w.islands)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42)
+                    # n_jobs=1, explicitly: G_Local is the one esda call here that defaults to -1,
+                    # a joblib/loky pool of one fresh interpreter per core, each forked from the
+                    # agent process. Below about 10,000 areas that pool saves a fraction of a
+                    # second at best, and the seeded result is identical either way. The cost on
+                    # larger layers: docs/agent-architecture-changes.md, Stage 19.
+                    g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42,
+                                     n_jobs=1)
 
             z = np.asarray(g.Zs, dtype="float64")
             p = np.asarray(g.p_sim, dtype="float64")
@@ -691,8 +858,12 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 counts[cls] = counts.get(cls, 0) + 1
 
             stat_name = "Gi*" if star else "Gi"
+            layer_key = content_key("gistar" if star else "gi", column,
+                                    input=_input_key(file_id, siblings), column=column,
+                                    **_weights_key(weights, k, threshold_km), star=bool(star),
+                                    permutations=perms)
             base = _stem(name, _source_stem(file_id), f"{column}_hotspots")
-            rec = _write_geojson(out, base, _source_stem(file_id), "hotspots")
+            rec = _write_geojson(out, base, _source_stem(file_id), "hotspots", key=layer_key)
 
             label_col = _label_column(out, label_column)
             csv_cols = [c for c in ([label_col] if label_col else []) +
@@ -717,7 +888,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "map_layer": _categorical_layer(rec,
                                                 _label_for(name, rec) or f"{column} {stat_name}",
                                                 "hotspot_class", int(len(out)),
-                                                _legend(_HOTSPOT_COLORS, classes)),
+                                                _legend(_HOTSPOT_COLORS, classes), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -990,8 +1161,14 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             out["residual"] = [_num(v) for v in resid]
             out["fitted"] = [_num(v) for v in
                              np.asarray(fitted.predy, dtype="float64").flatten()]
+            # The model that RAN, not the one requested: 'auto' that chose lag fits the same
+            # model as asking for lag. The explanatory columns are sorted, because the order the
+            # model lists them in changes no residual.
+            layer_key = content_key("regression", chosen, input=_input_key(file_id, siblings),
+                                    y_column=y_column, x_columns=sorted(xs), model=chosen,
+                                    **_weights_key(weights, k, threshold_km))
             base = _stem(name, _source_stem(file_id), f"{y_column}_{chosen}_residuals")
-            rec = _write_geojson(out, base, _source_stem(file_id), "residuals")
+            rec = _write_geojson(out, base, _source_stem(file_id), "residuals", key=layer_key)
             import pandas as pd
 
             csv_rec = _write_csv(pd.DataFrame(coefs), base, _source_stem(file_id), "coefficients")
@@ -1015,7 +1192,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "coefficients_csv": _asset(csv_rec),
                 "map_layer": _map_layer(rec, (_label_for(name, rec)
                                               or f"{y_column} {chosen} residuals"),
-                                        "choropleth", "residual", int(len(out))),
+                                        "choropleth", "residual", int(len(out)), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -1050,7 +1227,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
         the list of variables to be similar on; `n_regions` is how many you want. `method="maxp"`
         instead finds as many regions as possible subject to each holding at least `min_bound` of
         `bound_column` (e.g. 50,000 people per region) — there `n_regions` is ignored. Returns the
-        regions as a categorical map layer plus a per-region summary CSV.
+        regions as a categorical map layer plus a per-region summary CSV. A layer whose
+        contiguity graph falls into separate parts is refused before pygeoda sees it, with the
+        parts listed by `label_column` when that names each area uniquely.
         """
         notes: List[str] = []
         try:
@@ -1110,21 +1289,38 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 slim = slim.rename(columns={geom: "geometry"}).set_geometry("geometry")
 
             gd = pygeoda.open(slim)
-            w = getattr(pygeoda, f"{weights}_weights", pygeoda.queen_weights)(gd) \
-                if weights in {"queen", "rook"} else pygeoda.queen_weights(gd)
+            rule = weights if weights in {"queen", "rook"} else "queen"
+            w = getattr(pygeoda, f"{rule}_weights")(gd)
             if weights not in {"queen", "rook"}:
                 notes.append(f"weights={weights!r} is not a contiguity rule; regionalization "
                              "requires contiguity, so queen was used instead")
-            # pygeoda exposes these as METHODS, not properties: `getattr(w, "has_isolates")`
-            # returns the bound method, which is always truthy, so the un-called form put a false
-            # island warning on every single result.
-            try:
-                isolated = bool(w.has_isolates())
-            except Exception:
-                isolated = False
-            if isolated:
-                notes.append("some areas have NO contiguous neighbour (islands). They cannot join "
-                             "a connected region and the algorithm may place them alone or fail.")
+
+            # Count the parts BEFORE any algorithm runs. pygeoda does not refuse a contiguity
+            # graph that falls into more than one connected part. Measured on 0.1.3, on macOS
+            # and on Linux with the deployed versions alike: skater, redcap and schc SEGFAULT,
+            # which kills the agent's worker and every turn on it, and azp and max-p can spin
+            # on one core and never return. That held for every n_regions tried, including
+            # n_regions at or above the number of parts, so no region count is safe. An island
+            # is a part of one, so this also covers has_isolates(), which only added a note.
+            parts = _connected_parts([w.get_neighbors(i) for i in range(len(frame))])
+            if len(parts) > 1:
+                queen_parts = None
+                if rule == "rook":
+                    queen = pygeoda.queen_weights(gd)
+                    queen_parts = len(_connected_parts(
+                        [queen.get_neighbors(i) for i in range(len(frame))]))
+                return _disconnected(frame, parts, rule, queen_parts, label_column, needed, notes)
+            # max-p spins the same way on a CONNECTED layer when no region can reach the bound,
+            # and on one block that is exactly when the whole layer holds less than min_bound.
+            if meth == "maxp":
+                total = float(frame[str(bound_column)].sum())
+                if total < float(min_bound):
+                    return _bad(f"min_bound={_fmt(min_bound)} is more {bound_column} than the "
+                                f"whole layer holds ({_fmt(total)}), so not even one region can "
+                                "reach it",
+                                hint=f"lower min_bound to at most {_fmt(total)}, or pick another "
+                                     "method and give n_regions instead",
+                                bound_total=_fmt(total), notes=notes or None)
 
             data = [gd.GetRealCol(c) for c in cols]
             if meth == "skater":
@@ -1143,8 +1339,8 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             clusters = list(result["Clusters"] if isinstance(result, dict) else result)
             if not clusters or len(clusters) != len(frame):
                 return _bad(f"{meth} returned {len(clusters)} labels for {len(frame)} areas",
-                            hint="this usually means the layer's contiguity graph is "
-                                 "disconnected; run spatial_weights to inspect it")
+                            hint="the contiguity graph was checked as connected, so this is "
+                                 "unexpected; run spatial_weights to inspect it")
             found = sorted({int(c) for c in clusters})
             if len(found) < 2:
                 return _bad(f"{meth} could not form more than one region",
@@ -1174,8 +1370,18 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                         frame.loc[mask, str(bound_column)].to_numpy(dtype="float64").sum(), 2)
                 summary_rows.append(row)
 
+            # Only what this method reads: max-p derives the region count from its bound, and
+            # every other method takes n_regions and ignores the bound. The weights are the
+            # contiguity rule actually used, since anything but rook ran as queen above. The
+            # variables are sorted: the order they are listed in is wording.
+            layer_key = content_key("regions", meth, input=_input_key(file_id, siblings),
+                                    columns=sorted(cols), method=meth,
+                                    n_regions=None if meth == "maxp" else target,
+                                    bound_column=str(bound_column) if meth == "maxp" else None,
+                                    min_bound=float(min_bound) if meth == "maxp" else None,
+                                    weights=weights if weights in {"queen", "rook"} else "queen")
             base = _stem(name, _source_stem(file_id), f"{meth}_regions")
-            rec = _write_geojson(out, base, _source_stem(file_id), "regions")
+            rec = _write_geojson(out, base, _source_stem(file_id), "regions", key=layer_key)
             csv_rec = _write_csv(pd.DataFrame(summary_rows), base, _source_stem(file_id),
                                  "region_summary")
 
@@ -1210,7 +1416,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "summary_csv": _asset(csv_rec),
                 "map_layer": _categorical_layer(rec, _label_for(name, rec) or f"{meth} regions",
                                                 "region", int(len(out)),
-                                                _legend(palette, out["region"])),
+                                                _legend(palette, out["region"]), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -1223,8 +1429,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=global_spatial_autocorrelation, name="global_spatial_autocorrelation",
+        StructuredTool.from_function(func=accept_null_defaults(global_spatial_autocorrelation), name="global_spatial_autocorrelation",
             metadata=meta,
             description=(
                 "Test whether a variable is spatially CLUSTERED — Moran's I, Geary's C and "
@@ -1234,8 +1439,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "each statistic against its expected value under spatial randomness plus a "
                 "plain-language verdict. Run before local_moran_lisa. `weights`: queen|rook|knn|"
                 "distance_band|kernel. " + _SIB)),
-        StructuredTool.from_function(
-            func=local_moran_lisa, name="local_moran_lisa", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(local_moran_lisa), name="local_moran_lisa", metadata=meta,
             description=(
                 "LISA CLUSTER MAP (Local Moran's I) — puts the HOT SPOTS and COLD SPOTS on the "
                 "user's interactive map. Answers 'which neighborhoods/counties/tracts are the "
@@ -1244,8 +1448,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "(spatial outliers), or Not significant, and the layer is delivered as a "
                 "CATEGORICAL map layer with a legend plus a CSV of per-area statistics and "
                 "p-values. This is GeoDa's cluster map. " + _SIB)),
-        StructuredTool.from_function(
-            func=local_getis_ord, name="local_getis_ord", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(local_getis_ord), name="local_getis_ord", metadata=meta,
             description=(
                 "Getis-Ord Gi* HOT SPOT / COLD SPOT analysis — the ArcGIS-style hotspot map, "
                 "banded by confidence (99%/95%). Use when the question is 'where are the "
@@ -1253,16 +1456,14 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "instead when spatial OUTLIERS matter too. `star=True` (default) includes each "
                 "area in its own neighbourhood. Returns a categorical map layer with a legend "
                 "plus a CSV of z-scores and p-values. " + _SIB)),
-        StructuredTool.from_function(
-            func=moran_scatterplot, name="moran_scatterplot", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(moran_scatterplot), name="moran_scatterplot", metadata=meta,
             description=(
                 "The MORAN SCATTERPLOT as a downloadable PNG: each area's value against its "
                 "neighbours' average, coloured by LISA quadrant, with the regression line whose "
                 "slope IS Moran's I. GeoDa's signature plot — use it to SHOW spatial "
                 "autocorrelation and its outliers, alongside "
                 "global_spatial_autocorrelation which states it numerically. " + _SIB)),
-        StructuredTool.from_function(
-            func=spatial_regression, name="spatial_regression", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(spatial_regression), name="spatial_regression", metadata=meta,
             description=(
                 "SPATIAL REGRESSION — 'does X explain Y?' done correctly for areal data, where "
                 "plain OLS understates the standard errors because neighbours resemble each "
@@ -1273,8 +1474,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "ols|lag|error. `x_columns` is a LIST. Returns the coefficient table with "
                 "p-values, fit statistics (R-squared/pseudo-R-squared, AIC, log-likelihood), the "
                 "diagnostics, a coefficients CSV, and a residual map layer. " + _SIB)),
-        StructuredTool.from_function(
-            func=regionalize, name="regionalize", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(regionalize), name="regionalize", metadata=meta,
             description=(
                 "REGIONALIZATION — group areas into CONTIGUOUS regions similar on several "
                 "variables, using GeoDa's own algorithms (SKATER, REDCAP, AZP, SCHC, max-p). "
@@ -1284,9 +1484,10 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "on the map. `columns` is the LIST of variables to be similar on. method='maxp' "
                 "maximises the region count subject to bound_column/min_bound (e.g. 50000 people "
                 "each) and ignores n_regions. Returns a categorical region map with a legend and "
-                "a per-region summary CSV. Needs polygons. " + _SIB)),
-        StructuredTool.from_function(
-            func=spatial_weights, name="spatial_weights", metadata=meta,
+                "a per-region summary CSV. Needs polygons that form one connected block; a layer "
+                "that falls into separate parts (islands, water, sliver gaps) is refused with the "
+                "parts listed. " + _SIB)),
+        StructuredTool.from_function(func=accept_null_defaults(spatial_weights), name="spatial_weights", metadata=meta,
             description=(
                 "Build and INSPECT the spatial weights matrix ('who is next to whom') that every "
                 "other spatial statistic depends on: neighbour counts, islands (areas with NO "

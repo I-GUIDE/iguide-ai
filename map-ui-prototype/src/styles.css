@@ -102,6 +102,30 @@ img.iglogo { height: 26px; width: auto; display: block; }
 .grow { flex: 1; }
 .navbtn { font-size: 12px; padding: 5px 11px; }
 .navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
+
+/* Account badge — who the server says you are, in token mode only.
+   Three states, three colours, because they are three different things to do about it: sign in
+   (accent, it is an action), no access (amber, nothing to click will fix it), signed in (quiet,
+   it is only a statement). The amber is a WARNING and not an error: the account is perfectly
+   valid, it simply is not permitted here. */
+.acctwrap { position: relative; display: inline-flex; }
+.acct { font-size: 12px; padding: 5px 11px; max-width: 170px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+a.acct { display: inline-flex; align-items: center; text-decoration: none; border: 1px solid var(--line);
+  border-radius: 999px; background: #fff; box-shadow: var(--shadow); color: #3b4046; line-height: 1.6; }
+.acct-out { color: var(--link); border-color: #cfe3d7; font-weight: 600; }
+.acct-ok { color: #3b4046; }
+.acct-blocked { color: #8a5b00; border-color: #e8d8ae; background: #fffaf0; }
+.acctcard { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; width: 286px;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 10px 12px; }
+.acctrow { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 12px; }
+.acctkey { color: var(--muted); width: 66px; flex: none; }
+.acctval { color: var(--ink); overflow-wrap: anywhere; }
+code.acctval { font-size: 11px; background: var(--soft); border-radius: 6px; padding: 1px 5px; }
+.acctnote { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 12px; line-height: 1.5; color: #8a5b00; }
+.acctnote-quiet { color: var(--muted); }
 /* .top now holds the platform back-link, so it stays visible when narrow. */
 
 /* left panel: layer manager + feature inspector — floats over the map so it never
@@ -198,11 +222,50 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .reason .body .ln::before { content: "– "; color: #b7bcc2; }
 .reason .body .ln.tool { color: #3b4046; font-weight: 600; }
 .reason .body .ln.tool::before { content: "→ "; color: var(--brand); }
+/* What a tool RETURNED, under the → line that called it. Indented and quieter than the call:
+   the call is the decision, this is its consequence, and a reader scanning for what happened
+   wants them paired rather than competing. A failure colours itself through .ln.warn's palette
+   only when the tool actually failed — the text says "failed —" and that is enough. */
+/* A clamped row is clickable and says so on hover. The chevron sits in the gutter so it does
+   not shift the text when the row opens — a transcript that reflows as you read it is worse
+   than one that is too short. */
+.reason .body .ln.clampable { cursor: pointer; position: relative; padding-right: 14px; }
+.reason .body .ln.clampable:hover { background: rgba(16, 24, 40, .04); border-radius: 4px; }
+.reason .body .ln.clampable::after { content: "⌄"; position: absolute; right: 2px; color: #9aa0a6; }
+.reason .body .ln.clampable.open::after { content: "⌃"; }
+.reason .body .ln.clampable.open { white-space: pre-wrap; }
+.reason .body .ln.result { color: #6b7280; padding-left: 14px; }
+.reason .body .ln.result::before { content: "← "; color: #9aa0a6; }
+/* A tool that failed and then worked. Green rather than red: the turn recovered, and colouring
+   it as an error would train the reader to ignore the reds that matter. It still has to APPEAR —
+   a turn that quietly needed two attempts is a turn whose tool contract is wrong, and one retry
+   sits below the dead-end detector's threshold of two, so nothing else reports it. */
+.reason .body .ln.recovered { color: #1f7a4d; }
+.reason .body .ln.recovered::before { content: "↺ "; color: #1f7a4d; }
 .reason .body .ln.warn { color: #a4453a; }
 .reason .body .ln.warn::before { content: "! "; color: #a4453a; }
 .reason .body .ln.routing, .reason .body .ln.route { color: #3b4046; font-weight: 600; }
 .reason .body .ln.routing::before, .reason .body .ln.route::before { content: "⇢ "; color: var(--brand); }
 .reason .body .ln.search, .reason .body .ln.analysis, .reason .body .ln.status { color: #6b6478; }
+/* The graph narrating its own traversal. Same weight as .routing — it IS routing — but the run
+   collapses to one row, so what shows is a heading for a phase rather than a list of hops. */
+/* Why the loop stopped early, or started where it did. Not folded, and marked so it reads as
+   a reason rather than another step — this is the row that answers "why did it do that". */
+.reason .body .ln.decision { color: #7a5a12; font-weight: 600; }
+.reason .body .ln.decision::before { content: "? "; color: #7a5a12; }
+.reason .body .ln.node { color: #3b4046; font-weight: 600; }
+.reason .body .ln.node::before { content: "⇢ "; color: var(--brand); }
+/* How many rows are folded under this one. Stated on the row rather than left to the chevron:
+   "+4" says there is something specific behind the click, which "⌄" alone does not. */
+.reason .body .ln .more {
+  margin-left: 6px; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--brand); background: rgba(26, 163, 122, .12);
+  padding: 0 5px; border-radius: 8px; vertical-align: 1px;
+}
+/* A folded row, once shown. Indented and unemphasised: it is the detail behind a heading the
+   reader has already read, not a peer of it. No marker of its own — the indent carries it. */
+.reason .body .ln.sub { padding-left: 16px; font-weight: 400; color: #7b8189; }
+.reason .body .ln.sub::before { content: ""; }
 
 /* answer card */
 .answer-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); padding: 6px 18px 14px; }
@@ -232,12 +295,24 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .art img { display: block; width: 100%; height: auto; }
 .art figcaption { padding: 7px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
 .art figcaption .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-.files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.files a { display: inline-flex; align-items: center; gap: 7px; background: #eef6f0; border: 1px solid #d6e7db; color: var(--link); text-decoration: none; border-radius: 10px; padding: 7px 12px; font-size: 13px; }
-.files a:hover { background: #e4f0e8; }
-/* Underscore-joined filenames and long inline code have no break opportunity, so they punch out
-   of the pane and get clipped. Only routine now that the pane can be narrowed. */
-.files a { overflow-wrap: anywhere; }
+/* Downloads: a named section, ruled off from the answer.
+   The pills it replaces sat flush against the last paragraph and read as part of the prose —
+   and truncating the names to keep them pill-sized is what made four different artifacts
+   indistinguishable. A row each, the full name, and a divider that says where the answer ends. */
+.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+      display: flex; flex-direction: column; gap: 6px; }
+.dl-head { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+           color: var(--muted); font-weight: 600; }
+.dl-item { display: flex; align-items: center; gap: 9px; background: #eef6f0;
+           border: 1px solid #d6e7db; color: var(--link); text-decoration: none;
+           border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+.dl-item:hover { background: #e4f0e8; }
+/* Underscore-joined filenames have no break opportunity, so they punch out of the pane and get
+   clipped. Shown in FULL on purpose — the name is how one artifact is told from another — so
+   it wraps rather than being cut. */
+.dl-name { overflow-wrap: anywhere; min-width: 0; }
+.dl-ico { flex: none; color: var(--brand); }
+.dl-ext { font-size: 6.2px; font-weight: 700; fill: currentColor; letter-spacing: .04em; }
 .md code { overflow-wrap: anywhere; }
 
 /* map-layer pills */
@@ -351,11 +426,22 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    switch between two setups of one page, not a second application. */
 .tabs { display: flex; gap: 2px; margin-left: 18px; background: var(--soft); padding: 3px; border-radius: 999px; position: relative; }
 .tab { font-size: 13px; font-weight: 600; padding: 5px 14px; border: 0; border-radius: 999px;
-       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap; }
+       background: transparent; color: #5b6167; cursor: pointer; white-space: nowrap;
+       /* Matches the lens's own transition below, so the label's colour arrives WITH the lens
+          instead of snapping the instant React flips the .on class — a plain class swap beat
+          the travelling lens by the full 460ms. */
+       transition: color 460ms cubic-bezier(.22, 1.18, .36, 1); }
 .tab:hover:not(.on) { color: var(--ink); }
+/* The generic `button:hover:not(:disabled) { background: var(--soft) }` above is specificity
+   (0,2,1) and outranks `.tab.on`'s (0,2,0) `background: none`, so hovering the SELECTED tab
+   painted solid grey OVER the lens. Invisible while the lens is white on a grey track, which is
+   why it shipped; worst right after a click, with the cursor still sitting there while the lens
+   travels. Unselected tabs lose nothing — that hover fill is the same grey as the track, and
+   the affordance is the label darkening on the line above. */
+.tab:hover:not(:disabled) { background: none; }
 /* The selected tab no longer paints its own background: the lens behind it is the selection,
    and two of them would double the highlight during the travel. */
-.tab.on { background: none; color: var(--ink); box-shadow: none; }
+.tab.on { background: none; color: #fff; box-shadow: none; }
 .tab { position: relative; z-index: 1; }
 
 /* Liquid glass. The lens is a real translucent material rather than a white pill: it blurs and
@@ -373,13 +459,21 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 }
 .tabglass-lens {
   position: absolute; inset: 0; border-radius: 999px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .96), rgba(255, 255, 255, .74));
-  -webkit-backdrop-filter: blur(14px) saturate(180%);
-  backdrop-filter: blur(14px) saturate(180%);
+  /* Brand green, matching every other active-state control (send, the spatial toggle) rather
+     than being the one selected state that reads as a different material. No backdrop-filter:
+     the fill is opaque, so nothing shows through it — blurring a backdrop nobody can see costs
+     a compositing layer for no picture. The specular top and dark underside stay, dialled back
+     for a dark ground: they are what keeps it reading as a lens rather than a flat chip. */
+  /* A shade below --brand (#1aa37a), and deliberately: the label is 13px text, which WCAG AA
+     holds to 4.5:1, and white on --brand is 3.20:1. Both ends of the gradient have to clear it
+     because the text spans the pill — #158664 is 4.54:1 and #127658 is 5.59:1. The send button
+     keeps the exact brand green and is fine there: an icon is a graphic, held to 3:1. Revert
+     these two stops to #1db386/var(--brand) to match the swatch exactly and lose the contrast. */
+  background: linear-gradient(180deg, #158664, #127658);
   box-shadow: 0 1px 2px rgba(16, 24, 40, .10),
               0 0 0 .5px rgba(16, 24, 40, .06),
-              inset 0 1px 0 rgba(255, 255, 255, .95),
-              inset 0 -1px 0 rgba(16, 24, 40, .05);
+              inset 0 1px 0 rgba(255, 255, 255, .35),
+              inset 0 -1px 0 rgba(16, 24, 40, .12);
 }
 .tabglass.travelling .tabglass-lens { animation: tab-lens 460ms cubic-bezier(.4, 0, .2, 1); }
 @keyframes tab-lens {

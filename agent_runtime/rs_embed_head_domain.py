@@ -267,7 +267,7 @@ def width_note(dim: int) -> Optional[str]:
 def package_region(manifest: Dict[str, Any]) -> Dict[str, Any]:
     """Where and when the package was embedded, for the result and for the action ledger.
 
-    Re-attached to the tool result on purpose. ``predict_for_region`` records its region and
+    Re-attached to the tool result on purpose. A tool that takes a bbox records its region and
     months as tool ARGUMENTS, and the ledger's whitelist picks them up from there; a tool that
     takes only a ``file_id`` has no such arguments, so without this the row would read
     ``predict_from_package (file_id=...)`` and a later turn could not say what was predicted.

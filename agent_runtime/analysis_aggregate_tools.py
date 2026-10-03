@@ -36,8 +36,11 @@ from agent_runtime.langchain_geo_tools import (
     _resolve,
     _stage_vector_source,
     artifact_name,
+    input_content_key,
     read_vector,
 )
+from agent_runtime.map_layers import content_key
+from agent_runtime.tool_args import accept_null_defaults
 
 # sjoin predicates that make sense for "which area is this point in" style questions.
 _PREDICATES = ("within", "intersects", "contains", "covered_by", "covers", "touches", "crosses",
@@ -296,9 +299,13 @@ def _stats_row(series: Any) -> Dict[str, Any]:
     }
 
 
-def _write_geojson(gdf: Any, name: Optional[str], source: str, default: str) -> Dict[str, Any]:
+def _write_geojson(gdf: Any, name: Optional[str], source: str, default: str,
+                   key: Optional[str] = None) -> Dict[str, Any]:
     """Write EPSG:4326 GeoJSON through the file store (GeoJSON, never parquet: the map client
-    and every other tool can read it, parquet is a dead end for both)."""
+    and every other tool can read it, parquet is a dead end for both).
+
+    ``key`` is the content key of the inputs that produced the layer. It is recorded on the
+    file, so a later step that reads this output identifies it by what it holds."""
     from agent_runtime.file_store import create_output_file_from_path
 
     if getattr(gdf, "crs", None) is not None:
@@ -308,7 +315,7 @@ def _write_geojson(gdf: Any, name: Optional[str], source: str, default: str) -> 
     try:
         out = tmpdir / fname
         gdf.to_file(out, driver="GeoJSON")
-        return create_output_file_from_path(out, filename=fname)
+        return create_output_file_from_path(out, filename=fname, content_key=key)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -345,11 +352,19 @@ def _sample_for_map(gdf: Any, render: str, max_points: Optional[int]) -> Tuple[A
 
 
 def _map_layer(rec: Dict[str, Any], label: str, render: str, style_by: Optional[str],
-               count: int, *, sampled: bool = False, total: Optional[int] = None) -> Dict[str, Any]:
-    """The descriptor ``agent_runtime.map_layers.build_map_layer`` turns into the SSE event."""
-    return {"url": rec.get("download_url"), "label": label, "render": render,
-            "style_by": style_by, "source": "analysis", "count": int(count),
-            "sampled": bool(sampled), "total": int(total if total is not None else count)}
+               count: int, *, sampled: bool = False, total: Optional[int] = None,
+               key: Optional[str] = None) -> Dict[str, Any]:
+    """The descriptor ``agent_runtime.map_layers.build_map_layer`` turns into the SSE event.
+
+    ``key`` (a ``map_layers.content_key`` of the tool's inputs) becomes the id. Without one,
+    build_map_layer falls back to an id from ``label``. The model words the label, so a renamed
+    repeat stacked and two unnamed analyses of one kind merged."""
+    out = {"url": rec.get("download_url"), "label": label, "render": render,
+           "style_by": style_by, "source": "analysis", "count": int(count),
+           "sampled": bool(sampled), "total": int(total if total is not None else count)}
+    if key:
+        out["id"] = f"agent-{key}"
+    return out
 
 
 def _label_for(name: Optional[str], rec: Dict[str, Any]) -> str:
@@ -419,6 +434,10 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
 
     def _open(ref, siblings=None, layer=None):
         return _open_vector(ref, siblings, attached, layer)
+
+    def _input_key(ref, siblings=None):
+        """What an input IS, as _open reads it: its content, never its file_id."""
+        return input_content_key(ref, siblings, attached)
 
     # --- 1. point-in-polygon aggregation: the entry-level workhorse ---------------
 
@@ -509,8 +528,17 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
             result = result.drop(columns=["_area_key"])
 
             style_by = out_col
+            # Both inputs as read, the statistic, its value column (which only matters when
+            # the statistic is not a count) and the predicate. `classes` and the label column
+            # change the reported breaks and the CSV, not the layer.
+            layer_key = content_key("points_in_areas", stat,
+                                    points=_input_key(points_file_id, points_siblings),
+                                    areas=_input_key(areas_file_id, areas_siblings), statistic=stat,
+                                    value_column=value_column if stat != "count" else None,
+                                    predicate=pred)
             base = _stem(name, _source_stem(areas_file_id), "by_area")
-            rec = _write_geojson(result, base, _source_stem(areas_file_id), "points_in_areas")
+            rec = _write_geojson(result, base, _source_stem(areas_file_id), "points_in_areas",
+                                 key=layer_key)
 
             label_col = _label_column(result, area_label_column)
             key = str(label_col) if label_col else "area"
@@ -542,7 +570,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "class_breaks": _class_breaks(result[style_by].to_numpy(), classes),
                 "csv": _asset(csv_rec), "on_map": True,
                 "map_layer": _map_layer(rec, _label_for(name, rec), "choropleth", style_by,
-                                        len(result)),
+                                        len(result), key=layer_key),
             }
             if matched == 0:
                 notes.append("no point fell in any area — check the two layers actually overlap, "
@@ -698,8 +726,16 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
             centroids = gpd.GeoSeries(gpd.points_from_xy(cx, cy), crs=metric.crs).to_crs("EPSG:4326")
 
             style_by = out_col if stat != "count" else "point_count"
+            # The cell in METRES, so cell_km=1 and cell_km=1.0 are one grid, and min_count as
+            # the floor that was actually applied.
+            layer_key = content_key("grid", f"{kind}_{float(cell_km):g}km",
+                                    points=_input_key(points_file_id, siblings), shape=kind,
+                                    cell_m=round(size_m, 3), statistic=stat,
+                                    value_column=value_column if stat != "count" else None,
+                                    min_count=floor_n)
             base = _stem(name, _source_stem(points_file_id), f"{kind}_grid")
-            rec = _write_geojson(grid, base, _source_stem(points_file_id), f"{kind}_grid")
+            rec = _write_geojson(grid, base, _source_stem(points_file_id), f"{kind}_grid",
+                                 key=layer_key)
 
             table = pd.DataFrame({
                 "cell_id": grid["cell_id"].to_numpy(),
@@ -728,7 +764,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "class_breaks": _class_breaks(grid[style_by].to_numpy(), classes),
                 "csv": _asset(csv_rec), "on_map": True,
                 "map_layer": _map_layer(rec, _label_for(name, rec), "choropleth", style_by,
-                                        len(grid)),
+                                        len(grid), key=layer_key),
             }
             if notes:
                 payload["notes"] = notes
@@ -809,8 +845,16 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
             layer_gdf, sampled, total, sample_note = _sample_for_map(joined, render, None)
             if sample_note:
                 notes.append(sample_note)
+            # `units` adds a column only beyond m and km, which are always written, so m and
+            # km are the same layer. The search cap is keyed in metres, as it is applied.
+            layer_key = content_key("nearest", source=_input_key(from_file_id, from_siblings),
+                                    target=_input_key(to_file_id, to_siblings),
+                                    max_m=round(limit_m, 3) if limit_m is not None else None,
+                                    unit_column=unit if unit not in ("m", "km") else None,
+                                    to_label_column=to_label_column or None)
             base = _stem(name, _source_stem(from_file_id), "nearest")
-            rec = _write_geojson(layer_gdf, base, _source_stem(from_file_id), "nearest_distance")
+            rec = _write_geojson(layer_gdf, base, _source_stem(from_file_id), "nearest_distance",
+                                 key=layer_key)
 
             label_col = _label_column(joined, None)
             table = pd.DataFrame({
@@ -842,7 +886,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "sampled": bool(sampled), "features_total": total,
                 "csv": _asset(csv_rec), "on_map": True,
                 "map_layer": _map_layer(rec, _label_for(name, rec), render, "distance_m",
-                                        len(layer_gdf), sampled=sampled, total=total),
+                                        len(layer_gdf), sampled=sampled, total=total,
+                                        key=layer_key),
             }
             if dist.empty:
                 notes.append("nothing was within range" + (f" of max_km={max_km}" if max_km else "")
@@ -925,8 +970,11 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
             layer_gdf, sampled, total, sample_note = _sample_for_map(out, render, None)
             if sample_note:
                 notes.append(sample_note)
+            layer_key = content_key("clusters", f"{float(eps_km):g}km",
+                                    input=_input_key(file_id, siblings), eps_m=round(eps_m, 3),
+                                    min_samples=min_pts, drop_noise=bool(drop_noise))
             base = _stem(name, _source_stem(file_id), "clusters")
-            rec = _write_geojson(layer_gdf, base, _source_stem(file_id), "clusters")
+            rec = _write_geojson(layer_gdf, base, _source_stem(file_id), "clusters", key=layer_key)
 
             # Cluster centroid + radius are metric means, so compute them in the projected CRS
             # and transform ALL centroids in one pass (a per-cluster to_crs is N transforms).
@@ -972,7 +1020,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "sampled": bool(sampled), "features_total": total,
                 "csv": _asset(csv_rec), "on_map": True,
                 "map_layer": _map_layer(rec, _label_for(name, rec), render, "cluster",
-                                        len(layer_gdf), sampled=sampled, total=total),
+                                        len(layer_gdf), sampled=sampled, total=total,
+                                        key=layer_key),
             }
             if not rows:
                 notes.append(f"no cluster met min_samples={min_pts} within eps_km={eps_km}; "
@@ -992,7 +1041,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
         """count / min / max / mean / median (+ std, sum) for a dataset's numeric columns.
 
         With no `column`, describes every numeric column. With `by`, groups by that column first
-        (`period` = day|week|month|quarter|year buckets a date column, e.g. incidents by month).
+        (`period` = day|week|month|quarter|year buckets a date column, e.g. incidents by month;
+        dates carrying a UTC offset are bucketed in UTC, as the temporal tools do).
         Returns a compact JSON summary, a CSV of the table, and a PNG chart.
         """
         notes: List[str] = []
@@ -1030,13 +1080,27 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                     if not freq:
                         return _bad(f"unsupported period {period!r}",
                                     hint=f"use one of {list(_PERIODS)}")
-                    parsed = pd.to_datetime(group_key, errors="coerce")
-                    if parsed.notna().sum() == 0:
+                    # The temporal tools' parser, so a dataset has one time in every tool: a UTC
+                    # offset converts to UTC, a number gets only numeric readings, and years stay
+                    # in 1678-2262. A plain pd.to_datetime here read a typed number as nanoseconds
+                    # (every year or code in 1970), failed a daylight-saving column on both pandas
+                    # versions, and bucketed one offset by local clock. Imported here, not at the
+                    # top, so this module still loads if the temporal one cannot.
+                    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+                    parsed, _ = parse_time_series(group_key)
+                    dated = parsed.notna()
+                    n_dated = int(dated.sum())
+                    if n_dated == 0:
                         return _bad(f"column {by!r} could not be read as dates, so period="
                                     f"{period!r} cannot be applied",
                                     hint="pass a date/datetime column as `by`, or drop `period`")
-                    group_key = parsed.dt.to_period(freq).astype(str)
+                    # where(): pandas 2 labels an undated row "NaT", pandas 3 leaves it missing.
+                    group_key = parsed.dt.to_period(freq).astype(str).where(dated)
                     notes.append(f"grouped {by!r} into {period} buckets")
+                    if n_dated < len(dated):
+                        notes.append(f"{len(dated) - n_dated} of {len(dated)} rows have no "
+                                     f"readable date in {by!r} and are grouped as '(missing)'")
                 group_key = group_key.fillna("(missing)").astype(str)
 
             targets = [column] if column else numeric_cols
@@ -1217,7 +1281,13 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 mapped, sampled, total_out, sample_note = _sample_for_map(selected, mode, None)
                 if sample_note:
                     notes.append(sample_note)
-                rec = _write_geojson(mapped, name, source, stem)
+                # The criterion as APPLIED, not the raw arguments: it already drops `op` and
+                # `value` when top_n ranks, and folds `ascending` into top/bottom. The view is
+                # the resolved one, after 'auto' and a missing style column.
+                layer_key = content_key("selected", input=_input_key(file_id, sibling_file_ids),
+                                        layer=layer, criterion=criterion, render=mode,
+                                        style_by=style_by)
+                rec = _write_geojson(mapped, name, source, stem, key=layer_key)
                 table = selected.drop(columns=[_geom_name(selected)], errors="ignore")
                 csv_rec = _write_csv(table, name, source, f"{stem}_table")
                 payload: Dict[str, Any] = {
@@ -1233,7 +1303,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                     "criterion": criterion, "column": column, "csv": _asset(csv_rec),
                     "on_map": True,
                     "map_layer": _map_layer(rec, _label_for(name, rec), mode, style_by,
-                                            int(len(mapped)), sampled=sampled, total=total_out),
+                                            int(len(mapped)), sampled=sampled, total=total_out,
+                                            key=layer_key),
                 }
                 if notes:
                     payload["notes"] = notes
@@ -1243,8 +1314,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
 
     meta = {"category": "geo"}
     return [
-        StructuredTool.from_function(
-            func=select_by_attribute, name="select_by_attribute", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(select_by_attribute), name="select_by_attribute", metadata=meta,
             description=(
                 "SELECT A SUBSET of a layer by its attributes — the everyday GIS 'select by "
                 "attribute' / query, and the step that turns a whole layer into THE ONE FEATURE "
@@ -1256,8 +1326,7 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "into buffer_layer/clip_layer instead of operating on every feature. A test that "
                 "matches nothing returns the column's real range and example values rather than "
                 "an empty layer. " + _SIB)),
-        StructuredTool.from_function(
-            func=count_points_in_areas, name="count_points_in_areas", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(count_points_in_areas), name="count_points_in_areas", metadata=meta,
             description=(
                 "Aggregate POINTS INTO AREAS (point-in-polygon) and put the result on the user's "
                 "INTERACTIVE MAP as a choropleth: 'how many crashes per neighborhood', 'total "
@@ -1266,16 +1335,14 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "`<statistic>_<value_column>` when you name a value column), plus a CSV of "
                 "area -> value. statistic: count|sum|mean|median|min|max|std; predicate: "
                 "within|intersects|... CRS is aligned automatically. " + _SIB)),
-        StructuredTool.from_function(
-            func=aggregate_to_grid, name="aggregate_to_grid", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(aggregate_to_grid), name="aggregate_to_grid", metadata=meta,
             description=(
                 "Bin POINTS INTO A HEX OR SQUARE GRID and map the density as a choropleth — the "
                 "answer to 'where are these densest?' when there is no polygon layer to aggregate "
                 "into. `cell_km` is the real cell width in kilometres (computed in a projected "
                 "CRS, never degrees), `shape` is 'hex' or 'square'. Returns the occupied cells "
                 "with point_count and per_km2, plus a CSV. " + _SIB)),
-        StructuredTool.from_function(
-            func=nearest_distance, name="nearest_distance", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(nearest_distance), name="nearest_distance", metadata=meta,
             description=(
                 "Measure how far each feature of one layer is from the NEAREST feature of another "
                 "('distance from every school to the closest hospital'). Distances are true "
@@ -1283,21 +1350,20 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "distance_m/distance_km, a map layer styled by distance, a CSV, and min/mean/"
                 "median/max. Optional max_km caps the search; units sets the reported units. "
                 + _SIB)),
-        StructuredTool.from_function(
-            func=cluster_points, name="cluster_points", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(cluster_points), name="cluster_points", metadata=meta,
             description=(
                 "Detect spatial CLUSTERS / HOTSPOTS among points with DBSCAN and map them "
                 "coloured by cluster id. `eps_km` is the neighbourhood radius in real kilometres "
                 "and `min_samples` the minimum points per cluster; unclustered points are noise "
                 "(cluster = -1). Returns the classified points plus a CSV of cluster, n, "
                 "centroid and radius. Needs scikit-learn. " + _SIB)),
-        StructuredTool.from_function(
-            func=summary_statistics, name="summary_statistics", metadata=meta,
+        StructuredTool.from_function(func=accept_null_defaults(summary_statistics), name="summary_statistics", metadata=meta,
             description=(
                 "Descriptive statistics for a dataset's attributes: count, min, max, mean, "
                 "median, std, sum — for every numeric column by default, for one `column` when "
                 "named, and per group when `by` is given (`period`=day|week|month|quarter|year "
-                "buckets a date column). Returns a compact JSON summary plus a downloadable CSV "
+                "buckets a date column, in UTC when the dates carry an offset). Returns a "
+                "compact JSON summary plus a downloadable CSV "
                 "and PNG chart. Use this for the numbers behind a map, not for mapping. " + _SIB)),
     ]
 

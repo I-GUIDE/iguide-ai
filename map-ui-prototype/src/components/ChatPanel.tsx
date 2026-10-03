@@ -32,14 +32,14 @@ const RS_MODELS: { group: string; ids: string[] }[] = [
 
 const RS_YEARS = ['2024', '2023', '2022', '2021', '2020', '2019', '2018'];
 
-// embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools.py:37,386), so a
+// embed_region truncates to _MAX_MODELS_PER_CALL SILENTLY (rs_embed_tools._MAX_MODELS_PER_CALL), so a
 // sixth pick would vanish without a word. Stop at the cap in the UI, where it can be explained.
 const RS_MAX_MODELS = 5;
 // How tall the composer may grow before it starts scrolling. Four lines holds every staged
 // operation question, and stops a pasted wall of text from eating the conversation above it.
 const COMPOSER_MAX_ROWS = 4;
 // The second group runs the encoder at request time. Every model in one embed_region call shares
-// a SINGLE 600s budget (rs_embed_tools.py:35), so two of these together can blow it and lose the
+// a SINGLE 600s budget (rs_embed_tools._TIMEOUT_S, 600s), so two of these together can blow it and lose the
 // whole call — including the models that had already finished.
 const RS_ONTHEFLY = ['clay', 'prithvi', 'terramind'];
 
@@ -80,9 +80,13 @@ function rsActions(models: string[], year: string, season: string) {
   const sn = RS_SEASONS.find((s) => s.id === season) || RS_SEASONS[0];
   const when = sn.phrase(year);
   const changeYears = rsChangeYears(year);
-  // Only Embed takes several: embed_region is the one tool with a list-shaped `models`
-  // (rs_embed_tools.py:356) and returns one layer per model. segment/predict/change all take a
-  // scalar, so the rest read the first pick.
+  // Only Embed takes several, and the reason is real rather than historical: embed_region sends
+  // the whole list to /api/embed in ONE request and gets a layer back per model. The other three
+  // are composed from ONE embedding — clustering it, differencing it across periods, running a
+  // head on it — and each of those is defined against a single latent space, so a second model
+  // would mean a second, separate analysis rather than a richer one. The rest read the first pick.
+  // (There are no segment/change/predict tools to check against; see the composition contract in
+  // embed_region's docstring.)
   const model = models[0] || 'gse';
   const many = models.length > 1;
   const modelList = listJoin(models);
@@ -99,19 +103,22 @@ function rsActions(models: string[], year: string, season: string) {
         // list is what turns the stack into something navigable with the layer-list eye toggles.
         ? `Embed this drawn region with the ${modelList} models for ${when}, put each model's embedding on the map as its own layer, and list them — they cover the same ground, so only the top one is visible until I toggle the rest.`
         : `Embed this drawn region with the ${model} model for ${when} and put the embedding on the map.` },
+    // Every operation below the first is COMPOSED from the embedding rather than naming a
+    // one-shot tool, because those tools no longer exist: the agent embeds, then writes the
+    // clustering / differencing / prediction against the package in code. The questions are
+    // worded as outcomes, not as tool calls, so they keep working as the composition changes.
     { label: 'Segment',
-      prompt: `Segment this drawn region into 6 look-alike zones from its ${model} satellite embedding for ${when}, and show it on the map.` },
-    // Composed from embed_region rather than asking for embedding_change, which returns a CSV
-    // and NO layer and throws its per-year embeddings away — its own note says it tells you THAT
-    // the place changed, not what changed. Embedding each year instead puts all three on the map
-    // (start/end are part of the layer id, so they do not collide), leaves reusable packages
-    // behind, and makes the change readable as colour change. Here a shared basis IS meaningful:
-    // one model, one space, and align_embedding_colors already numbers same-region repeats.
-    // It also costs nothing extra — /api/change embeds once per year too.
+      prompt: `Embed this drawn region with the ${model} model for ${when}, then cluster that embedding into 6 look-alike zones and put the zones on the map.` },
+    // Composed rather than asking for a change tool, which returned a CSV and NO layer and threw
+    // its per-year embeddings away — it told you THAT the place changed, not what changed.
+    // Embedding each year instead puts them all on the map (start/end are part of the layer id,
+    // so they do not collide), leaves reusable packages behind, and makes the change readable as
+    // colour change. Here a shared basis IS meaningful: one model, one space, and
+    // align_embedding_colors already numbers same-region repeats.
     { label: 'Change',
       prompt: `Embed this drawn region with the ${model} model for ${sn.over(listJoin(changeYears))}, put each year's embedding on the map on one shared colour basis, and work out from them how much the region changed year to year.` },
     { label: 'Predict',
-      prompt: `Run the available pretrained heads on this drawn region using ${model} embeddings for ${when}, and report the predictions with their validation scores.` },
+      prompt: `Embed this drawn region with the ${model} model for ${when}, then run whatever pretrained heads cover ${model} on that embedding and report each prediction with its validation score. If no head covers ${model}, say so and tell me which models do.` },
   ];
 }
 
@@ -121,7 +128,14 @@ const RS_SUGGESTIONS = [
   'Which satellite embedding models can I use?',
   'Embed Urbana, Illinois with the GSE model',
   'What can you do with satellite embeddings?',
-  'Compare Champaign and Urbana on a shared PCA basis',
+  // Was "Compare Champaign and Urbana on a shared PCA basis" — the heaviest thing on the page
+  // sitting where the lightest ought to be. It embedded two WHOLE cities (~30 km² each, tens of
+  // thousands of tiles) before it could align anything, so the one starter a visitor is most
+  // likely to click ran for minutes and spent imagery quota on the deployment's credential.
+  // A 1 km box each keeps the point of it — one shared basis is what makes two regions
+  // comparable by colour at all — at roughly a thirtieth of the ground, and names GSE, which
+  // is precomputed and returns in seconds rather than being computed on the fly.
+  'Compare 1 km boxes in Champaign and Urbana with GSE on a shared colour basis',
 ];
 
 interface Props {
@@ -185,6 +199,130 @@ function Sources({ response }: { response: any }) {
   );
 }
 
+/** One rendered row: a line, plus any lines folded underneath it. */
+type Row = { line: TraceLine; folded?: TraceLine[] };
+
+/** What the transcript SHOWS, folded from what it stored.
+ *
+ * Two ladders, both of which used to print in full. A ReAct round emits an "asking the model"
+ * line before every tool call — eight identical rows naming the same model, between the rows
+ * that said what actually happened; only the first survives, because the model is worth
+ * stating once. And the graph narrates its own traversal: measured on a one-tool turn, nine of
+ * fifteen rows were routing bookkeeping ("Routing the request", "Routed to orchestrate",
+ * "Orchestrator agent started", "supervisor -> analyze (decision)", "Running analysis
+ * workflow"), five to start and four to stop, against three rows that carried information.
+ * A consecutive run of those collapses to its first line with the rest one click away.
+ *
+ * The first line, not the last, because a run opens by saying what is beginning — the last
+ * line of the closing run is "Supervisor graph completed", which is the least useful string
+ * in the set.
+ *
+ * Folded at RENDER, not at ingest. The array keeps every event, so the stored transcript stays
+ * complete and a later reader is not looking at an edited record. */
+export function foldTrace(trace: TraceLine[]): Row[] {
+  let seenModelLine = false;
+  const kept = trace.filter((t) => {
+    if (t.kind !== 'llm') return true;
+    if (seenModelLine) return false;
+    seenModelLine = true;
+    return true;
+  });
+  const rows: Row[] = [];
+  for (const line of kept) {
+    const prev = rows[rows.length - 1];
+    if (line.kind === 'node' && prev && prev.line.kind === 'node') {
+      (prev.folded ||= []).push(line);
+    } else {
+      rows.push({ line });
+    }
+  }
+  return rows;
+}
+
+/** How many rows the transcript shows: one per fold row plus the rows folded under it. */
+export function visibleSteps(trace: TraceLine[]): number {
+  return foldTrace(trace).reduce((n, r) => n + 1 + (r.folded?.length || 0), 0);
+}
+
+// How much of a trace line shows before it is clamped. A traceback or a tool's argument dict
+// runs to hundreds of characters, and a transcript where every row is a paragraph is unreadable
+// — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
+const TRACE_CLAMP = 140;
+
+function TraceRow({ row }: { row: Row }) {
+  const { line, folded } = row;
+  const long = line.text.length > TRACE_CLAMP;
+  const run = folded?.length || 0;
+  // TWO independent states, because the two things a row can hide are not the same thing.
+  // A run of steps starts SHOWN: this trace is read to find out what the agent did, and a
+  // reader who has to click to see the steps is being asked to guess whether there is
+  // anything behind the click. Collapsing is the deliberate act, not expanding.
+  // A long message still starts CLAMPED — that one hides a 4000-char traceback or an argument
+  // dict, and printing those in full is what made the transcript unreadable to begin with.
+  const [openRun, setOpenRun] = useState(true);
+  const [openText, setOpenText] = useState(false);
+  const toggle = run > 0 ? () => setOpenRun((v) => !v) : () => setOpenText((v) => !v);
+  const open = run > 0 ? openRun : openText;
+  const expandable = long || run > 0;
+  const label = run > 0
+    ? (openRun ? 'Collapse these steps' : `Show ${run} more step${run === 1 ? '' : 's'}`)
+    : (openText ? 'Collapse' : 'Show the whole message');
+  return (
+    <>
+      <div
+        className={`ln ${line.kind || ''}${expandable ? ' clampable' : ''}${open ? ' open' : ''}`}
+        onClick={expandable ? toggle : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        onKeyDown={expandable ? (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        } : undefined}
+        title={expandable ? label : undefined}
+      >
+        {openText || !long ? line.text : `${line.text.slice(0, TRACE_CLAMP)}…`}
+        {run > 0 && <span className="more">{openRun ? `−${run}` : `+${run}`}</span>}
+      </div>
+      {openRun && folded?.map((f, i) => (
+        <div className={`ln ${f.kind || ''} sub`} key={i}>{f.text}</div>
+      ))}
+    </>
+  );
+}
+
+/** The name to show for a download — never the placeholder.
+ *
+ * `collectDownloads` fills `filename` with the literal string "download" when a tool result
+ * carried a url and an id but no name, and several tools did exactly that — so a list of four
+ * artifacts read "download · download · download · download". The tools now send their names;
+ * this is the fallback for anything that still does not, and an id is at least unique and
+ * traceable where a repeated word is neither. */
+function displayName(f: FileRecord): string {
+  const n = (f.filename || '').trim();
+  if (n && n.toLowerCase() !== 'download') return n;
+  return f.file_id ? `unnamed file (${f.file_id})` : 'unnamed file';
+}
+
+/** Extension-aware file glyph. Inline SVG rather than an emoji or an icon font: it inherits
+ *  currentColor, so it stays legible in both themes without a second asset to load. */
+function FileIcon({ name }: { name: string }) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const tag = ({ tif: 'TIF', tiff: 'TIF', png: 'PNG', jpg: 'JPG', jpeg: 'JPG', csv: 'CSV',
+                 geojson: 'GEO', json: 'JSON', npz: 'NPZ', zip: 'ZIP', pdf: 'PDF',
+                 txt: 'TXT', md: 'MD', html: 'HTM' } as Record<string, string>)[ext] || '';
+  return (
+    <svg className="dl-ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"
+         focusable="false">
+      {/* A page with its corner turned. Two paths so the fold reads at 18px, where a single
+          outline with a diagonal notch turns to mush. */}
+      <path d="M14 2.5H7A1.5 1.5 0 0 0 5.5 4v16A1.5 1.5 0 0 0 7 21.5h10a1.5 1.5 0 0 0 1.5-1.5V7z"
+            fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M14 2.5V7h4.5" fill="none" stroke="currentColor" strokeWidth="1.4"
+            strokeLinejoin="round" />
+      {tag && <text x="12" y="17.4" textAnchor="middle" className="dl-ext">{tag}</text>}
+    </svg>
+  );
+}
+
 function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
@@ -194,8 +332,13 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
       <div className="ai-label">I-GUIDE AI{m.streaming && <span className="spin" />}</div>
       {m.trace && m.trace.length > 0 && (
         <details className="reason" open={m.streaming}>
-          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${m.trace.length} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{m.trace.map((t, j) => <div key={j} className={`ln ${t.kind || ''}`}>{t.text}</div>)}</div>
+          {/* The tally counts what is SHOWN. Counting the stored array called a turn with seven
+              tool calls "28 steps", most of them the folded model lines. */}
+          {/* Counts what is SHOWN, and runs now show expanded — so this is every row again,
+              minus the folded model ladder. Counting the collapsed rows instead called a
+              fifteen-row transcript "7 steps" while fifteen rows sat under it. */}
+          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${visibleSteps(m.trace)} steps`}</span><span className="chev">▾</span></summary>
+          <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
         </details>
       )}
       {(hasBody || imgs.length > 0 || m.response) && (
@@ -212,7 +355,18 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
               ))}
             </div>
           )}
-          {files.length > 0 && <div className="files">{files.map((f) => <a key={f.file_id} href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">{f.filename}</a>)}</div>}
+          {files.length > 0 && (
+            <div className="dl">
+              <div className="dl-head">{files.length === 1 ? 'Download' : 'Downloads'}</div>
+              {files.map((f) => (
+                <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
+                   target="_blank" rel="noopener noreferrer" title={displayName(f)}>
+                  <FileIcon name={displayName(f)} />
+                  <span className="dl-name">{displayName(f)}</span>
+                </a>
+              ))}
+            </div>
+          )}
           {m.response && <Sources response={m.response} />}
         </div>
       )}

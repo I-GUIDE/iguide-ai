@@ -18,13 +18,20 @@ rather than by a reconstruction of it.
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
+import itertools
 import json
 import logging
 import os
+import re
 import tempfile
+import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
+from agent_runtime.map_layers import content_key, content_layer_id
+from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,135 @@ _MAX_MODELS_PER_CALL = 5
 # How many saved packages list_embedding_packages will describe. Each one costs opening its .npz
 # to read the manifest, and a listing long enough to need scrolling is not an answer anyway.
 _PACKAGE_LIST_MAX = 15
+# An identical embed_zones call, repeated inside one turn, replayed instead of re-swept. The
+# model does this — the reported Champaign/Urbana turn swept one city twice — and a sweep is the
+# most expensive thing here: one request to the imagery provider per tile, minutes of wall clock,
+# and now that a named area is no longer capped, a duplicate costs a FULL second sweep rather
+# than a cheap partial one. Keyed on every argument that determines the result, so a legitimate
+# repeat (the same polygon for a different year, which is exactly the Change workflow) still runs.
+_ZONE_MEMO: "OrderedDict[str, Tuple[float, str]]" = OrderedDict()
+_ZONE_MEMO_TTL_S = float(os.getenv("RS_EMBED_ZONE_MEMO_TTL_S", "1800"))
+_ZONE_MEMO_MAX = 32
+_ZONE_SCOPE_SEQ = itertools.count(1)
+
+
+def _as_list(value: Any) -> Optional[List[str]]:
+    """One name or several, however the model wrote it.
+
+    A parameter typed List[str] is rejected by pydantic BEFORE the function runs when the model
+    passes a bare string — observed live as `ValidationError: models Input should be a valid
+    list [input_value='gse', input_type=str]`, a whole wasted round trip for a request that was
+    perfectly clear. Writing models="gse" for one model is the natural thing to write, so the
+    signatures accept it and this normalises it. Comma-separated too: it is what a model reaches
+    for next, and splitting it here is cheaper than another rejection.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [str(value)]
+
+
+def _iso_date(value: Optional[str], *, month_end: bool = False) -> Optional[str]:
+    """Accept a month or a full date, return the ISO date the zones service demands.
+
+    embed_region documents its window as MONTHS ("YYYY-MM") and the zones service wants full
+    ISO dates, so a model that had just read embed_region passed "2022-06" here and got
+    `SpecError: TemporalSpec.range expects ISO dates 'YYYY-MM-DD'`. It then retried with
+    "2022-06-01" and succeeded — which is why one request produced two embed_zones calls, and
+    why the first looked like a duplicate sweep rather than the failure it was.
+
+    Two tools over the same imagery should not disagree about what a date looks like. A month
+    widens to the whole month: the START to its first day, the END to its last, so "2022-06" to
+    "2022-09" means June through September inclusive rather than stopping on the 1st.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        year, month = (int(part) for part in text.split("-"))
+        day = calendar.monthrange(year, month)[1] if month_end else 1
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    return text
+
+
+def _zone_memo_scope() -> Optional[str]:
+    """A token for the TURN in flight, or None when there is no turn.
+
+    Scoped to the streaming trace state, which is a ContextVar set once per request — so a
+    replay can only ever serve the call it duplicates, never a later conversation. Process-global
+    would have been wrong twice over: it would replay a result into a turn that never asked for
+    it, and it silently coupled two tests in test_rs_embed_zonal that call this tool with the
+    same arguments and different stubbed responses.
+
+    None means no memo at all: without a trace state there is no turn to be inside — a CLI run,
+    an eval, a unit test — and the duplicate this exists to stop happens inside one.
+    """
+    try:
+        from agent_runtime.streaming_trace import _TRACE_STATE
+
+        state = _TRACE_STATE.get()
+        if state is None:
+            return None
+        # NOT id(): CPython reuses an address once the object is freed, so a later turn whose
+        # state landed on a freed one's address would read the earlier turn's results — the
+        # exact cross-turn replay this scoping exists to prevent, and a test caught it doing so.
+        #
+        # Stamped onto the state. A WeakKeyDictionary would be tidier — no mutation of another
+        # module's object — but _TraceState is a plain @dataclass, so it generates __eq__ and is
+        # therefore UNHASHABLE and cannot be a weak key. Holding a strong reference instead, to
+        # keep an id alive, would pin a turn's sink and handler in memory for the whole TTL.
+        #
+        # This needs _TraceState to accept attributes, which it does today and would not under
+        # `@dataclass(slots=True)`. test_the_scope_resolves_for_a_real_trace_state fails loudly
+        # if that changes, rather than letting the memo quietly stop working.
+        token = getattr(state, "_rs_zone_memo_scope", None)
+        if token is None:
+            token = f"turn{next(_ZONE_SCOPE_SEQ)}"
+            setattr(state, "_rs_zone_memo_scope", token)
+        return str(token)
+    except Exception:  # noqa: BLE001 - the memo must never be the thing that breaks a call
+        return None
+
+
+def _zone_memo_key(**call: Any) -> str:
+    """Every argument that determines the result, order-normalised so a reordered list of
+    zone_ids is the same question rather than a new one."""
+    norm = dict(call)
+    for field in ("zone_ids", "sibling_file_ids"):
+        if field in norm:
+            norm[field] = sorted(str(v) for v in (norm[field] or []))
+    blob = json.dumps(norm, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _zone_memo_get(key: str, *, now: Optional[float] = None) -> Optional[str]:
+    """The stored result for an identical call in THIS turn. Expired entries drop on read."""
+    scope = _zone_memo_scope()
+    if scope is None:
+        return None
+    stamp = time.time() if now is None else now
+    for k in [k for k, (ts, _) in _ZONE_MEMO.items() if stamp - ts > _ZONE_MEMO_TTL_S]:
+        _ZONE_MEMO.pop(k, None)
+    hit = _ZONE_MEMO.get(f"{scope}:{key}")
+    if hit is None:
+        return None
+    _ZONE_MEMO.move_to_end(f"{scope}:{key}")
+    return hit[1]
+
+
+def _zone_memo_put(key: str, result: str, *, now: Optional[float] = None) -> None:
+    """Remember a SUCCESSFUL result. A failure is not cached: the next call should retry it —
+    a wedged service or an expired credential is exactly the case where attempt two works."""
+    scope = _zone_memo_scope()
+    if scope is None:
+        return
+    _ZONE_MEMO[f"{scope}:{key}"] = (time.time() if now is None else now, result)
+    _ZONE_MEMO.move_to_end(f"{scope}:{key}")
+    while len(_ZONE_MEMO) > _ZONE_MEMO_MAX:
+        _ZONE_MEMO.popitem(last=False)
 
 
 def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST",
@@ -332,14 +468,12 @@ def _layer_id(kind: str, hint: Any = None, /, **content: Any) -> str:
     ``hint`` is legibility only, for logs and the DOM. It is itself content-derived — a
     rounded centre, a file id — so it cannot drift while the content stands still. Uniqueness
     never rests on it: two layers with the same hint are still told apart by the digest.
+
+    The rule now lives in ``map_layers.content_layer_id`` so that every tool's layers follow
+    it, not only these. This keeps the ``embed-`` namespace, and the ids it returned before the
+    move are pinned by test so that no existing embedding layer changes its id.
     """
-    blob = json.dumps(content, sort_keys=True, default=str)
-    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
-    bits = ["embed", _slug(kind)]
-    if hint is not None and str(hint).strip():
-        bits.append(_slug(str(hint)))
-    bits.append(digest)
-    return "-".join(bits)
+    return content_layer_id("embed", kind, hint, **content)
 
 
 def _layer_label(base: str, tag: str) -> str:
@@ -459,10 +593,15 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
     def embed_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
                      lat: Optional[float] = None, file_id: Optional[str] = None,
-                     models: Optional[List[str]] = None, start: str = "2022-06",
+                     models: Optional[Union[str, List[str]]] = None, start: str = "2022-06",
                      end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M,
                      name: Optional[str] = None) -> str:
         """Embed a RECTANGLE with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
+
+        This is also the entry point for SEGMENTATION into look-alike zones, CHANGE DETECTION
+        between periods, per-pixel similarity and land-cover-style clustering: there is no separate
+        tool for those, and each is written in code over the embedding package this saves — see
+        COMPOSING FROM THE PACKAGE below.
 
         NAMED US AREA? Do not use this. "the embedding of Urbana" / "of Champaign County"
         wants the administrative boundary, and this tool embeds a box around a point — it
@@ -481,6 +620,52 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         or `lon`+`lat` for a point (a `buffer_m` square around it). A `file_id` is accepted
         only for POINT layers; for polygons use embed_zones, which keeps their shape.
         `start`/`end` are months, "YYYY-MM".
+
+        COMPOSING FROM THE PACKAGE — the second route, not the only one. segment_region,
+        embedding_change and predict_for_region do the common cases in ONE call, server-side, on
+        the NATIVE grid: prefer them when they fit, because the package exports a grid decimated
+        to a cell budget (stride 2 at the default footprint), so clustering it in code clusters
+        every second pixel. Compose when the tool cannot express what was asked — a k it does not
+        take, a metric of your own, more than two periods, a per-pixel change surface — and say
+        that the composed result is at the exported resolution.
+
+        Some work has a tool and must not be written by hand. The trained heads live on the
+        service and are never exported, so predict_from_package is the only route to them and
+        list_prediction_heads says what has been trained. align_embedding_colors puts several
+        regions on ONE shared colour basis; fitting a PCA per region and comparing the colours is
+        the mistake it exists to prevent. list_embedding_packages finds a package saved in an
+        earlier turn when the file_id is no longer to hand — it and predict_from_package both
+        take a filename as well as an id.
+
+        Stage the package into execute_code by passing `embedding_package.file_id` in
+        `input_files` — a file_id an earlier TOOL produced works, not just an upload. Staging has
+        a 200 MB budget across everything attached, and a package carrying a full grid can
+        approach it, so stage the one package you need rather than several. Load it with numpy:
+
+            grid__<model>    (D, H, W) float32 — the per-pixel embedding, north-up (row 0 = maxlat)
+            pooled__<model>  (D,) float32      — one vector for the whole region
+            meta             0-d ndarray of JSON — read it as json.loads(str(z["meta"])); plain
+                             json.loads(z["meta"]) raises TypeError
+
+        meta["models"] is a LIST, one entry per model, and grid_hw / grid_stride / grid_saved_hw
+        are fields of that ENTRY, not of meta itself. A `grid_stride` above 1 means the saved grid
+        is every Nth cell of the native grid_hw, so quote resolution from that entry's
+        grid_saved_hw (equivalently grid__<model>.shape[1:]) and never from grid_hw.
+
+        Then: k-means over the pixel axis for look-alike zones, 1 - cosine between two periods'
+        pooled vectors for how much a place changed, per-pixel cosine for WHERE it changed.
+
+        To deliver it, either polygonize and use add_map_layer — which gets a legend and clickable
+        zones, and is the better answer when the classes matter — or save the array AS AN IMAGE and
+        drape it with add_raster_layer, passing this call's `region_bbox` as bounds. For that
+        second route the PNG must be the pixels themselves, one image pixel per grid cell:
+        PIL.Image.fromarray(rgb).save(...) or plt.imsave(...). A matplotlib FIGURE is the wrong
+        thing to drape — axes, margins, titles and a colorbar all become part of the layer, and
+        the pixels no longer line up with the bounds, so the whole map is silently misregistered.
+
+        Two things to say rather than let the map imply them: clusters are unlabelled, so the same
+        number means nothing across separate runs, and a distance says THAT a place changed, not
+        what changed.
         """
         box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m, polygon_extent_ok=False)
         if isinstance(box, dict):
@@ -489,7 +674,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         avail = _svc("/api/models", method="GET")
         if avail.get("error"):
             return json.dumps({"ok": False, **avail})
-        chosen = [str(m) for m in (models or ["gse"])][:_MAX_MODELS_PER_CALL]
+        # _as_list, not a comprehension: a bare "gse" would iterate CHARACTERS and ask the
+        # service for models g, s and e.
+        chosen = (_as_list(models) or ["gse"])[:_MAX_MODELS_PER_CALL]
         bad = _model_error(chosen, avail.get("models") or [])
         if bad:
             return json.dumps(bad)
@@ -541,7 +728,15 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             out["failed"] = failed
         if pkg:
             rec = _fetch_package(str(res.get("download_url") or ""),
-                                 f"{_slug(name or 'embedding')}_vectors")
+                                 # NOT "embedding_vectors" for everything unnamed. That default
+                                 # gave 32 of the 73 stored packages the same filename, so a
+                                 # later turn naming one could not be answered — the ambiguity
+                                 # refusal exists because of this line. Region, models and
+                                 # period are all known here and make the name identify the
+                                 # file, which a timestamp would not: unique is not the problem,
+                                 # unidentifiable is.
+                                 f"{_slug(name or region_tag or 'embedding')}"
+                                 f"_{'-'.join(chosen)}_{start}_{end}_vectors")
             info: Dict[str, Any] = {"models_saved": pkg.get("models"),
                                     "pooled_vectors": True,
                                     "grids_saved": pkg.get("grids_saved") or []}
@@ -556,15 +751,35 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                         "file_id": rec["file_id"], "filename": rec.get("filename"),
                         "model": layer_model, "months": f"{start}..{end}",
                         "models_in_package": pkg.get("models") or []}
-            # The service caps which grids go into the export (300x300 cells). Say so: a
+            # The service DECIMATES an oversized grid rather than dropping it — the export cap
+            # became a stride, recorded per entry as grid_stride — so a model missing from
+            # grids_saved now means the export genuinely failed for it, not that the region was
+            # too big. Say so: a
             # missing full-resolution grid is otherwise invisible until someone loads the file.
+            else:
+                # The package is the ONLY input to every composed operation — segmentation,
+                # change, prediction — so losing it removes those capabilities for the turn.
+                # Silence here read as "there is no package", and the model would go on to
+                # describe clustering it could not do.
+                info["unavailable"] = (
+                    "the embedding ran, but its vector package could not be fetched from the "
+                    "service, so there is no file to compose from")
+                info["consequence"] = (
+                    "clustering, change detection and prediction all need this file. Say the "
+                    "map layer is here but the per-pixel work is not available this turn — do "
+                    "not describe zones or distances you could not compute.")
+            # A grid too large for the export budget is DECIMATED now, not dropped, so a model
+            # missing from grids_saved means the export genuinely failed for it rather than that
+            # the region was too big.
             dropped = [m["model"] for m in summaries
                        if m["model"] not in (pkg.get("grids_saved") or [])]
             if dropped:
-                info["full_grid_omitted_for"] = dropped
-                info["why"] = ("the per-model grid exceeded the export cap (300x300 cells), so the "
-                               "file holds the pooled vector only — enough for similarity, "
-                               "prediction and comparison, not for per-pixel work")
+                info["grid_missing_for"] = dropped
+                info["why"] = ("no per-pixel grid came back for these models, so the file holds "
+                               "their pooled vector only — enough for similarity, prediction and "
+                               "comparison, not for per-pixel work. An oversized grid is "
+                               "decimated rather than dropped (the manifest gives grid_stride), "
+                               "so this is an export failure, not a size limit.")
             out["embedding_package"] = info
         # One descriptor per model; the client stacks them and the layer list toggles between.
         if layers:
@@ -692,7 +907,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
     def predict_for_region(bbox: Optional[List[float]] = None, lon: Optional[float] = None,
                            lat: Optional[float] = None, file_id: Optional[str] = None,
-                           models: Optional[List[str]] = None, start: str = "2022-06",
+                           models: Optional[Union[str, List[str]]] = None, start: str = "2022-06",
                            end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M) -> str:
         """Run a pretrained downstream head on a region's embedding to PREDICT a value.
 
@@ -704,7 +919,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         if isinstance(box, dict):
             return json.dumps({"ok": False, **box})
         res = _svc("/api/predict", {"geometry": _geometry(box), "start": start, "end": end,
-                                    "models": [str(m) for m in (models or [])],
+                                    "models": _as_list(models) or [],
                                     "buffer_m": int(buffer_m)})
         if res.get("error"):
             return json.dumps({"ok": False, **res})
@@ -722,12 +937,13 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         user refers to an embedding, a layer or a region worked on earlier and the file_id is not
         to hand; then pass that file_id to predict_from_package or align_embedding_colors.
 
-        SCOPE: the file store records no conversation, so this lists what the DEPLOYMENT has
-        saved, not only this conversation. Packages from earlier or other conversations appear
-        too. Match on the region and months rather than on the filename — the default export
-        name is reused for every unnamed region, so one name covers many different places — and
-        do not describe a package as "yours" or "the one from earlier" on the strength of its
-        name alone.
+        SCOPE: this conversation's packages PLUS the deployment's shared ones — every package
+        saved before files were attributed to a conversation, which is most of them. Another
+        conversation's new package is not listed; a shared older one is. So match on the region
+        and months rather than on the filename — the default export name was reused for every
+        unnamed region, so one name covers many different places — and do not describe a package
+        as "yours" or "the one from earlier" on the strength of its name alone. For what THIS
+        conversation actually made, list_conversation_files is the authority.
 
         `has_head` says whether a pretrained head exists for that model, so a package that
         cannot be predicted from is visible as such before anything is attempted.
@@ -773,7 +989,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     "colours comparable. Neither re-embeds.",
         })
 
-    def predict_from_package(file_id: str, models: Optional[List[str]] = None) -> str:
+    def predict_from_package(file_id: str,
+                             models: Optional[Union[str, List[str]]] = None) -> str:
         """Run the pretrained heads on an embedding you ALREADY have — no re-embedding.
 
         `file_id` takes EITHER the `embedding_package.file_id` from an embed_region result — from
@@ -872,7 +1089,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         head_dim = {str(h.get("model")): h.get("dim") for h in (heads.get("models") or [])}
         head_score = {str(h.get("model")): h for h in (heads.get("models") or [])}
 
-        wanted = {str(m).strip().lower() for m in (models or []) if str(m).strip()}
+        wanted = {m.lower() for m in (_as_list(models) or [])}
         if wanted:
             missing = sorted(wanted - {m.lower() for m in vectors})
             vectors = {m: v for m, v in vectors.items() if m.lower() in wanted}
@@ -952,10 +1169,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             out["domain_unverifiable"] = unverifiable
         if "dofa" in usable:
             out["pooling_note"] = (
-                "predict_for_region puts dofa through the model's final norm layer on a square "
-                "or point region, which is a different vector from the one saved here; the saved "
-                "one is what the head was trained on. If both numbers are in play, report them "
-                "as two recipes rather than reconciling them.")
+                "The service's own re-embedding route puts dofa through the model's final norm "
+                "layer on a square or point region, which is a different vector from the one "
+                "saved in the package; the saved one is what the head was trained on. If a dofa "
+                "number from that route is also in play, report the two as different recipes "
+                "rather than reconciling them.")
         out["validation"] = {m: {k: head_score[m].get(k) for k in ("score", "score_name", "n")}
                              for m in usable if m in head_score}
         out["note"] = ("Scored the vectors already saved for this region, so no imagery was "
@@ -966,8 +1184,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                        "being asked about another year or another place.")
         return json.dumps(out)
 
-    def align_embedding_colors(file_ids: List[str], model: Optional[str] = None,
-                               names: Optional[List[str]] = None) -> str:
+    def align_embedding_colors(file_ids: Union[str, List[str]], model: Optional[str] = None,
+                               names: Optional[Union[str, List[str]]] = None) -> str:
         """Re-colour several already-embedded regions on ONE shared PCA basis, so the colours
         mean the same thing in every layer.
 
@@ -981,8 +1199,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
         Pass the `file_id` of each region's embedding package — the .npz embed_region saves as
         `embedding_package.file_id`. They must all carry a grid for the same model; a package
-        whose grid exceeded the export cap holds only the pooled vector and has no pixels to
-        re-colour, and this says so rather than quietly dropping it.
+        whose export genuinely failed holds only the pooled vector and has no pixels to
+        re-colour, and this says so rather than quietly dropping it. A grid that was merely too
+        LARGE is not that case: the service decimates it to a stride and still exports it.
 
         Costs nothing at the imagery provider: it reuses embeddings already paid for, so it is
         always cheaper than embedding the regions again, and it works on regions embedded in
@@ -991,9 +1210,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """
         import numpy as np
 
-        from agent_runtime.file_store import create_output_file_from_path, resolve_file_id
+        from agent_runtime.file_store import (create_output_file_from_path,
+                                              get_file_record, resolve_file_id)
 
-        ids = [str(f).strip() for f in (file_ids or []) if str(f).strip()]
+        ids = _as_list(file_ids) or []
+        labels = _as_list(names) or []
         if len(ids) < 2:
             return json.dumps({
                 "ok": False,
@@ -1020,7 +1241,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if not entry["grids"]:
                 problems.append({"file_id": fid,
                                  "error": "this package holds the pooled vector only — its "
-                                          "grid exceeded the export cap, so there are no "
+                                          "grid export failed, so there are no "
                                           "pixels to re-colour"})
                 continue
             loaded.append(entry)
@@ -1088,8 +1309,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         # The basis the PCA was ACTUALLY fitted on: packages drop out of `loaded` when they
         # cannot be read, hold no grid, or carry no bbox, and those that remain are what set
         # every layer's colours. Digesting the requested list instead would call two different
-        # renderings the same layer.
-        fitted_basis = sorted(str(e["file_id"]) for e in loaded)
+        # renderings the same layer. Each package counts by what it HOLDS: a re-run of
+        # embed_region saves the same vectors under a new file_id.
+        from agent_runtime.file_store import file_content_key
+
+        fitted_basis = sorted(file_content_key(str(e["file_id"])) for e in loaded)
         for idx, (entry, arr, p_) in enumerate(zip(loaded, arrays, proj)):
             h, w = int(arr.shape[1]), int(arr.shape[2])
             img = np.clip((p_ - lo) / (hi - lo + 1e-8), 0.0, 1.0).reshape(h, w, 3)
@@ -1103,8 +1327,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                           "be placed on the map"})
                 continue
             tag = _region_tag(None, bbox)
-            if names and idx < len(names) and str(names[idx]).strip():
-                tag = str(names[idx]).strip()
+            if labels and idx < len(labels) and str(labels[idx]).strip():
+                tag = str(labels[idx]).strip()
             seen_before = used_tags.get(tag, 0)
             used_tags[tag] = seen_before + 1
             if seen_before:
@@ -1137,16 +1361,35 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 # overwrite a raster of somewhere else. `package` is what makes this raster THIS
                 # one, since bbox, model and basis are identical for every layer in the call.
                 superseded or _layer_id("sharedpca", _region_tag(None, bbox),
-                                        package=str(entry["file_id"]), bbox=_round_bbox(bbox),
-                                        model=model, basis=fitted_basis),
+                                        package=file_content_key(str(entry["file_id"])),
+                                        bbox=_round_bbox(bbox), model=model, basis=fitted_basis),
                 # A re-coloured raster points at the SAME vectors as the layer it replaces —
                 # only the colours were refitted — so the pointer has to survive the re-render
                 # or aligning the colours would cost the layer its data.
                 embedding={"file_id": str(entry["file_id"]), "model": model,
                            "recoloured_on_shared_basis": True}))
-            regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
-                            "grid": [h, w], "image_file_id": rec["file_id"],
-                            "download_url": rec.get("download_url")})
+            # TWO files are involved and they must not be conflated: the .npz package this
+            # region came FROM (entry["file_id"]) and the re-coloured .png just rendered
+            # (rec["file_id"]). This used to emit the package's id beside the IMAGE's
+            # download_url, with no filename at all — and the client harvests any object
+            # carrying {download_url, file_id} as one downloadable file. So the download panel
+            # listed three entries labelled "unnamed file (file_...)" whose ids named the
+            # packages while their links fetched the pictures.
+            #
+            # Each file now travels as its own object, complete: id, name and url that all
+            # refer to the same bytes. The image nests rather than sitting under sibling
+            # `image_*` keys, because a flat shape is exactly what let a harvester pair one
+            # file's id with another's url.
+            pkg = get_file_record(str(entry["file_id"])) or {}
+            regions.append({"file_id": entry["file_id"],
+                            "filename": pkg.get("filename"),
+                            "download_url": pkg.get("download_url"),
+                            "label": tag, "bbox": bbox, "grid": [h, w],
+                            "image": {"file_id": rec["file_id"],
+                                      "filename": rec.get("filename"),
+                                      "download_url": rec.get("download_url")},
+                            # Kept flat as well: callers already read this one.
+                            "image_file_id": rec["file_id"]})
 
         if not layers:
             return json.dumps({"ok": False,
@@ -1180,16 +1423,16 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         return json.dumps(out)
 
     return [
-        StructuredTool.from_function(func=list_embedding_models, name="list_embedding_models", metadata=meta),
-        StructuredTool.from_function(func=embed_region, name="embed_region", metadata=meta),
-        StructuredTool.from_function(func=segment_region, name="segment_region", metadata=meta),
-        StructuredTool.from_function(func=embedding_change, name="embedding_change", metadata=meta),
-        StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
-        StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
-        StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
-        StructuredTool.from_function(func=list_embedding_packages, name="list_embedding_packages", metadata=meta),
-        StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
-        StructuredTool.from_function(func=predict_from_package, name="predict_from_package", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_embedding_models), name="list_embedding_models", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(embed_region), name="embed_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(segment_region), name="segment_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(embedding_change), name="embedding_change", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(compare_regions), name="compare_regions", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(align_embedding_colors), name="align_embedding_colors", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_prediction_heads), name="list_prediction_heads", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(list_embedding_packages), name="list_embedding_packages", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(predict_for_region), name="predict_for_region", metadata=meta),
+        StructuredTool.from_function(func=accept_null_defaults(predict_from_package), name="predict_from_package", metadata=meta),
     ]
 
 
@@ -1506,8 +1749,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
     def embed_zones(file_id: str, zone_id_field: Optional[str] = None, model: str = "gse",
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
                     max_tiles: Optional[int] = None, name: Optional[str] = None,
-                    zone_ids: Optional[List[str]] = None,
-                    sibling_file_ids: Optional[List[str]] = None,
+                    zone_ids: Optional[Union[str, List[str]]] = None,
+                    sibling_file_ids: Optional[Union[str, List[str]]] = None,
                     start: Optional[str] = None, end: Optional[str] = None) -> str:
         """Embed one or many POLYGONS — the pixels INSIDE each shape — and map the result.
 
@@ -1531,9 +1774,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         what it looks like from space. Works with any polygon layer: GeoJSON, shapefile,
         GeoPackage.
 
-        `start`/`end` (e.g. "2025-03-01", "2025-05-01") embed a DATE RANGE instead of the
-        whole of `year` — pass both or neither. Use them whenever the user names a period:
-        without them a request for March-May silently becomes a full-year composite.
+        `start`/`end` embed a DATE RANGE instead of the whole of `year` — pass both or neither.
+        Use them whenever the user names a period: without them a request for March-May
+        silently becomes a full-year composite. Either form works, the same as embed_region:
+        a month ("2025-03") or a full date ("2025-03-01"). A month covers all of itself, so
+        "2025-03" to "2025-05" is March through May inclusive.
 
         There is NO tile cap by default, so the sweep fetches every tile the polygons touch
         and the answer covers all of them. Each tile is one request to the imagery provider,
@@ -1559,6 +1804,33 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         there, the per-zone SUM is recoverable exactly, so zones roll up to a coarser
         partition without error.
         """
+        # One name or several, however they were written — a bare string here would iterate
+        # characters into the zone filter and match nothing.
+        zone_ids = _as_list(zone_ids)
+        sibling_file_ids = _as_list(sibling_file_ids)
+        # Every argument that determines the result. A repeat with ANY of them changed is a
+        # different question and runs: same polygon, different year is the Change workflow.
+        memo_key = _zone_memo_key(
+            file_id=file_id, zone_id_field=zone_id_field, model=model, year=year,
+            clusters=clusters, tile_px=tile_px, max_tiles=max_tiles, name=name,
+            zone_ids=sorted(str(z) for z in (zone_ids or [])),
+            sibling_file_ids=sorted(str(f) for f in (sibling_file_ids or [])),
+            start=_iso_date(start), end=_iso_date(end, month_end=True))
+        replayed = _zone_memo_get(memo_key)
+        if replayed is not None:
+            try:
+                prior = json.loads(replayed)
+            except ValueError:  # pragma: no cover - a stored result is our own json
+                prior = None
+            if isinstance(prior, dict):
+                # Says so in the payload the model reads. The trace still shows two calls, and
+                # an answer that describes two sweeps of one city would be wrong about what was
+                # done — the layers and file_ids below are the FIRST call's, not a second set.
+                prior["reused_earlier_run"] = (
+                    "identical to a call already made in this conversation, so the tiles were "
+                    "not fetched again — these are that run's layers and files, not new ones")
+                return json.dumps(prior)
+
         tmp = None
         # Outside the guard below: that try/except exists because `_stage` is missing in some
         # builds, and its fallback branch does not re-import everything. map_layers has no
@@ -1582,6 +1854,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             attached = _index_attached(default_input_file_ids)
             read_path, tmp = _stage_vector_source(file_id, sibling_file_ids, attached)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("embed_zones failed fast: could not read %s: %s", file_id, exc)
             return json.dumps({"ok": False, "error": f"could not read {file_id}: {exc}"})
 
         png_path = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
@@ -1589,16 +1862,55 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
                                 "max_tiles": None if max_tiles is None else int(max_tiles),
-                                "start": start, "end": end,
+                                # A month is widened to the whole month here rather than
+                                # rejected: embed_region documents its window as "YYYY-MM", so
+                                # a model that read that one passes months to this one.
+                                "start": _iso_date(start),
+                                "end": _iso_date(end, month_end=True),
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
                                 "image": True})
         if not res.get("ok"):
+            # Logged, because the trace does not show tool RESULTS — only calls. A failure and
+            # a success render identically as a single `embed_zones(...)` line, which is how a
+            # fast failure followed by a retry read as a duplicate sweep for two rounds of
+            # diagnosis. Until the trace carries results, the server log is the only place the
+            # reason exists.
+            logger.warning("embed_zones failed: %s",
+                           json.dumps({k: v for k, v in res.items()
+                                       if k in ("error", "detail", "hint")})[:400])
             return json.dumps({"ok": False, **{k: v for k, v in res.items() if k != "zones"}})
 
         zones = res["zones"]
         dims = int(res["dims"])
         with_px = [z for z in zones if z["pixels"]]
+
+        # What every zonal layer in this call is computed FROM. Keyed on the REQUEST, so a
+        # swallowed tile error cannot re-identify a layer, and shared by all three so they
+        # agree on what "the same run" means.
+        # The EFFECTIVE period, not the raw arguments. _zonal_service_body sends a range only
+        # when both ends are given and the service falls back to `year` otherwise, so half a
+        # range and no range are the same imagery — digesting the arguments raw split one
+        # composite across two layers, and left `year` deciding identity on runs that ignored it.
+        # The dates are the ones the service was sent, so "2025-03" and "2025-03-01" are one
+        # period, as they are one composite.
+        _period = (("range", _iso_date(start), _iso_date(end, month_end=True))
+                   if start and end else ("year", int(year)))
+        # The polygons as they were READ, never their file_id. A re-ground that fetched the
+        # same boundary again wrote it under a new file_id, and keyed on that id the same
+        # sweep stacked a second raster and a second group layer. A shapefile counts by all
+        # of its parts (source_content_key), so its siblings need no entry of their own, and
+        # a sibling that changes nothing read changes nothing here.
+        from agent_runtime.langchain_geo_tools import source_content_key
+
+        polygons_key = source_content_key(file_id, read_path)
+        zone_content = {"file": polygons_key, "model": model, "period": _period,
+                        "tile_px": int(tile_px), "max_tiles": max_tiles,
+                        "zone_id_field": zone_id_field,
+                        # What the caller ASKED for. len(present) is the count that came back,
+                        # which a swallowed tile error changes without changing the request.
+                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                        "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
 
         # --- CSV of per-zone vectors: the artifact an ML step consumes ---
         stem = artifact_name(name, "csv", default=f"{model}_zone_embeddings")
@@ -1609,32 +1921,19 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             lines.append(",".join([str(z["zone_id"]), str(z["pixels"]), f"{z['area_km2']:.6f}"]
                                   + [f"{v:.6f}" for v in z["mean"]]))
         out_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        csv_rec = create_output_file_from_path(out_csv, filename=out_csv.name)
+        # Recorded so fit_zone_model, which reads this CSV, keys it by the request that made
+        # it rather than by its bytes. The vectors do not depend on how many groups were asked
+        # for, so `clusters` stays out.
+        csv_rec = create_output_file_from_path(
+            out_csv, filename=out_csv.name,
+            content_key=content_key("zone_vectors", polygons_key,
+                                    **{k: v for k, v in zone_content.items() if k != "clusters"}))
 
         # --- the map layer: look-alike groups. Groups are the one view of a 64-dim vector
         # worth looking at — a choropleth of a single dimension is a picture of an arbitrary
         # axis, and it looks like a result.
         layer = None
         cluster_note = None
-        # What every zonal layer in this call is computed FROM. Keyed on the REQUEST, so a
-        # swallowed tile error cannot re-identify a layer, and shared by all three so they
-        # agree on what "the same run" means.
-        # The EFFECTIVE period, not the raw arguments. _zonal_service_body sends a range only
-        # when both ends are given and the service falls back to `year` otherwise, so half a
-        # range and no range are the same imagery — digesting the arguments raw split one
-        # composite across two layers, and left `year` deciding identity on runs that ignored it.
-        _period = (("range", str(start), str(end)) if start and end else ("year", int(year)))
-        zone_content = {"file": file_id, "model": model, "period": _period,
-                        "tile_px": int(tile_px), "max_tiles": max_tiles,
-                        "zone_id_field": zone_id_field,
-                        # The data actually read is assembled from these too: _stage_vector_source
-                        # reconstructs a shapefile from its siblings, so one file_id can name
-                        # different geometry depending on what came with it.
-                        "siblings": sorted(str(f) for f in sibling_file_ids) if sibling_file_ids else None,
-                        # What the caller ASKED for. len(present) is the count that came back,
-                        # which a swallowed tile error changes without changing the request.
-                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
-                        "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
         try:
             import geopandas as gpd
 
@@ -1663,7 +1962,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 gj = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
                     name, "geojson", default=f"{model}_zone_groups")
                 sub.to_file(gj, driver="GeoJSON")
-                rec = create_output_file_from_path(gj, filename=gj.name)
+                rec = create_output_file_from_path(
+                    gj, filename=gj.name,
+                    content_key=content_key("zonegroups", polygons_key, **zone_content))
                 present = sorted({str(v) for v in sub["look_alike_group"]})
                 # The REQUESTED extent, not sub's. `sub` holds only the zones that came back
                 # with pixels, so a single failed tile shrinks it — and an id built on that
@@ -1686,9 +1987,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                         place = f"zone {sub['zone_id'].iloc[0]}"
                     layer = {"url": rec.get("download_url"),
                              # TAKES THE PLACE OF the outline this polygon file already has on
-                             # the map: admin_boundary keys its layer on the same file_id, so
-                             # this redraws it with what the embedding found inside instead of
-                             # stacking a second copy of the same city beside it.
+                             # the map: admin_boundary keys its layer on what the same file
+                             # holds, so this redraws it with what the embedding found inside
+                             # instead of stacking a second copy of the same city beside it.
                              #
                              # Only for ONE zone. The multi-zone branch below keeps its own
                              # k-bearing id on purpose — asking for 3 groups and then 6 is two
@@ -1708,9 +2009,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     layer = {"url": rec.get("download_url"),
                              # k belongs in the id because it is in the label: asking for 3
                              # groups and then 6 is two analyses of the same zones, and the
-                             # second must not silently replace the first. segment_region
-                             # already keys on its k for the same reason.
-                             "id": _layer_id("zonegroups", file_id, **zone_content),
+                             # second must not silently replace the first. A zone raster
+                             # already keys on its k for the same reason. The hint is the
+                             # polygons' content key too: a file_id there would move the id
+                             # whenever the input was re-fetched, digest or no digest.
+                             "id": _layer_id("zonegroups", polygons_key, **zone_content),
                              "label": _layer_label(
                                  f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
@@ -1787,6 +2090,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                                        filename=Path(img["path"]).name)
         if rec_png:
             out["pixel_image"] = {"file_id": rec_png["file_id"],
+                                  # Without this the download panel lists it as
+                                  # "unnamed file (file_...)": the client harvests any
+                                  # {file_id, download_url} pair and substitutes a placeholder
+                                  # for the missing name. The record already knows it.
+                                  "filename": rec_png.get("filename"),
                                   "download_url": rec_png.get("download_url"),
                                   "size_bytes": rec_png.get("size_bytes"),
                                   "size_px": img.get("size_px"),
@@ -1796,7 +2104,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 rec_png, [float(v) for v in img["bounds"]],
                 _layer_label(f"{model} pixel embedding in zones",
                              _region_tag(name, img["bounds"])),
-                _layer_id("zonepixels", file_id, **zone_content)))
+                _layer_id("zonepixels", polygons_key, **zone_content)))
         elif img.get("error"):
             # Say why there is no picture, and what would get one — the vectors are unaffected
             # either way, and an unexplained absence reads as a failed analysis.
@@ -1808,7 +2116,13 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             if len(layers) > 1:
                 out["map_layers"] = layers
             out["on_map"] = True
-        return json.dumps(out)
+        rendered = json.dumps(out)
+        # Only a SUCCESSFUL sweep is remembered. A failure should be retried, not replayed —
+        # a wedged service or an expired credential is exactly the case where the second
+        # attempt is the one that works.
+        if out.get("ok"):
+            _zone_memo_put(memo_key, rendered)
+        return rendered
 
 
     def fit_zone_model(vectors_csv_file_id: str, polygons_file_id: str, label_column: str,
@@ -1828,9 +2142,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         """
         tmp = None
         try:
-            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.file_store import create_output_file_from_path, file_content_key
             from agent_runtime.langchain_geo_tools import (_index_attached, _resolve,
-                                                          _stage_vector_source, artifact_name)
+                                                          _stage_vector_source, artifact_name,
+                                                          source_content_key)
 
             csv_path, _rec = _resolve(vectors_csv_file_id)
             attached = _index_attached(default_input_file_ids)
@@ -1848,7 +2163,17 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             if not res.get("ok"):
                 return json.dumps({"ok": False, **res})
 
-            rec = create_output_file_from_path(gj, filename=gj.name)
+            # Both inputs by what they HOLD. The polygons as read, so a shapefile counts by
+            # its parts and needs no siblings entry. The vectors by the key embed_zones
+            # recorded on its CSV, else by their bytes. Keyed on the two file_ids, a re-ground
+            # that re-ran admin_boundary and embed_zones stacked a second prediction map.
+            polygons_key = source_content_key(polygons_file_id, poly_path)
+            predicted = {"vectors": file_content_key(vectors_csv_file_id),
+                         "polygons": polygons_key, "column": label_column,
+                         "zone_id_field": zone_id_field, "blocks": int(blocks)}
+            rec = create_output_file_from_path(
+                gj, filename=gj.name,
+                content_key=content_key("predicted", polygons_key, **predicted))
             blocked = res["spatial_block_cv"]
             naive = res.get("naive_random_split_cv") or {}
             out = {
@@ -1857,17 +2182,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 "download_url": rec.get("download_url"),
                 "on_map": True,
                 "map_layer": {"url": rec.get("download_url"),
-                              # polygons_file_id as well as the name: _region_tag has no
-                              # bbox to fall back on here, so an unnamed run identified the
-                              # layer by label_column alone and the same column over two
-                              # different areas collided.
-                              "id": _layer_id(
-                                  "predicted", polygons_file_id,
-                                  vectors=vectors_csv_file_id, polygons=polygons_file_id,
-                                  column=label_column, zone_id_field=zone_id_field,
-                                  siblings=sorted(str(f) for f in sibling_file_ids)
-                                  if sibling_file_ids else None,
-                                  blocks=int(blocks)),
+                              # The polygons as well as the name: _region_tag has no bbox to
+                              # fall back on here, so an unnamed run identified the layer by
+                              # label_column alone and the same column over two different
+                              # areas collided.
+                              "id": _layer_id("predicted", polygons_key, **predicted),
                               "label": _layer_label(
                                   f"{label_column} predicted from embeddings",
                                   _region_tag(name)),
@@ -1895,8 +2214,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 import shutil
                 shutil.rmtree(tmp, ignore_errors=True)
 
-    return [StructuredTool.from_function(func=embed_zones, name="embed_zones", metadata=meta),
-            StructuredTool.from_function(func=fit_zone_model, name="fit_zone_model", metadata=meta)]
+    return [StructuredTool.from_function(func=accept_null_defaults(embed_zones), name="embed_zones", metadata=meta),
+            StructuredTool.from_function(func=accept_null_defaults(fit_zone_model), name="fit_zone_model", metadata=meta)]
 
 
 __all__ = ["make_rs_embed_tools", "make_rs_embed_zonal_tools", "run_zonal_worker", "RS_EMBED_URL"]

@@ -219,10 +219,9 @@ def test_numpy_stand_ins_reproduce_scikit_learn(tmp_path):
     numbers are the same, so scikit-learn runs HERE in a fresh subprocess, where torch is
     absent and it is safe, and the two are compared.
     """
-    import subprocess
-
     import numpy as np
 
+    from agent_runtime import fork_safe
     from agent_runtime.rs_embed_zonal_worker import (group_kfold_indices, kfold_indices,
                                                      kmeans_labels, ridge_loo_predict)
 
@@ -262,8 +261,10 @@ json.dump({
     payload.write_text(json.dumps({"X": X.tolist(), "y": y.tolist(),
                                    "groups": groups.tolist(), "blobs": blobs.tolist(),
                                    "alphas": list(alphas), "out": str(result)}))
-    proc = subprocess.run([sys.executable, "-c", script, str(payload)],
-                          capture_output=True, text=True, timeout=300)
+    # fork_safe: a fork of this process after the suite's reprojections can die before exec on a
+    # Mac, and the skip below would then blame scikit-learn for it.
+    proc = fork_safe.run([sys.executable, "-c", script, str(payload)],
+                         capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         pytest.skip(f"scikit-learn unavailable for the comparison: {proc.stderr[-200:]}")
     ref = json.loads(result.read_text())
@@ -422,7 +423,7 @@ def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {
@@ -579,7 +580,7 @@ def test_embed_zones_delivers_the_picture_and_the_groups(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     reply = {"ok": True, "model": "gse", "year": 2022, "zones": 2, "dim": 3,
@@ -689,7 +690,7 @@ def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_pa
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {
@@ -866,3 +867,384 @@ def test_a_date_range_reaches_the_zonal_service():
     assert "start" not in _zonal_service_body({"start": "2025-03-01"})
     assert "end" not in _zonal_service_body({"end": "2025-05-01"})
     assert "start" not in _zonal_service_body({})
+
+
+# --- an identical sweep is replayed, a different one is not --------------------
+def _memo_call(**over):
+    """The argument set embed_zones keys its memo on."""
+    base = dict(file_id="file_poly", zone_id_field="GEOID", model="gse", year=2022,
+                clusters=5, tile_px=200, max_tiles=None, name=None,
+                zone_ids=[], sibling_file_ids=[], start="2022-06", end="2022-09")
+    base.update(over)
+    return base
+
+
+def _a_turn():
+    """A real _TraceState. Not object(): the scope is a WeakKeyDictionary key and a bare
+
+    object cannot be weak-referenced, so a fixture built on one silently disabled the memo and
+    every test below it read as a failure of the code rather than of the fixture.
+    """
+    from agent_runtime.streaming_trace import _TraceState
+
+    return _TraceState(sink=None, handler=None, agent_role="test")
+
+
+@pytest.fixture()
+def in_a_turn(monkeypatch):
+    """A trace state, because the memo is scoped to the turn and is inert without one."""
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    state = _a_turn()
+    token = _TRACE_STATE.set(state)
+    yield T
+    _TRACE_STATE.reset(token)
+
+
+def test_without_a_turn_nothing_is_remembered(monkeypatch):
+    """No trace state means no turn to be inside: a CLI run, an eval, a unit test. The memo
+
+    exists for a duplicate WITHIN one turn, and a process-global cache would replay a result
+    into a conversation that never asked for it.
+    """
+    import agent_runtime.rs_embed_tools as T
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    key = T._zone_memo_key(**_memo_call())
+    T._zone_memo_put(key, '{"ok": true}')
+    assert T._zone_memo_get(key) is None
+    assert len(T._ZONE_MEMO) == 0
+
+
+def test_another_turn_does_not_see_this_ones_result(monkeypatch):
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    monkeypatch.setattr(T, "_ZONE_MEMO", T.OrderedDict())
+    key = T._zone_memo_key(**_memo_call())
+    first = _a_turn()
+    token = _TRACE_STATE.set(first)
+    T._zone_memo_put(key, '{"ok": true}')
+    assert T._zone_memo_get(key) is not None
+    _TRACE_STATE.reset(token)
+
+    second = _a_turn()                            # a different turn
+    token2 = _TRACE_STATE.set(second)
+    assert T._zone_memo_get(key) is None
+    _TRACE_STATE.reset(token2)
+
+
+def test_the_same_sweep_twice_is_one_sweep(in_a_turn):
+    """The reported turn swept one city twice. A sweep is one provider request PER TILE, and
+
+    since a named area is no longer capped the duplicate costs a full second sweep rather than
+    a cheap partial one — which is what promoted this from wasteful to the dominant cost.
+    """
+    T = in_a_turn
+    key = T._zone_memo_key(**_memo_call())
+    assert T._zone_memo_get(key) is None
+    T._zone_memo_put(key, '{"ok": true, "zones_with_pixels": 1}')
+    assert T._zone_memo_get(key) == '{"ok": true, "zones_with_pixels": 1}'
+
+
+def test_the_same_polygon_in_a_different_year_still_runs(in_a_turn):
+    """Same polygon, different period is the CHANGE workflow — three sweeps on purpose."""
+    T = in_a_turn
+    T._zone_memo_put(T._zone_memo_key(**_memo_call()), '{"ok": true}')
+    for differs in ({"start": "2018-06", "end": "2018-09"}, {"model": "satmae"},
+                    {"clusters": 6}, {"zone_ids": ["17019"]}, {"max_tiles": 20}):
+        assert T._zone_memo_get(T._zone_memo_key(**_memo_call(**differs))) is None, differs
+
+
+def test_zone_ids_order_does_not_make_a_new_call(in_a_turn):
+    T = in_a_turn
+    T._zone_memo_put(T._zone_memo_key(**_memo_call(zone_ids=["b", "a"])), '{"ok": true}')
+    assert T._zone_memo_get(T._zone_memo_key(**_memo_call(zone_ids=["a", "b"]))) is not None
+
+
+def test_an_entry_expires(in_a_turn):
+    T = in_a_turn
+    key = T._zone_memo_key(**_memo_call())
+    T._zone_memo_put(key, '{"ok": true}', now=1000.0)
+    assert T._zone_memo_get(key, now=1000.0 + T._ZONE_MEMO_TTL_S - 1) is not None
+    assert T._zone_memo_get(key, now=1000.0 + T._ZONE_MEMO_TTL_S + 1) is None
+
+
+def test_the_memo_is_bounded(in_a_turn):
+    """A long session must not accumulate embedding results in process memory."""
+    T = in_a_turn
+    for i in range(T._ZONE_MEMO_MAX + 8):
+        T._zone_memo_put(T._zone_memo_key(**_memo_call(file_id=f"file_{i}")), '{"ok": true}')
+    assert len(T._ZONE_MEMO) == T._ZONE_MEMO_MAX
+    # The oldest went first, the newest is still there.
+    assert T._zone_memo_get(T._zone_memo_key(**_memo_call(file_id="file_0"))) is None
+    assert T._zone_memo_get(
+        T._zone_memo_key(**_memo_call(file_id=f"file_{T._ZONE_MEMO_MAX + 7}"))) is not None
+
+
+def test_the_scope_resolves_for_a_real_trace_state():
+    """The memo hangs a token on the trace state, which needs _TraceState to accept attributes.
+
+    It does today. Under `@dataclass(slots=True)` it would not, and the memo would stop working
+    SILENTLY — every duplicate sweep running again with nothing to say so. This is the alarm.
+    (A WeakKeyDictionary would avoid the mutation, but a plain dataclass generates __eq__ and is
+    therefore unhashable, so it cannot be a weak key.)
+    """
+    import agent_runtime.rs_embed_tools as T
+    from agent_runtime.streaming_trace import _TRACE_STATE
+
+    state = _a_turn()
+    token = _TRACE_STATE.set(state)
+    try:
+        scope = T._zone_memo_scope()
+        assert scope is not None, "the memo is inert: _TraceState no longer accepts attributes"
+        assert T._zone_memo_scope() == scope, "the same turn must resolve to the same scope"
+    finally:
+        _TRACE_STATE.reset(token)
+
+
+# --- a month and a date mean the same thing to both tools ----------------------
+def test_a_month_is_widened_to_the_whole_month():
+    """embed_region documents its window as "YYYY-MM"; the zones service demands full ISO.
+
+    A model that had read embed_region passed "2022-06" here, got `SpecError: TemporalSpec.range
+    expects ISO dates 'YYYY-MM-DD'`, retried with "2022-06-01" and succeeded — which is why one
+    request produced two embed_zones calls and why the first looked like a duplicate sweep.
+    """
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-06") == "2022-06-01"
+    assert _iso_date("2022-09", month_end=True) == "2022-09-30"
+
+
+def test_the_end_of_a_month_is_its_last_day_not_its_first():
+    """Otherwise "2022-06" to "2022-09" would stop on 1 September and quietly drop a month."""
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-02", month_end=True) == "2022-02-28"
+    assert _iso_date("2024-02", month_end=True) == "2024-02-29"      # leap year
+
+
+def test_a_full_date_is_left_alone():
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date("2022-06-15") == "2022-06-15"
+    assert _iso_date("2022-06-15", month_end=True) == "2022-06-15"
+
+
+def test_no_window_stays_no_window():
+    """None means "the whole of `year`" — widening it to a date would silently narrow the run."""
+    from agent_runtime.rs_embed_tools import _iso_date
+
+    assert _iso_date(None) is None
+    assert _iso_date("") is None
+
+
+def test_the_memo_sees_a_month_and_its_date_as_one_call(in_a_turn):
+    """The retry that produced the second record passes the SAME window in the other spelling."""
+    T = in_a_turn
+    as_month = T._zone_memo_key(**_memo_call(start="2022-06", end="2022-09"))
+    T._zone_memo_put(as_month, '{"ok": true}')
+    # embed_zones normalises before keying, so both spellings resolve to one entry.
+    assert T._zone_memo_key(**_memo_call(start="2022-06-01", end="2022-09-30")) != as_month, (
+        "the helper normalises at the call site, not inside _zone_memo_key")
+
+
+# --- the trace says what came back, not only that something was called ---------
+def test_a_failure_is_the_headline():
+    """The line this whole change exists for. A tool failing in 1.6s and being retried looked
+
+    exactly like the same tool running twice, because the trace showed calls and never results —
+    two wrong diagnoses came out of that in one afternoon.
+    """
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    out = _outcome(_json.dumps({"ok": False,
+                                "error": "SpecError: TemporalSpec.range expects ISO dates."}))
+    assert out.startswith("failed — ")
+    assert "TemporalSpec" in out
+
+
+def test_a_count_is_reported_with_its_noun():
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "count": 8})) == "8 results"
+    assert _outcome(_json.dumps({"ok": True, "count": 1})) == "1 result"
+    assert _outcome(_json.dumps({"ok": True, "count": 0})) == "0 results"
+
+
+def test_zero_results_is_said_rather_than_omitted():
+    """A search that found nothing is the single most useful thing the line can report."""
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "count": 0})) == "0 results"
+    assert _outcome(_json.dumps({"ok": True, "documents": []})) == "0 documents"
+
+
+def test_layers_and_files_have_their_own_headline():
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome(_json.dumps({"ok": True, "map_layers": [1, 2, 3]})) == "3 layers on the map"
+    assert _outcome(_json.dumps({"ok": True, "map_layer": {"id": "x"}})) == "1 layer on the map"
+    assert _outcome(_json.dumps({"ok": True, "filename": "urbana.npz"})) == "urbana.npz"
+
+
+def test_an_unrecognised_shape_says_nothing_rather_than_guessing():
+    """Returning None leaves the duration, which is still worth having. Inventing a summary for
+
+    a shape the tools do not produce would put a wrong number in the one line a reader trusts.
+    """
+    from agent_runtime.streaming_trace import _outcome
+
+    assert _outcome("not json at all") is None
+    assert _outcome(None) is None
+    assert _outcome('{"something": "unfamiliar"}') is None
+
+
+def test_the_repair_story_is_emitted(monkeypatch):
+    """A failure, a retry naming it, and a recovery saying how many attempts it took.
+
+    One retry sits BELOW the dead-end detector's threshold of two, so without these events a
+    turn that quietly needed a second attempt reports nothing at all — which is how a format
+    mismatch between two sibling tools survived unnoticed.
+    """
+    import agent_runtime.streaming_trace as ST
+
+    seen = []
+    handler = ST.StreamingTraceCallbackHandler.__new__(ST.StreamingTraceCallbackHandler)
+    handler._lock = __import__("threading").Lock()
+    handler._tool_runs = {}
+    handler._tool_failures = {}
+    handler._state = None
+    monkeypatch.setattr(handler, "_emit", lambda ev, data: seen.append((ev, data)))
+
+    handler.on_tool_start({"name": "embed_zones"}, "{}", run_id="r1")
+    handler.on_tool_end('{"ok": false, "error": "SpecError: expects ISO dates"}', run_id="r1")
+    handler.on_tool_start({"name": "embed_zones"}, "{}", run_id="r2")
+    handler.on_tool_end('{"ok": true, "zones_with_pixels": 1}', run_id="r2")
+
+    kinds = [ev for ev, _ in seen]
+    assert "tool_retry" in kinds, "the second call must say what it is retrying"
+    assert "tool_recovered" in kinds, "a success after a failure must not pass silently"
+
+    retry = next(d for ev, d in seen if ev == "tool_retry")
+    assert "SpecError" in retry["message"], "the retry names the error it is retrying"
+    recovered = next(d for ev, d in seen if ev == "tool_recovered")
+    assert recovered["attempts"] == 2
+    assert "attempt 2" in recovered["message"]
+
+
+def test_a_clean_run_says_nothing_about_repair(monkeypatch):
+    """No failure, no retry line, no recovery line — the common case stays quiet."""
+    import agent_runtime.streaming_trace as ST
+
+    seen = []
+    handler = ST.StreamingTraceCallbackHandler.__new__(ST.StreamingTraceCallbackHandler)
+    handler._lock = __import__("threading").Lock()
+    handler._tool_runs = {}
+    handler._tool_failures = {}
+    handler._state = None
+    monkeypatch.setattr(handler, "_emit", lambda ev, data: seen.append((ev, data)))
+
+    handler.on_tool_start({"name": "keyword_search"}, "{}", run_id="r1")
+    handler.on_tool_end('{"ok": true, "count": 8}', run_id="r1")
+    kinds = [ev for ev, _ in seen]
+    assert "tool_retry" not in kinds and "tool_recovered" not in kinds
+    assert next(d for ev, d in seen if ev == "tool_result")["outcome"] == "8 results"
+
+
+def test_a_toolmessage_is_unwrapped_before_it_is_read():
+    """LangChain hands on_tool_end a ToolMessage in some versions and a raw string in others.
+
+    _short_text stringifies either, so `content` looked right while the outcome came back empty
+    and the trace line showed a bare duration — caught only by watching a real turn.
+    """
+    from agent_runtime.streaming_trace import _outcome
+
+    class ToolMessage:
+        def __init__(self, content):
+            self.content = content
+
+    assert _outcome(ToolMessage('{"documents": [1, 2, 3]}')) == "3 documents"
+    assert _outcome(ToolMessage('{"ok": false, "error": "boom"}')) == "failed — boom"
+    assert _outcome(b'{"count": 8}') == "8 results"
+
+
+# --- one name or several, however the model wrote it ---------------------------
+def test_a_bare_string_is_one_name_not_three_characters():
+    """Observed live: `ValidationError: models Input should be a valid list
+
+    [input_value='gse', input_type=str]` — pydantic rejected the call before the function ran,
+    and the model retried. Worse than the rejection would have been accepting it: a bare string
+    iterated as characters asks the service for models g, s and e.
+    """
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list("gse") == ["gse"]
+    assert _as_list(["gse"]) == ["gse"]
+
+
+def test_comma_separated_is_accepted_too():
+    """What a model reaches for once it knows a list is wanted. Splitting here is cheaper than
+
+    another rejection."""
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list("gse,satmae") == ["gse", "satmae"]
+    assert _as_list("gse, satmae , dofa") == ["gse", "satmae", "dofa"]
+
+
+def test_absent_stays_absent():
+    """None means "the default", and turning it into [] would mean "explicitly none"."""
+    from agent_runtime.rs_embed_tools import _as_list
+
+    assert _as_list(None) is None
+    assert _as_list("") == []
+
+
+def test_the_list_parameters_accept_a_scalar_in_their_schema():
+    """The coercion is useless if pydantic rejects the call first, so the ANNOTATIONS have to
+
+    admit a string — that is where the ValidationError came from.
+    """
+    import inspect
+
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    by_name = {t.name: t for t in make_rs_embed_tools()}
+    for tool, param in (("embed_region", "models"), ("predict_for_region", "models"),
+                        ("predict_from_package", "models"),
+                        ("align_embedding_colors", "file_ids"),
+                        ("align_embedding_colors", "names")):
+        ann = str(inspect.signature(by_name[tool].func).parameters[param].annotation)
+        assert "str" in ann and "List" in ann, f"{tool}.{param} still refuses a bare string: {ann}"
+
+
+def test_a_traceback_keeps_the_frame_that_names_the_error():
+    """The row clamps at 140 in the transcript and expands on click, so the cap in the emitter
+
+    decides what there is to expand INTO. At 140 a traceback lost its last frame — the only part
+    worth reading — and the expand revealed a message that was already truncated.
+    """
+    import json as _json
+
+    from agent_runtime.streaming_trace import _outcome
+
+    tb = ("Traceback (most recent call last):\n"
+          '  File "/work/script.py", line 16, in <module>\n'
+          "    labels = kmeans.fit_predict(pixels)\n"
+          + "  ...intermediate frame...\n" * 8
+          + "ValueError: Found array with dim 3. KMeans expected <= 2.")
+    out = _outcome(_json.dumps({"ok": False, "error": tb}))
+    assert "ValueError: Found array with dim 3" in out, "the error itself must survive the cap"
+    assert len(out) > 140, "and there must be more than the clamp shows, or expanding is pointless"

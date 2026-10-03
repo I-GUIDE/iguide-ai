@@ -309,6 +309,12 @@ _AUDIT_PROMPT = (
     '* "absent" - you searched the evidence AND the execution record and found NO span on this\n'
     '  subject at all: the number, name, venue, price or event simply does not occur anywhere.\n'
     '  Set evidence_quote to "none".\n'
+    'ELIDED RECORDS. A record may carry a marker like "... [4213 chars elided] ...". That text\n'
+    'was cut to fit, NOT withheld: what it held is unknown to you, so its absence is not\n'
+    'evidence that a claim is unsupported. When a claim is on the SUBJECT of an elided section -\n'
+    'the same tool, the same list, the same file - and you can find no span for it, mark it\n'
+    '"absent" but say in the reason that the record was TRUNCATED rather than that the subject\n'
+    'never occurs, and treat it as a minor over-reach rather than an invented specific.\n'
     '\n'
     'STEP 2 - VERDICT, DERIVED ONLY FROM THE LEDGER.\n'
     '* issues = exactly the rows whose status is "contradicted" or "absent", one issue each.\n'
@@ -468,6 +474,21 @@ def _compact_for_audit(obj: Any, _depth: int = 0) -> Any:
     return obj
 
 
+def _elided(text: str, max_chars: int) -> str:
+    """*text* capped at *max_chars*, and SAYING SO when it was cut.
+
+    A blind slice makes a cut span indistinguishable from a span that was never there — and the
+    auditor's rule for "absent" is "you searched and found nothing", so a claim supported at
+    char 9000 of an 8000-char cap comes back as an invented specific at high severity, over an
+    answer that was right. `_render_execution_record` already marked its cut; prior_actions and
+    the environment lines did not, which is the half that produced a false caveat on a correct
+    cross-turn answer. The marker is worded the same in both, so the prompt explains it once.
+    """
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n... [{len(text) - max_chars} chars elided] ..."
+
+
 def _render_execution_record(key: str, value: Any, max_chars: int) -> str:
     """One execution-record section, compacted, and cut at BOTH ends rather than just the head.
 
@@ -499,9 +520,27 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
     if not execution_context:
         return "(no tools were executed)"
     if isinstance(execution_context, str):
-        return execution_context[:max_chars]
+        return _elided(execution_context, max_chars)
     parts: List[str] = []
     if isinstance(execution_context, dict):
+        # FIRST, because it is the turn under audit and everything after it may be elided.
+        #
+        # Earlier turns reach the auditor as purpose-built lines — `tool(args) -> facts`, and
+        # `FAILED tool(args) -> DID NOT RUN: <error>`. The CURRENT turn reached it only as a
+        # JSON dump of the peers' results, so the turn whose answer was on trial was the one
+        # described worst: a tool's ARGUMENTS were quotable for every turn except this one, and
+        # a failed call looked like any other entry. An answer saying "embedded for 2022" is
+        # grounded by `embed_zones(year=2022)`, which is an argument, not a result.
+        this_turn = execution_context.get("this_turn")
+        if this_turn:
+            rendered_turn = ("\n".join(str(p) for p in this_turn)
+                             if isinstance(this_turn, (list, tuple)) else str(this_turn))
+            parts.append("tool calls and results from THIS TURN, the one being audited (first-"
+                         "class grounding, exactly like the evidence — an ARGUMENT grounds a "
+                         "claim about what was asked for, and a line beginning FAILED means "
+                         "that tool produced NOTHING, so a claim resting on it is "
+                         "contradicted, not merely absent):\n"
+                         + _elided(rendered_turn, max(max_chars, _EXEC_RECORD_MAX_CHARS)))
         # The execution record gets the SAME budget as prior_actions: the auditor should not
         # see less of the turn it is auditing than of earlier ones.
         record_cap = max(max_chars, _EXEC_RECORD_MAX_CHARS)
@@ -529,7 +568,7 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
                             else str(env))
             parts.append("facts about the environment this answer was produced in (first-class "
                          "grounding: quote these spans when the answer describes them):\n"
-                         + rendered_env[:max_chars])
+                         + _elided(rendered_env, max_chars))
         prior = execution_context.get("prior_actions")
         if prior:
             rendered = ("\n".join(str(p) for p in prior) if isinstance(prior, (list, tuple))
@@ -537,9 +576,9 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
             parts.append("tool calls and results from EARLIER TURNS of this same conversation "
                          "(the agent legitimately answers follow-up questions from these — treat "
                          "them as grounding exactly like this turn's tool output):\n"
-                         + rendered[:max(max_chars, _PRIOR_ACTIONS_MAX_CHARS)])
+                         + _elided(rendered, max(max_chars, _PRIOR_ACTIONS_MAX_CHARS)))
     else:
-        parts.append(json.dumps(execution_context, default=str)[:max_chars])
+        parts.append(_elided(json.dumps(execution_context, default=str), max_chars))
     return "\n".join(parts) if parts else "(no tools were executed)"
 
 

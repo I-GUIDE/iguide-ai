@@ -132,6 +132,10 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "analyze and export. A TIGER .zip is read directly by file_id; an EXTRACTED shapefile "
     "is several files (.shp/.shx/.dbf/.prj) — just pass the .shp's file_id (or any one "
     "component); the tool auto-finds the rest among the attached files.\n"
+    "FILES THIS CONVERSATION HAS: `list_conversation_files` is the record — ask it. The "
+    "transcript is not a record (earlier links get trimmed from context) and neither is the "
+    "sandbox working directory, which holds scratch files and not the user's artifacts. "
+    "Never answer 'what did you save' by listing a directory in execute_code.\n"
     + VISUALIZATION_ROUTES_RULE
 )
 
@@ -172,6 +176,10 @@ CODE_PEER_PROMPT = (
     "any one component) — the tool auto-finds the rest among the attached files. If you read "
     "it in execute_code instead, geopandas needs the whole shapefile set — prefer a .zip via "
     "input_files, and include geopandas in `dependencies`.\n"
+    "FILES THIS CONVERSATION HAS: `list_conversation_files` is the record — ask it. The "
+    "transcript is not a record (earlier links get trimmed from context) and neither is the "
+    "sandbox working directory, which holds scratch files and not the user's artifacts. "
+    "Never answer 'what did you save' by listing a directory in execute_code.\n"
     "When the evidence references ingested knowledge-base blocks (by doc_id), call "
     "get_kb_block(doc_id) to read the FULL source of a referenced function/notebook and "
     "REUSE its logic verbatim instead of stubbing loaders or inventing local file paths. "

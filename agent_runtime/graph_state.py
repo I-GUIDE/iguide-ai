@@ -34,6 +34,20 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     "qgis_metric_buffer",
     "pyqgis_layer_summary",
     "qgis_map_image",
+    # Elevation. Needs no credential and no attached file — the region can be a bbox, a point,
+    # or a boundary the same turn just fetched — so it belongs to the analysis intent rather
+    # than to the upload-gated set. On the supervisor path the peers get their tools directly
+    # and never consult this set; this entry is what keeps it from being stripped on the
+    # smart-routing path, where a name absent from every set is registered and unreachable.
+    "dem_for_region",
+    # The raster -> zone bridge. Its inputs are file_ids, but they are ones the same turn
+    # PRODUCED (a DEM, a boundary) rather than ones a user uploaded, so it is not upload-gated
+    # either; a turn that asks for elevation per tract reaches both of these or neither.
+    "zonal_stats_for_raster",
+    # Arithmetic on a DEM this deployment already fetched — no service, no credential, and the
+    # same reachability as dem_for_region, which is the tool a turn arrives at them through.
+    "terrain_derivative",
+    "inundation_at_level",
 }
 
 DISCOVERY_TOOL_NAMES: set[str] = {
@@ -69,6 +83,7 @@ FILE_TOOL_NAMES: set[str] = {
     "inspect_file_for_analysis",
     "write_text_file",
     "write_output_file",
+    "list_conversation_files",
 }
 
 SKILL_TOOL_NAMES: set[str] = {

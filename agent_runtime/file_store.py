@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
+from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -83,6 +87,15 @@ def _public_base_url() -> str:
     origin they call — robust across port mappings and proxies. Set ``AGENT_PUBLIC_BASE_URL``
     when clients can't do that resolution and need ready-to-use absolute URLs.
     """
+    # Local mode ignores it. The main checkout's .env sets it to the PRODUCTION agent, so a laptop
+    # inheriting it hands out links to agent.i-guide.io for files that exist only on the laptop —
+    # each one a 404 ("unknown file_id") that reads like a lost file rather than a wrong host.
+    try:
+        from agent_runtime import deployment_mode
+        if deployment_mode.is_local():
+            return ""
+    except ValueError:
+        pass  # an invalid AGENT_MODE is reported where it is read; it does not decide URLs
     base = (os.getenv("AGENT_PUBLIC_BASE_URL") or "").strip().rstrip("/")
     return base if base.lower().startswith(("http://", "https://")) else ""
 
@@ -261,8 +274,81 @@ def resolve_file_id(file_id: str) -> Path:
     return path
 
 
+# Which conversation is writing. A ContextVar because the store is called from deep inside tool
+# code that has no idea what a session is — the same shape the streaming trace state uses, set
+# once per request at the edge. JWT will replace WHERE this value comes from, not what it does.
+_SESSION: ContextVar[Optional[str]] = ContextVar("agent_file_store_session", default=None)
+# Sentinel: `session=None` means "search every conversation", which is different from
+# "the caller did not say", and a default of None could not tell them apart.
+_UNSET = object()
+
+
+def set_session(session_id: Optional[str]) -> Any:
+    """Bind the conversation for this request. Returns a token for ContextVar.reset."""
+    return _SESSION.set(str(session_id).strip() or None if session_id else None)
+
+
+def reset_session(token: Any) -> None:
+    try:
+        _SESSION.reset(token)
+    except Exception:  # noqa: BLE001 - a stale token must not break a response
+        pass
+
+
+def current_session() -> Optional[str]:
+    return _SESSION.get()
+
+
+# ---------------------------------------------------------------------------
+# WHOSE file this is (token mode), as distinct from WHICH CONVERSATION wrote it
+# ---------------------------------------------------------------------------
+# Two independent axes, and conflating them loses one of them: a user has many conversations,
+# and in dev/demo there is no user at all. `session` keeps answering "which conversation", and
+# `owner_id` answers "whose". Outside token mode `owner_id` is None on every new record and
+# nothing changes — scoping stays exactly the per-conversation behaviour it is today.
+#
+# The value comes from the identity ContextVar rather than a second one of our own, so there is
+# one place a caller is established and one place it can be wrong.
+
+
+def current_owner() -> Optional[str]:
+    """The signed-in user's id, or None when this deployment does not identify anyone."""
+    try:
+        from agent_runtime import identity
+    except Exception:  # noqa: BLE001 - identity is optional; the store predates it
+        return None
+    return identity.current_user_id()
+
+
+def record_owner(record: Dict[str, Any]) -> Optional[str]:
+    value = (record or {}).get("owner_id")
+    return str(value).strip() or None if value else None
+
+
+def may_read(record: Dict[str, Any], *, allow_unowned: bool = True) -> bool:
+    """Whether the CURRENT caller may read this record.
+
+    With no caller — dev, demo, or a service request — this is always True and the store behaves
+    exactly as it did before ownership existed.
+
+    ``allow_unowned`` decides the one genuinely awkward case: 1,325 records predate ownership
+    and cannot be attributed to anyone. Treating them as readable keeps every existing reuse
+    working; treating them as denied is the safe reading for a browser download. The two callers
+    want different answers, so neither is hardcoded here.
+    """
+    caller = current_owner()
+    if not caller:
+        return True
+    owner = record_owner(record)
+    if owner is None:
+        return allow_unowned
+    return owner == caller
+
+
 def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
-               kind: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+               kind: Optional[str] = None, limit: int = 20,
+               session: Any = _UNSET,
+               include_unowned: bool = True) -> List[Dict[str, Any]]:
     """Stored file records, newest first, optionally narrowed by name / extension / kind.
 
     A ``file_id`` has been the store's only handle, and a ``file_id`` is exactly what a later
@@ -275,11 +361,20 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
     finds its file. Ordering is by mtime, because records carry no timestamp of their own; ties
     break on file_id so the result is deterministic.
 
+    ``include_unowned=False`` narrows the result to records this conversation actually wrote.
+    The default keeps unstamped records visible, which is right for REUSE — a saved embedding
+    package is worth offering whoever asks — and wrong for a question about this conversation,
+    where "the files you made" must not be answered with 1,325 files from everyone else.
+
     There is no index — records are one json file each — so this scans the metadata directory,
     which is the same scan ``create_output_file_from_path`` already does to honour ``overwrite``.
     """
     needle = (name or "").strip().lower()
     want_suffix = (suffix or "").strip().lower()
+    # THIS conversation's files by default. A record written before sessions existed has no
+    # `session` and stays visible to everyone: the store holds 1,325 of them and hiding the lot
+    # would break every reuse the demo depends on. Pass session=None to search across all.
+    want_session = current_session() if session is _UNSET else session
     out: List[Dict[str, Any]] = []
     for meta_path in _metadata_dir().glob("*.json"):
         try:
@@ -292,6 +387,16 @@ def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
         if want_suffix and not filename.lower().endswith(want_suffix):
             continue
         if needle and needle not in filename.lower():
+            continue
+        owner = record.get("session")
+        if want_session and owner and owner != want_session:
+            continue
+        if want_session and not owner and not include_unowned:
+            continue
+        # Another user's file is never a candidate, in any conversation. Unowned records stay
+        # visible: they are the legacy reuse pool, they were created by a deployment that
+        # identified nobody, and hiding them would break the reuse this lookup exists for.
+        if not may_read(record, allow_unowned=True):
             continue
         try:
             path = _record_path(record)
@@ -322,7 +427,10 @@ def resolve_file_ref(ref: str, *, suffix: Optional[str] = None
         return resolve_file_id(text), require_file_record(text), []
     except Exception:  # noqa: BLE001 - not an id, so try it as a name
         pass
-    matches = find_files(name=text, suffix=suffix)
+    # A high limit on purpose: the CALLER reports how many matched, and find_files' default page
+    # size of 20 made that count the page size rather than the truth — "20 saved packages match"
+    # where 32 did. The caller still shows only a handful.
+    matches = find_files(name=text, suffix=suffix, limit=500)
     if not matches:
         raise ValueError(f"no stored file matches {text!r}")
     first = matches[0]
@@ -375,6 +483,8 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
         "file_id": file_id,
         "filename": original_name,
         "kind": "upload",
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -383,20 +493,49 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
     return _with_public_url(_write_record(record))
 
 
+def _output_to_replace(safe_name: str) -> Optional[Dict[str, Any]]:
+    """The record ``overwrite=True`` may reuse: an output named ``safe_name`` that THIS
+    conversation wrote for THIS caller, the newest if there are several. None otherwise.
+
+    This used to be the first output with that name in directory order, from any conversation
+    and any owner, and the write then re-stamped it with the current ones. qgis_metric_buffer
+    passed overwrite=True under its default name "buffer.geojson", so one user's buffer took over
+    another's file_id: the first user's link served the second user's bytes, and the record left
+    the conversation that made it. find_files was scoped to the conversation and the owner; this
+    scan never was.
+
+    Nothing is reused when no conversation is bound, because the records that would match are
+    the unstamped legacy pool that every conversation reads. The owner must match exactly, so a
+    borrowed conversation id does not reach another user's file. In dev and demo nobody is
+    identified and the owner is None on both sides.
+    """
+    session = current_session()
+    if not session:
+        return None
+    owner = current_owner()
+    candidates: List[Tuple[float, str, Dict[str, Any]]] = []
+    for meta_path in _metadata_dir().glob("*.json"):
+        try:
+            record = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a half-written record must not break a write
+            continue
+        if (record.get("kind") != "output" or record.get("filename") != safe_name
+                or record.get("session") != session or record_owner(record) != owner):
+            continue
+        try:
+            mtime = _record_path(record).stat().st_mtime
+        except Exception:  # noqa: BLE001 - its data is gone, so there is nothing to replace
+            continue
+        candidates.append((mtime, str(record.get("file_id")), record))
+    # Newest first, as find_files and resolve_file_ref order them, so the file replaced is the
+    # one a lookup by this name finds and the link the model gave last.
+    return max(candidates, key=lambda c: c[:2])[2] if candidates else None
+
+
 def create_output_file(filename: str, content: str, overwrite: bool = False) -> Dict[str, Any]:
     maybe_sweep_expired_files()
     safe_name = secure_filename(filename or "agent_output.txt") or "agent_output.txt"
-    existing_record: Optional[Dict[str, Any]] = None
-
-    if overwrite:
-        for meta_path in _metadata_dir().glob("*.json"):
-            try:
-                record = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if record.get("kind") == "output" and record.get("filename") == safe_name:
-                existing_record = record
-                break
+    existing_record = _output_to_replace(safe_name) if overwrite else None
 
     if existing_record:
         file_id = str(existing_record["file_id"])
@@ -411,6 +550,11 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
@@ -423,6 +567,7 @@ def create_output_file_from_path(
     source_path: str | Path,
     filename: Optional[str] = None,
     overwrite: bool = False,
+    content_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     maybe_sweep_expired_files()
     source = Path(source_path).expanduser().resolve()
@@ -430,17 +575,7 @@ def create_output_file_from_path(
         raise ValueError(f"source file does not exist: {source}")
 
     safe_name = secure_filename(filename or source.name or "agent_output.bin") or "agent_output.bin"
-    existing_record: Optional[Dict[str, Any]] = None
-
-    if overwrite:
-        for meta_path in _metadata_dir().glob("*.json"):
-            try:
-                record = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if record.get("kind") == "output" and record.get("filename") == safe_name:
-                existing_record = record
-                break
+    existing_record = _output_to_replace(safe_name) if overwrite else None
 
     if existing_record:
         file_id = str(existing_record["file_id"])
@@ -455,17 +590,104 @@ def create_output_file_from_path(
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
+        # Which conversation produced this. Absent on everything written before this existed,
+        # and find_files treats that absence as "visible to all" so the demo's existing 1,325
+        # files stay reachable rather than vanishing.
+        "session": current_session(),
+        "owner_id": current_owner(),
         "path": str(relative_path),
         "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
+    # What the file HOLDS, as its producer derived it from its inputs — read back by
+    # file_content_key when this file becomes the input to the next step.
+    if content_key:
+        record["content_key"] = str(content_key)
     return _with_public_url(_write_record(record))
+
+
+# ---------------------------------------------------------------------------
+# WHAT a file holds, as distinct from WHICH write produced it
+# ---------------------------------------------------------------------------
+# A file_id names one write. A step that is re-run writes the same thing again under a NEW
+# file_id, so anything keyed on the id treats the repeat as new. Observed 2026-10-01: a
+# re-grounding pass re-ran admin_boundary for Champaign, the second write was byte-identical
+# to the first, and because the map layer was keyed on the file_id the map ended up holding
+# two copies of the same outline.
+#
+# GDAL's GeoJSON writer puts the layer name, which is the output filename, into the file as a
+# top-level "name" member. The two 2 km buffers of that run differed in that member and in
+# nothing else, so hashing raw bytes would have told them apart. Only that one member, in the
+# position GDAL writes it, is dropped before hashing.
+_GDAL_LAYER_NAME = re.compile(
+    rb'^(\s*\{\s*"type"\s*:\s*"FeatureCollection"\s*,\s*)"name"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*')
+_DIGEST_HEAD_BYTES = 4096
+
+
+@lru_cache(maxsize=512)
+def _content_digest(path: str, size: int, mtime_ns: int) -> str:
+    """sha1 of a file's bytes without GDAL's layer-name member. size and mtime_ns key the
+    cache, so a file rewritten in place (qgis_metric_buffer overwrites by name) is re-read."""
+    digest = hashlib.sha1()
+    with open(path, "rb") as handle:
+        head = handle.read(_DIGEST_HEAD_BYTES)
+        digest.update(_GDAL_LAYER_NAME.sub(rb"\1", head, count=1))
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def file_content_key(ref: Any) -> str:
+    """A stable token for what a file HOLDS, whichever run wrote it.
+
+    Used wherever a file is an INPUT to something that needs an identity, such as the id of a
+    map layer drawn from it. Its file_id cannot serve, because a repeat of the step that wrote
+    the file writes the same content under a new id. Three sources, in order:
+
+    1. the ``content_key`` the producer recorded on the file: a digest of the inputs that
+       produced it. Preferred over the bytes, because the same result can be written in
+       different bytes (see _GDAL_LAYER_NAME).
+    2. a digest of the bytes, for a file nothing recorded (an upload, a sandbox output).
+       Identical content gives the same key, whatever the file is called.
+    3. the reference itself, stripped, when it resolves to no file. It is still stable and
+       still distinct.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        return ""
+    path: Optional[Path] = None
+    try:
+        record = get_file_record(text)
+    except Exception:  # noqa: BLE001 - an unreadable record is treated as no record
+        record = None
+    if record:
+        recorded = str(record.get("content_key") or "").strip()
+        if recorded:
+            return recorded
+        try:
+            path = _record_path(record)
+        except Exception:  # noqa: BLE001
+            path = None
+    else:
+        try:
+            candidate = Path(text).expanduser()
+            path = candidate if candidate.is_file() else None
+        except (OSError, ValueError):  # a reference no filesystem can hold (e.g. a NUL byte)
+            path = None
+    if path is not None:
+        try:
+            stat = path.stat()
+            return "sha1-" + _content_digest(str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            pass
+    return text
 
 
 __all__ = [
     "create_output_file",
     "create_output_file_from_path",
+    "file_content_key",
     "find_files",
     "resolve_file_ref",
     "get_file_record",
