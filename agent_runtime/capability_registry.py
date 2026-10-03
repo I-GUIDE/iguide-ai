@@ -14,8 +14,10 @@ names are arguments rather than datasets — because that is judgement, not inve
 generating it would lose the nuance that makes it useful.
 
 Keeping this honest is one test: ``rag_pipeline/tests/test_supervisor_knows_its_peers.py``
-asserts that the factories named here are exactly the factories the peer builders call. Bind a
-toolset without describing it and that test fails with its name.
+asserts, per peer, that the factories named here for a peer are exactly the factories that peer
+binds, wherever the binding is made: its own builder in ``graph.py``, or ``build_agent_executor``
+and ``collect_tools``, which the test reaches by running the peer's real assembly code. Bind a
+toolset without describing it and that test fails with its name and the place it is bound.
 
 The ``code`` capability is the one whose peer is swapped per request (``code_peer``, falling back
 to ``AGENT_CODE_PEER``), so its description is per BACKEND — ``describe_code_peer``. The LangChain
@@ -44,8 +46,9 @@ class Toolset:
     requires_skills: bool = False
 
 
-# Both peers bind nearly the same spatial toolkit; ``peers`` records which ones actually get it,
-# so a capability offered by only one is never described as if both had it.
+# Both peers bind nearly the same spatial toolkit; the split below records which ones actually get
+# it, so a capability offered by only one is never described as if both had it, and one both have
+# is never described as one peer's.
 _SHARED: Tuple[Toolset, ...] = (
     Toolset("make_langchain_geocode_tools",
             "geocoding a place name or address to coordinates"),
@@ -77,6 +80,23 @@ _SHARED: Tuple[Toolset, ...] = (
             "listing the files this conversation has produced"),
     Toolset("make_code_execution_tools",
             "running code in a sandbox"),
+    # Shared, not code-only: both peers bind the same two loaders over the same skill roots. The
+    # code peer calls make_skill_tools itself, and since 6ba1bd3 build_agent_executor adds it for
+    # every peer that hands over a preloaded tool list, analyze included. Described as the code
+    # peer's alone, it made matching a skill look like a reason to choose code, and with a CLI
+    # code peer, which loads none, the prompt mentioned skills nowhere. The clause promises
+    # loading, which both can do. Following a skill takes the tools it names, and the rest of
+    # each line says which ones that peer has.
+    #
+    # This clause used to read "packaged skills and saved workflows", and the decider repeated it
+    # as a capability. The code peer cannot run a saved workflow: a notebook workflow the
+    # extractor packages as a skill runs through an MCP tool (the server's
+    # ``run_notebook_workflow``), and MCP tools are bound in the analyze and search peers behind
+    # include_mcp_tools, never in the code peer. Running one is that MCP toolset's capability, not
+    # this one's.
+    Toolset("make_skill_tools",
+            "loading packaged skills: step-by-step instructions for particular analyses",
+            requires_skills=True),
 )
 
 _ANALYZE_ONLY: Tuple[Toolset, ...] = (
@@ -85,16 +105,9 @@ _ANALYZE_ONLY: Tuple[Toolset, ...] = (
     Toolset("make_langchain_mcp_tools", "external MCP tools, including a live QGIS instance"),
 )
 
-_CODE_ONLY: Tuple[Toolset, ...] = (
-    # This clause used to read "packaged skills and saved workflows", and the decider repeated it
-    # as a capability. The code peer cannot run a saved workflow: a notebook workflow the
-    # extractor packages as a skill runs through an MCP tool (``mcp_run_nbwf_*``), and MCP tools
-    # are bound in the analyze and search peers behind include_mcp_tools, never in this one.
-    # What this peer can do with any skill is read it.
-    Toolset("make_skill_tools",
-            "loading packaged skills: step-by-step instructions for particular analyses",
-            requires_skills=True),
-)
+# Nothing is code-only today. A toolset only the LangChain code peer binds belongs here, and
+# reaches the decider through describe_code_peer.
+_CODE_ONLY: Tuple[Toolset, ...] = ()
 
 CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
     "analyze": _SHARED + _ANALYZE_ONLY,
@@ -103,7 +116,7 @@ CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
 
 
 def factories() -> set:
-    """Every factory this registry claims a peer binds. Compared against reality by a test."""
+    """Every factory this registry claims some peer binds. The drift test compares per peer."""
     return {t.factory for caps in CAPABILITIES.values() for t in caps}
 
 

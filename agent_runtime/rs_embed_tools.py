@@ -30,6 +30,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from agent_runtime.map_layers import content_key, content_layer_id
 from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
@@ -467,14 +468,12 @@ def _layer_id(kind: str, hint: Any = None, /, **content: Any) -> str:
     ``hint`` is legibility only, for logs and the DOM. It is itself content-derived — a
     rounded centre, a file id — so it cannot drift while the content stands still. Uniqueness
     never rests on it: two layers with the same hint are still told apart by the digest.
+
+    The rule now lives in ``map_layers.content_layer_id`` so that every tool's layers follow
+    it, not only these. This keeps the ``embed-`` namespace, and the ids it returned before the
+    move are pinned by test so that no existing embedding layer changes its id.
     """
-    blob = json.dumps(content, sort_keys=True, default=str)
-    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
-    bits = ["embed", _slug(kind)]
-    if hint is not None and str(hint).strip():
-        bits.append(_slug(str(hint)))
-    bits.append(digest)
-    return "-".join(bits)
+    return content_layer_id("embed", kind, hint, **content)
 
 
 def _layer_label(base: str, tag: str) -> str:
@@ -1310,8 +1309,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         # The basis the PCA was ACTUALLY fitted on: packages drop out of `loaded` when they
         # cannot be read, hold no grid, or carry no bbox, and those that remain are what set
         # every layer's colours. Digesting the requested list instead would call two different
-        # renderings the same layer.
-        fitted_basis = sorted(str(e["file_id"]) for e in loaded)
+        # renderings the same layer. Each package counts by what it HOLDS: a re-run of
+        # embed_region saves the same vectors under a new file_id.
+        from agent_runtime.file_store import file_content_key
+
+        fitted_basis = sorted(file_content_key(str(e["file_id"])) for e in loaded)
         for idx, (entry, arr, p_) in enumerate(zip(loaded, arrays, proj)):
             h, w = int(arr.shape[1]), int(arr.shape[2])
             img = np.clip((p_ - lo) / (hi - lo + 1e-8), 0.0, 1.0).reshape(h, w, 3)
@@ -1359,8 +1361,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 # overwrite a raster of somewhere else. `package` is what makes this raster THIS
                 # one, since bbox, model and basis are identical for every layer in the call.
                 superseded or _layer_id("sharedpca", _region_tag(None, bbox),
-                                        package=str(entry["file_id"]), bbox=_round_bbox(bbox),
-                                        model=model, basis=fitted_basis),
+                                        package=file_content_key(str(entry["file_id"])),
+                                        bbox=_round_bbox(bbox), model=model, basis=fitted_basis),
                 # A re-coloured raster points at the SAME vectors as the layer it replaces —
                 # only the colours were refitted — so the pointer has to survive the re-render
                 # or aligning the colours would cost the layer its data.
@@ -1883,6 +1885,33 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         dims = int(res["dims"])
         with_px = [z for z in zones if z["pixels"]]
 
+        # What every zonal layer in this call is computed FROM. Keyed on the REQUEST, so a
+        # swallowed tile error cannot re-identify a layer, and shared by all three so they
+        # agree on what "the same run" means.
+        # The EFFECTIVE period, not the raw arguments. _zonal_service_body sends a range only
+        # when both ends are given and the service falls back to `year` otherwise, so half a
+        # range and no range are the same imagery — digesting the arguments raw split one
+        # composite across two layers, and left `year` deciding identity on runs that ignored it.
+        # The dates are the ones the service was sent, so "2025-03" and "2025-03-01" are one
+        # period, as they are one composite.
+        _period = (("range", _iso_date(start), _iso_date(end, month_end=True))
+                   if start and end else ("year", int(year)))
+        # The polygons as they were READ, never their file_id. A re-ground that fetched the
+        # same boundary again wrote it under a new file_id, and keyed on that id the same
+        # sweep stacked a second raster and a second group layer. A shapefile counts by all
+        # of its parts (source_content_key), so its siblings need no entry of their own, and
+        # a sibling that changes nothing read changes nothing here.
+        from agent_runtime.langchain_geo_tools import source_content_key
+
+        polygons_key = source_content_key(file_id, read_path)
+        zone_content = {"file": polygons_key, "model": model, "period": _period,
+                        "tile_px": int(tile_px), "max_tiles": max_tiles,
+                        "zone_id_field": zone_id_field,
+                        # What the caller ASKED for. len(present) is the count that came back,
+                        # which a swallowed tile error changes without changing the request.
+                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                        "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
+
         # --- CSV of per-zone vectors: the artifact an ML step consumes ---
         stem = artifact_name(name, "csv", default=f"{model}_zone_embeddings")
         out_csv = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / stem
@@ -1892,32 +1921,19 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             lines.append(",".join([str(z["zone_id"]), str(z["pixels"]), f"{z['area_km2']:.6f}"]
                                   + [f"{v:.6f}" for v in z["mean"]]))
         out_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        csv_rec = create_output_file_from_path(out_csv, filename=out_csv.name)
+        # Recorded so fit_zone_model, which reads this CSV, keys it by the request that made
+        # it rather than by its bytes. The vectors do not depend on how many groups were asked
+        # for, so `clusters` stays out.
+        csv_rec = create_output_file_from_path(
+            out_csv, filename=out_csv.name,
+            content_key=content_key("zone_vectors", polygons_key,
+                                    **{k: v for k, v in zone_content.items() if k != "clusters"}))
 
         # --- the map layer: look-alike groups. Groups are the one view of a 64-dim vector
         # worth looking at — a choropleth of a single dimension is a picture of an arbitrary
         # axis, and it looks like a result.
         layer = None
         cluster_note = None
-        # What every zonal layer in this call is computed FROM. Keyed on the REQUEST, so a
-        # swallowed tile error cannot re-identify a layer, and shared by all three so they
-        # agree on what "the same run" means.
-        # The EFFECTIVE period, not the raw arguments. _zonal_service_body sends a range only
-        # when both ends are given and the service falls back to `year` otherwise, so half a
-        # range and no range are the same imagery — digesting the arguments raw split one
-        # composite across two layers, and left `year` deciding identity on runs that ignored it.
-        _period = (("range", str(start), str(end)) if start and end else ("year", int(year)))
-        zone_content = {"file": file_id, "model": model, "period": _period,
-                        "tile_px": int(tile_px), "max_tiles": max_tiles,
-                        "zone_id_field": zone_id_field,
-                        # The data actually read is assembled from these too: _stage_vector_source
-                        # reconstructs a shapefile from its siblings, so one file_id can name
-                        # different geometry depending on what came with it.
-                        "siblings": sorted(str(f) for f in sibling_file_ids) if sibling_file_ids else None,
-                        # What the caller ASKED for. len(present) is the count that came back,
-                        # which a swallowed tile error changes without changing the request.
-                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
-                        "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
         try:
             import geopandas as gpd
 
@@ -1946,7 +1962,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 gj = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
                     name, "geojson", default=f"{model}_zone_groups")
                 sub.to_file(gj, driver="GeoJSON")
-                rec = create_output_file_from_path(gj, filename=gj.name)
+                rec = create_output_file_from_path(
+                    gj, filename=gj.name,
+                    content_key=content_key("zonegroups", polygons_key, **zone_content))
                 present = sorted({str(v) for v in sub["look_alike_group"]})
                 # The REQUESTED extent, not sub's. `sub` holds only the zones that came back
                 # with pixels, so a single failed tile shrinks it — and an id built on that
@@ -1969,9 +1987,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                         place = f"zone {sub['zone_id'].iloc[0]}"
                     layer = {"url": rec.get("download_url"),
                              # TAKES THE PLACE OF the outline this polygon file already has on
-                             # the map: admin_boundary keys its layer on the same file_id, so
-                             # this redraws it with what the embedding found inside instead of
-                             # stacking a second copy of the same city beside it.
+                             # the map: admin_boundary keys its layer on what the same file
+                             # holds, so this redraws it with what the embedding found inside
+                             # instead of stacking a second copy of the same city beside it.
                              #
                              # Only for ONE zone. The multi-zone branch below keeps its own
                              # k-bearing id on purpose — asking for 3 groups and then 6 is two
@@ -1992,8 +2010,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # k belongs in the id because it is in the label: asking for 3
                              # groups and then 6 is two analyses of the same zones, and the
                              # second must not silently replace the first. A zone raster
-                             # already keys on its k for the same reason.
-                             "id": _layer_id("zonegroups", file_id, **zone_content),
+                             # already keys on its k for the same reason. The hint is the
+                             # polygons' content key too: a file_id there would move the id
+                             # whenever the input was re-fetched, digest or no digest.
+                             "id": _layer_id("zonegroups", polygons_key, **zone_content),
                              "label": _layer_label(
                                  f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
@@ -2084,7 +2104,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 rec_png, [float(v) for v in img["bounds"]],
                 _layer_label(f"{model} pixel embedding in zones",
                              _region_tag(name, img["bounds"])),
-                _layer_id("zonepixels", file_id, **zone_content)))
+                _layer_id("zonepixels", polygons_key, **zone_content)))
         elif img.get("error"):
             # Say why there is no picture, and what would get one — the vectors are unaffected
             # either way, and an unexplained absence reads as a failed analysis.
@@ -2122,9 +2142,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         """
         tmp = None
         try:
-            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.file_store import create_output_file_from_path, file_content_key
             from agent_runtime.langchain_geo_tools import (_index_attached, _resolve,
-                                                          _stage_vector_source, artifact_name)
+                                                          _stage_vector_source, artifact_name,
+                                                          source_content_key)
 
             csv_path, _rec = _resolve(vectors_csv_file_id)
             attached = _index_attached(default_input_file_ids)
@@ -2142,7 +2163,17 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             if not res.get("ok"):
                 return json.dumps({"ok": False, **res})
 
-            rec = create_output_file_from_path(gj, filename=gj.name)
+            # Both inputs by what they HOLD. The polygons as read, so a shapefile counts by
+            # its parts and needs no siblings entry. The vectors by the key embed_zones
+            # recorded on its CSV, else by their bytes. Keyed on the two file_ids, a re-ground
+            # that re-ran admin_boundary and embed_zones stacked a second prediction map.
+            polygons_key = source_content_key(polygons_file_id, poly_path)
+            predicted = {"vectors": file_content_key(vectors_csv_file_id),
+                         "polygons": polygons_key, "column": label_column,
+                         "zone_id_field": zone_id_field, "blocks": int(blocks)}
+            rec = create_output_file_from_path(
+                gj, filename=gj.name,
+                content_key=content_key("predicted", polygons_key, **predicted))
             blocked = res["spatial_block_cv"]
             naive = res.get("naive_random_split_cv") or {}
             out = {
@@ -2151,17 +2182,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 "download_url": rec.get("download_url"),
                 "on_map": True,
                 "map_layer": {"url": rec.get("download_url"),
-                              # polygons_file_id as well as the name: _region_tag has no
-                              # bbox to fall back on here, so an unnamed run identified the
-                              # layer by label_column alone and the same column over two
-                              # different areas collided.
-                              "id": _layer_id(
-                                  "predicted", polygons_file_id,
-                                  vectors=vectors_csv_file_id, polygons=polygons_file_id,
-                                  column=label_column, zone_id_field=zone_id_field,
-                                  siblings=sorted(str(f) for f in sibling_file_ids)
-                                  if sibling_file_ids else None,
-                                  blocks=int(blocks)),
+                              # The polygons as well as the name: _region_tag has no bbox to
+                              # fall back on here, so an unnamed run identified the layer by
+                              # label_column alone and the same column over two different
+                              # areas collided.
+                              "id": _layer_id("predicted", polygons_key, **predicted),
                               "label": _layer_label(
                                   f"{label_column} predicted from embeddings",
                                   _region_tag(name)),

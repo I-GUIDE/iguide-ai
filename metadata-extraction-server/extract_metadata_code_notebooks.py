@@ -166,6 +166,7 @@ def process_zip(zip_path: str, bucket: str) -> Dict:
     return metadata
 
 def extract_metadata(bucket: str, key: str):
+    tmp_path = None
     try:
         # Initialize S3 client for Minio
         s3 = boto3.client(
@@ -177,9 +178,11 @@ def extract_metadata(bucket: str, key: str):
         )
 
         # Download file to temporary storage
-        tmp_path = None
-        tmp_path = os.path.join("/tmp", key)
-        os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
+        # The object key is caller-controlled. os.path.join("/tmp", key) followed it out of /tmp:
+        # "../../etc/x" resolves above it, and an absolute key discards "/tmp" entirely, while
+        # makedirs then created whatever directories the key named. Keep only the final name.
+        safe_name = os.path.basename(key) or "downloaded-object"
+        tmp_path = os.path.join("/tmp", safe_name)
         logging.info(f"Downloading {key} from bucket {bucket}")
         s3.download_file(bucket, key, tmp_path)
         logging.info(f"Download complete: {tmp_path}")
@@ -205,12 +208,14 @@ def extract_metadata(bucket: str, key: str):
             safe_prefix = sanitize_tag_value(os.path.splitext(file_path)[0]) + "_"
             
             if bucket == "code":
-                for i, item in enumerate(analysis):
+                file_analysis = analysis.get("analysis", []) if isinstance(analysis, dict) else []
+                for i, item in enumerate(file_analysis):
                     sanitized_metadata[f"{safe_prefix}{i}_type"] = sanitize_tag_value(item["type"])
                     sanitized_metadata[f"{safe_prefix}{i}_name"] = sanitize_tag_value(item["name"])
                     
             elif bucket == "notebooks":
-                for i, cell in enumerate(analysis):
+                notebook_cells = analysis.get("analysis", []) if isinstance(analysis, dict) else []
+                for i, cell in enumerate(notebook_cells):
                     sanitized_metadata[f"{safe_prefix}cell_{i}_type"] = "code"
                     #sanitized_metadata[f"{safe_prefix}cell_{i}_funcs"] = str(len(cell["functions"]))
 

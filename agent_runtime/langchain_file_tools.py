@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,30 +28,33 @@ def _allowed_roots() -> List[Path]:
     return sorted(roots)
 
 
-def _find_managed_file_by_name(filename: str) -> Optional[Path]:
+def _find_managed_record_by_name(filename: str) -> Optional[Dict[str, Any]]:
+    """The stored file a bare ``filename`` names for THIS caller, or None: the newest record
+    with exactly that name among those ``find_files`` lets this conversation and this user see.
+
+    This was a scan of every conversation's uploads/ and outputs/ for an on-disk name ending in
+    ``__<filename>``, and it checked neither the conversation nor the owner, so bob read alice's
+    ``summary.md`` by name while find_files hid it from him. find_files is where both scopes are
+    applied, so a name goes through it.
+
+    The unowned legacy pool stays readable, because find_files keeps it for reuse, and it competes
+    on recency like everything else. Uploads carry no conversation either (the upload route binds
+    the user, not the thread), so ranking this conversation's own files first would put an older
+    output above the file the user just re-uploaded under the same name.
+    """
     if not filename or any(sep in filename for sep in ("/", "\\")):
         return None
-
-    candidates: List[Path] = []
-    root = storage_root()
-    for folder in (root / "uploads", root / "outputs"):
-        if not folder.exists():
-            continue
-        for path in folder.iterdir():
-            if path.is_file() and path.name.endswith(f"__{filename}"):
-                candidates.append(path)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+    # find_files matches a substring, so only the exact name counts: "summary.md" is neither
+    # "old_summary.md" nor "final__summary.md", which the suffix scan matched. And no page, since
+    # find_files sorts every match before cutting one, and newer near-misses would fill it.
+    for record in find_files(name=filename, limit=sys.maxsize):
+        if record.get("filename") == filename:
+            return record
+    return None
 
 
 def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
     ref = str(path or "").strip()
-    matched_managed_file = _find_managed_file_by_name(ref)
-    if matched_managed_file is not None:
-        return matched_managed_file
-
     raw_candidate = Path(ref).expanduser()
     if raw_candidate.is_absolute():
         candidates = [raw_candidate.resolve()]
@@ -83,6 +87,10 @@ def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, 
     record = get_file_record(ref)
     if record:
         return resolve_file_id(ref), record
+
+    record = _find_managed_record_by_name(ref)
+    if record:
+        return resolve_file_id(str(record["file_id"])), record
 
     return _resolve_local_allowed_path(ref, must_exist=must_exist), None
 

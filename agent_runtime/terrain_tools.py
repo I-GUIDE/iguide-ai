@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 # _resolve_bbox understands every way a region arrives (bbox, point+buffer, an uploaded file's
 # extent) and _raster_layer builds the descriptor the client drapes. Reimplementing either here
 # would be a second copy to keep in sync with the client's whitelist.
+from agent_runtime.map_layers import content_key
 from agent_runtime.rs_embed_tools import (_layer_id, _layer_label, _raster_layer, _region_tag,
                                           _resolve_bbox, _round_bbox, _slug)
 from agent_runtime.tool_args import accept_null_defaults
@@ -444,13 +445,22 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
         png = tmp / f"{stem}.png"
         _render(values, png)
 
-        tif_rec = create_output_file_from_path(tif, filename=tif.name)
+        # WHICH shape the pixels were cut to, not only whether they were: two shapes with one
+        # bounding box (a city and its own bbox from geometry_summary) are two different
+        # rasters. An unclipped DEM keeps `False` here, and with it the id it always had.
+        from agent_runtime.file_store import file_content_key
+
+        dem = {"bbox": _round_bbox(served), "size": px,
+               "clipped": file_content_key(file_id) if (clip_to_shape and file_id) else False}
+        # Recorded on the GeoTIFF, which terrain_derivative, inundation_at_level and
+        # zonal_stats_for_raster read, so their layers are keyed on the request that fetched it.
+        tif_rec = create_output_file_from_path(
+            tif, filename=tif.name, content_key=content_key("dem", _region_tag(None, box), **dem))
         png_rec = create_output_file_from_path(png, filename=png.name)
 
         layer = _raster_layer(
             png_rec, served, f"Elevation — {name or _region_tag(None, box)}",
-            _layer_id("dem", _region_tag(None, box), bbox=_round_bbox(served), size=px,
-                      clipped=bool(clip_to_shape and file_id)))
+            _layer_id("dem", _region_tag(None, box), **dem))
 
         out: Dict[str, Any] = {
             # region_bbox is what the pixels COVER, so every area and share computed from this
@@ -510,9 +520,9 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
         try:
             from rasterio.features import rasterize
 
-            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.file_store import create_output_file_from_path, file_content_key
             from agent_runtime.langchain_geo_tools import (_index_attached, _stage_vector_source,
-                                                           artifact_name)
+                                                           artifact_name, source_content_key)
 
             attached = _index_attached(default_input_file_ids)
             poly_path, tmp = _stage_vector_source(polygons_file_id, sibling_file_ids, attached)
@@ -607,10 +617,20 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                             "an all-NoData frame, so a DEM that got here has data somewhere; "
                             "check the extents overlap where that data actually is."})
 
+            # Both inputs by what they HOLD: the raster by the key dem_for_region recorded (else
+            # its bytes), the polygons as read. Keyed on their two file_ids, a re-ground that
+            # fetched either again stacked a second copy of the same choropleth. `band` and
+            # `all_touched` decide which pixels each zone summarises, so both are in.
+            # zone_id_field is not: it names zones in the preview, and changes nothing drawn.
+            polygons_key = source_content_key(polygons_file_id, poly_path)
+            zonal = {"raster": file_content_key(raster_file_id), "polygons": polygons_key,
+                     "prefix": prefix, "band": int(band), "all_touched": bool(all_touched)}
             out_dir = Path(tempfile.mkdtemp(prefix="zonal_"))
             gj = out_dir / artifact_name(name, "geojson", default=f"{prefix}_by_zone")
             gdf.to_file(gj, driver="GeoJSON")
-            rec = create_output_file_from_path(gj, filename=gj.name)
+            # Recorded, because fit_zone_model reads this layer as its polygons.
+            rec = create_output_file_from_path(
+                gj, filename=gj.name, content_key=content_key("zonal", polygons_key, **zonal))
 
             preview = []
             for idx, row in rows[:10]:
@@ -634,9 +654,7 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "on_map": True,
                 "map_layer": {
                     "url": rec.get("download_url"),
-                    "id": _layer_id("zonal", polygons_file_id, raster=raster_file_id,
-                                    polygons=polygons_file_id, prefix=prefix,
-                                    zone_id_field=zone_id_field),
+                    "id": _layer_id("zonal", polygons_key, **zonal),
                     "label": _layer_label(f"{prefix} by zone", _region_tag(name)),
                     "render": "choropleth", "style_by": f"{prefix}_mean",
                     "source": "analysis", "count": int(with_data)},
@@ -743,13 +761,22 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             png = tmp_dir / f"{stem}.png"
             _render_grid(grid, png, cmap)
 
-            from agent_runtime.file_store import create_output_file_from_path
-            tif_rec = create_output_file_from_path(tif, filename=tif.name)
-            png_rec = create_output_file_from_path(png, filename=png.name)
+            from agent_runtime.file_store import create_output_file_from_path, file_content_key
             box = list(bounds)
+            # The raster it was computed FROM. Keyed on the bbox alone, the slope of a clipped
+            # DEM and of the unclipped DEM of the same box were one layer: clipping keeps the
+            # grid and its bounds and only blanks pixels. The sun angles shape only a
+            # hillshade, and two hillshades under different suns were one layer too.
+            derived = {"bbox": _round_bbox(box), "raster": file_content_key(raster_file_id),
+                       "sun": ([float(azimuth), float(altitude)] if kind == "hillshade"
+                               else None)}
+            tif_rec = create_output_file_from_path(
+                tif, filename=tif.name,
+                content_key=content_key(kind, _region_tag(None, box), **derived))
+            png_rec = create_output_file_from_path(png, filename=png.name)
             layer = _raster_layer(
                 png_rec, box, f"{label} — {name or _region_tag(None, box)}",
-                _layer_id(kind, _region_tag(None, box), bbox=_round_bbox(box)))
+                _layer_id(kind, _region_tag(None, box), **derived))
 
             finite = grid[np.isfinite(grid)]
             out: Dict[str, Any] = {
@@ -849,14 +876,20 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             png = tmp_dir / f"{stem}.png"
             _render_grid(depth, png, "Blues", vmin=0.0)
 
-            from agent_runtime.file_store import create_output_file_from_path
-            tif_rec = create_output_file_from_path(tif, filename=tif.name)
-            png_rec = create_output_file_from_path(png, filename=png.name)
+            from agent_runtime.file_store import create_output_file_from_path, file_content_key
             box = list(bounds)
+            # The raster and the level as RESOLVED, so a depth above the minimum and the
+            # absolute level it works out to are one layer. Keyed on the bbox and the level
+            # alone, two different DEMs of one box flooded to one level shared a layer.
+            flooded = {"bbox": _round_bbox(box), "level": round(level, 3),
+                       "raster": file_content_key(raster_file_id)}
+            tif_rec = create_output_file_from_path(
+                tif, filename=tif.name,
+                content_key=content_key("inundation", _region_tag(None, box), **flooded))
+            png_rec = create_output_file_from_path(png, filename=png.name)
             layer = _raster_layer(
                 png_rec, box, f"Under {round(level, 2)} m — {name or _region_tag(None, box)}",
-                _layer_id("inundation", _region_tag(None, box), bbox=_round_bbox(box),
-                          level=round(level, 3)))
+                _layer_id("inundation", _region_tag(None, box), **flooded))
 
             wet_depths = depth[np.isfinite(depth)]
             out: Dict[str, Any] = {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -118,8 +119,9 @@ def make_file_handle_tool(func: Callable) -> Callable[..., Dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# Analyze-peer tools: run extracted KB spatial functions + general GIS ops,
-# all passing (Geo)DataFrames by file_id (so the GIS runs as executed tool steps).
+# Analyze-peer tools: general GIS ops that chain by passing (Geo)DataFrames as
+# file_ids (so the GIS runs as executed tool steps). kb_run_geofunction, below, is
+# NOT one of them: it executes stored knowledge-base source in this process.
 # --------------------------------------------------------------------------- #
 def _strip_tool_decorators(code: str) -> str:
     return "\n".join(l for l in code.splitlines() if l.strip() != "@tool")
@@ -182,14 +184,40 @@ def _nearest_blocks(*terms: str, limit: int = 5) -> dict:
         return {"hint": "Search agent_kb_search for a real block id; do not guess one."}
 
 
+def _in_process_exec_allowed() -> bool:
+    """Whether stored source may run in THIS process, unsandboxed: on the dev backend only.
+
+    ``AGENT_CODE_EXEC_BACKEND=local`` is the existing switch that already means "run untrusted
+    code on this host, not in a sandbox" (``code_execution.LocalSubprocessExecutor``). The
+    deployment pins it to ``docker``, so there this is False.
+    """
+    return (os.getenv("AGENT_CODE_EXEC_BACKEND") or "docker").strip().lower() == "local"
+
+
 def kb_run_geofunction(doc_id: str, function_name: str, args_json: str = "{}") -> str:
-    """Execute an extracted spatial function from a KB block via file handles.
+    """Execute an extracted spatial function from a KB block, IN THIS PROCESS. Dev only.
+
+    NOT A PEER TOOL: do not bind it. Block source is notebook code submitted to the platform by
+    third parties, and this ``exec()``s it here with no sandbox; in the deployment "here" is
+    ``agent-api``, which runs as root with the host's Docker socket mounted. It left
+    ``make_geo_analysis_tools`` on 2026-10-01 (docs/agent-architecture-changes.md, stage 13), and
+    ``rag_pipeline/tests/test_no_peer_execs_stored_code.py`` fails if a peer is offered it or any
+    other tool that reaches ``exec``/``eval``. It refuses outright unless
+    ``AGENT_CODE_EXEC_BACKEND=local``. A model reaches KB code through ``get_kb_block`` +
+    ``execute_code``, which runs it in the sandbox.
 
     Loads the block's code (get_kb_block), isolates `function_name` via AST (ignoring
     surrounding notebook/agent code), defines it, and calls it with `args_json` (a JSON
     object). (Geo)DataFrame parameters must be passed as file_ids (from a prior step);
     the result is written to a new file_id (or a PNG file_id for a plot)."""
     import json
+    if not _in_process_exec_allowed():
+        # Refuse BEFORE reading the block: nothing stored is even loaded on this path.
+        return json.dumps({
+            "error": "kb_run_geofunction is disabled: it would run knowledge-base source inside "
+                     "the agent process, unsandboxed. Read the block with get_kb_block and run "
+                     "it with execute_code instead.",
+            "requires": "AGENT_CODE_EXEC_BACKEND=local (development only)"})
     from rag_pipeline.search.agent_kb import get_kb_block
     blk = get_kb_block(doc_id)
     if not blk.get("found"):
@@ -331,17 +359,16 @@ def choropleth_image(gdf_file_id: str, column: str, title: str = "Choropleth map
 
 
 def make_geo_analysis_tools() -> list:
-    """LangChain StructuredTools for the analyze peer: run extracted KB spatial functions
-    and chain GIS ops by file_id (heat map, set filter)."""
+    """LangChain StructuredTools for the analyze peer: chain GIS ops by file_id (set filter,
+    heat map, choropleth).
+
+    ``kb_run_geofunction`` is deliberately absent: it ``exec()``s stored knowledge-base source in
+    the agent process (see its docstring). Do not add it here, nor any tool that runs stored
+    source in-process; ``rag_pipeline/tests/test_no_peer_execs_stored_code.py`` fails if one is
+    bound to any peer.
+    """
     from langchain_core.tools import StructuredTool
     return [
-        StructuredTool.from_function(
-            func=kb_run_geofunction, name="kb_run_geofunction",
-            description=("Execute an extracted spatial function from a knowledge-base block by "
-                         "doc_id + function_name, passing (Geo)DataFrames as file_ids (args_json). "
-                         "Returns the produced file_id. Chain steps by feeding one step's file_id "
-                         "into the next. E.g. load_chicago_crime_data → file_id → spatial_join_and_count."),
-            metadata={"category": "computation"}),
         StructuredTool.from_function(
             func=kb_select_rows, name="kb_select_rows",
             description=("Filter a (Geo)DataFrame file (df_file_id) to rows whose column is in a "
@@ -364,5 +391,4 @@ def make_geo_analysis_tools() -> list:
 
 
 __all__ = ["write_geodata", "read_geodata", "capture_current_fig", "make_file_handle_tool",
-           "kb_run_geofunction", "kb_select_rows", "heatmap_image", "choropleth_image",
-           "make_geo_analysis_tools"]
+           "kb_select_rows", "heatmap_image", "choropleth_image", "make_geo_analysis_tools"]
