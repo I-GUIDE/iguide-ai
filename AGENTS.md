@@ -62,7 +62,7 @@ python3 -m pytest rag_pipeline/tests/ -q
 python3 -m pytest tests/ -q        # 135 passed, 32 skipped (all of tests/live/)
 ```
 
-Baseline is **1645 passed, 4 skipped, 0 failed** (22 Sep 2026). If something fails, it is yours.
+Baseline is **2036 passed, 4 skipped, 0 failed** (3 Oct 2026). If something fails, it is yours.
 
 **A passing run says nothing about whether the suite stayed offline.** Until 2026-10-02 every
 run reached eight search engines (the supervisor's web fallback, through `ddgs`), the Census
@@ -282,7 +282,7 @@ check rather than making it wrong — the map-denial check needs no catalog and 
 
 ## The tool surface
 
-**53 analysis tools in nine families**, plus four code-execution/workspace tools, five file
+**52 analysis tools in nine families**, plus four code-execution/workspace tools, five file
 tools, and the search/granular surface. Enumerate them from the factories rather than trusting
 that count — that is the only trustworthy inventory, and this paragraph is the proof: it said
 "36 tools in six families" long enough for a capability review to repeat it, while
@@ -293,7 +293,7 @@ never listed at all.
 `make_overlay_tools` (7) · `make_aggregate_tools` (6) · `make_temporal_tools` (5) ·
 `make_spatial_stats_tools` (7) · `make_langchain_geo_tools` (7) · `make_rs_embed_tools` (10) ·
 `make_rs_embed_zonal_tools` (2) · `make_terrain_tools` (4) · `make_admin_boundary_tools` (1) ·
-`make_geo_analysis_tools` (4)
+`make_geo_analysis_tools` (3)
 
 plus `make_code_execution_tools`, `make_langchain_file_tools` / `make_conversation_file_tools`,
 `make_langchain_granular_tools`, `make_langchain_qgis_tools`, `make_langchain_geocode_tools`,
@@ -301,8 +301,11 @@ plus `make_code_execution_tools`, `make_langchain_file_tools` / `make_conversati
 
 `make_geo_analysis_tools` is the one that hides: it lives in `extractors/geo_handles.py`, not
 in `agent_runtime/`, so a grep scoped to the runtime package misses `heatmap_image`,
-`choropleth_image`, `kb_run_geofunction` and `kb_select_rows` and concludes they were deleted.
-It is wired at `supervisor/graph.py:3209` like every other family.
+`choropleth_image` and `kb_select_rows` and concludes they were deleted. It is wired in
+`supervisor/graph.py` like every other family (search `make_geo_analysis_tools`; a line number
+here went stale within ten days). It had a fourth tool, `kb_run_geofunction`, until the analysis
+peer stopped offering it because it `exec()`'d knowledge-base code in the agent's own process —
+see Stage 19 of `docs/agent-architecture-changes.md`.
 
 The analysis families load **only when files are attached** to the conversation
 (`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), so a bare chat session has none
