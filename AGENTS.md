@@ -13,18 +13,32 @@ claim names a file so you can verify it rather than trust it.
 Agent API (Flask + gunicorn in prod, `app.run` locally):
 
 ```bash
-PYTHONPATH="$PWD" PORT=5055 AGENT_PUBLIC_BASE_URL= AGENT_CHAT_API_KEY= python3 api/server.py
+PYTHONPATH="$PWD" PORT=5055 AGENT_MODE=local AGENT_CHAT_API_KEY= python3 api/server.py
 ```
 
-All four matter, and each failure is silent or misleading:
+**`AGENT_MODE=local` is not optional on a laptop.** The main checkout's `.env` points at shared
+infrastructure — the PRODUCTION OpenSearch cluster among it — and every `load_dotenv` in the code
+walks up from a worktree and finds it. Without the mode, a local turn writes its conversation,
+snapshot and trace into prod, and nothing errors: on 2026-10-01 seven test conversations landed
+there unnoticed. Local mode closes the conversation store entirely (whatever the request asks —
+the map UI always asks for memory), keeps knowledge-base search READING, ignores
+`AGENT_PUBLIC_BASE_URL`, and gives dev-style access. It must be set on the command line or in the
+environment: `.env` loads with `override=False`, so the command line wins over the `.env`'s own
+`AGENT_MODE=token`.
+
+**Read the boot banner.** In local mode the server logs every endpoint it can still reach, tagged
+`[local ]` or `[REMOTE]` — the remote embedding server, the LLM, rs-embed, the KB cluster (marked
+READ ONLY). Anything `[REMOTE]` there is a real network call your test will make.
+
+The rest still matters, and each failure is silent or misleading:
 
 - no `PYTHONPATH` → `ModuleNotFoundError: rag_pipeline` (`api/server.py` imports it, and running
   a script puts only `api/` on `sys.path`)
-- `AGENT_PUBLIC_BASE_URL` inherited from a deployment `.env` → every `download_url` becomes
-  absolute against the *remote* host, so local downloads 404 with `unknown file_id`
 - `AGENT_CHAT_API_KEY` set → `/agent/chat*` answers 403 (`_get_agent_chat_api_key`); empty
   disables the gate
 - `PORT` defaults to 5002; the compose deployment maps host 3500 → container 5002
+- outside local mode, an inherited `AGENT_PUBLIC_BASE_URL` makes every `download_url` absolute
+  against the *remote* host, so local downloads 404 with `unknown file_id`
 
 Map UI prototype (`map-ui-prototype/`, Vite + React + MapLibre + deck.gl):
 
@@ -38,11 +52,33 @@ panel. Node 18+ required.
 
 ## Tests
 
+**Neither suite loads a `.env` unless `RUN_LIVE_BACKEND_TESTS=1`.** A bare `load_dotenv()` walks
+up from its module's directory, so from a worktree under `.claude/worktrees/` it finds the main
+checkout's file, with the developer's real credentials. Both conftests make it a no-op unless
+the variable is set, and `tests/live/` is skipped without it.
+
 ```bash
 python3 -m pytest rag_pipeline/tests/ -q
+python3 -m pytest tests/ -q        # 135 passed, 32 skipped (all of tests/live/)
 ```
 
 Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
+
+**A passing run says nothing about whether the suite stayed offline.** Until 2026-10-02 every
+run reached eight search engines (the supervisor's web fallback, through `ddgs`), the Census
+TIGERweb service, and whatever listened on localhost:8077 and 127.0.0.1:8000, and every test
+passed, because each of those paths degrades quietly when its service does not answer.
+`rag_pipeline/tests/conftest.py` now stubs the three the code reaches on its own
+(`_no_live_services`), and `test_admin_boundary_area_arg.py` stubs TIGERweb at `_query`, as
+`test_admin_boundary.py` always did. A new test whose code path calls another live service
+stubs it at the point of use the same way. The conftest also takes back the one `.env` it cannot
+prevent: `rag_pipeline/__init__.py` loads the repo root's `.env` by explicit path, and pytest
+imports that package before it can import a conftest inside it. In a copy laid out like the main
+checkout, 56 of that file's variables reached the tests, the three self-skipping live tests ran,
+and seven tests failed. To check a change, deny the network to the whole process and count what
+was attempted. A probe on Python's `socket` module is not enough, because `ddgs` sends through
+`primp`, a Rust client, and its requests never pass through that module. `sandbox-exec` with
+outbound IP denied catches them on macOS, and `docker run --network none` on Linux.
 
 That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
 is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
@@ -403,6 +439,19 @@ pip. Consequences: code cannot fetch anything at runtime — an API call belongs
 the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
+
+**Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
+once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
+fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close
+through `os_log`, and `os_log` reads a mapping the child never inherited. On the maintainer's Mac
+every later `qgis_process` returned -11 with empty output and every `execute_code` "failed during
+dependency installation", and neither program ever ran. `fork_safe.run` starts the child with
+`posix_spawn`, which runs no fork handler; off macOS it is `subprocess.run` unchanged, and the
+deployed Linux container is unaffected, so no CI run will show this. A source scan in
+`test_fork_safe.py` fails on a direct `subprocess`, `os.fork` or `multiprocessing` start, and a
+test fake has to replace `fork_safe.run`, the function the module calls. A library that forks on
+its own is not covered: joblib's loky pool calls `os.fork()`, and `esda.G_Local` starts one by
+default (`n_jobs=-1`). `scripts/repro_macos_fork_crash.py` reproduces the crash in under a second.
 
 **A baked image saves nothing on its own.** `pip install --target` sets
 `ignore_installed=True` — pip does not consult the image's site-packages — so a package baked

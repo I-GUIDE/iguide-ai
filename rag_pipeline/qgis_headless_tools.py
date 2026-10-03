@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
+from agent_runtime import fork_safe
+
 from .agent_file_store import create_output_file_from_path, get_file_record, resolve_file_id, storage_root
 
 
@@ -94,7 +96,7 @@ def pyqgis_available() -> bool:
             if python_bin == sys.executable:
                 ok = importlib.util.find_spec("qgis") is not None
             else:
-                probe = subprocess.run(
+                probe = fork_safe.run(
                     [python_bin, "-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('qgis') else 1)"],
                     capture_output=True, timeout=15,
                 )
@@ -331,7 +333,9 @@ def _qgis_env() -> Dict[str, str]:
 
 
 def _run_subprocess(command: list[str], *, timeout_sec: int, cwd: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # fork_safe, not subprocess: on macOS a fork after the server's first reprojection dies
+    # before exec, and this returned -11 with empty output at native:reprojectlayer.
+    return fork_safe.run(
         command,
         cwd=str(cwd or _repo_root()),
         env=_qgis_env(),
@@ -653,10 +657,11 @@ def qgis_metric_buffer_tool(
     }
     if final_output.exists():
         try:
+            # A new file every run, never overwrite=True. A re-run can differ (a corrected
+            # distance), and the earlier answer's link must keep serving the buffer it showed.
             payload["managed_output"] = create_output_file_from_path(
                 final_output,
                 filename=final_output.name,
-                overwrite=True,
                 content_key=key,
             )
         except Exception as exc:
@@ -786,10 +791,10 @@ def pyqgis_render_map_tool(
     output_path = result.get("output_path")
     if result.get("ok") and output_path:
         try:
+            # A new file every run, as in qgis_metric_buffer: an earlier answer embeds this image.
             record = create_output_file_from_path(
                 output_path,
                 filename=Path(str(output_path)).name,
-                overwrite=True,
             )
             result["managed_output"] = record
         except Exception as exc:

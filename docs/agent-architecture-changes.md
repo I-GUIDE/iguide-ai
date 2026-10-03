@@ -34,6 +34,13 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
 | 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 → 2026-10-02 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
 | 20 | [A layer is what went into it](#stage-20) | `claude/layer-identity-by-inputs`, `claude/layer-identity-remaining-tools` | layer ids from the inputs that made them, not the files they wrote |
+| 21 | [A filename names this conversation's file](#stage-21) | 2026-10-02 | a bare filename resolves through `find_files`: this conversation, this caller, the exact name |
+| 22 | [A file_id names one write](#stage-22) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
+| 23 | [An upload names its conversation](#stage-23) | 2026-10-02 | the upload route binds the thread id as well as the caller; the map UI sends it |
+| 24 | [A laptop that writes nothing](#stage-24) | 2026-10-03 | `AGENT_MODE=local` makes a laptop run write to no shared store; an override list wrote seven conversations into prod |
+| 25 | [Starting a child without forking the agent](#stage-25) | 2026-10-01 | on macOS every child starts by `posix_spawn`; nothing in the agent process forks |
+| 26 | [Permutations run in the agent's own process](#stage-26) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
+| 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1946,7 +1953,54 @@ has a different cost. Two habits are now written down. Check for streams in flig
 recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
 `embedding-server`, and agent-api then waited on their health checks.
 
-### Stage S13.5 What this stage did not fix
+### Stage S13.5 `AGENT_MCP_UNBIND`: an override that unbound nothing
+
+Found on 2026-10-02 and fixed on 10-03, after the four above were written up. It shares their
+silence but not their symptom: the deployment does not set the variable, so nobody saw it fail.
+
+`AGENT_MCP_UNBIND` names MCP tools the agent should not bind. Its parser was meant to accept
+either `create_notebook_workflow_tool` or `mcp_create_notebook_workflow_tool`, the name the agent
+sees, and it removed the prefix with `lstrip("mcp_")`. `lstrip` does not remove a prefix. It
+removes leading characters drawn from a set, here m, c, p and _. Every name that starts with one
+of them was mangled, with or without the prefix:
+
+```
+mcp_create_notebook_workflow_tool,create_notebook_workflow_tool,mcp_count_crimes_per_community
+  -> {reate_notebook_workflow_tool, ount_crimes_per_community}
+```
+
+The mangled names match no tool, and nothing is logged when a name matches nothing. Two of the 16
+tools defined under `MCP_server/tools/` could not be unbound under either spelling:
+`create_notebook_workflow_tool` and `count_crimes_per_community`. The same held for any generated
+tool given a name that starts with m, c or p; the default name, `notebook_<stem>`, was safe.
+`create_notebook_workflow_tool` is the remote notebook builder that #42 asked the maintainer about
+unbinding, so the override is how an operator would unbind it if that decision is reversed.
+
+The override also replaces the default list rather than adding to it. Setting it to that one name
+therefore left the builder bound and bound the two web-search tools again: two tools added, none
+removed.
+
+The test could not catch it. `test_the_unbind_list_is_overridable` checked both spellings with
+`describe_image`, and d is not in the set, so `lstrip` and a prefix removal agree on that name.
+The default list never reaches the parser, and neither of its names starts with one of the four
+characters. `printenv` in the `agent-api` container on 10-03 found the variable unset, so the
+defect was latent in the deployment.
+
+The fix is `removeprefix("mcp_")`, which needs Python 3.9; the images run 3.11. One new test
+parses the string above, then names starting with c (the two real tools), m and p, each written
+both ways. The other builds through `_make_remote_mcp_tools` with the listing stubbed, because
+that is the path the deployment takes. Restoring `lstrip` fails both, and the old test still
+passes.
+
+Unchanged:
+
+- **The override still replaces the default list**, as its test asserts. An operator who unbinds
+  one more tool and wants the two web-search tools to stay unbound must name all three.
+- **A name that matches no tool is still silent**, so a typo fails the way this bug did.
+- **#42 lists this bug under "Found, and not fixed here".** It was still open when this was
+  written. Whichever of the two merges second should update that bullet.
+
+### Stage S13.6 What this stage did not fix
 
 - **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
   The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
@@ -3536,3 +3590,963 @@ reads the file then keys it by what it holds.
 - `build_map_layer` still derives an id from the label for any descriptor without one, and nothing
   checks that a new tool sets one.
 - `regionalize` segfaults on a disconnected contiguity graph (S20.9).
+
+---
+
+## Stage 21 — A filename names this conversation's file {#stage-21}
+
+*2026-10-02. Branch `claude/read-by-name-scoping`.*
+
+S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 15 on
+`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S15.6).
+
+### Stage S21.1 What a read by name did
+
+`read_text_file` and `inspect_file_for_analysis` resolve `path` through `_resolve_allowed_path`. A
+file_id goes to the store. Anything else went to `_resolve_local_allowed_path`, which first called
+`_find_managed_file_by_name`: for a bare filename, the newest file in `uploads/` or `outputs/` whose
+on-disk name ended in `__<filename>`. It read no record, so it never saw `session` or `owner_id`.
+
+Measured with a probe on prototype `5ae6d92`, first on 2026-10-01 and again on 2026-10-02. Alice
+wrote `summary.md` in `conv-alice`. Bob, in `conv-bob`, read `ALICE PRIVATE` back by name through
+both tools, while `find_files("summary.md")` returned `[]` for him. The same read worked from
+alice's other conversation, and in dev mode from any conversation. The scan had four more
+consequences:
+
+- `execute_code(input_files=["summary.md"])` staged alice's file into bob's sandbox, because
+  `_resolve_input_file` falls back to `_resolve_allowed_path`. It went in under its on-disk name,
+  `file_<id>__summary.md`, so even alice's own `open("summary.md")` would have found nothing.
+- `write_text_file` sends a name that starts with "." down its path branch,
+  `_resolve_allowed_path(..., must_exist=False)`. The scan matched a suffix of the on-disk name, so
+  `".md"` found alice's `notes__.md` (on disk `file_<id>__notes__.md`) and overwrote it.
+  `secure_filename` strips leading dots, so only a stored name containing `__.` can be reached this
+  way. It is narrow, but it is a write into another user's file.
+- The suffix is not the filename: `"summary.md"` also matched `final__summary.md`.
+- A conversation's own file lost to a newer one elsewhere. Once alice had written a newer
+  `summary.md`, bob's read returned hers instead of his own.
+
+The scan arrived in `1017671` (2026-04-28), four months before records carried a session
+(`9b83546`), when the store was one namespace anyway. Reason not recorded.
+
+### Stage S21.2 What changed
+
+- `_find_managed_record_by_name` replaces the scan. It calls `find_files(name=...)`, which applies
+  both scopes and orders newest first, and keeps only a record whose `filename` is exactly the
+  name given, case included.
+- It asks for every match, with no page. `find_files` sorts all substring matches newest first and
+  only then cuts its page of 20. With 25 newer `draft*_summary.md` files, the exact `summary.md`
+  was not on that page.
+- `_resolve_allowed_path` tries it after the file_id and before a raw path, and returns the
+  record. A read by name now reports the `file_id` and `download_url` it resolved, where both were
+  null. `execute_code` stages the file under its filename as well as its id.
+- A refusal is the "file does not exist" error a missing name gets, word for word apart from the
+  name. The download endpoint answers 404 rather than 403 for the same reason (S9.3): a different
+  answer would tell bob that alice has a file by that name.
+
+### Stage S21.3 The unowned legacy pool, decided
+
+A record with no session and no owner stays readable by name, from any conversation. That is the
+answer `find_files` already gives, because the pool is reused, and `may_read`'s docstring keeps the
+opposite answer for a browser download, which is a different caller.
+
+It competes on recency like everything else. Ranking this conversation's own files first looked
+safer and was rejected. **An upload carries no conversation.** The upload route binds the user and
+not the thread, and the map UI posts only the files. Measured through the route in dev mode, with a
+`thread_id` sent in the query, the form and a header, the record was stored with `session: null`.
+So "own first" cannot tell a legacy record from this conversation's upload. It would rank an earlier
+turn's output above the corrected file the user had just uploaded under the same name. That is the
+wrong-file bug `_build_staging` was already fixed for, in the comment above its second pass.
+`test_a_newer_upload_outranks_an_older_output_of_the_same_name` pins this choice.
+
+### Stage S21.4 Verification, and what it costs
+
+- `test_read_by_name_scope.py`, 26 tests. On prototype 17 fail and 9 pass. The 9 are what scoping
+  must not break: a conversation's own file, the same in dev mode, and the legacy pool, each
+  through both tools, plus three ordering cases (the newest of several, the newer upload, and the
+  near-misses a page would hide). With the fix, 26 pass.
+- Re-running the probe on the branch, every by-name case is refused, and the raw paths in S21.5
+  still get through.
+- That file and eight neighbouring modules (file ownership, conversation listing, input staging,
+  the ledger's file rows, code execution, upload ownership, the download route and the sweep):
+  168 pass.
+- The full suite: 1671 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus
+  this file's 26.
+
+The price is a parse of every metadata record on each by-name read, since the store has no index.
+On a synthetic store of 1,400 records (the store's own comments count 1,325 legacy ones), a
+by-name read took 74 to 91 ms against 9 to 14 ms for the scan. At 5,000 records it was 460 ms against 45 ms. These are
+medians of 30 warm runs on the Mac, three runs at 1,400 and one at 5,000. `list_conversation_files`,
+`resolve_file_ref` and `overwrite=True` already pay for the same scan. If it starts to matter, the
+fix is an index, not an unscoped scan.
+
+### Stage S21.5 What this stage did not fix
+
+This change scopes a bare filename and nothing else. Two other routes reach a stored file without
+passing through `find_files`, and each needs a decision of its own:
+
+- **Raw paths.** The storage root is an allowed root, so a path into it is resolved with no session
+  or owner check, for reads and for writes. That leaves open whether a managed file should be
+  reachable by raw path at all, once it can be named by id or by filename.
+- **File ids.** A read by file_id is not checked against the owner. Outside the store itself,
+  `may_read` is called only by the download endpoint. Whether an id should then be honoured across
+  all of its owner's conversations, or only inside its own, is undecided.
+
+Two scoping gaps sit upstream of the lookup:
+
+- **Uploads are never stamped with a conversation** (S21.3). In dev and demo mode an upload is in
+  the pool every conversation reads by name, and `list_conversation_files` does not list it even
+  in the conversation that uploaded it. In token mode the owner check still confines it to its
+  user.
+- **A request with no `thread_id` binds no conversation**, and `find_files` then searches all of
+  them, though the owner check still applies. The map UI mints its thread id before the first turn
+  (from reading the code, not measured). Other API clients may not.
+
+---
+
+## Stage 22 — A file_id names one write {#stage-22}
+
+*2026-10-01. Branch `claude/output-overwrite-scope`.*
+
+S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
+the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
+`claude/layer-identity-by-inputs` (its S13.6) lists it among what it did not fix.
+
+### Stage S22.1 What overwrite did
+
+`create_output_file` and `create_output_file_from_path` each scanned every metadata record and took
+the first output with the same filename, in directory order, from any conversation and any owner.
+They then reused its file_id, copied the new bytes over the old file and re-stamped the record
+with the current session and owner.
+
+Of the 44 producer call sites, two hard-coded it: `qgis_metric_buffer` and `pyqgis_render_map`.
+Their model-facing defaults are `buffer.geojson` and `map.png`, and the supervisor's own QGIS
+workflow passes `buffer.geojson` and `qgis_map.png` for every caller. Two more passed the model's
+flag through: `write_output_file`, and `write_text_file` given a bare filename. The other 40
+always write a new file.
+
+So the second person to buffer anything took over the first person's file. The first person's
+link served the second person's buffer, and their record no longer said it was theirs.
+`find_files` then hid it from the conversation that made it. In token mode their own link
+answered 404: the download endpoint's `may_read` check found a record that named someone else.
+
+Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
+(`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
+re-grounding pass (the S13.1 table on that branch). That pass repeated the same buffer. A re-run
+with a corrected distance would have changed what the first answer's link served, with nothing in
+the transcript to show it.
+
+`overwrite=True` arrived in `8dc7f25` (2026-05-07), before conversations or owners existed, when
+the store was one namespace anyway. Reason not recorded.
+
+### Stage S22.2 What changed
+
+- `file_store._output_to_replace` is now the single scan behind both create functions. It reuses
+  only an output that THIS conversation wrote for THIS caller. The session must match, and a
+  session must be bound: with none, the records that match are the unstamped legacy pool every
+  conversation reads. The owner must match exactly, because the conversation id arrives from the
+  client and a borrowed one must not reach another user's file. In dev and demo it is None on
+  both sides. Of several matches, the newest is replaced, in the same order `find_files` uses.
+  Directory order was no order: on prototype the new test of it failed on one run and passed on
+  the next.
+- `qgis_metric_buffer` and `pyqgis_render_map` no longer pass `overwrite`, so every run is a new
+  file. An earlier answer links to the buffer or embeds the map image, and a re-run can differ.
+- `test_no_producer_hard_codes_overwrite` walks the producers' source and fails on any
+  `create_output_file*` call with a literal `overwrite=True`. Passing the caller's own flag through
+  is still allowed.
+
+### Stage S22.3 Why both halves
+
+Two fixes were offered: drop the flag in the tool, or scope the reuse. They fail different tests
+in `test_output_overwrite_scope.py` (19 tests):
+
+| | fail |
+|---|---|
+| prototype | 14 every run, plus the newest-match test on some runs; the 4 that pin a conversation still overwriting its own file pass |
+| scoping alone | 2: the same-conversation re-run (the 2026-10-01 case) and the guard |
+| dropping the flag alone | 10, plus the newest-match test on some runs: the model's write tools still reach another conversation's file |
+
+Scoping alone leaves a real case open. Inside one conversation, two different buffers under the
+default name, or a corrected re-run under the old name, still share one file_id.
+
+### Stage S22.4 Layer identity, and the merge order
+
+This depends on `claude/layer-identity-by-inputs`, and must merge after it. On prototype,
+`add_map_layer` called without a `name` builds its layer id from the input's on-disk stem, and that
+stem carries the buffer's file_id. Measured on two identical buffers written as separate files:
+`agent-file_524b820f3452_buffer` and `agent-file_f5deaf380dcc_buffer`. File reuse was what kept
+a repeated buffer on one layer. With a `name`, both are `agent-2_km_buffer`, and nothing changes.
+
+With the two branches combined, a re-grounded buffer is a new file (`file_04a5ecb661d2`, then
+`file_6463dacb8698`) and still the same layer (`agent-map-shapes-d6163870f2`), because the layer
+is keyed on `file_content_key`. In code the two branches conflict in one hunk, at the buffer's
+call to `create_output_file_from_path`. The resolution keeps `content_key=key` and drops
+`overwrite=True`.
+
+### Stage S22.5 Verification
+
+- `test_output_overwrite_scope.py`: 19 pass, stable over five runs.
+- The full suite: 1664 passed, 4 skipped, against a baseline of 1645 and 4.
+- Combined with `claude/layer-identity-by-inputs` in a throwaway worktree, with the conflict
+  resolved as above: this file, that branch's `test_layer_identity_by_inputs.py`, and the QGIS,
+  map-layer-identity and file-ownership tests, 89 passed.
+
+### Stage S22.6 What this stage did not fix
+
+- `read_text_file` and `inspect_file_for_analysis` resolve a bare filename through
+  `_find_managed_file_by_name`, which scans every conversation's uploads and outputs. In a probe,
+  bob read alice's `summary.md` by name while `find_files` correctly hid it from him. This is the
+  read-side twin of this stage, and a separate change.
+- The write tools report `"overwritten": true` whenever the model asked for it, not when a file
+  was actually replaced.
+- Every buffer and map is now kept. The only collection is the opt-in TTL sweep
+  (`AGENT_FILE_RETENTION_DAYS`, off by default).
+- On `claude/layer-identity-by-inputs`, the docstring of `_content_digest` gives "qgis_metric_buffer
+  overwrites by name" as its example of a file rewritten in place. The example goes stale here. The
+  reason stands, because a conversation's own `write_output_file(overwrite=True)` still rewrites in
+  place.
+
+---
+
+## Stage 23 — An upload names its conversation {#stage-23}
+
+*2026-10-02. Branch `claude/stamp-upload-session`.*
+
+S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
+upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 17 on
+`claude/read-by-name-scoping` lists that gap in its S17.5, and its S17.3 was shaped by it.
+
+### Stage S23.1 What an unstamped upload did
+
+Measured through the route with the Flask test client in dev mode on 2026-10-02: with a thread id
+sent in the query string, in the form and in a header, the record was stored with `session: null`.
+`find_files` reads a record with no session as the legacy pool that every conversation shares.
+Three consequences:
+
+- `list_conversation_files` asks `find_files` for `include_unowned=False`, so it never listed an
+  upload, not even in the conversation that uploaded it. Its docstring promises every file the
+  conversation has "made or been given".
+- Nobody is identified in dev and demo mode, so the owner check passes everyone. Any conversation
+  could find another's upload through `find_files` and open it through `resolve_file_ref`. In
+  token mode the owner check still confined it to its user.
+- Stage 17 ranks a read by bare name by recency rather than "this conversation's own files first",
+  because an upload could not be told apart from a legacy record (its S17.3).
+
+### Stage S23.2 What changed
+
+- The map UI sends `thread_id` as a form field beside the files. The value is `threadRef.current`,
+  the id its turns send, which `newThreadId()` mints before the first turn. A restored conversation
+  gets its saved id back before anything else, so its uploads and its turns still agree.
+- `_upload_thread_id()` reads `threadId` or `thread_id` from the form, then from the query string.
+  These are the chat routes' two spellings, normalised by the same `_coalesce` and strip, so a blank
+  or padded id cannot become a conversation of its own. The form wins, because it is what the client
+  composed for this upload. No header is read, because no route takes a thread id from one. Nor is
+  `memoryId`: the chat routes bind the file store to `threadId` alone.
+- The route binds that id with `set_file_store_session` around `save_uploaded_file`, as the chat
+  routes do around a turn, and resets it in `finally`. Production runs gunicorn with `--threads 4`,
+  and each thread serves one request after another, so a binding left set would outlive its request
+  on that thread. Nothing reads it there today: every route that uses the store binds its own id
+  first, the upload route included, even when the id is None. A route added later without a binding
+  of its own would run in the last caller's conversation. `test_the_binding_ends_with_the_request`
+  pins the reset; S23.5 says why its first version did not.
+- The response keeps its shape. Each file record already carried `session`, null until now.
+- The map UI counts every upload's file id as already drawn, when the upload returns and again
+  when its conversation is reopened. S23.4 says why.
+
+### Stage S23.3 An upload with no thread id, decided
+
+It is stored exactly as before: no session, in the pool. The clients that send none are
+`examples/iguide_chat_prototype.html` (the reference client), `examples/agent_chat_stream_demo.html`
+(the dashboard page), any map UI tab still running the bundle from before this change, and callers
+outside this repo. All but the last are known to send a thread id with their turns.
+
+- **Refusing it** would break every one of those uploads.
+- **Minting a session for it** would keep the upload out of other conversations, and out of the one
+  that uses it too. Those clients send their thread id on turns, so a minted id would never match:
+  the upload would drop out of that conversation's listing and its lookups by name, though it stays
+  reachable by file id. Once Stage 17 routes the file tools' bare-name read through `find_files`,
+  the model could not open its own upload by name.
+- **Adopting it into the first conversation that attaches it** by `fileIds` was not taken either.
+  The chat route would start writing the records it reads, and a record has one `session`, so an
+  upload attached in two conversations would belong to whichever came first.
+
+Such an upload logs `Upload with no thread id` at INFO. The fallback can be tightened once that line
+stops appearing. Until then `test_an_upload_with_no_thread_id_is_stored_as_before` pins it, so that
+tightening it is a decision rather than an accident.
+
+### Stage S23.4 Revised during the work: the listing redrew the upload
+
+The first run in Chrome, with only the server change and `uploadFiles`, answered correctly and left
+two copies of the upload on the map: the preview `Upload: stamp_probe_points` and a second
+`stamp_probe_points` layer, 3 points each. The listing now returns the upload's record, and the
+client harvests download records from every event. When no `map_layer` event fired, the artifact
+fallback (`loadVectorArtifacts`) draws every GeoJSON among them. It skips a file it has drawn
+before (`loadedArtifacts`) or one a `map_layer` event drew (`layerSourceFiles`). The preview is
+drawn locally from the `File`, so it was in neither set.
+
+The listing made this common but did not create it. `read_text_file` and
+`inspect_file_for_analysis` return the same record when called by file id, which the turn prompt
+asks for, so an "inspect my upload" turn reached the same fallback. That is from reading the code,
+not measured.
+
+The first fix registered the file only when the record's name matched the preview's, the way
+`onUpload` already attaches `sourceUrl`, and registered each reopened layer by its URL. Both miss
+every name `secure_filename` rewrites: `My Data.geojson` is stored as `My_Data.geojson`, and
+`roads(1).geojson` as `roads1.geojson`. A preview whose name did not match never gets a
+`sourceUrl`, so it comes back from its inline copy, with no URL to register. So `onUpload` now
+registers every returned file id with no name match, and `restoreSession` registers the
+conversation's upload ids the same way. The URL registration was dropped. Beyond uploads, the only
+duplicate it prevented was of a layer a `map_layer` event drew, which is an older gap this stage
+leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` replaces it by id.
+
+### Stage S23.5 Verification
+
+- `test_upload_session.py`, 15 tests. On prototype 9 fail and 6 pass. The 6 are guards that hold
+  either way: the binding ends with the request, a later thread-less upload names no conversation,
+  another conversation lists nothing, a thread-less upload is stored and found as before, and a
+  blank id, twice. With the fix all 15 pass.
+- An independent re-derivation of this section deleted the reset and found the first version of
+  `test_the_binding_ends_with_the_request` still passing. That version checked the session after a
+  second upload, which binds its own id before it writes. The test now checks straight after the
+  first upload, and fails without the reset. A second mutation, binding only when an id is present,
+  fails five tests.
+- `npm run check:upload` calls `uploadFiles` against a stubbed `fetch` and reads the multipart body.
+  With prototype's `agentClient.ts` the thread-id check fails. With the change all four checks pass,
+  `npm run build` is clean, and `check:auth`, `check:fold` and `check:hooks` still pass.
+- The full suite: 1660 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus this
+  file's 15.
+- A probe through the route in dev mode, in four trees. The upload is made in `sess-a`. The last two
+  columns are what `sess-b` gets when it asks for the file by name:
+
+  | | stored `session` | listed in `sess-a` | `find_files` / `resolve_file_ref` | `read_text_file` / `inspect_file_for_analysis` |
+  | --- | --- | --- | --- | --- |
+  | prototype `5ae6d92` | null | no | finds it | reads it |
+  | Stage 17 alone | null | no | finds it | reads it |
+  | this stage alone | `sess-a` | yes | nothing | reads it |
+  | both | `sess-a` | yes | nothing | refused |
+
+  Neither change closes that read on its own. On prototype the file tools' bare-name read is the
+  directory scan S17.1 describes, which never opens a record, so no stamp can scope it. Stage 17's
+  route through `find_files` honours the stamp, but on its own it finds an unstamped upload in the
+  pool. The two merge cleanly in code. Merged, eight file-store test modules (107 tests) pass, and so
+  does the full suite: 1686 passed, 4 skipped, which is 1645 + 26 + 15.
+- In Chrome, against this branch served locally in dev mode with a scratch file store, one new tab
+  per test. Tab 1 ran with no client fix, tabs 2 to 4 with the first fix in S23.4, and tabs 5 to 7
+  with the by-id registration. A layer count proves something only when the turn carried the upload's
+  download record (the answer then shows a DOWNLOAD box); without it the fallback has nothing to draw.
+
+  | tab | gesture | what the turn did | record in the turn | layers |
+  | --- | --- | --- | --- | --- |
+  | 1 | upload `stamp_probe_points.geojson`, ask "Which files are saved in this conversation?" | `list_conversation_files`: 1 result, the upload by name and id | yes | 2 |
+  | 2 | the same, in a new conversation | 1 result: its own upload, not tab 1's of the same name | yes | 1 |
+  | 3 | the question alone, nothing uploaded | 0 results; the answer: "No files are saved in this conversation." | no | 0 |
+  | 4 | reopen tab 2's conversation from History, ask again | answered from the earlier turn, no tool call | no | 1, proving nothing |
+  | 5 | upload `renamed probe (1).geojson`, stored as `renamed_probe_1.geojson`; ask, then name the tool | the first answer came from the attachment note; the second called the tool: 1 result | yes, the second | 1 |
+  | 6 | reopen tab 5's conversation, name the tool, then ask to inspect the upload | the earlier result reused, then `inspect_vector`, whose result carries no record | no | 1, proving nothing |
+  | 7 | restart the API server, which clears the process-local ledger; reopen tab 5's conversation, name the tool | called the tool: 1 result | yes | 1 |
+
+  Tab 5's preview was saved inline, with no `sourceUrl`, which is the name mismatch S23.4 describes.
+  So tab 7 is a reopened upload that only the id registration covers. The thread ids of tabs 1, 2 and
+  5, read back from their saved session records, equal the `session` on their uploads. A `curl`
+  upload with no thread id was stored with `session: null` and logged the one
+  `Upload with no thread id` line. The UI uploads logged none.
+
+### Stage S23.6 What this stage did not fix
+
+- A thread-less upload is still in the pool in dev and demo mode (S23.3). Of the two example pages,
+  the reference client mints a thread id per page load, so it needs a one-line change. The
+  dashboard page defaults every visitor to `demo-thread-1`, so stamping its uploads with that would
+  move them from the pool into one conversation that everyone shares.
+- Until Stage 17 lands, `read_text_file` and `inspect_file_for_analysis` still read another
+  conversation's upload by bare name (S23.5).
+- S17.3's choice of recency over "own conversation first" is not revisited here. Its premise no
+  longer holds for an upload from a client that sends its thread id, but a legacy record and a
+  thread-less upload still cannot be told apart.
+- A request with no `thread_id` binds no conversation, and raw-path and file-id access are
+  unscoped. Both are as S17.5 describes.
+- Two older gaps in the same client code, found by reading it and not measured. A reopened
+  conversation does not register the layers a `map_layer` event drew, so a later turn that lists the
+  conversation's outputs can draw one of them a second time. And an upload whose name
+  `secure_filename` rewrites never gets its `sourceUrl`, so one too large to keep inline cannot be
+  restored.
+
+---
+
+## Stage 24 — A laptop that writes nothing {#stage-24}
+
+### Stage S24.1 The recipe failed twice, so it became a mode
+
+Running the agent locally meant inheriting the main checkout's `.env`, which points at shared
+infrastructure: the PRODUCTION OpenSearch cluster, a remote embedding server, the production
+agent's public URL, dev object storage, the VM's rs-embed, and `AGENT_MODE=token`. Every
+`load_dotenv` in the code walks up from a worktree and finds that file.
+
+The safe way to run locally was therefore a list of overrides, and the list failed twice. On
+2026-10-01 a local verification run wrote seven conversations into prod; nothing errored, because
+a write that should not happen does not fail — it succeeds. The recipe recorded afterwards
+(`PLATFORM_TIER=dev` with `OPENSEARCH_NODE` blank) still wrote, to the DEV cluster: with the
+explicit host empty, `platform_endpoints.opensearch_url()` falls back to the tier's. It was caught
+only by reading the code while planning a local model test.
+
+A guarantee that depends on remembering eight variables is not a guarantee. `AGENT_MODE=local`
+is a fourth mode beside `dev`, `demo` and `token`.
+
+### Stage S24.2 What it guarantees, and where each guarantee lives
+
+**Persistent memory is off, checked in three places.** The failure it prevents is silent, so no
+single check is trusted alone:
+
+* **The request flag**, in `_normalize_agent_chat_request` and at the second call site. The map
+  UI hard-codes `use_persistent_memory: true`, so a flag the client controls cannot be the switch;
+  local mode overrides it.
+* **The conversation endpoints.** The map UI saves snapshots by `PUT /agent/conversations/<id>`
+  DIRECTLY, outside the per-request flag. In local mode a PUT is declined in the body
+  (`{"stored": false}`, HTTP 200 — the client keeps its own copy, and a store that is deliberately
+  off is not an error for it to report); GET and traces answer 404. These checks run BEFORE
+  `assert_memory_owner`, which reads the store.
+* **The store's own client.** `memory_module._get_opensearch_client()` raises
+  `PersistentMemoryDisabled` before it builds anything — and before it consults the cache, since
+  a guard behind the cache is bypassed by any client built earlier. Every read and write of the
+  conversation store comes through here, which is what makes the mode a guarantee rather than a
+  convention.
+
+**Knowledge-base search keeps reading.** Memory and search shared `OPENSEARCH_NODE`, so "no memory
+writes" used to imply "no search", and a model tested without search is being tested on a crippled
+agent. The five search modules build their own clients, so closing the memory store leaves them
+untouched.
+
+**Download links stay on the machine.** `AGENT_PUBLIC_BASE_URL` is ignored; the `.env` sets it to
+the production agent, which made every local link a 404 against a host that never had the file.
+
+**Access is `dev`'s.** No identity, settings shown, model chosen per request. Every existing call
+site tests `is_token()` or demo — none compares `== DEV` — so `local` inherited dev behaviour at
+each of them without a change.
+
+### Stage S24.3 The banner is the part that prevents a repeat
+
+The 2026-10-01 writes went unnoticed because nothing ever said *this process will write to
+149.165.155.195*. In local mode the server logs, at boot, every endpoint it can still reach,
+tagged `[local ]` or `[REMOTE]`, with credentials in URLs masked and `AGENT_PUBLIC_BASE_URL` listed
+as `[ignored]` rather than silently dropped.
+
+### Stage S24.4 How it was tested
+
+`test_local_mode.py` targets the two real failing configurations by name and asserts the store is
+never OPENED — a constructor that raises if called — rather than that a write fails, since "it
+raised" and "it did not touch the cluster" are different claims. Both load-bearing guards were
+mutation-tested: removing the store guard fails the four store tests; removing the request
+override fails the one that covers it.
+
+`/agent/ui-config` gained `persistent_memory`. The endpoint is unauthenticated, and
+`test_demo_mode.py` pins its whole body so that any new field is a deliberate edit; that pin was
+extended rather than loosened.
+
+### Stage S24.5 What it does not do
+
+It does not make a local run OFFLINE. The LLM, the remote embedding server and knowledge-base
+reads are still real network calls; the banner names them. It does not change any deployed mode:
+`token` on the VM is untouched. And the map UI's own word "local" — its mock mode, `runLocal` —
+is a different thing from this server mode; a comment in both places says so.
+
+---
+
+## Stage 25 — Starting a child without forking the agent {#stage-25}
+
+On 2026-10-01 a local agent server on the maintainer's Mac ran one turn that called
+`admin_boundary`, `qgis_metric_buffer` and `add_map_layer`, all successfully. After that, every
+child the same process started died before `exec`. `qgis_metric_buffer` returned returncode -11
+with empty stdout and stderr at its first step (`native:reprojectlayer`), and the `execute_code`
+fallback "failed during dependency installation". Neither program ever ran. macOS wrote 11 crash
+reports, each for a `python3.13` child of the server, each faulting inside PROJ's `pthread_atfork`
+child handler. The workaround at the time was to restart the server between turns. The same day
+had 11 more reports with the identical signature from a Python 3.11 process, and while this entry
+was being written another session's local server wrote four more, so it is not one interpreter
+or one session.
+
+This is a stage rather than a fix in one tool because the agent process is the parent of every
+QGIS run, every sandbox container and every CLI peer, so how it starts a child is a property of
+the whole process. One function now owns it, and a test keeps every other route out. Stages 13
+to 15 are claimed by open branches; this takes the next free number.
+
+### Stage S25.1 The chain
+
+Read from the crash reports, PROJ's source, the libsystem_trace and libsqlite3 code in the dyld
+shared cache, and an `atfork` probe in the child:
+
+1. **PROJ registers a fork handler on its first database lookup.** It is pyproj 3.7.2's bundled
+   PROJ 9.5.1, from the user site-packages here. In the child, the handler empties
+   `SQLiteHandleCache` (`invalidateHandles()` → `cache_.clear()`), which `sqlite3_close`s every
+   proj.db handle that no live PROJ object still holds. That code is unchanged through PROJ master.
+2. **That PROJ links Apple's `/usr/lib/libsqlite3`, whose descriptor is already invalid in the
+   child.** With `PROJ_LOG_SQLITE3=1` every child printed `cannot fstat db file …/proj.db` and
+   `close(…/proj.db) - Bad file descriptor`. Apple's `sqlite3_log` forwards each message to
+   `os_log`; an initializer inside `sqlite3_initialize` switches that route on.
+3. **libsystem_trace reads a mapping the child did not inherit.** `os_log_type_enabled` compares
+   the log object's generation with the process's, and on a mismatch it refreshes the object by
+   reading its subsystem key (`com.apple.libsqlite3` / `logging`). That key lives in logd's shared
+   "Activity Tracing" mapping. Probed in the child before PROJ's handler ran, the key's page was
+   unmapped and the generations had been reset (0 and -1, against 1 and 1 in the parent), so
+   every child takes the refresh. The refresh maps a fresh copy first, and the stale pointer is
+   valid again only if that copy lands where the parent had it. The faulting instruction is
+   `ldrb w23, [x8, #0x2]` with `x8` the key, and the fault address is the key plus 2, "not in any
+   region".
+
+### Stage S25.2 Why three lines never reproduced it, and what does
+
+The minimal script (a `Transformer.from_crs` lookup, then a subprocess from a thread) survives
+because nothing has freed address space below the preferences mapping, so the child maps it back
+at the parent's address. After PROJ's handler the probe found the key mapped again. The extra
+condition the server supplied was not logging state held by another thread, the hypothesis at the
+time. It was the address-space layout.
+
+Measured, with the reprojection in a worker thread and the launch from another:
+
+| freed between the first reprojection and the launch | child |
+|---|---|
+| nothing (the three-line script) | 0 |
+| request threads that exited (1 and 4) | 0 |
+| a 1 MB or 8 MB buffer, or a 6.5 MB HTTP body (libmalloc keeps their address space) | 0 |
+| 200,000 or 500,000 small objects (CPython unmaps the emptied 1 MiB arenas) | **-11** |
+
+`scripts/repro_macos_fork_crash.py` is the last row. It runs in 0.7 s, and its crash reports
+match the server's frame for frame (the first 16 frames, offsets inside libsqlite3 and
+libsystem_trace included). It points SIGSEGV at `_exit`, so a doomed child exits with status 11
+and no report is written; `--crash-report` keeps the real one.
+
+### Stage S25.3 The options, measured in that state
+
+| how the child was started | child |
+|---|---|
+| `subprocess.run(cwd=job_dir)`, what `qgis_headless_tools._run_subprocess` did | **-11** |
+| `subprocess.run` with an absolute path and the default `close_fds` | **-11** |
+| `os.fork()` | **-11** |
+| multiprocessing `'spawn'`, which starts its child with fork_exec | **-11** |
+| `SQLITE_ENABLE_LOGGING=0` (Apple's switch), then the original call | **-11** |
+| multiprocessing `'forkserver'`, started before any PROJ use | 0 |
+| `posix_spawn`: absolute path, `close_fds=False` | 0 |
+| `posix_spawn` through `/bin/sh` that changes directory and `exec`s | 0, in the right directory |
+| real `qgis_process --version` and `docker version`, by `posix_spawn` | 0 |
+
+Turning Apple's logging off does not help, because `sqlite3_close` also asks `os_signpost` about
+the same log object, and that crash came through the same refresh. A forkserver or helper works,
+but only if it exists before the first PROJ lookup in every entry point: the server, gunicorn, a
+script, a test. A fork handler cannot be unregistered, and keeping a live PROJ object does not
+stop the close: with a `pyproj.CRS` held for the life of the process, the child still died.
+`posix_spawn` needs no ordering, because nothing in this process runs at all in the child.
+
+CPython 3.13 already uses `posix_spawn` on macOS, but only when the program is a path, `close_fds`
+is false (macOS has no `POSIX_SPAWN_CLOSEFROM`), and there is no `cwd`, `preexec_fn`, `pass_fds`,
+new session, process group or identity change. Anything else falls back to fork_exec without a
+word. `_run_subprocess` missed two of those conditions: `cwd=job_dir`, and the default
+`close_fds`.
+
+### Stage S25.4 `fork_safe.run`
+
+`agent_runtime/fork_safe.py`, a `subprocess.run` that takes the arguments the agent uses:
+
+* The program is resolved on the child's `PATH` as subprocess would, and a missing one raises the
+  same `FileNotFoundError`, so every caller's "qgis_process not found" and "docker executable not
+  found" branch keeps its meaning.
+* `close_fds=False` costs nothing. PEP 446 makes every descriptor Python opens non-inheritable,
+  and a process with `api.server` imported and the turn's tools run had nothing inheritable but 0,
+  1 and 2.
+* A working directory is reached through `/bin/sh -c 'cd -- "$1" && shift && exec "$@"'`. The
+  `exec` matters: the command, not the shell, is the agent's child, so the exit status is the
+  command's and a kill on timeout reaches it instead of orphaning it behind a dead shell. A test
+  pins it by checking that the command's parent pid is the agent's.
+* Options that would bring fork back (`preexec_fn`, `pass_fds`, `start_new_session`,
+  `close_fds=True`, …) are refused on every platform, so a Linux-only run still catches them.
+* Off macOS it is `subprocess.run`, unchanged.
+
+Fifteen launches moved to it: QGIS (2), `code_execution` (8), the two CLI peers (2 each), and the
+server's docker image check (1). Measured end to end in the crashing state, with the real tools:
+`qgis_metric_buffer_tool` through `fork_safe` returned ok with its three steps at 0, the same call
+through the old launch failed at `reproject_input`, and `execute_code` ran in the
+`iguide-codeexec` sandbox. The reproduction and these tests also pass under the Mac's Python
+3.11.12, whose `posix_spawn` conditions differ in detail. `test_fork_safe.py` scans
+`agent_runtime/`, `rag_pipeline/` and `api/` and fails on a direct `subprocess`, `os.fork`,
+`os.system` or multiprocessing start, because a new tool calling `subprocess.run` would bring the
+crash back on a Mac and nowhere else. It also runs the reproduction: the guarded child must run in
+its directory, and on a Mac the unguarded one must die, or that test skips and says the
+environment does not reproduce it.
+
+Seventeen test fakes moved from `subprocess.run` to `fork_safe.run`, and one test that starts a
+real child now uses it too: `test_numpy_stand_ins_reproduce_scikit_learn` skips when its
+scikit-learn child exits non-zero, so a child killed by this crash would have been reported as
+"scikit-learn unavailable". On macOS `subprocess.run` now receives `/bin/sh` and no `cwd`, and
+four QGIS tests that asserted on `argv[0]` and `cwd` failed until their fake replaced the function
+the module actually calls. The peer and code-execution fakes passed either way, but only because
+`docker` is on this Mac's PATH, which is not something a fake should depend on.
+
+### Stage S25.5 The deployed container is not affected
+
+Checked inside `agent-api` (Python 3.11.16, glibc 2.41) with throwaway scripts in `/tmp`. Nothing
+was deployed.
+
+* **PROJ registers the handler there too.** All four PROJ copies in the image import
+  `__register_atfork`: pyproj's 9.5.1, rasterio's 9.7.1, fiona's 9.4.1, and the system 9.6.0 that
+  QGIS 3.40.6 uses. **Revised during the work:** the first check searched those libraries for
+  `pthread_atfork`, found nothing, and would have recorded "Linux PROJ has no fork handler". On
+  glibc `pthread_atfork` is linked statically from `libc_nonshared.a`, and what a library imports
+  is `__register_atfork`.
+* **What protects Linux is how CPython starts children there.** With libc's `abort` registered
+  as a fork child handler, `subprocess.run(["pwd"], cwd=dir)` exited 0 in the container and
+  aborted on the Mac. `os.fork()` aborted on both, which proves the handler was live. CPython 3.11
+  uses `vfork` or `posix_spawn` for subprocess on Linux, and neither runs fork handlers.
+* **Even a real fork is harmless there.** In the same 500,000-object state, `os.fork()`, which
+  does run PROJ's handler, exited 0. So did `subprocess.run(["pwd"], cwd=dir)` and a real
+  `qgis_process --version`. `PROJ_LOG_SQLITE3=1` printed nothing in the child: the image's bundled
+  SQLite has a valid descriptor there and nothing to report, and Linux has no `os_log`.
+
+So this change is a no-op on the deployment, and no Linux CI run would ever have shown the bug.
+
+### Stage S25.6 What this does not fix
+
+* The two defects are upstream and unreported. PROJ calls `sqlite3_close`, which is not
+  async-signal-safe, from a fork child handler, and libsystem_trace refreshes a logging object
+  through a pointer the child never inherited.
+* Any real `fork()` of the agent process on macOS still runs PROJ's handler. Our code has none,
+  and the scan forbids adding one, but a library can. joblib does: `esda.G_Local` defaults to
+  `n_jobs=-1`, and its loky pool starts each worker with `os.fork()` and then `exec`. That is the
+  same mechanism, though it was not reproduced in a realistic order: importing esda and numba
+  after the reprojection filled the free gap, so the next fork survived. Passing `n_jobs=1`
+  would close that route and is also cheaper at the agent's sizes (on 144 features with 999
+  permutations, 5 s serial against 30–36 s for the pool). It is left for a separate change,
+  because it changes how a statistics tool computes rather than how a child is started.
+* The 11 crash reports from the incident, and the ones made while reproducing it before the
+  script learned to avoid them, are still in `~/Library/Logs/DiagnosticReports`.
+
+---
+
+## Stage 26 — Permutations run in the agent's own process {#stage-26}
+
+`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S16.6 (branch
+`claude/fork-safe-subprocess`) named this call as the one known fork of the agent process that
+`fork_safe` cannot cover, because a library makes it. S16.6 left it for a separate change,
+because it changes how a statistics tool computes rather than how a child is started. This is
+that change. It is a trade, not a free win. At the sizes this tool usually sees, the worker pool
+costs more than it saves: about a quarter of a second per cold call on the image, and 20 to
+150 s on the Mac. On layers of tens of thousands of areas the pool is faster: at 85,000 cells on
+the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. Stages 13 to 18 are
+claimed by open, unpushed or uncommitted branches (17 three times and 18 twice when this was
+written); this takes the next free number.
+
+### Stage S26.1 Which calls start a pool
+
+Every esda constructor the module calls, with its default in esda 2.9.0 (the image) and 2.10.0
+(the Mac). The two versions agree:
+
+| call | tool | `n_jobs` default | change |
+|---|---|---|---|
+| `esda.Moran`, `esda.Geary`, `esda.G` | `global_spatial_autocorrelation`, `moran_scatterplot` | no such parameter: a Python loop over `np.random.permutation`, in-process | none |
+| `esda.Moran_Local` | `local_moran_lisa` | 1 | none |
+| `esda.G_Local` | `local_getis_ord` | **-1** | `n_jobs=1` |
+
+The other engines start nothing either. Under a counter of every Python-level child start, the two
+`spatial_regression` tests that fit models (spreg `OLS`, and the spatial model `model="auto"` chose)
+and the SKATER and max-p `regionalize` tests started none. spreg's multiprocessing lives only in its
+`*_Regimes` models, which no tool uses, and pygeoda's `cpu_threads` are threads.
+
+With `-1`, esda's `crand` cuts the areas into one chunk per `os.cpu_count()` and hands the
+chunks to `joblib.Parallel` on the loky backend. loky starts a fresh interpreter per chunk, and
+each must import esda before it can work. A cold call started 10 children on the image (8 cores)
+and 16 on the Mac (14 cores). Traced on the Mac, those are the 14 workers, loky's resource
+tracker, and CPython's multiprocessing resource tracker.
+
+S16.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
+joblib 1.4.2 (loky 3.4.1), and it is where the 15 `os.fork` audit events in
+`test_getis_ord_finds_hot_and_cold_ends` come from: the 14 workers and loky's tracker. The
+image's joblib 1.6.0 (loky 3.6.0) calls `_posixsubprocess.fork_exec` instead, which raises no
+`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S16.5). On
+macOS it is a plain `fork()`, because CPython 3.13 defines `VFORK_USABLE` only under
+`__linux__`. Upgrading joblib on the Mac would therefore hide these forks from an `os.fork` audit
+hook without removing them.
+
+### Stage S26.2 What the pool costs, and when it pays
+
+The measured call is `G_Local(y, w, permutations=999, star=True, seed=42)` exactly as the tool
+makes it, on queen weights. Inputs are the suite's `_lattice()` at 8×8 (the test's 64 cells) and
+12×12 (S16.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
+85,000 cells. The tessellation is tract-like, about six neighbours a cell and at most 13; Illinois
+has 3,265 tracts, and 85,000 is roughly every US tract. "Cold" is a fresh process, with `-1` and
+`1` interleaved. CPU counts the process plus its reaped workers.
+
+On the image (`agent-api`, Python 3.11, no numba, 8 vCPU, 1-minute load 0.4–2.5), the code ran from
+a throwaway copy in the container's `/tmp`, with nothing deployed. Each cold cell is six runs across
+two containers of the same image, which was recreated without a rebuild between the two sets of
+runs. "Warm" is the second and third call in one process, the way a long-lived server makes them.
+loky keeps a pool's workers for 300 s after a call (joblib's `idle_worker_timeout` default, in both
+versions):
+
+| cells | cold, `n_jobs=-1` | cold, `n_jobs=1` | warm, `-1` | warm, `1` |
+|---|---|---|---|---|
+| 64 | 0.23–0.30 s | 0.016–0.017 s | not run | not run |
+| 144 | 0.28–0.30 s | 0.024–0.025 s | 0.035–0.038 s | 0.021 s |
+| 3,000 | 0.49–0.62 s | 0.30–0.38 s | 0.16 s | 0.25 s |
+| 10,000 | 0.94–1.27 s | 0.93–1.08 s | 0.64–0.65 s | 0.95–1.01 s |
+| 30,000 | 2.57–3.77 s | 3.43–3.84 s | 2.22–2.23 s | 3.37–3.42 s |
+| 85,000 | 8.41–12.28 s | 13.27–14.59 s | 8.2–9.0 s | 13.0–13.1 s |
+
+So on the image the pool costs a start-up of about 0.25 s, paid on the first call and again after
+each 300 s idle, and it pays back only on large layers. Cold, the two are even at 10,000 cells; the
+pool is ahead by about 0.5 s at 30,000 and 3.9 s at 85,000 (medians). Warm, it is behind at 144
+cells and ahead at 3,000 (nothing in between was measured): by 0.09 s there, 0.3–0.4 s at 10,000 and
+4–5 s at 85,000. It always uses more CPU in total. Cold at 30,000, for example, the pool took
+12.7–13.9 CPU seconds against 9.5–10.7.
+
+On the Mac (Python 3.13, numba 0.61, 14 cores), cold, under a 1-minute load of 32–77 throughout.
+Readings at the end of serial runs were 32–67, so the load was mostly other sessions; the highest
+readings include the pool's own 14 workers:
+
+| cells | `n_jobs=-1` | `n_jobs=1` | CPU seconds, `-1` against `1` |
+|---|---|---|---|
+| 64 | 50–65 s | 8.8–13 s | 276–286 against 13–15 |
+| 144 | 47–77 s | 7.1–39 s | 272–288 against 12–17 |
+| 3,000 | 47–86 s | 11–13 s | 289–306 against 14–16 |
+| 10,000 | 43–162 s | 10–31 s | 280–356 against 16–19 |
+
+With numba, serial costs about the same at every size, because almost all of it is compiling
+esda's kernels, once per process. The pool compiles them again in all 14 workers, at 19–25 CPU
+seconds each. Blocking numba with an import shim on the same Mac separates the two costs: serial
+falls to 0.016–1.4 s, and the pool still takes 6.0–12.4 s and 32–74 CPU seconds to start its
+interpreters. The image has no numba, which `requirements.txt` does not ask for, so esda and
+libpysal fall back to plain-Python loops. At these sizes that is the faster stack by far: 0.31 s
+at 3,000 cells against 11–13 s on the Mac. The Mac's numbers measure numba's compiler, not
+production.
+
+End to end through `local_getis_ord` on the image, the before module is the deployed one, which
+is byte-identical to `prototype`'s, and the after module is this change. Runs are interleaved and
+start with esda already imported, because the first call in a process also pays 1.1–1.2 s for
+that import either way:
+
+| cells | before | after | of which `G_Local`, before against after |
+|---|---|---|---|
+| 144 | 0.35–0.36 s | 0.066–0.069 s | 0.31 s against 0.023 s |
+| 3,000 | 0.81–0.94 s | 0.62–0.64 s | 0.51–0.62 s against 0.32–0.33 s |
+| 10,000 | 2.06–2.14 s | 2.13–2.17 s | 0.96–1.02 s against 1.02–1.03 s |
+| 85,000 (two runs each) | 17.7–18.1 s | 22.8–23.5 s | 7.9–8.0 s against 12.7–13.2 s |
+
+For `test_getis_ord_finds_hot_and_cold_ends`, the call phase went from 0.47–0.52 s to 0.23–0.25 s
+on the image. On the Mac, under a load of 34–62, it went from 60–75 s and 299–311 CPU seconds to
+13–43 s and 17–20 CPU seconds. Children started during the test went from 10 to none on the
+image, and from 16 to none on the Mac.
+
+**Revised during the work.** A first draft of this entry, the code comment and the test said the
+pool was "never faster up to 10,000 areas". That came from cold runs in a single container. In
+the recreated container, the pool's cold median was 17–19% lower at 30,000 and 85,000 cells, and
+serial's was 12% higher at 10,000, which made 10,000 even rather than a win for serial. Warm runs
+then put the crossover somewhere between 144 and 3,000 cells. The claim was wrong, and the trade
+above replaces it.
+
+### Stage S26.3 The same answer
+
+`crand` draws the whole permutation matrix from the seed (`vec_permutations(max_card, n,
+permutations, seed)`) before it branches on `n_jobs`. The workers only split the areas.
+Measured: `p_sim`, `z_sim`, `Zs` and `rGs` were hash-identical between `-1` and `1` in every run
+and at every size, on the image, on the Mac with numba, and on the Mac without it. `p_sim` and
+`rGs`, the two hashed in the warm runs, were also identical across the warm calls and matched the
+cold runs. Through the tool on the image, the per-feature `hotspot_class`,
+`gi_z` and `gi_p`, and the whole JSON result (ids and urls aside), were identical before and
+after at 144, 3,000, 10,000 and 85,000 cells.
+
+The hashes also showed something about the two stacks. The permutation matrix itself is
+bit-identical with and without numba (`vec_permutations` with the same seed, compared directly at
+3,000 cells), so `p_sim` agrees between the Mac and the image at every size compared. The
+statistics differ in the last bits between stacks: `rGs` by at most one ulp between numba and
+plain Python on the Mac, and `Zs`, `z_sim` and `rGs` between the Mac and the image even with
+numba blocked, so not all of the Mac–image difference is numba's.
+
+### Stage S26.4 The guard
+
+`test_permutation_inference_starts_no_process_pool` replaces `joblib.Parallel` with a function
+that raises, then runs `local_getis_ord` (Gi* and Gi), `local_moran_lisa` and
+`global_spatial_autocorrelation`. esda imports `Parallel` inside `parallel_crand` at call time,
+so patching `joblib` is patching it where it is used. Against the deployed module the test fails
+with *"esda started a joblib process pool"* from `local_getis_ord`, both in the image and on the
+Mac. With this change it passes. It would also catch a future esda that flipped `Moran_Local`'s
+default.
+
+### Stage S26.5 What this does not cover
+
+* **National-scale layers pay for it.** At 85,000 cells, `local_getis_ord` takes about 5 s longer
+  on the image (22.8–23.5 s against 17.7–18.1 s). At 30,000 cells the statistic alone takes
+  about 0.5 s longer cold and 1.2 s longer warm. If layers that size matter, the pool could come
+  back off macOS and above a size threshold, for example `n_jobs=-1` when
+  `sys.platform != "darwin"` and the layer has 10,000 or more areas. That keeps the fork off the
+  Mac and the start-up off small layers. It is not done here, for two reasons. It adds a
+  platform branch to a statistics call. And every pool, once started, keeps eight interpreters
+  in the agent container for 300 s.
+* The fork half is prevention by mechanism, not a fix for an observed crash. As S16.6 records,
+  this route was not reproduced in a realistic order.
+* `Moran`, `Geary` and `G` take no seed, so `global_spatial_autocorrelation`'s p-values still
+  vary between runs. That is unchanged here.
+
+---
+
+## Stage 27 — A library that crashes instead of refusing {#stage-27}
+
+`regionalize` (`agent_runtime/analysis_spatial_stats_tools.py`) hands a contiguity graph to
+pygeoda, GeoDa's C++ core, inside the agent's own process. Given a graph that falls into more than
+one connected part, pygeoda does not raise. Three of the five methods segfault and the other two
+can spin without returning, and in production the process that goes down is the gunicorn worker
+serving the turn. The tool's only pre-flight check was `w.has_isolates()`, and a layer split into
+blocks of several areas each passes it.
+
+### Stage S27.1 What it did, measured
+
+The crash report's layer is a 5x5 lattice built as `box(-88.3 + c/100, 40.0 + r/100, -88.29 +
+c/100, 40.01 + r/100)`. A cell's right edge and its neighbour's left edge come from different
+expressions, and three of the four column joins miss by one ulp (`-88.29` against
+`-88.28999999999999`), as does one of the four row joins (`40.019999999999996` against `40.02`).
+That is **8 parts and no island**. The report said 5; libpysal and pygeoda both count 8. Built
+with exactly shared edges, the same lattice runs fine.
+
+Each call ran in its own process, on macOS (Python 3.13, pygeoda 0.1.3):
+
+| method | on a split graph |
+| --- | --- |
+| skater, redcap, schc | SIGSEGV every time: the report's lattice at n_regions 2, 3, 5 and 8; two separate 4x4 blocks at 2 and 4; an 8x8 lattice plus one detached cell at 2 and 4 |
+| azp | never returned (killed at 30 to 60 s) on the report's lattice at 2, 3, 5 and 8 and on the island layer at 2 and 4; finished on the two blocks at 2 and 4 |
+| max-p | never returned when some part could not reach `min_bound`: the report's lattice at 1500 and 4000 (its two-area parts hold less), the island layer at 3000; finished on the two blocks at 3000 |
+
+Whether azp and max-p return depends on the data and the split, so neither can be relied on. On a
+4-part variant of the lattice (right edges computed as `-88.3 + 0.01 + c/100`), azp finished at 8
+and max-p at 1500, with every part holding at least 2,113. The max-p rule held when the audit
+controlled for the data: with every area's value at 800, the report's lattice finished at 1600,
+which its two-area parts can just reach, and hung at 1700.
+
+A linux/amd64 replica of the deployed environment (Python 3.11.16, pygeoda 0.1.3, libpysal
+4.14.1, numpy 2.4.6) reproduced every case re-run there. On the 4-part variant at n_regions 3,
+skater, redcap and schc segfault and azp hangs. The tool itself segfaults on the Maui and San
+Francisco layers below, and the tests in S27.3 die with SIGSEGV on the report's lattice.
+
+A hang is not idle. azp spun at 4.9 s of CPU per 5 s of wall time and released the GIL: on macOS
+the main thread kept waking on schedule. Inferred rather than measured in gunicorn: one such turn
+holds one of the worker's four threads and one core for good, while the worker's heartbeat and
+its health check carry on. That is the S12.1 failure, four hung calls being the whole service,
+reached by another road, and nothing notices until the fourth.
+
+Real layers get here through the agent's own tools, `admin_boundary(subdivide="tracts")` and then
+`regionalize`, on the code before this stage:
+
+* **Maui County, HI**: 48 tracts in three parts, Maui, Molokai and Lanai (43, 3 and 2 tracts),
+  and no island. skater, redcap and schc segfault; azp was still running at 90 s.
+* **San Francisco County, CA**: 244 tracts, one of them the Farallon Islands (`06075980401`), an
+  island. skater segfaults all the same: the island earned a note (*"the algorithm may place them
+  alone or fail"*) and then the crash.
+* **Monroe County, FL** has the same shape (the Dry Tortugas tract) and segfaults the same way.
+  **Kitsap County, WA** is connected and regionalizes normally.
+
+### Stage S27.2 The guard
+
+Before any algorithm runs, the tool counts the connected parts of **the graph pygeoda will
+walk**, read back through its own `get_neighbors()` rather than rebuilt with libpysal. The two
+agreed on every layer above, but a guard that relies on two implementations agreeing is weaker
+than one that reads the input itself. Reading the neighbours and running a union-find over
+10,000 areas takes 16 to 37 ms on the dev Mac.
+
+More than one part is refused, for every method and every `n_regions`. Whether to refuse only
+when `n_regions` is below the number of parts was considered, since every part needs a region of
+its own. That is not where the crash starts: skater segfaulted with `n_regions` equal to the
+number of parts (8 on the lattice) and above it (4 on two blocks). So the error says that no
+method or `n_regions` gets around it, which also stops a retry with a larger count.
+
+An island is a part of one, so the same check covers it, and the `has_isolates()` note is gone.
+All it ever did was announce the crash that followed.
+
+**The same hang on a connected layer.** max-p also spins when no region can reach `min_bound`, and
+on a single block that is exactly when the layer's total of `bound_column` is below it. Measured
+on an 8x8 lattice totalling 33,212: a bound of 33,211 or 33,212 returns one region, and 33,213 or
+double the total never returns. *"Regions of at least 50,000 people"* in a county of 40,000 is
+that call, so it is now refused, with the total named.
+
+The refusal follows *errors name the alternatives*:
+
+* the number of parts, their sizes, and how many are islands;
+* when at most 50 areas lie outside the largest part, their ids as `outside_largest_part`, in
+  the column named by `id_column`. That is the readable label when it is unique, otherwise the
+  first text or integer column that is, and never one of the analysed columns: `_prepare` has
+  coerced those to numbers, so `"1,100"` in the file is `1100` there, and `select_by_attribute`
+  reads the file. A tract `NAME` is unique within a county but not across a state. The hint then
+  names the call that keeps the largest part, `select_by_attribute` with `op='not_in'`, and says
+  to regionalize that selection. Verified end to end on Maui: refused, then 43 tracts selected,
+  then 5 regions;
+* the other parts one at a time. One other part is selected with `op='in'` and the same list.
+  With several, `smaller_parts` lists each, and the hint says how many have the 8 areas
+  regionalization takes (`_MIN_OBS`). When none does, it says so and leaves them as blocks of
+  their own;
+* under `weights='rook'`, whether queen contiguity would join the layer. This is computed, not
+  guessed, because queen also counts areas that meet only at a corner;
+* for gaps that should not be there (slivers, rounding), that the boundaries need snapping first.
+
+The `connectivity` block (returned by `spatial_weights`, the global and local autocorrelation
+tools and the regression) now carries `components`, and `spatial_weights` says *"the graph falls
+into N separate parts"*. The old hint after a bad result already said *"run spatial_weights to
+inspect it"*, and on this lattice that would have shown `islands: 0` and nothing else. The
+regionalize tool description now states the precondition as well, since a tool description is
+part of the architecture.
+
+### Stage S27.3 A test that cannot take the suite with it
+
+Any test that could hit either failure runs the call in a child process (`sys.executable -c …`)
+and asserts on the exit code. Against the old module on the Mac, the four tests that give it a
+split graph die with *"died with exit -11 (SIGSEGV)"*, the max-p test hits its timeout, and the
+run completes. The Linux replica showed the same for the three such tests that existed before the
+audit. Two details would each have produced a false result:
+
+* **The fixture is a GeoPackage.** GeoJSON writes coordinates rounded, which turns
+  `-88.28999999999999` back into `-88.29`. Measured: the lattice comes back from a GeoJSON
+  round trip as **one** block, so every assertion on it would pass against the crashing code. The
+  GeoPackage keeps all 8 parts. The agent's own outputs round the same way: `select_by_attribute`
+  writes GeoJSON, and in the audit a selection from the split lattice came back joined.
+* **`close_fds=False` and no `cwd`**, which keep CPython on `posix_spawn` on macOS. A fork after
+  PROJ has run in the test process can kill the child before exec (the open
+  `claude/fork-safe-subprocess` work), and that -11 would read as the tool crashing.
+
+The calls that segfault run first and the ones that hang run last, under a 120 s timeout, so a
+regression fails fast where it can. Mac suite: 1653 passed, 4 skipped (1645 before; the eight new
+tests are the difference). On the Linux replica, the module's test file as it stood before the
+audit passed 38 of 39. The one failure was the distance-band island test, which is Linux-only and
+is fixed separately on `claude/distance-band-no-island`.
+
+### Stage S27.4 What an independent audit changed
+
+Before this landed, a separate agent re-derived every number above with its own scripts. It
+found four things wrong, all corrected here:
+
+* **The first matrix was run on the wrong lattice.** The harness built the right edges as
+  `-88.3 + 0.01 + c/100`, the 4-part variant, so the first version of the table said azp
+  finished at 8 and max-p at 1500 on the report's lattice. Re-run on the report's own recipe,
+  both hang.
+* **max-p's hang on a connected layer** (S27.2) was not guarded. The guard counted parts, but
+  the table's own max-p row gives an unreachable bound as the cause, and one block can have that
+  too.
+* **Ids were listed from an analysed column.** With a text column `"1,100"` to `"1,124"` passed in
+  `columns`, the refusal listed the coerced numbers, and `op='not_in'` kept all 25 areas instead of
+  6.
+* **The rest was offered as one `op='in'` selection.** For a mainland with two small islands, that
+  selection was refused again as two parts.
+
+It also measured the guard at 16 to 24 ms where one run here gave 37. The text now states a range.
+The Linux replica checks above were not re-run after these fixes: Docker Desktop on the dev Mac
+stopped responding after the disk filled.
+
+### Stage S27.5 What this stage did not fix
+
+* **Nothing inside regionalize joins a split that queen leaves.** The tool takes only queen and
+  rook. pygeoda's `precision_threshold`, which exists for exactly this, changed nothing on 0.1.3:
+  the lattice stayed in 8 parts at every value tried, from 1e-12 up to 0.02 degrees, under queen
+  and rook, whether opened from a frame or from a shapefile. Snapping the coordinates first does
+  work: `shapely.set_precision` on a 1e-9-degree grid joins the lattice into one block. A sliver in
+  real boundaries needs a tolerance in metres, though, so offering it needs the same metric
+  treatment distances get. Not done.
+* **This checks the preconditions that were found. It does not make pygeoda safe.** Any other
+  input that crashes or spins libgeoda still takes a worker or a thread. Containing every such
+  failure would mean running the native call out of process, as the test does, at the cost of a
+  process start per call.
+* **A dropped area is a gap too.** An area dropped for a missing value may have been the only
+  link between two parts. The refusal then lists the parts and the notes say rows were dropped,
+  but nothing ties the two together.
+* pygeoda's other variants (`azp_sa`, `azp_tabu`, `maxp_sa`, `maxp_tabu`) are not exposed and
+  were not tested. Any new pygeoda call should go through the same checks.
