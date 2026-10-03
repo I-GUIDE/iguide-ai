@@ -219,10 +219,9 @@ def test_numpy_stand_ins_reproduce_scikit_learn(tmp_path):
     numbers are the same, so scikit-learn runs HERE in a fresh subprocess, where torch is
     absent and it is safe, and the two are compared.
     """
-    import subprocess
-
     import numpy as np
 
+    from agent_runtime import fork_safe
     from agent_runtime.rs_embed_zonal_worker import (group_kfold_indices, kfold_indices,
                                                      kmeans_labels, ridge_loo_predict)
 
@@ -262,8 +261,10 @@ json.dump({
     payload.write_text(json.dumps({"X": X.tolist(), "y": y.tolist(),
                                    "groups": groups.tolist(), "blobs": blobs.tolist(),
                                    "alphas": list(alphas), "out": str(result)}))
-    proc = subprocess.run([sys.executable, "-c", script, str(payload)],
-                          capture_output=True, text=True, timeout=300)
+    # fork_safe: a fork of this process after the suite's reprojections can die before exec on a
+    # Mac, and the skip below would then blame scikit-learn for it.
+    proc = fork_safe.run([sys.executable, "-c", script, str(payload)],
+                         capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         pytest.skip(f"scikit-learn unavailable for the comparison: {proc.stderr[-200:]}")
     ref = json.loads(result.read_text())
@@ -422,7 +423,7 @@ def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {
@@ -579,7 +580,7 @@ def test_embed_zones_delivers_the_picture_and_the_groups(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     reply = {"ok": True, "model": "gse", "year": 2022, "zones": 2, "dim": 3,
@@ -689,7 +690,7 @@ def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_pa
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {

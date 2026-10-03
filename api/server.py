@@ -16,7 +16,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
-from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
+from rag_pipeline.memory_module import (MemoryAccessDenied, PersistentMemoryDisabled,
+                                        SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
                                         get_session_snapshot, get_turn_trace, list_memories,
                                         list_turn_traces, save_session_snapshot)
@@ -119,6 +120,10 @@ if platform_endpoints.search_tier_note():
     logger.info("%s", platform_endpoints.search_tier_note())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
+# Local mode names every endpoint it can still reach, local or REMOTE. The writes this mode
+# exists to prevent were silent: nothing said "this laptop is about to write to production".
+for _line in deployment_mode.local_mode_report():
+    logger.warning("%s", _line)
 
 
 def _extract_presented_api_key() -> str:
@@ -294,7 +299,11 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     include_mcp_tools = mcp_tools_enabled() if _mcp_raw is None else bool(_mcp_raw)
     mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
     enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
-    use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+    # Local mode overrides the REQUEST: the map UI hard-codes usePersistentMemory=true, so a flag
+    # the client controls cannot be the thing that keeps a laptop off a shared store.
+    use_persistent_memory = (
+        bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+        and deployment_mode.persistent_memory_allowed())
     smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
@@ -713,6 +722,18 @@ def _normalize_uploaded_files():
     return [item for item in files if getattr(item, "filename", None)]
 
 
+def _upload_thread_id() -> Optional[str]:
+    """The conversation an upload belongs to: `threadId`/`thread_id` in the form, else the query.
+
+    The same field under the same two spellings that the chat routes bind around a turn, and
+    normalised the same way, so an upload and the turns that use it carry one id. The form wins
+    because it is what the client composed for this upload. None when the client sent none.
+    """
+    value = _coalesce(request.form.get("threadId"), request.form.get("thread_id"),
+                      request.args.get("threadId"), request.args.get("thread_id"))
+    return str(value).strip() if value is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -743,11 +764,16 @@ def health():
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
 
 
+# Read relative to the repository root, which is /app in the agent-api image, so the page is a
+# deployment input: rag_pipeline/Dockerfile copies it there, and
+# rag_pipeline/tests/test_image_dashboard_page.py fails if that COPY is dropped or misplaced.
+_DASHBOARD_PAGE = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
+
+
 @app.route('/agent/dashboard', methods=['GET'])
 def agent_dashboard():
     """Serve the local streaming agent dashboard."""
-    dashboard_path = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
-    return send_file(dashboard_path)
+    return send_file(_DASHBOARD_PAGE)
 
 
 def _list_code_peers():
@@ -759,8 +785,8 @@ def _list_code_peers():
     tell "not configured" apart from "not built".
     """
     import os as _os
-    import subprocess as _sp
 
+    from agent_runtime import fork_safe
     from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, SELECTABLE_MODELS,
                                            resolve_claude_settings, selects_claude)
     from agent_runtime.opencode_peer import (CODE_PEER_ENV, DEFAULT_OPENCODE_IMAGE,
@@ -769,8 +795,8 @@ def _list_code_peers():
     def _image_present(env_var, default_name):
         name = _os.getenv(env_var, default_name)
         try:
-            return _sp.run(["docker", "image", "inspect", name],
-                           capture_output=True, timeout=5).returncode == 0
+            return fork_safe.run(["docker", "image", "inspect", name],
+                                 capture_output=True, timeout=5).returncode == 0
         except Exception:  # noqa: BLE001 - no docker, no answer, never a page error
             return False
 
@@ -821,6 +847,9 @@ def agent_ui_config():
         "mode": deployment_mode.current_mode(),
         "demo_mode": demo,
         "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
+        # False in local mode. Additive: a client that ignores it is unaffected, and one that
+        # reads it can stop offering to save what the server will not keep.
+        "persistent_memory": deployment_mode.persistent_memory_allowed(),
     }
     if deployment_mode.is_token():
         # Where the CLIENT refreshes an expired token. The agent never handles refresh tokens:
@@ -1005,6 +1034,14 @@ def agent_conversation(memory_id):
             user = _require_user()
         except identity.IdentityError as exc:
             return _identity_error_response(exc)
+        if not deployment_mode.persistent_memory_allowed():
+            # BEFORE assert_memory_owner, which reads the store. A PUT is accepted and declined
+            # in the body rather than failed: the client keeps its own copy, and a store that is
+            # deliberately off is not an error for it to report.
+            if request.method == 'PUT':
+                return jsonify({"stored": False, "reason": "persistent_memory_disabled"})
+            return jsonify({"error": "Conversations are not stored in local mode.",
+                            "reason": "persistent_memory_disabled"}), 404
         token = identity.set_user(user)
         try:
             try:
@@ -1032,6 +1069,9 @@ def agent_conversation(memory_id):
                 return jsonify({"error": str(exc), "reason": "conversation_too_large"}), 413
         finally:
             identity.reset_user(token)
+    except PersistentMemoryDisabled:
+        return jsonify({"error": "Conversations are not stored in local mode.",
+                        "reason": "persistent_memory_disabled"}), 404
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
@@ -1071,6 +1111,9 @@ def agent_conversation_traces(memory_id):
             user = _require_user()
         except identity.IdentityError as exc:
             return _identity_error_response(exc)
+        if not deployment_mode.persistent_memory_allowed():
+            return jsonify({"error": "No traces are recorded in local mode.",
+                            "reason": "persistent_memory_disabled"}), 404
         token = identity.set_user(user)
         try:
             try:
@@ -1096,6 +1139,9 @@ def agent_conversation_traces(memory_id):
             return jsonify({"traces": list_turn_traces(memory_id, limit=limit)})
         finally:
             identity.reset_user(token)
+    except PersistentMemoryDisabled:
+        return jsonify({"error": "No traces are recorded in local mode.",
+                        "reason": "persistent_memory_disabled"}), 404
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on traces for %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
@@ -1153,6 +1199,11 @@ def upload_agent_files():
     The returned `file_id` values can be passed to `/agent/chat` or
     `/agent/chat/stream` via the JSON field `fileIds`.
 
+    Send the conversation's `threadId` with the upload, the same one its chat turns send. It
+    stamps the file with that conversation, so `list_conversation_files` lists it there and
+    other conversations cannot find it by name. Without one the file is stored with no
+    conversation, as every upload was before the field existed.
+
     ---
     tags:
       - Agent Files
@@ -1171,6 +1222,11 @@ def upload_agent_files():
         type: file
         required: false
         description: Multi-file upload (repeat this field per file).
+      - in: formData
+        name: threadId
+        type: string
+        required: false
+        description: The conversation these files belong to, as sent on its chat turns. `thread_id` is accepted too, and either may be sent in the query string instead; the form wins.
     responses:
       200:
         description: Upload succeeded.
@@ -1197,6 +1253,10 @@ def upload_agent_files():
                   download_url:
                     type: string
                     example: /agent/files/file_0123456789ab/download
+                  session:
+                    type: string
+                    example: agent-thread-1
+                    description: The conversation the file was stamped with; null when no `threadId` was sent.
             count:
               type: integer
               example: 2
@@ -1234,10 +1294,24 @@ def upload_agent_files():
         # owner_id: None, which made AGENT_TOKEN_STRICT=1 unreachable in practice: a user could
         # not download their own attachment.
         _upload_token = identity.set_user(_upload_user)
+        # And the conversation, for the same reason one axis over. Without it every upload was
+        # written session: None, the legacy pool, so list_conversation_files never listed one,
+        # not even where it was made, and in dev/demo any conversation found it by name.
+        #
+        # No thread id leaves the record exactly as it was before: there is no conversation to
+        # name, a minted one would hide the file from the conversation that later attaches it,
+        # and refusing would break every client that does not send one yet.
+        thread_id = _upload_thread_id()
+        _session_token = set_file_store_session(thread_id)
         try:
             uploaded = [save_uploaded_file(file_storage) for file_storage in files]
         finally:
+            reset_file_store_session(_session_token)
             identity.reset_user(_upload_token)
+        if not thread_id:
+            # Counted, because this fallback can only be tightened once nothing relies on it.
+            logger.info("Upload with no thread id: %d file(s) stored with no conversation",
+                        len(uploaded))
         return jsonify({"files": uploaded, "count": len(uploaded)}), 200
     except ValueError as e:
         logger.error(f"Agent file upload validation error: {str(e)}")
@@ -2017,7 +2091,8 @@ def agent_chat():
                 include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
                 mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
                 enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
-                use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                use_persistent_memory=(bool(normalized.get("use_persistent_memory", True))
+                                       and deployment_mode.persistent_memory_allowed()),
                 smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
                 forced_intent=normalized.get("forced_intent"),
                 file_paths=normalized.get("file_paths"),
@@ -2128,7 +2203,9 @@ def agent_chat_stream():
     **Uploading files**
 
     1. POST the file(s) to `/agent/files/upload` (multipart/form-data, form field `file` or
-       `files`); the response returns a `file_id` for each file.
+       `files`), with the conversation's `threadId` as a form field; the response returns a
+       `file_id` for each file. The `threadId` is what lets `list_conversation_files` list the
+       upload in this conversation and keeps other conversations from finding it by name.
     2. Send those ids here as `fileIds`, with your `userQuery` and (for continuity) a stable
        `threadId`/`memoryId`. The agent stages each file into its code/geo tools — inside
        `execute_code` the file is reachable via the `input_files` argument and appears in the

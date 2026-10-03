@@ -2,11 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Map, Source, Layer, useControl } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
-import { MapboxOverlay } from '@deck.gl/mapbox';
+// Not @deck.gl/mapbox: its MapboxOverlay reads `map.transform`, which MapLibre 6 removed, so
+// every interleaved frame threw "Cannot read properties of undefined (reading 'height')" and
+// no deck layer was drawn. @deck.gl/maplibre is deck.gl's own fork of it for MapLibre 4.5-6.
+import { MapLibreOverlay } from '@deck.gl/maplibre';
 import type { Feature, Polygon } from 'geojson';
 import type { LayerArtifact } from '../contracts';
 import { toDeckLayer } from '../toDeckLayer';
 import 'maplibre-gl/dist/maplibre-gl.css';
+// MapLibre 6 ships only ES modules and starts its worker from a URL that a bundler cannot
+// work out for itself, so the map is handed one (MapLibre's own Vite recipe). `?worker&url`
+// emits a self-contained worker chunk. Plain `?url` emits the worker file alone, and its import
+// of `./maplibre-gl-shared.mjs` then 404s — only in a build, since dev serves the file in place.
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 
 // Raster OSM basemap -- no API key required (fine for a prototype).
 const OSM_STYLE: any = {
@@ -33,8 +41,8 @@ function getTooltip({ object }: any) {
 
 function DeckOverlay({ layers, onFeatureClick }: { layers: any[]; onFeatureClick: (feature: any, layerId: string) => void }) {
   const onClick = (info: any) => { if (info && info.object) onFeatureClick(info.object, info.layer?.id ?? ''); };
-  const overlay = useControl(() => new MapboxOverlay({ interleaved: true, layers, getTooltip, onClick }));
-  (overlay as MapboxOverlay).setProps({ layers, getTooltip, onClick });
+  const overlay = useControl(() => new MapLibreOverlay({ interleaved: true, layers, getTooltip, onClick }));
+  (overlay as MapLibreOverlay).setProps({ layers, getTooltip, onClick });
   return null;
 }
 
@@ -215,9 +223,11 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
     <Map
       initialViewState={{ longitude: -89.0, latitude: 40.5, zoom: 5.2 }}
       mapStyle={OSM_STYLE}
+      workerUrl={maplibreWorkerUrl}
       // Keep the WebGL buffer so the rendered view can be exported as an image;
-      // without it canvas.toDataURL() returns a cleared, single-colour frame.
-      preserveDrawingBuffer
+      // without it canvas.toDataURL() returns a cleared, single-colour frame. MapLibre 5 moved
+      // this from a top-level option into canvasContextAttributes.
+      canvasContextAttributes={{ preserveDrawingBuffer: true }}
       cursor="grab"
       onClick={(e: MapLayerMouseEvent) => onMapClick(e.lngLat.lng, e.lngLat.lat)}
       ref={(r) => {

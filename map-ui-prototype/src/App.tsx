@@ -371,6 +371,9 @@ export default function App() {
     memoryRef.current = rec.memoryId ?? null;
     sessionFileIds.current = [...(rec.fileIds || [])];
     pendingFileIds.current = [...(rec.fileIds || [])];
+    // As at upload time: each upload counts as drawn, so a later turn that lists it does not
+    // bring back a second copy of it through the artifact fallback.
+    for (const id of rec.fileIds || []) layerSourceFiles.current.add(id);
     setMessages(rec.messages || []);
     setLayers([]);
     autoRevealed.current = false;
@@ -394,6 +397,11 @@ export default function App() {
         const fc = await res.json();
         if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
         restored.push({ ...(l as any), data: fc } as LayerArtifact);
+        // Back on the map, so it counts as drawn, as onMapLayer counts a live layer. The set
+        // starts empty in a new tab, and the first turn whose results carried this file's
+        // download record (list_conversation_files does) drew it again through the artifact
+        // fallback: a second copy, filled, over the restored one.
+        layerSourceFiles.current.add(fileKey(url));
       } catch { /* the file is gone — leave the layer out rather than showing an empty one */ }
     }
     setLayers(restored);
@@ -766,12 +774,15 @@ export default function App() {
 
   const onUpload = useCallback(async (files: File[]) => {
     // Always try to show GeoJSON on the map locally for instant feedback.
-    for (const f of files) {
+    // previews[i] is the layer files[i] drew, if it drew one.
+    const previews: (string | undefined)[] = [];
+    for (const [i, f] of files.entries()) {
       if (/\.(geo)?json$/i.test(f.name)) {
         try { const j = JSON.parse(await f.text());
           const fc: FeatureCollection = j.type === 'FeatureCollection' ? j : j.type === 'Feature' ? { type: 'FeatureCollection', features: [j] } : { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: j, properties: {} }] };
           const name = f.name.replace(/\.(geo)?json$/i, '');
           putLayer({ kind: 'geojson', id: `upload-${name}`, source: 'upload', label: `Upload: ${name}`, data: fc, style: { fill: [239, 68, 68, 90], line: [239, 68, 68, 255], pointRadius: 6 }, fitBounds: true });
+          previews[i] = `upload-${name}`;
           fitView(fc);
           // Remember the upload's extent so the agent can bound Overpass by "the geojson I uploaded".
           try { const bb = layerBBox(fc); uploadContext.current = `The uploaded file "${name}" covers bbox [${bb.map((x) => x.toFixed(4)).join(', ')}] (minLon,minLat,maxLon,maxLat, EPSG:4326).`; } catch { /* */ }
@@ -780,19 +791,34 @@ export default function App() {
     }
     if (mode === 'live') {
       try {
-        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig());
+        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could
         // not survive a reload. Now that the same bytes live in the file store, record where
         // to re-fetch them so a restored session shows the upload too.
+        //
+        // Every upload is on the map already, as the preview above, so the artifact fallback must
+        // not draw it again. It did, after any turn whose results carried the upload's download
+        // record, and the agent's file listing carries it now that the upload names this
+        // conversation. Registered by id, because the server's secure_filename rewrites names.
         for (const r of recs) {
-          const stem = (r.filename || '').replace(/\.(geo)?json$/i, '');
-          if (stem && r.download_url) {
+          if (r.file_id) layerSourceFiles.current.add(r.file_id);
+        }
+        // Paired by POSITION, not by name. The route answers one record per file, in the order
+        // sent, but names it by werkzeug's secure_filename: "My Data.geojson" comes back as
+        // "My_Data.geojson", "roads(1).geojson" as "roads1.geojson". Matched by name, such a
+        // preview never got its url and was stored inline, which INLINE_KEEP_BYTES drops past
+        // 2 MB: a 3.8 MB upload reopened as "0 layer(s) restored, 1 no longer available".
+        // A count that disagrees pairs nothing: a wrong pairing would restore one file's
+        // geometry under another's name.
+        if (recs.length === files.length) {
+          recs.forEach((r, i) => {
+            const id = previews[i];
+            if (!id || !r.download_url) return;
             setLayers((prev) => prev.map((l) => (
-              l.id === `upload-${stem}` && l.kind === 'geojson'
-                ? { ...l, sourceUrl: r.download_url } : l)));
-          }
+              l.id === id && l.kind === 'geojson' ? { ...l, sourceUrl: r.download_url } : l)));
+          });
         }
         pushMsg({ role: 'agent', text: `Uploaded ${recs.length} file(s) to the agent: ${recs.map((r) => r.filename).join(', ')}. They're attached to this conversation — ask me about them.` });
       } catch (e: any) { pushMsg({ role: 'agent', text: `Upload to agent failed: ${e.message}` }); }
