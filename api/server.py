@@ -16,7 +16,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
-from rag_pipeline.memory_module import (MemoryAccessDenied, SnapshotTooLarge,
+from rag_pipeline.memory_module import (MemoryAccessDenied, PersistentMemoryDisabled,
+                                        SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
                                         get_session_snapshot, get_turn_trace, list_memories,
                                         list_turn_traces, save_session_snapshot)
@@ -119,6 +120,10 @@ if platform_endpoints.search_tier_note():
     logger.info("%s", platform_endpoints.search_tier_note())
 if deployment_mode.boot_warning():
     logger.warning("%s", deployment_mode.boot_warning())
+# Local mode names every endpoint it can still reach, local or REMOTE. The writes this mode
+# exists to prevent were silent: nothing said "this laptop is about to write to production".
+for _line in deployment_mode.local_mode_report():
+    logger.warning("%s", _line)
 
 
 def _extract_presented_api_key() -> str:
@@ -294,7 +299,11 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     include_mcp_tools = mcp_tools_enabled() if _mcp_raw is None else bool(_mcp_raw)
     mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
     enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
-    use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+    # Local mode overrides the REQUEST: the map UI hard-codes usePersistentMemory=true, so a flag
+    # the client controls cannot be the thing that keeps a laptop off a shared store.
+    use_persistent_memory = (
+        bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+        and deployment_mode.persistent_memory_allowed())
     smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
@@ -821,6 +830,9 @@ def agent_ui_config():
         "mode": deployment_mode.current_mode(),
         "demo_mode": demo,
         "api_key_required": bool(_get_agent_chat_api_key()) and not demo,
+        # False in local mode. Additive: a client that ignores it is unaffected, and one that
+        # reads it can stop offering to save what the server will not keep.
+        "persistent_memory": deployment_mode.persistent_memory_allowed(),
     }
     if deployment_mode.is_token():
         # Where the CLIENT refreshes an expired token. The agent never handles refresh tokens:
@@ -1005,6 +1017,14 @@ def agent_conversation(memory_id):
             user = _require_user()
         except identity.IdentityError as exc:
             return _identity_error_response(exc)
+        if not deployment_mode.persistent_memory_allowed():
+            # BEFORE assert_memory_owner, which reads the store. A PUT is accepted and declined
+            # in the body rather than failed: the client keeps its own copy, and a store that is
+            # deliberately off is not an error for it to report.
+            if request.method == 'PUT':
+                return jsonify({"stored": False, "reason": "persistent_memory_disabled"})
+            return jsonify({"error": "Conversations are not stored in local mode.",
+                            "reason": "persistent_memory_disabled"}), 404
         token = identity.set_user(user)
         try:
             try:
@@ -1032,6 +1052,9 @@ def agent_conversation(memory_id):
                 return jsonify({"error": str(exc), "reason": "conversation_too_large"}), 413
         finally:
             identity.reset_user(token)
+    except PersistentMemoryDisabled:
+        return jsonify({"error": "Conversations are not stored in local mode.",
+                        "reason": "persistent_memory_disabled"}), 404
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
@@ -1071,6 +1094,9 @@ def agent_conversation_traces(memory_id):
             user = _require_user()
         except identity.IdentityError as exc:
             return _identity_error_response(exc)
+        if not deployment_mode.persistent_memory_allowed():
+            return jsonify({"error": "No traces are recorded in local mode.",
+                            "reason": "persistent_memory_disabled"}), 404
         token = identity.set_user(user)
         try:
             try:
@@ -1096,6 +1122,9 @@ def agent_conversation_traces(memory_id):
             return jsonify({"traces": list_turn_traces(memory_id, limit=limit)})
         finally:
             identity.reset_user(token)
+    except PersistentMemoryDisabled:
+        return jsonify({"error": "No traces are recorded in local mode.",
+                        "reason": "persistent_memory_disabled"}), 404
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on traces for %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
@@ -2017,7 +2046,8 @@ def agent_chat():
                 include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
                 mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
                 enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
-                use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                use_persistent_memory=(bool(normalized.get("use_persistent_memory", True))
+                                       and deployment_mode.persistent_memory_allowed()),
                 smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
                 forced_intent=normalized.get("forced_intent"),
                 file_paths=normalized.get("file_paths"),
