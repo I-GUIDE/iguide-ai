@@ -25,6 +25,19 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 13 | [Shapes nobody owned](#stage-13) | 2026-10-01 → 2026-10-03 | downloads named, qwen3.8, rs-embed off a personal credential, a restart that cut off live turns |
+| 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
+| 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
+| 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
+| 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
+| 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
+| 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 → 2026-10-02 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
+| 20 | [A layer is what went into it](#stage-20) | `claude/layer-identity-by-inputs`, `claude/layer-identity-remaining-tools` | layer ids from the inputs that made them, not the files they wrote |
+| 21 | [A filename names this conversation's file](#stage-21) | 2026-10-02 | a bare filename resolves through `find_files`: this conversation, this caller, the exact name |
+| 22 | [A file_id names one write](#stage-22) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
+| 23 | [An upload names its conversation](#stage-23) | 2026-10-02 | the upload route binds the thread id as well as the caller; the map UI sends it |
+| 24 | [A laptop that writes nothing](#stage-24) | 2026-10-03 | `AGENT_MODE=local` makes a laptop run write to no shared store; an override list wrote seven conversations into prod |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -274,6 +287,8 @@ finds binding half the tool surface out of reach.
 of the 3-tier dispatcher added in `ad6361b`, so the hierarchy had been unreachable from the agent
 since it was written. The same shape as stage 7's `list_conversation_files`: registered, wired,
 documented, and not actually reachable.
+
+---
 
 ## Stage 5 — Supervisor over peers {#stage-5}
 
@@ -735,6 +750,206 @@ After these, a re-run sweep showed zero failed calls on boundary, tracts, geocod
 buffer, OSM and raster. Two cases got slower, which is single-run variance and not claimed as a
 regression either way.
 
+### Stage S8.5 The `code` line is generated too, per backend
+
+*Branch `claude/decider-code-line-from-registry`, off `5ae6d92`.*
+
+S8.2 (`99d71ad`) generated the decider's `analyze` line from `capability_registry`. In the same
+commit it wrote the `code` line by hand: *"It binds the same toolkit as analyze, plus packaged
+skills and saved workflows."* That one sentence drifted in both directions at once, which is the
+lesson worth keeping: **the router's description of a peer has to come from the same source as the
+peer's binding, or it drifts, toward promising too much as readily as too little.**
+
+* **Too little.** `describe("code")` had **zero** call sites outside tests. A registry entry that
+  only the code peer binds reached the drift test, which composed its own view (the framing,
+  `describe("analyze")` and `describe("code")`), and never reached the decider. The test
+  certified an artifact production did not use. This is not hypothetical: the extraction branch
+  adds `make_langchain_staging_tools` as exactly such an entry.
+* **Too much, three ways.** The code peer binds no tool that runs a saved workflow. A notebook
+  workflow the extractor packages as a skill runs through an MCP tool (`mcp_run_nbwf_*`), and MCP
+  tools are bound in the analyze and search peers behind `include_mcp_tools`, never in the code
+  peer. "Packaged skills" was false in production: the image copies neither default skill root,
+  and inside the container `SkillRegistry.discover()` finds **0** skills. And "the same toolkit as
+  analyze" is false for a CLI code peer (`claude`, `opencode`), which binds **none** of the 15 code
+  toolsets. It runs an agentic CLI in its own container, whose only writable mount is `/work`. The
+  deployment default is `langchain`, but a browser's dropdown choice persists, so CLI peers do run.
+
+| | before | after |
+|---|---|---|
+| the code line | hand-written, identical for every backend | `_code_capability_line`: the registry inventory for the LangChain peer, the CLI's own runtime for a CLI peer |
+| which backend the decider describes | none; it was never told | `_code_peer_backend(code_peer)`, the one resolution the code node also uses |
+| the skills clause | always present | present only when `SkillRegistry.discover` over the request's skill roots finds a skill, the condition `make_skill_tools` binds on |
+| "saved workflows" | promised | removed |
+| the request example | *"e.g. code needs evidence"* for every backend | *"e.g. analyze needs evidence"* when a CLI runs, since a CLI has no `request_capability` |
+| the drift test | read a separately composed description | reads the prompt captured from `default_decide_fn` itself |
+
+**The resolution was the part that would have been missed.** The request's `code_peer` reached
+`default_code_fn` and nothing else. `build_supervisor_graph` built the decider without it, so a
+per-request choice could only ever have been described as the env default. Now
+`run_supervisor_orchestration` builds the decider from the same `cfg.code_peer` and
+`cfg.skill_roots` as the code peer, and both resolve through `_code_peer_backend`. A test replaces
+that one function and watches both the runner and the description follow it.
+
+**The cost, measured with gpt-4o's tokenizer (`o200k_base`):**
+
+| | before | after |
+|---|---|---|
+| code line, LangChain peer, no skills (the deployed image) | 30 | 182 |
+| code line, LangChain peer, with skills | 30 | 194 |
+| code line, a CLI peer | 30 | 189 |
+| whole decider prompt at minimal state, deployed image | 954 | 1,106 |
+
+That is +152 tokens, about +16%, on every decision step. Every one of the deployed code line's 14
+clauses also appears in the analyze line. Rendering the code line as a difference from analyze
+would recover most of that; it is not done here.
+
+**Not fixed here:**
+
+* **The other peers bind skills too.** `build_agent_executor` has added `make_skill_tools` to
+  every preloaded-tools peer, analyze included, since `6ba1bd3`, and `collect_tools` adds it for
+  search. The registry still lists skills as code-only. The drift test scans only `graph.py` for
+  `make_*_tools(` calls, so it cannot see a binding made elsewhere. This errs toward describing
+  too little, the cheaper direction.
+* **The Dockerfile still ships no skills.** That is a separate fix. The decider is now right
+  either way, because it describes skills exactly when the peer will have them.
+* **The CLI description is declared, not derived.** `CLI_PEER` in the registry is written from
+  `claude_peer.py` and `opencode_peer.py`. One clause is held to the binding by a test: neither
+  `build_docker_argv` passes `--network none`. The others are not: staged uploads, inlined evidence
+  and analysis, and GeoJSON output becoming a layer.
+
+**For the extraction branch.** Its per-consumer capability table names these same two peers
+`code_peer` and `cli_peer`. `CODE_PEER_CONSUMER` maps each backend onto those keys, so the code
+line can read that table's rows rather than a parallel structure, whichever branch lands first.
+
+### Stage S8.6 The skill loaders are both peers', and the drift test reads each peer
+
+*Branch `claude/skills-shared-drift-sees-all-bindings`, stacked on S8.5 (`05f562b`).*
+
+The first of S8.5's three open items was that the registry listed the skill loaders as the code
+peer's alone, though `build_agent_executor` has given them to analyze since `6ba1bd3`. This closes
+it, and closes the reason it could stay open: the drift test could not see where analyze's binding
+is made.
+
+**The registry was written from the one file its test read.** `99d71ad` (2026-09-17) created the
+registry, with a drift test that regex-scanned `graph.py` for `make_*_tools(` calls and pooled
+every peer into one set. Fifteen days earlier, `6ba1bd3` had put the skill loaders into
+`build_agent_executor` for every peer that hands it a preloaded tool list, analyze included. In
+`graph.py` only the code peer calls `make_skill_tools`, so the registry filed skills as code-only,
+and the test agreed: the factory was in the pooled set (the code peer's call) and in the registry
+(as code's). **A pooled set cannot fail a toolset described for the wrong peer**, so scanning more
+files would not have caught this either. The search peer was invisible for a plainer reason. It
+calls no factory in `graph.py` at all, and all four of its toolsets come from
+`tool_policy.collect_tools`.
+
+| | before | after |
+|---|---|---|
+| skills clause on the analyze line | never | when discovery over the request's skill roots finds a skill |
+| skills clause on the code line (LangChain peer) | under that same condition | unchanged |
+| with a CLI code peer | no line mentioned skills, though analyze could load every one | the analyze line does |
+| the analyze inventory | `describe("analyze")`, so the default roots | the request's `skill_roots`, as the code line already read |
+| what the drift test reads | one regex over `graph.py`, all peers pooled | per peer: its own function, plus a run of its real assembly |
+
+**Why shared, rather than left code-only or dropped:**
+
+* **The binding is the same.** All three peers are built with the same `cfg.skill_roots`. The code
+  peer's own call and `build_agent_executor`'s produce the same `list_available_skills` and
+  `load_skill`, and the second is de-duplicated by name.
+* **A shared capability described as one peer's is a routing signal.** On the code line alone,
+  "loading packaged skills" made matching a skill look like a reason to choose code. The difference
+  the two lines exist to draw is existing tools versus new code, and matching a skill does not
+  decide that. The checkout's three skills split three ways. `chicago-crime-analysis` names
+  `agent_kb_search`, `get_kb_block` and `execute_code`, which the code peer binds by default and
+  analyze only partly outside unified mode. `ai-agent-for-chicago-crime-analysis` names
+  `mcp_run_nbwf_d01e717421c1b0ff`, which no peer can call, because no registration path produces
+  that name. The extractor names tools `mcp_run_<workflow_id>`, generated tools are registered as
+  `notebook_<name>`, and the MCP server's one runner, `run_notebook_workflow`, refuses unless
+  `AGENT_ALLOW_WORKFLOW_EXEC=1`. `example-skill` names `keyword_search` and `semantic_search`, which
+  outside unified mode only search binds. No one peer can follow every skill. So the clause
+  promises loading, which both can do, and the rest of each line says which tools a peer has to
+  follow one with.
+* **With a CLI code peer, the old filing said nothing.** A CLI loads no skills, so the code line
+  drops the clause, and with skills filed as code-only, no other line carried it.
+* **Dropping it from both lines was the other option.** That needs a bound-but-not-told exemption
+  for both toolkit peers, and leaves a request that names a skill with no line mentioning skills.
+* **Not measured.** No routing run compares the two descriptions. The effect on decisions is
+  argued here, not observed.
+
+**Search binds them too, and is deliberately not told.** `collect_tools` gives search
+`make_skill_tools` and `make_quality_tools`, plus `make_langchain_mcp_tools` behind
+`include_mcp_tools`, beside the retrieval tools. That flag is on by default: an API request that
+omits `includeMcpTools` gets `AGENT_INCLUDE_MCP_TOOLS`, which defaults on. Its line stays
+hand-written because it states a job, "retrieve evidence", not an inventory. A skills clause
+there would make the retrieval peer a place to send analysis. The test now holds that as a
+decision rather than an accident. Each toolset search binds is either stated on its line in the
+words `REQUIRED_TERMS` gives it, or listed in `NOT_TOLD` with the reason, and an entry that
+outlives its binding fails.
+
+**The drift test reads each peer, wherever the binding is made.** A peer's bindings are the union
+of two readings:
+
+* **Static.** The `make_*_tools` calls inside the peer's own function in `graph.py`, each one
+  whatever condition guards it. They are parsed with `ast` rather than a regex, so a factory named
+  in a comment no longer counts.
+* **Probed.** The peer's real assembly code runs once with an upload and once without, with every
+  other flag a binding hides behind switched on. Every factory the repo's own discovery
+  (`capabilities._discover_registry_factories`) finds is replaced by a recorder, and
+  `create_agent` by a stop. Each recorded call keeps the file and function it came from, so a
+  failure says where the binding is made. The first run against S8.5's code failed with
+  *"the analyze peer binds make_skill_tools (from executor_factory.py:build_agent_executor), but
+  capability_registry does not describe them for analyze"*. The same run failed that regression's
+  named test, and six tests of the analyze line: whether it carries the clause, and whether it
+  reads the request's skill roots.
+
+**Why a probe and not a wider scan.** `build_agent_executor` binds different toolsets depending on
+whether it is handed `preloaded_tools`. A scan would have to restate that branch in the test, and
+a scan of `collect_tools` would credit its toolsets to analyze and code, which never reach it. The
+probe follows the branch the peer really takes, into whichever module it leads, and records every
+factory the repo's discovery knows. A synthetic test adds a toolset at the preloaded seam and
+checks that the probe sees it for analyze and code while the static reading does not, so the
+probe's reach is tested without depending on where today's bindings happen to live. One static
+check keeps the old scan's reach: every factory called anywhere in `graph.py` must be bound by
+some peer. It works per factory, so a fourth peer defined there fails it by binding a factory no
+other peer has, but not by binding only factories the three peers already bind.
+
+**The cost, measured with gpt-4o's tokenizer (`o200k_base`) at minimal state, as in S8.5.** The
+prompt changes by one inserted clause, *"; loading packaged skills: step-by-step instructions for
+particular analyses"*, which is 12 tokens:
+
+| whole decider prompt | before | after |
+|---|---|---|
+| LangChain code peer, no skills (the deployed image) | 1,106 | 1,106 |
+| LangChain code peer, the checkout's 3 skills (the image once PR #31 lands) | 1,118 | 1,130 |
+| CLI code peer (`claude`), no skills | 1,113 | 1,113 |
+| CLI code peer (`claude`), the checkout's 3 skills | 1,113 | 1,125 |
+
+That is +12 tokens, about +1.1%, on each decision step while discovery finds a skill, and nothing
+in the deployed image until it ships skill roots. The test costs more than the prompt. The probe
+imports what the peers import, `torch` included through the retrieval tools' search stack. Run
+alone, the file took 0.6–1.1 s before and 6.5–44 s after in pytest's own timing, and 73 s the
+first time on a cold cache. That was on a Mac at a load average of 20 to 46, which is why the range
+is wide. In the
+full suite those modules are imported before this file runs. Run after `test_capabilities.py`,
+which imports the same modules, all 58 tests in the file took 0.3 s together.
+
+**Not fixed here:**
+
+* **A factory is one toolset.** The probe replaces each factory whole and does not look inside it.
+  `make_langchain_granular_tools` carries `make_langchain_qgis_tools`,
+  `make_admin_boundary_tools` and `make_langchain_file_tools` into the search peer, and nothing
+  here accounts for them there.
+* **The registry describes every binding a peer can have, not the ones a request gets.** Analyze
+  is told it retrieves datasets, publications and notebooks, though it binds the retrieval tools
+  only in unified mode (`AGENT_UNIFIED_PEER`, off by default). The code peer keeps four of them
+  (`agent_kb_search`, `get_kb_block`, `web_search`, `web_fetch`). S8.2's registry has always read
+  this way, and it is unchanged here.
+* **A binding outside `graph.py` behind a condition the probe does not set** is seen by neither
+  reading. The probe sets every flag that gates a binding today.
+* **Search binds the widest MCP surface, and the decider is told about none of it.** With MCP on
+  (the API default) and no `mcp_modules`, search's MCP tools are every tool the MCP server
+  registers. Without a server, the local fallback loads the default module list instead. Analyze's
+  are scoped to `spatial_analysis_tools`, yet the analyze line is the only one that mentions MCP.
+  Found here, not changed.
+
 ---
 
 ## Stage 9 — Who the caller is {#stage-9}
@@ -1007,8 +1222,6 @@ stray file configured them. They self-skip when unconfigured, so they now skip b
 *Still open:* one conversation produced **two** memory documents — the agent's own
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
 the orphan rather than explaining it, and why the two ids diverge is not yet understood.
-
----
 
 ---
 
@@ -1435,3 +1648,2259 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+### Stage S12.8 The fifth value kept outside the tier rule: the agent search client's credential
+
+S12.7's rule is that *a value the platform sets per tier, stored anywhere other than the tier
+table, does not move when the tier does*. S12.7 lists three instances. The fourth is on the
+extraction path, `agent_kb._os_client`, which `claude/extraction-integration` moves. The fifth
+was found on 2026-10-01 at `5ae6d92`, in the deployed container's copy as well as the
+repository's, and it is in the platform search itself: `rag_pipeline/search/agents.py`'s
+`_os_client` resolved `OPENSEARCH_NODE` through the tier rule and `OPENSEARCH_USERNAME` /
+`OPENSEARCH_PASSWORD` bare. **A tiered host with the untiered credential.** The three clients
+beside it (`keyword.py`, `semantic.py`, `spatial.py`) resolve all three names through
+`search/utils.getenv`, `<NAME>_<SEARCH_TIER>` first, and `agents.py`'s own `_getenv` already
+delegated to that helper. It was used for one of the three names.
+
+Why nothing failed: the bare pair **is** prod's. Reproduced inside the deployed container,
+`SEARCH_TIER=prod` resolves the node to prod's cluster (`149.165.155.195`) and the bare pair
+authenticates there. The same pair returned 401 against the dev cluster on 2026-09-22, so
+`SEARCH_TIER=dev` would send prod's password to dev's cluster, and the agent search would fail
+with a 401 that reads as a network problem. It is the trap S12.6 records for
+`opensearch_credentials()`, reached by another path. Latent, not live: the deployment searches
+prod.
+
+The fix is the two lines `keyword.py` already had. `claude/extraction-integration` makes the
+same change to `agents.py`, byte for byte including its comment, so the two branches merge
+cleanly there. No resolver was added. That branch introduces `platform_endpoints.search_cluster()`,
+returning `(node, user, pwd)` under a credential-follows-host rule, and a second resolver here
+would be a second answer to the same question for it to unpick. When it lands, the four search
+clients (`agents.py`, `keyword.py`, `semantic.py`, `spatial.py`) share one shape and can move
+onto it together.
+
+Pinned by `rag_pipeline/tests/test_search_tier_credential.py` (seven tests; the suite goes from
+1645 to 1652 passed, 4 skipped before and after):
+
+- The client built under `SEARCH_TIER=dev`, with the `_DEV` triple beside a different bare
+  triple, carries the DEV pair. It is recorded where `agents.py` binds `OpenSearch`, and checked
+  once more through the `Authorization` header the real client would send. Three more
+  configurations pin the precedence: bare names alone, `SEARCH_TIER=dev` under
+  `PLATFORM_TIER=prod` (the pair follows the SEARCH tier), and prod beside the bare triple.
+  Assertions name hosts and pairs by where they came from (dev, prod, bare), never by value.
+- The drift guard: no module under `rag_pipeline/search/` or `extractors/emitters/` reads the
+  three names bare (`os.getenv`, `os.environ`). It carries two named carve-outs, `agent_kb.py`
+  and `opensearch_emitter.py`, which `claude/extraction-integration` moves onto
+  `search_cluster()`. Each carve-out expires itself: the test fails the moment its file stops
+  reading the bare names, so the list cannot go stale.
+- `@lru_cache(maxsize=1)` is on `_os_client` and not on `_os_index`, the settings helper beside
+  it. On the sibling branch an anchored edit here moved the decorator onto a settings helper,
+  caching a setting; targeted runs passed and the full suite caught it. Pinned so the next edit
+  near it fails by name.
+
+Not changed by this: with a tiered node and **no** tiered pair, `tiered_env` still falls back to
+the bare pair, per variable. All four search clients share that rule now. `search_cluster()`'s
+credential-follows-host rule is its replacement once they call it, and that is the sibling
+branch's change, so it is not asserted here either way.
+
+### Stage S12.9 What the image carries, and what quietly did not ship
+
+S12.7's fault has a packaging twin: **a directory the runtime reads, named anywhere other than
+the Dockerfile's copy list, does not reach the container.** `agent_runtime/skills.py` discovers
+skill bundles under `REPO_ROOT/skills` and `REPO_ROOT/.agents/skills`, and `REPO_ROOT` is `/app`
+in the image. `rag_pipeline/Dockerfile` builds `/app` from an explicit list of `COPY`
+instructions, one package added each time one was needed, and no version of it on `prototype`
+has copied either skill root since skills landed on 2026-05-06 (`d51cd25`): 148 days. Discovery
+skips a root that does not exist, by design, so the registry degraded to empty and nothing said
+so.
+
+| image | `/app/skills` | `/app/.agents/skills` | `SkillRegistry.discover()` |
+| --- | --- | --- | --- |
+| deployed `agent-api`, measured 2026-10-01 | absent | absent | 0 skills |
+| `prototype` @ `5ae6d92`, built locally | absent | absent | 0 skills, 0 errors |
+| the same commit with this change | 2 skills | 1 skill | 3 skills, 0 errors |
+
+The deployed agents did not have skill tools that returned nothing; they had no skill tools.
+`make_skill_tools()` returns an empty list for an empty registry, so `list_available_skills` and
+`load_skill` were never offered, and `available_skills` was `[]` in every response and in the
+stream's `initialized` event. The image now copies both roots, and all three skills load in it as
+the image's non-root user.
+
+**The first fix was partial.** `f8f99ef` on `backend_swap` (2026-08-13) copied `.agents/` alone:
+one skill of three, with `/app/skills`, the first root, still missing. The test it added passed,
+because it asked whether *any* root was copied. That is S12.7's lesson again: a check that
+recognises one wrong answer (no root) certifies another (one root of two). The commit is still on
+`backend_swap` and in `claude/extraction-integration`'s merge `b911191`; whichever branch meets
+this change should keep both `COPY` lines and drop that test.
+
+The guard is `rag_pipeline/tests/test_image_skill_roots.py`. It builds the part of `/app` that
+holds the skill roots in a temporary directory by the Dockerfile's own rules (`WORKDIR`, each
+`COPY` of the last stage, then `.dockerignore`), plants a skill in each root, and runs the real
+discovery with no explicit roots, as every production caller does. Eleven cases check that it
+rejects the ways a root can be lost, the partial fix among them. It reads text, so it does not
+replace building the image, but it fails on a checkout before anyone builds one.
+
+`.dockerignore` was checked, not assumed. Its `*.md` reads as though it drops every `SKILL.md`,
+but Docker anchors patterns at the context root, so it drops only the root's own markdown. The
+test's matcher was cross-checked against a real build of this context: of 390 paths on disk it
+predicted exactly the 365 that Docker sent.
+
+`AGENT_SKILL_PATHS` appends roots after the defaults; it does not replace them. A deployment that
+points it at a writable volume for generated skills (`backend_swap` uses
+`/app/agent_chat_files/skills`) keeps the baked-in ones: the built image found four skills with a
+third root mounted, and a test pins the order.
+
+Two of the three skills deserve a look before this is deployed, because deploying it is what
+puts them in front of the model. `example-skill` is a stub whose description says it exists to
+verify skill loading. `ai-agent-for-chicago-crime-analysis` names `mcp_run_nbwf_d01e717421c1b0ff`
+as its tool, and no such tool exists on `prototype`. `allowed-tools` is advisory, so loading that
+skill tells the agent to call a tool it does not have; nothing blocks it.
+
+The rule this leaves, beside S12.7's: **anything the runtime reads relative to `REPO_ROOT` is a
+deployment input, and the copy list is where it has to be named.** The other repository-root
+paths in the copied packages are import paths, `.env` files the image leaves out on purpose, a
+boundary for user-supplied notebook paths, and the skill emitter's output directory. One is a
+real gap and is not fixed here: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+and `examples/` is not in the image either.
+
+### Stage S12.10 The page `/agent/dashboard` serves
+
+The skill-roots fix (S12.8 in I-GUIDE/iguide-ai#31, open at the time of writing) ended by naming
+one more gap of its class: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+which `api/server.py` reads relative to the repository root, and no revision of
+`rag_pipeline/Dockerfile` on any branch has copied `examples/`. The Dockerfile has built `/app`
+from an explicit list since it was created (`1c78e59`, 2025-12-14), and the route landed into it
+(`7f71a90`, 2026-05-07). Every image built in the 148 days since answers the route with a 500.
+
+| where | `GET /agent/dashboard`, 2026-10-02 |
+| --- | --- |
+| `https://agent.i-guide.io` (production) | 500, Flask's default 265-byte page; `/health` 200 at the same time |
+| `prototype` @ `5ae6d92`, built locally, under the image's own gunicorn `CMD` | 500; one ERROR traceback per request, `FileNotFoundError: ... '/app/examples/agent_chat_stream_demo.html'` |
+| the same commit with this change | 200, `text/html`, byte-identical to the checkout's file |
+
+**Revised during the work: the first decision was the opposite.** The task allowed either
+answer, copy the page in or make the route answer 404 cleanly, and `prototype` on its own
+pointed to the second. README.md, AGENTS.md and `docs/` never mention the route. Its docstring
+calls it "the local streaming agent dashboard". And `CORS(app)` lets the page reach the live
+agent from `file://` anyway: a preflight from `Origin: null` was allowed, `x-api-key` included.
+A 404 version was written and tested, and the suite passed with it (1647 passed). It was
+withdrawn because `backend_swap`, read afterwards, records the opposite intent:
+
+- `8fd97f58` (2026-08-12) closed two holes it described as "reachable from the open internet"
+  and kept `/agent/dashboard` open on purpose, as "static HTML with no data".
+- `66e71d54` (2026-08-12) fixed hardcoded tool checkboxes in the page that an earlier fix had
+  corrected only in the prototype: "fixing one shipped client had left the other broken".
+- M0.2b (2026-08-07 in that branch's `docs/DEVLOG.md`) updated it, with the prototype, to
+  describe the new auth contract.
+
+That branch also scopes CORS to `AGENT_CORS_ORIGINS`, falling back to `ALLOWED_DOMAIN_LIST`. A
+page opened from disk sends `Origin: null`, so unless `null` is on that list, being served by the
+agent is the only way the page works against a deployment.
+"Nobody noticed the 500 for 148 days" is no evidence either way: the skill roots went unnoticed
+for the same 148 days and were plainly meant to ship. `git log -S` on one branch found where the
+route came from. The reasons were in another branch's commit messages.
+
+**The change** is one `COPY`, of this file only, placed after `api/`:
+`COPY examples/agent_chat_stream_demo.html ./examples/`. Nothing else in the copied packages
+reads the root `examples/`, and its other page, `iguide_chat_prototype.html`, is only named in a
+docstring. `.dockerignore` does not exclude it: its patterns are anchored at the context root and
+none reaches `examples/`, and the image builds with it. The route's path moved into a module
+constant, `_DASHBOARD_PAGE`, unchanged in value, so a test reads the path from the code instead
+of restating it.
+
+**The guard** is `rag_pipeline/tests/test_image_dashboard_page.py`. It follows the page through
+the Dockerfile's own rules (`WORKDIR`, each `COPY` of the last stage, then `.dockerignore`) and
+checks that it lands beside wherever `api/` lands, which is where the route reads it. The
+readers are #31's, copied byte for byte with one addition. A directory named as a `COPY` source
+always has its contents land inside the destination. A single file lands *inside* a destination
+that ends in `/`, and *as* any other destination. Fourteen cases check the audit's verdicts, and
+all fourteen were also built for real. Every accepted Dockerfile served the page. Five of the six
+rejected ones built without an error and left a route that would answer 500. The sixth, an
+ignore pattern that drops a file a `COPY` names, failed the build. The subtlest is a missing
+trailing slash: `COPY … ./examples` builds cleanly and writes the page as a *file* named
+`/app/examples`. Removing the new line fails the guard with "no COPY in the Dockerfile carries
+it". Moving it to `./` fails with both paths named.
+
+Not fixed here:
+
+- **Production still answers 500** until the image is rebuilt with this change, and deploying
+  is a separate decision. Once it is deployed, the page is public at
+  `https://agent.i-guide.io/agent/dashboard`, as `backend_swap` decided it should be.
+- On `backend_swap`, `test_api_auth.py`'s docstring says `/agent/dashboard` is asserted to stay
+  open, but its `OPEN` list holds only `/health`. That assertion was never written, so nothing
+  there notices the route being closed or broken. Add it when that branch meets this one.
+- Once #31 merges, the Dockerfile and `.dockerignore` readers exist in two test files. They
+  belong in one module, and this file's `_lands_at` is the superset.
+
+S12.8's rule held: **anything the runtime reads relative to `REPO_ROOT` is a deployment input.**
+The one path that looked like an exception was not one. What showed that was another branch's
+commit messages, not this branch's code or docs.
+
+---
+
+## Stage 13 — Shapes nobody owned {#stage-13}
+
+Four fixes from 2026-10-01 to 10-03 (#28, #29 and two operational changes) share one cause: an
+interface with no owner. One was a payload shape that the server emits and the client reads, with
+no code standing between them. One was a model id that only a remote catalogue decides. One was
+an initialisation path written twice. One was the moment a config change becomes an outage. Each
+broke silently, and in each the visible symptom pointed somewhere other than the cause.
+
+> **On numbering.** This is Stage 13 on `prototype` because it merged first. At the time of
+> writing, nine open PRs also call themselves Stage 13 (#32, #34, #36, #37, #38, #40, #44, #45,
+> #46), several with different content under the same `{#stage-13}` anchor, and #30 and #31 both
+> claim S12.8. Whoever lands them must renumber; merged order is the honest sequence.
+
+### Stage S13.1 The download panel is whatever the tools emit
+
+The Downloads panel showed `unnamed file (file_f2929f3dec7d)` three times. The files downloaded,
+so it read as cosmetic. It was not.
+
+Nothing server-side assembles that panel. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`)
+walks the entire SSE payload and harvests any object holding a `download_url` and a `file_id` or
+`filename`, on the assumption that the three describe one file. The shape a tool emits is
+therefore the whole contract, and no code sits between the two ends to enforce it.
+
+`align_embedding_colors` broke it in both directions at once. Each region entry carried the
+embedding **package**'s `file_id` (an `.npz`) next to the re-coloured **image**'s `download_url`
+(a `.png`), and no filename. Each row was labelled from one file and linked to the other. It
+appeared to work only because the click still downloaded *something*. `embed_zones`'
+`pixel_image` had the milder half: its id and url agreed, but it had no name.
+
+The store had the names all along (`drawn_region_2018_gse_2018-06_2018-09_vectors.npz` and its
+siblings). That was established from evidence, not by reading code. `chat_traces` showed that
+turn calling `align_embedding_colors` on exactly those three ids, and the store's metadata held
+intact names for each. This was the first time the trace store answered a production question.
+
+Each file now travels as its own complete object. The second file **nests** instead of sitting
+under sibling `image_*` keys, because the flat shape is what allowed one file's id to be paired
+with another's url. `test_download_descriptors.py` mirrors the client's harvesting rule in
+Python, since a test checking any other rule would pass while the panel stayed wrong. It also
+includes the shape that shipped, to prove the check rejects it.
+
+### Stage S13.2 A model replaced under us, and a test that asserted a fact about the world
+
+Purdue withdrew `qwen3.6:27b` and put `qwen3.8:27b` in its place. Unlike its predecessor, which
+was listed and "Recommended" while returning zero bytes in 90 s, the replacement is usable as an
+agent model. Verified through `build_llm` rather than raw HTTP:
+
+- it answers in 0.7 s
+- it emits correct `tool_calls` with `finish_reason=tool_calls`
+- it keeps `reasoning_content` through `ReasoningPreservingChatOpenAI`
+- it completes a tool-result round trip in 2.2 s
+
+It reasons harder than 3.6, spending 34 of 38 completion tokens to say "OK", so the deliberate
+absence of `max_tokens` matters more with it, not less.
+
+Both hardcoded fallback defaults moved, along with `_ANVIL_FALLBACK_MODELS`. The second default,
+in the per-request path of `build_llm`, was nearly missed. Measured claims keep the model they
+were measured on: the `max_tokens` numbers still name qwen3.6, with 3.8's own measurement added
+beside them.
+
+The instructive part was a test. `test_the_model_defaults_to_the_verified_id` asserted that
+"qwen3.6:27b is the id AnvilGPT actually serves". No local test talks to Purdue, so that claim
+could not fail when it went stale, and it did go stale. A unit test can pin a **shape** (Open
+WebUI `name:tag`, never HuggingFace `Qwen/...`). It cannot pin a fact owned by a remote service.
+The test now pins the shape and states that the roster is probed. `/agent/models` fetches it
+live, so the picker corrected itself; the fallback tuple is consulted only when that fetch fails.
+
+qwen3.8 was the deployment default from 10-01 until 10-02, when the VM returned to OpenAI
+`gpt-5.6-luna`. It remains selectable per request.
+
+### Stage S13.3 rs-embed: three weeks of 500s behind a green health check
+
+rs-embed (a separate repository on the same host) returned 500 on every `/api/embed` from
+2026-09-08 until 10-01. Its Earth Engine credential was a person's `earthengine authenticate`
+token, and that token stopped being accepted. `/api/models` and `/api/health` kept answering 200
+throughout, the pattern already recorded for services that succeed at nothing.
+
+Two defects hid it, and both are worth recognising elsewhere.
+
+- **The error you saw was not the error that happened.** `ensure_ready()` caught
+  `ee.Initialize`'s exception into a variable it never used, tried a geemap fallback, and
+  propagated only the fallback's failure. The expired credential therefore surfaced as
+  `module 'geemap' has no attribute 'ee_initialize'` (geemap removed that function in 0.38),
+  which sent debugging after the wrong library. A fallback that can fail must chain the primary
+  error, not replace it.
+- **Initialisation was written twice, and the copies disagreed.** The library half reads
+  `EE_PROJECT`. The web app's `_ensure_ee` read `EARTHENGINE_PROJECT` and called `ee.Initialize()`
+  itself with no credentials. A fix applied only to the library changed nothing, because
+  `/api/embed` goes through the web app. The web app now defers to the library's helper.
+
+It now authenticates as a service account, and the unit sets `EE_PROJECT` explicitly. The unit
+previously set no environment at all, so it had been running with no project and inheriting
+whatever project the personal credential named. Verified from inside the agent container:
+`ok=True`, `backend=gee`, `nodata_fraction=0.0`, and a grid that is 100% finite. The status code
+alone was not enough: with no model named, the service returns `{"results":[]}` and still
+answers 200.
+
+Where the fix lives is uneven, and the next maintainer needs to know it. The library half is
+committed on the VM on a branch that has never been pushed. The web-app half cannot be committed
+at all, because rs-embed gitignores `examples/**`. It exists only on that host and in a backup.
+
+### Stage S13.4 A restart is an outage for whoever is mid-turn
+
+Switching the default model on 2026-10-02 at 14:33 UTC was an env-only change, and it cut off
+eight live turns: four 502s and four 200 streams truncated mid-answer, across the prod platform
+backend and real users. Nothing reported it. It surfaced only because a later, unrelated error
+report led to reading the nginx log.
+
+The Deployment section of AGENTS.md said never to *recover* with `--force-recreate`, to preserve
+evidence. It did not cover the other reason to recreate: a config change, which needs one and
+has a different cost. Two habits are now written down. Check for streams in flight before
+recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
+`embedding-server`, and agent-api then waited on their health checks.
+
+### Stage S13.5 `AGENT_MCP_UNBIND`: an override that unbound nothing
+
+Found on 2026-10-02 and fixed on 10-03, after the four above were written up. It shares their
+silence but not their symptom: the deployment does not set the variable, so nobody saw it fail.
+
+`AGENT_MCP_UNBIND` names MCP tools the agent should not bind. Its parser was meant to accept
+either `create_notebook_workflow_tool` or `mcp_create_notebook_workflow_tool`, the name the agent
+sees, and it removed the prefix with `lstrip("mcp_")`. `lstrip` does not remove a prefix. It
+removes leading characters drawn from a set, here m, c, p and _. Every name that starts with one
+of them was mangled, with or without the prefix:
+
+```
+mcp_create_notebook_workflow_tool,create_notebook_workflow_tool,mcp_count_crimes_per_community
+  -> {reate_notebook_workflow_tool, ount_crimes_per_community}
+```
+
+The mangled names match no tool, and nothing is logged when a name matches nothing. Two of the 16
+tools defined under `MCP_server/tools/` could not be unbound under either spelling:
+`create_notebook_workflow_tool` and `count_crimes_per_community`. The same held for any generated
+tool given a name that starts with m, c or p; the default name, `notebook_<stem>`, was safe.
+`create_notebook_workflow_tool` is the remote notebook builder that #42 asked the maintainer about
+unbinding, so the override is how an operator would unbind it if that decision is reversed.
+
+The override also replaces the default list rather than adding to it. Setting it to that one name
+therefore left the builder bound and bound the two web-search tools again: two tools added, none
+removed.
+
+The test could not catch it. `test_the_unbind_list_is_overridable` checked both spellings with
+`describe_image`, and d is not in the set, so `lstrip` and a prefix removal agree on that name.
+The default list never reaches the parser, and neither of its names starts with one of the four
+characters. `printenv` in the `agent-api` container on 10-03 found the variable unset, so the
+defect was latent in the deployment.
+
+The fix is `removeprefix("mcp_")`, which needs Python 3.9; the images run 3.11. One new test
+parses the string above, then names starting with c (the two real tools), m and p, each written
+both ways. The other builds through `_make_remote_mcp_tools` with the listing stubbed, because
+that is the path the deployment takes. Restoring `lstrip` fails both, and the old test still
+passes.
+
+Unchanged:
+
+- **The override still replaces the default list**, as its test asserts. An operator who unbinds
+  one more tool and wants the two web-search tools to stay unbound must name all three.
+- **A name that matches no tool is still silent**, so a typo fails the way this bug did.
+- **#42 lists this bug under "Found, and not fixed here".** It was still open when this was
+  written. Whichever of the two merges second should update that bullet.
+
+### Stage S13.6 What this stage did not fix
+
+- **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
+  The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
+  (11 started, 11 traces written, each ending `node_completed`, none with an error event inside
+  the stream). No chat request reached it between 17:42 and 18:35. The failure therefore
+  happened in the platform frontend or backend, whose logs this repository cannot see.
+- **Four emitters whose files never reach the panel**: `image_file_id` at three sites in
+  `rs_embed_tools.py` and `predictions_file_id` at one. These files are not unnamed; they are
+  absent. Making them appear changes what users see, so that is a decision rather than a fix.
+- **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
+- **This file's numbering**, as noted at the top of the stage.
+
+---
+
+## Stage 14 — A promise kept by rounding luck {#stage-14}
+
+`spatial_weights` with `weights='distance_band'` and no `threshold_km` tells the user it *"used
+the smallest distance that leaves no island"*. On the deployed Linux image that was false: the
+test lattice came back with one island. The test that checks the promise arrived with the tool
+(`7cb9f47`, 2026-08-19) and passes on a Mac, so nobody saw it fail until the suite ran on
+Linux: in `backend_swap`'s CI, which fixed it in `4e8d327`; in the deployed-version CI being
+added to `prototype` (`460cd25`, branch `claude/ci-deployed-constraints`); and inside the deployed
+`agent-api` container on 2026-10-01.
+
+This is stage 14 because that CI change opens stage 13, *Testing what is deployed*. Its first
+Linux run found this tie, recorded it, and left the test failing for a separate change. This is
+that change.
+
+### Stage S14.1 Where the island came from
+
+The automatic threshold is `libpysal.weights.min_threshold_distance`, which returns the critical
+pair's distance as a square root. `DistanceBand` then admits a pair when its **squared** distance
+is at most the threshold squared, because scipy's KD-tree compares in squared space. Squaring a
+rounded square root can come back one ulp short of where it started, and on the 8×8 test lattice
+(projected to UTM 31N) it does. Measured on both machines:
+
+* Both compute the same threshold to the last bit, 110,884.46616304158 m, and the distance the
+  KD-tree reports for the critical pair equals it exactly: the "margin of 0.0 m". The Linux band
+  still drops the pair, because its squared distance is one ulp above the squared threshold.
+  Dropping it leaves one cell with no neighbour at all.
+* The two machines project one easting of that pair **one ulp apart** (1.2e-10 m at about
+  999 km), with identical PROJ 9.5.1 and GEOS 3.13.1. Their KD-trees also disagree on the same
+  coordinates: on the Mac's, the Mac's KD-tree keeps the pair and the Linux one drops it.
+  Computed by hand, that sum of squares lands exactly on the squared threshold if `dy*dy` is
+  fused into the final addition, and one ulp above it with plain arithmetic.
+
+Swapping the pair's exact coordinates between the machines shows that either difference alone
+drops the pair:
+
+| pair's coordinates from | macOS/arm64 KD-tree | Linux/x86-64 KD-tree |
+|---|---|---|
+| macOS | kept | **dropped** |
+| Linux | **dropped** | **dropped** |
+
+The coincidence was the Mac passing, not Linux failing. The pair survived only where the Mac's
+coordinates met the Mac's arithmetic. These two machines also run different library versions
+(libpysal 4.15.0, scipy 1.15.3, numpy 2.1.3 on the Mac; 4.14.1, 1.17.1, 2.4.6 in the container),
+but the session working on the extraction branch pinned CI's exact versions on a Mac and still got
+no island, so the split follows the platform rather than a version.
+
+### Stage S14.2 The fix, and what it costs
+
+One line after `min_threshold_distance`: `thresh *= 1.0 + 1e-9`. That is about 0.1 mm at 100 km
+and 7.6 million ulps at this threshold, so it absorbs any last-bit disagreement while staying far
+below any distance an analysis could care about. It is the line `backend_swap` carries in
+`4e8d327`, after which that branch's Linux CI went green. This is the only place the code derives
+a band from `min_threshold_distance`.
+
+**Revised during the work:** the line and its comment are now copied from `4e8d327` verbatim.
+The first version reworded the comment, and the extraction-integration branch already carries
+`4e8d327`, so a test merge of `prototype` into it conflicted in this file. With identical lines
+the same test merge has no conflict at all. The note's caveat is a separate comment two lines
+further down, where it cannot collide.
+
+What it changes, measured on the lattice: nothing on the Mac (146 links before and after), and on
+Linux exactly the dropped pair (144 links and 1 island before, 146 and 0 after). Only two
+directed pairs lie within a relative 1e-9 of the threshold, and they are that pair. The note
+keeps its wording and prints the padded distance. That differs from the strict minimum far below
+the note's metre precision, and the unpadded value is not reliably island-free, so "the smallest
+distance that leaves no island" is now true on every platform instead of one.
+
+`test_default_distance_band_survives_a_rounding_disagreement` makes the failure reproducible
+anywhere. It shrinks the computed minimum by a relative 1e-12, far more than one ulp and a
+thousandth of the pad. Without the pad it fails on the Mac with one island, which the original
+test never could.
+
+Verification ran inside the deployed `agent-api` container (Python 3.11.16, x86-64). Before ran
+against the deployed module, byte-identical to `prototype`'s; after ran against a copy of
+`agent_runtime/` in `/tmp` with only this module replaced. Nothing was deployed.
+`test_spatial_stats_tools.py` went from 2 failed and 33 passed to 35 passed. The Mac's full suite
+went from 1645 passed and 4 skipped to 1646 and 4, the difference being the new test.
+
+### Stage S14.3 The reason worth keeping
+
+A correctness promise was being met by rounding luck, and only a Linux run could show it. The
+developer's machine was the one platform where the luck held, so the test that encoded the
+promise passed there from the day it was written while the deployed image broke it. A promise of
+the form "the smallest X such that…" over floating point needs a margin by construction, and a
+test that perturbs its input past the rounding instead of waiting for an unlucky platform.
+
+Not deployed: the running image still has the unpadded threshold, so a caller that omits
+`threshold_km` can still get an island until the next image rebuild.
+
+---
+
+## Stage 15 — What counts as a date is decided here, not by pandas {#stage-15}
+
+*2026-10-01, `claude/temporal-numeric-code-columns`.*
+
+A pandas major upgrade silently widened what counts as a date, and only a run on the deployed
+versions could show it. `test_csv_with_coordinates_flows_through` failed inside the deployed
+`agent-api` container (Python 3.11.16, pandas 3.0.5) and passed on the development machine
+(pandas 2.2.3), with nothing in the repository changed: `requirements.txt` names `pandas`
+without a version, so the image takes whatever is current when it is built. `prototype` has no
+lock file and no CI; separate tasks cover both.
+
+### Stage S15.1 The mechanism, and why the obvious fix would have missed it
+
+The test's `Beat` column (1234, 1235, 1236) was offered as a time column beside `Date`. The
+diagnosis this work started from suspected the numeric path, numbers falling through to the
+text ladder where pandas 3 infers formats differently, and proposed skipping that ladder for
+numeric columns. It also flagged that 1234 sits inside the year branch's range, so which branch
+fired had to be checked first. Checked in a replica of the deployed image, built from the
+container's own `pip freeze`, the numeric path was not involved and the version difference was
+not format inference:
+
+* **`Beat` was never numeric.** GDAL's CSV reader types every field as text, so the column
+  reached `parse_time_series` as `"1234"` (dtype `str` on pandas 3, `object` on pandas 2). The
+  year branch never ran. The name gate in `_candidate_columns`, which skips a numeric column
+  without a time-ish name, asked the dtype, so for a CSV upload it never fired. Skipping the
+  text ladder for numeric series would not have touched this fixture.
+* **Format inference did not change; resolution did.** On each version the three text
+  strategies agree with one another. pandas 3 parses strings at microsecond resolution, so
+  `"1234"` became 1234-01-01. pandas 2 parsed at nanoseconds, whose range starts at 1677-09-21,
+  and coerced it to NaT. The test had been passing on an accident of `datetime64[ns]`.
+
+Across 31 column shapes, every difference between the two versions but one is a year outside
+1678–2262; the exception is in S15.4. Measured on the two versions:
+
+| input | pandas 2.2.3 | pandas 3.0.5, deployed |
+|---|---|---|
+| CSV: `incident_id` 1001–1005 beside a clean `Date` | `Date` | **`incident_id`** chosen as the time column |
+| CSV: IUCR-style codes (`0486`, `0820`, `1310`, `041A`, `2820`) beside a `Date` with two unusable rows | `Date` | **`IUCR`** chosen, 0.8 against 0.6 |
+| Chicago-style beats 111–2535, 40 values | 5 read as years | 20 read as years |
+| CSV: `Year` beside a `Beat` holding 1711–2212 | **crash**, `OutOfBoundsDatetime` in `_span` | `Beat` offered beside `Year` |
+
+The last row is pandas 2's own failure: the beats parse as years there too, and their 501-year
+span overflows its nanosecond `Timedelta`.
+
+### Stage S15.2 Three rules, each stated where pandas used to decide
+
+1. **A column is numeric by what it holds, not by its dtype.** `_as_numbers` accepts typed
+   numbers, and text in which every value is a plain number; blanks and the NA markers
+   `read_csv` would read as NaN are allowed. The name gate now treats a CSV's numbers exactly as
+   it always treated typed ones.
+2. **A number gets only numeric readings:** a four-digit year, YYYYMMDD (19000101–21001231),
+   epoch seconds or milliseconds. It no longer falls through to the text ladder, and a number
+   that fits none of them is a code and stays unparsed. YYYYMMDD is a new explicit branch; it
+   used to work only because the text ladder happened to infer `%Y%m%d`.
+3. **Every inferred time must fall in 1678–2262** (`_YEAR_FLOOR`, `_YEAR_CEILING`), on the text
+   ladder too. That is the window pandas 2 enforced implicitly, and stating it keeps the verdict
+   from moving with the pandas version. It is the rule that stops the IUCR column, which `041A`
+   keeps from counting as numeric. A column the source already typed as datetime is not clamped.
+
+After the change the 31 shapes give identical results on both versions, apart from S15.4, and
+every CSV in the table detects `Date` (or `Year`) alone.
+
+### Stage S15.3 Behaviour that changed on purpose
+
+* A CSV column of epoch seconds now parses. It parsed as nothing on either version.
+* A CSV year column with a gap, which `to_csv` writes as `2019.0` and an empty cell, now reads as
+  years: 2 of 3 values, where both versions read 0.
+* An 8-digit date held as digits in a CSV column **without** a time-ish name is no longer
+  auto-detected. That is the treatment a typed integer column always had; `time_column=` still
+  reads it.
+* Text dates outside 1678–2262, which pandas 3 had started parsing, are unparsed again, as on
+  pandas 2.
+* `parse_method` has a new value, `YYYYMMDD number`.
+
+Cost, measured on the development machine with both versions interleaved in one process: a
+million Chicago-format dates took 1.83 s against 1.77 s, with identical results. The added work
+is 0.04 s for the number check and 0.04 s per strategy for the window, so the slowest case, a
+column whose blank cells force the whole 22-strategy ladder, pays under a second on top of about
+43 s. A million beats held as text got cheaper, 0.74 s against 1.39 s, because the text ladder no
+longer runs on them; before the change pandas 2.2.3 read 125,531 of them as years.
+
+### Stage S15.4 Found here, not fixed
+
+* **Mixed UTC offsets stopped parsing on pandas 3.** An ISO column mixing `Z` and `+01:00`, or a
+  US daylight-saving pair such as `-06:00` and `-05:00`, parses 2 of 2 on pandas 2.2.3 and 0 of 2
+  on 3.0.5. pandas 3 raises `Mixed timezones detected` unless given `utc=True`, every strategy
+  fails, and the column reads as having no time at all. It is the same upgrade moving the line
+  the other way, so dates that should parse no longer do. Fixed in S15.5.
+* **`_span` overflows on pandas 2** when parsed times span more than about 292 years, and the
+  whole `detect_time_column` call then fails. This affects the development machine only.
+* **A code column inside 1678–2262 with a time-ish name** still parses as years: a `Report Area`
+  holding 1711–2212 would. Only the name tells it from a year column, and here the name says time.
+
+### Stage S15.5 Offsets are converted to UTC by pandas, on every version
+
+*2026-10-02, `claude/temporal-mixed-utc-offsets`, stacked on `claude/temporal-numeric-code-columns`.*
+
+This fixes the first item in S15.4. The module docstring promises that a time carrying a UTC
+offset is converted to UTC and made naive. On pandas 2 that promise rested on a deprecated path:
+`pd.to_datetime` returned a column whose offsets differ as objects, and `_naive` converted the
+objects. Its `FutureWarning` named both the change and the fix: such a column *"will raise an
+error unless `utc=True`"*. pandas 3 made it the error, `ValueError: Mixed timezones detected`,
+and `errors="coerce"` does not suppress it. The
+strategy loop's `except Exception: continue` swallowed it in the inferred and the mixed strategy
+alike, and no explicit format has a `%z`, so none can match a time with an offset. On the deployed
+image a CSV of a US feed's local times, `-06:00` in winter and `-05:00` in summer, got
+`found: false` from `detect_time_column`, and `filter_by_time`, `time_series` and
+`temporal_hotspots` each answered "no time/date column could be detected in this dataset".
+
+**The rule:** the inferred and mixed strategies pass `utc=True`, so pandas converts every offset
+itself and `_naive` only drops the zone. Checked on both versions, on the raw `pd.to_datetime`
+calls and then through `parse_time_series`:
+
+* With `utc=True` the two strategies give the same instants on 2.2.3 and 3.0.5 for all 13 offset
+  shapes tried inside pandas 2's nanosecond range: `Z` beside `+01:00`; `-06:00` beside `-05:00`
+  with a `T` or a space, without the colon, with fractional seconds, or in RFC 2822; with garbage,
+  blanks and nulls among them; the two `01:30` of a fall-back night; single offsets; and text
+  with an offset beside text without.
+* Text without an offset is read as UTC and made naive again, so its values do not move: ISO,
+  Chicago, date-only, day-first, month names, `YYYY-MM`.
+* The explicit formats are left as they were. None of the 20 matches any of those offset strings
+  on either version, with `utc=True` or without it, because none has a `%z`.
+
+Then `parse_time_series` itself, on 49 column shapes:
+
+| shapes | pandas 2.2.3 (development) | pandas 3.0.5 (deployed) |
+|---|---|---|
+| 12 whose offsets differ | parsed; unchanged | **0% unfixed**; fixed, the same instants as 2.2.3 |
+| 4 mixing text with an offset and text without | 2 of 2; unchanged | **1 of 2 unfixed**, only the rows that fit the first value's layout; fixed, 2 of 2 |
+| 3 of offset times outside or at the edges of 1678–2262 | unchanged but one, below | 0 unfixed; fixed, as on 2.2.3 but one, below |
+| the other 30 | unchanged | unchanged |
+
+Fixed, the deployed version returns what pandas 2.2.3 always returned on 48 of the 49 shapes. The
+49th is an offset time that lands on 2262-04-12 UTC: the year window of S15.2 admits it and pandas
+3 keeps it, but it is past pandas 2's nanosecond ceiling of 2262-04-11 23:47. On 2.2.3 the fix
+moves one shape, the wrong way; it is the first item under *Found here, not fixed* below.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ parses again on pandas 3, in UTC, as the docstring says.
+* In a column mixing times that carry an offset with times that do not, the ones without are read
+  as UTC. pandas 2 did this all along, through `_naive`'s own `utc=True`. Unfixed, pandas 3 kept
+  only the rows that fit the first value's layout.
+
+**Found here, not fixed:**
+
+* **pandas 2.2.3 wraps around instead of failing** when `utc=True` pushes an offset time past its
+  nanosecond range, in the inferred strategy only. `2262-04-11T23:00:00-05:00` becomes
+  1677-09-21, which the year window drops. `1677-09-21T00:30:00+01:00` becomes 2262-04-11 23:04,
+  which the window keeps: a wrong time where the unfixed code gave NaT. Only a clock time on
+  1677-09-21 with a positive offset can reach it, and only on pandas 2, so only on the
+  development machine. pandas 3 does not wrap.
+* **`summary_statistics(by=<date column>, period=...)`** in `analysis_aggregate_tools.py` parses
+  the column with its own `pd.to_datetime`. A daylight-saving column fails there on both versions,
+  with `Can only use .dt accessor with datetimelike values` on 2.2.3 and `Mixed timezones
+  detected` on 3.0.5. A single offset is bucketed by local clock time: `2026-01-31T20:00:00-06:00`
+  counts in January there and in February in `time_series`, which works in UTC. Fixed in S15.6.
+* **Abbreviated zone names** (`CST`, `CDT`) parse on neither version, fixed or not.
+
+**Cost**, as the best of interleaved rounds in one process, with every value distinct so that
+`to_datetime`'s cache never helps:
+
+| 100,000 values, deployed container (3.0.5) | unfixed | fixed |
+|---|---|---|
+| Chicago format | 5.34 s | 5.24 s |
+| ISO with no offset; with one offset | 0.04 s; 0.42 s | 0.04 s; 0.42 s |
+| ISO with `-06:00` and `-05:00` | 2.78 s, nothing parsed | 0.42 s |
+
+On the deployed version the rule costs nothing measurable, and a daylight-saving column, which
+used to run all 22 strategies to fail, now parses at the first. The development machine was not
+timed, because other work held its load average at 63, so pandas 2.2.3's cost is not measured.
+
+**Verified where the failure lives:**
+
+| | unfixed (`claude/temporal-numeric-code-columns`) | fixed |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 38 temporal tests | the 2 new mixed-offset tests fail | all pass |
+| development machine (pandas 2.2.3), the 38 temporal tests | all pass | all pass |
+
+The live module in the same container, `prototype`'s, fails 9 of the 38: the 7 of S15.7 and the
+same 2. On the development machine the full suite gives 1654 passed and 4 skipped: S15.7's 1651
+and the three new tests.
+
+Three tests are new. Two fail unfixed on pandas 3: offsets that differ (the daylight-saving pair,
+`Z` beside `+01:00`, and text with and without an offset), and a CSV of daylight-saving local
+times through `detect_time_column` and `filter_by_time`, whose window is checked in UTC. The third
+is a guard that passes either way: one offset is still converted, and text without one keeps its
+clock time. The development machine passes all three unfixed, so it cannot show this failure. As
+in S15.7, each version of `agent_runtime/` was imported from `/tmp` ahead of `/app` in the
+deployed container; nothing was deployed.
+
+### Stage S15.6 `summary_statistics` reads a date the way the temporal tools do
+
+*2026-10-02, `claude/summary-statistics-utc-periods`, stacked on `claude/temporal-mixed-utc-offsets`.*
+
+This fixes the second item in S15.5's *Found here, not fixed*. `summary_statistics(by=<column>,
+period=day|week|month|quarter|year)` read the `by` column with its own
+`pd.to_datetime(errors="coerce")`, so none of this stage's rules reached it: an offset was not
+converted to UTC, a number got pandas' default reading, and nothing held the years to 1678–2262.
+Through the tool, on CSVs of points:
+
+* **A daylight-saving column failed on both versions**: `Can only use .dt accessor with
+  datetimelike values` on 2.2.3, `Mixed timezones detected` on 3.0.5. `Z` beside `+01:00` failed
+  the same way.
+* **One offset was bucketed by local clock time.** `2026-01-31T20:00:00-06:00` is 02:00 UTC on
+  February 1, so the same three rows gave January 1 and February 2 here and February 3 in
+  `time_series`.
+* **On pandas 3 a CSV's beats became years.** `"1234"`, `"1235"` and `"1236"` grouped by year came
+  back as the years 1234, 1235 and 1236. pandas 2.2.3 refused the column.
+
+Two more turned up, the first while checking what a numeric `by` does, and a GeoJSON input showed
+where the daylight-saving failure lives:
+
+* **A typed number was read as nanoseconds since 1970**, `pd.to_datetime`'s default for an
+  integer. A GeoJSON's years (2019, 2020), its beat codes (1234–1236) and its epoch seconds each
+  came back as a single `1970` or `1970-01` bucket, with `ok: true`, on both versions.
+* **An undated row's group was named by the pandas version**: `NaT` on 2.2.3, `(missing)` on
+  3.0.5. pandas 3's `astype(str)` keeps a missing value missing, so the `fillna("(missing)")`
+  after it worked there only.
+* **GDAL types a GeoJSON's ISO date-times itself**, so the daylight-saving failure was a CSV one.
+  One offset arrives as `datetime64[ms, UTC-06:00]` and was bucketed by local clock too; offsets
+  that differ arrive already converted to UTC, and were right before.
+
+**The change:** the `period` branch reads the column with `parse_time_series`, so it gets the
+reading every temporal tool gets: an offset converted to UTC, a number only numeric readings, a
+year in 1678–2262. The import sits inside the branch, not at the top of the module. The supervisor
+imports each analysis factory separately so that one module's failure costs only its own tools,
+and `analysis_spatial_stats_tools` imports this module when it loads, so a top-level import would
+have tied both to the temporal module. An undated row is grouped as `(missing)` on both versions
+and counted in a note; `time_series` drops such rows instead and reports them as
+`excluded_unparsed_time`. The tool description, which the model reads, and the docstring now say
+that the buckets are in UTC when the dates carry an offset.
+
+Through the tool on both versions, 16 column shapes:
+
+| shapes | 2.2.3, before | 3.0.5, before | after, both versions |
+|---|---|---|---|
+| 2 CSVs whose offsets differ (`-06:00` and `-05:00`; `Z` and `+01:00`) | `.dt` error | `Mixed timezones` error | UTC buckets |
+| 2 with one offset, CSV and GeoJSON | local clock | local clock | UTC buckets |
+| beats as text, `"1234"`–`"1236"`, by year | refused | the years 1234–1236 | refused |
+| epoch seconds as text | refused | refused | their dates |
+| 3 typed numbers: years, beat codes, epoch seconds | all `1970` | all `1970` | years; refused; dates |
+| one row reading `not a date` | group `NaT` | group `(missing)` | group `(missing)`, and a note |
+| 6 others: ISO, Chicago format, years as text, weeks, GeoJSON dates, GeoJSON offsets that differ | | | unchanged |
+
+After the change the two versions agree on all 16; before, they disagreed on 4, two of them only in
+the error message. The tool now gives `time_series`'s buckets on 12 of the 16, against 5. The other
+4 differ on purpose or from before: both tools refuse the two code columns, in different words; the
+undated row is kept here and dropped there; and a week is the same bucket in both, labelled
+`2026-01-05/2026-01-11` here and `2026-01-05` in `time_series`.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ is bucketed, in UTC, on both versions.
+* One offset is bucketed in UTC, as in `time_series`, so a row within a few hours of midnight UTC
+  can move to the next or the previous bucket.
+* Typed years give their years and typed epoch seconds their dates, where both gave `1970`; epoch
+  seconds held as text, which were refused, read as dates too.
+* A code column outside 1678–2262, such as the beats 1234–1236, is refused with *"could not be
+  read as dates"*, typed or as text, where a typed one gave `1970` and, on pandas 3, a text one
+  gave years.
+* On 2.2.3 an undated row's group is `(missing)`, no longer `NaT`, and on both versions a note
+  counts those rows.
+
+**Found here, not fixed:**
+
+* **`time_series`' hour-of-day profile calls UTC hours local.** Its axis reads *"hour of day
+  (local clock time)"*, but a time that carried an offset is in UTC by then: `09:00:00-06:00`
+  counts at hour 15. For a Chicago feed the peak moves by six hours in winter and five in
+  summer, under a label that says it did not.
+* **A code column inside 1678–2262 is read as years**, typed or as text, whatever its name: beats
+  1711, 1712 and 2212 grouped by year come back as those years. S15.4 records the same ambiguity
+  for detection. Here the caller has named the column and asked for periods, and only the values
+  could say otherwise.
+* **A week has two labels for one bucket**, as above. Each label is part of its tool's output,
+  so neither was changed here.
+
+**Cost** of parsing and bucketing the column, without reading the file, interleaved in one
+process, the median of three rounds, every date distinct:
+
+| 100,000 values, deployed container (3.0.5) | before | after |
+|---|---|---|
+| ISO, no offset | 0.03 s | 0.06 s |
+| ISO, one offset | 0.40 s | 0.43 s |
+| Chicago format | 5.19 s | 5.23 s |
+| ISO with 1 value in 100 unreadable | 0.06 s | 1.94 s |
+
+A column that reads in full stops at the first strategy and costs about 0.03 s more. The last row
+is the slowest case S15.3 describes for blank cells: a column holding any value no strategy reads
+runs all 22 strategies, which `time_series` already does on the same column. Only the deployed
+container was timed, at a load average under 0.7 on 8 cores.
+
+**Verified where the failure lives:**
+
+| | before (`claude/temporal-mixed-utc-offsets`) | after |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 36 aggregate tests | the 4 new tests fail | all pass |
+| deployed container, the 38 temporal tests | | all pass |
+| development machine (pandas 2.2.3), the 36 aggregate tests | the 4 new tests fail | all pass |
+| development machine, full suite | 1654 passed, 4 skipped | 1658 passed, 4 skipped |
+
+Four tests are new, and each fails before on both versions: a daylight-saving CSV grouped by month,
+whose buckets are UTC ones; a CSV with one offset, whose months are the ones `time_series` counts;
+typed years and epoch seconds read as dates and the beats 1234–1236 refused, typed and as text; and
+an undated row grouped as `(missing)` with a note, which fails at the label on 2.2.3 and at the
+note on 3.0.5. In the deployed container *before* was `/app`'s `agent_runtime/` with S15.5's
+`analysis_temporal_tools.py`, and *after* was that plus this module. Each was imported from `/tmp`
+ahead of `/app`, `diff -rq` named only those files, and it was the same container from the first
+run to the last. `prototype`'s `summary_statistics`, live in the same container, gives *before*'s
+answer on all 16 shapes. Nothing was deployed.
+
+### Stage S15.7 Verified where the failure lives (S15.1–S15.4)
+
+| | unfixed | fixed |
+|---|---|---|
+| deployed container, `test_csv_with_coordinates_flows_through` | fails | passes |
+| deployed container, the 35 temporal tests | 7 fail | all pass |
+| local replica of the deployed versions, the 35 temporal tests | the same 7 fail | all pass |
+| development machine (pandas 2.2.3), the 35 temporal tests | 4 fail | all pass |
+| development machine, full suite | 1645 passed, 4 skipped | 1651 passed, 4 skipped |
+
+In the deployed container each version of `agent_runtime/` was imported from `/tmp` ahead of
+`/app`, whose copy of the module is identical to `prototype`'s; nothing was deployed. The six new
+tests pin the three rules, the YYYYMMDD and bare-year readings, and the CSV shapes above. The
+original test is unchanged.
+
+### Stage S15.8 A year column is found by its name, and the blank row that let Beat win
+
+*2026-10-02, `claude/temporal-yr-and-blank-date`, stacked on `claude/temporal-numeric-code-columns`.*
+
+Rule 1 of S15.2 sends a CSV's numbers through the name gate, which is what keeps the beats out.
+The same gate decides whether a real year column is tried at all, and no hint matched `yr`. On
+`prototype` a CSV's `yr` column never needed one: GDAL hands it over as text, text is always a
+candidate, and the text ladder read `"2019"` as a year. Counted as numbers, the column faced the
+gate and failed it, so a dataset whose only time is a `yr` column reported no time column. `Year`
+passed only because `year` was already a hint. A typed `yr` column, from GeoJSON or a GeoPackage,
+had never been tried on any branch, for the same reason.
+
+**The name is the fix, because nothing else tells the two apart.** The year window cannot separate
+a year column from a code column whose values fall inside it: Chicago's beats include 1834 and
+2011. `yr` is now a hint. Hints match as substrings, which catches run-together assessor names such
+as `YRBUILT`, `SALEYR` and `TAXYR` that a whole-word rule would miss. A substring also matches
+names like `gyro` or `copyright`, but such a column still has to hold years, YYYYMMDD or epochs to
+parse, and a count like `yr2020_pop` is tried exactly as `year2020_pop` already was.
+
+**The blank date row is the deployed failure in full, and no test had it.** On the deployed
+versions `test_csv_with_coordinates_flows_through` failed only at
+`assert 'Beat' not in ['Date', 'Beat']`: its `Date` has no gap, so the two tied at 1.0, the name
+hint broke the tie, and `Date` still won. The first Linux CI run, on
+`claude/ci-deployed-constraints`, measured the sharper form. GDAL hands a blank cell over as `""`,
+which counts against `Date`, so with one blank in four rows `Date` parses 0.75 and `Beat`, read as
+the years 1234–1237, wins at 1.0: the deployed tool chose a beat number as the time column.
+`test_csv_beat_cannot_outrank_a_date_with_a_blank_row` pins that shape and keeps the original's
+`Beat` assertion.
+
+Measured through the real upload path, in a linux/amd64 `python:3.11-slim` replica of the deployed
+versions (`pip install -r requirements.txt -c constraints.txt`, the lock from
+`claude/ci-deployed-constraints`: CPython 3.11.16, pandas 3.0.5, geopandas 1.1.4, pyogrio 0.13.0
+with GDAL 3.12.4):
+
+| upload | `prototype` | S15.2 without `yr` | with `yr` |
+|---|---|---|---|
+| CSV: `Date` blank in one row of four, `Beat` 1234–1237 | **`Beat`** chosen, 1.0 against 0.75 | `Date` | `Date` |
+| CSV: `Year` beside `Beat` 1234–1236 | `Year`, with `Beat` offered too | `Year` | `Year` |
+| CSV: `yr` beside `Beat` 1834–2012 | `yr`, with `Beat` offered too | **no time column** | `yr` |
+| CSV: `YRBUILT` beside `Beat` 1834–2012 | `YRBUILT`, with `Beat` offered too | **no time column** | `YRBUILT` |
+| GeoJSON: integer `yr` beside `Beat` 1834–2012 | no time column | no time column | `yr` |
+
+**Behaviour that changed on purpose:** a column whose name contains `yr` is now tried when it holds
+numbers, typed or as CSV text, and gets the numeric readings any hinted number gets.
+
+**Found here, not fixed:** a CSV year column named without any hint, such as `FY` or `season`, is
+still not auto-detected. `prototype` read both through the text ladder; under S15.2 they report no
+time column, with or without `yr`, measured the same way as the table. `time_column=` still reads
+them. Each further hint widens what the gate lets through, so which names to add is a separate
+decision.
+
+**Verified where the failure lives**, in the same replica, with this section's four new test cases
+copied into each version's test file:
+
+| `agent_runtime/` | the 39 temporal tests |
+|---|---|
+| `prototype` | 11 fail: this stage's original 7, the blank-row test (`Beat` chosen) and the 3 `yr` cases |
+| `claude/temporal-numeric-code-columns` | 3 fail: the 3 `yr` cases, each with no time column |
+| with `yr` | all pass |
+
+The full suite in the same replica gives 1 failed, 1654 passed and 4 skipped with this change, and 2
+failed, 1643 passed and 4 skipped on `prototype`, the counts of the first Linux CI run. The failure
+left is `test_distance_band_without_a_threshold_leaves_no_island`, the platform-rounding failure
+`prototype` has too, which a separate change fixes; the one this change and its parent remove is
+`test_csv_with_coordinates_flows_through`. The development machine (pandas 2.2.3) passes the 39
+temporal tests as well. Nothing was deployed.
+
+---
+
+## Stage 16 — Six tests only the Mac passed {#stage-16}
+
+A replica of the deployed `agent-api` Python environment was built on 2026-10-01 and again on
+2026-10-02: `python:3.11-slim` for linux/amd64, the image's GDAL apt layer, `requirements.txt`
+installed with the running container's `pip freeze` as constraints, and the `en_core_web_sm`
+3.8.0 wheel. Its own `pip freeze` matches the deployed container's (image `deeb331964f6`) on 176
+of 177 lines; the missing one is `py-spy`, which the real Dockerfile adds in a later layer. Five
+tests that pass on the development Mac fail in it, and an image built from
+`rag_pipeline/Dockerfile` fails a sixth. Each passed on the Mac because the Mac lacks something
+production has, or has something production does not.
+
+| test | why the Mac passed it | which side was wrong | fixed in |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through` | pandas 2.2.3, whose nanosecond range turns `"1234"` into NaT | **the code**. In the replica, a CSV with one blank date in four rows gets `Beat` as its time column, and `filter_by_time(start="2026-07")` answers `ok` with 0 matches | `claude/temporal-numeric-code-columns` (stage 13 there) |
+| three in `test_spatial_locations.py` | no spaCy model, so the capitalization fallback ran | **the code**. Production's NER path skipped the vocabulary and the normalization the fallback applies | this stage, S16.1 |
+| `test_distance_band_without_a_threshold_leaves_no_island` | the Mac's floating point kept a pair that sits exactly on the threshold | **the code**. The threshold had no margin | `claude/distance-band-no-island` (stage 14) |
+| `test_pyqgis_available_probes_worker_python` | no QGIS installed | **the test**. It assumed the machine had no QGIS | this stage, S16.2 |
+
+The island's cause was measured again in the replica rather than taken from the stage 14 branch.
+The automatic threshold, 110,884.46616304158 m, is bit-identical on both machines. The Mac
+projects the critical pair's easting one ulp higher (`0x1.e7c562adf9522p+19` against
+`...9521p+19`). On both machines the square of the threshold is one ulp below the pair's squared
+distance as Python computes it. The Mac's KD-tree keeps the pair anyway and the replica's drops
+it: 146 links and no island against 144 links and one. With stage 14's relative pad of 1e-9,
+both give 146 links and no island.
+
+### Stage S16.1 Production's NER path never saw the fallback's filters
+
+`extract_locations_from_query` (`rag_pipeline/search/spatial.py`) turns a question into the
+place names it geocodes. It has two paths. Where `en_core_web_sm` is installed, as in the agent
+image, it offers spaCy's GPE, LOC and FAC entities. Where it is absent, as on the Mac and in CI,
+it offers capitalized phrases filtered through `_NOT_PLACES`. The fallback produces exactly the
+three tests' expectations: with the model uninstalled in the replica, all 15 tests in the file
+pass. With the model, measured on spaCy 3.8.16 and `en_core_web_sm` 3.8.0, the NER path differs
+in two ways.
+
+* **It keeps the article.** "the Great Plains" (FAC), "the Chesapeake Bay" (LOC), "the United
+  States", "the Gulf of Mexico", "the Rocky Mountains" and "the Great Lakes" all come back with
+  the "the". The fallback has never offered it, so the same place reached the geocoder and
+  `_BBOX_CACHE` under two spellings, depending on which path ran.
+* **It labels formats, tools and agencies as places.** "GeoJSON" is a GPE in three of the
+  queries below, and "NetCDF", "MODIS", "USGS", "LAS" and "Python" are GPEs elsewhere. Every
+  one is in `_NOT_PLACES`, whose comment says these terms are never places, but only the
+  fallback consults that set. So for "convert a GeoJSON to a COG with GDAL" the deployed
+  extractor offers "GeoJSON" to Google's geocoder, which is paid and rate-limited, and a box that
+  came back would scope the spatial search to wherever Google put it.
+
+The tests stated the intended behaviour and the code was wrong. NER cannot know that a file
+format is not a place, and the vocabulary that says so was skipped on the one path production
+runs. The article is the weaker half. Whether it ever changed what Google returned was not
+measured, because that takes paid calls, so dropping it is normalization: one spelling per place,
+whichever path ran. The changes are these:
+
+1. A leading **lowercase** "the" is dropped from an entity (`_without_article`). A capitalized
+   one is kept. NER returns "The Hague" as a GPE, and at the start of a query a capital "The"
+   cannot be told apart from a name.
+2. An entity whose every word is in `_NOT_PLACES` is dropped (`_only_non_places`).
+3. Dropping such an entity does not open the fallback, which is for text NER could not parse,
+   such as the search peer's keyword form. Here NER parsed the sentence and found only a file
+   format. Falling back would offer the capitalized words instead: "Convert" for "Convert a
+   GeoJSON to a COG with GDAL", where spaCy reads "Convert" as a PERSON.
+
+**Measured on 176 queries in the replica, with the real model.** The queries are the file's
+test queries, 30 written around articles, 32 around technical terms, GeoAnalystBench's 44
+distinct task titles and its 50 instructions, and the 10 prompts in
+`geopathfinder_top10_tasks.csv`. 21 of them change. In 12 a leading "the" goes, and in 9 a
+technical term goes (GeoJSON 3, Python 2, and one each of USGS, MODIS, LAS and NetCDF). No
+candidate is added and no place is lost: where a technical term sat beside a place, Colorado and
+Chicago remain. Six queries go from one non-place candidate to none. For scale, the deployed
+container logged 9 candidates resolved to a box between its start (2026-10-01 15:15 UTC) and this
+measurement, and none of them begins with an article or is a technical term.
+
+The three tests pass as written, now on both paths. Ten new tests give the NER path the entities
+the model returned, through a blank English pipeline with those spans set, so the path
+production runs is tested on machines without the model. Against the old code, 8 of the 10 fail
+on the Mac.
+
+Found and **not** fixed, because each needs its own measurement:
+
+* **The fallback offers a request's first word.** It takes any capitalized word that is not in
+  `_NOT_PLACES`, and an imperative request starts with one. 30 of the 44 GeoAnalystBench task
+  titles and 7 of the 10 geopathfinder prompts name no place that NER finds, and each offers its
+  first word as a place: "Identify", "Use", "Find". Whether Google returns a box for these was not
+  measured, because that takes paid calls.
+* NER also labels "Kriging" (LOC), "Tsunami" (GPE) and "node" (GPE) as places, and no vocabulary
+  covers them.
+* CI as proposed on `claude/ci-deployed-constraints` runs the fallback path, not production's.
+  The freeze's `en_core_web_sm @ <url>` line constrains a package that nothing requests, so pip
+  installs no model. The new NER tests are what cover production's path there.
+
+### Stage S16.2 A test that assumed QGIS was absent
+
+`test_pyqgis_available_probes_worker_python` set `QGIS_PYTHON_BIN` to a nonexistent path and
+expected `pyqgis_available()` to be False. But `qgis_python_candidates()` falls back to
+`sys.executable` and then `/usr/bin/python3` on purpose, so that a developer's `.env` naming
+QGIS.app does not disable PyQGIS inside the container. In the agent image `/usr/bin/python3` is
+the distro Python 3.13.5 that `python3-qgis` installs into, in the deployed container as in a
+fresh build, so the probe found QGIS, and the test failed in every image with QGIS. The code was
+right. The test now pins the whole candidate list, and a fresh probe cache, instead of one
+environment variable. No production behaviour changes.
+
+In an image built from `rag_pipeline/Dockerfile` (linux/amd64, 2026-10-02),
+`test_qgis_headless_tools.py` went from 1 failed and 20 passed to 21 passed.
+
+### Stage S16.3 Verification, and what is not deployed
+
+| where | tree | failed | passed | skipped |
+|---|---|---|---|---|
+| Mac (arm64, Python 3.13.5, pandas 2.2.3, no spaCy model) | `prototype` | 0 | 1645 | 4 |
+| Mac | this branch | 0 | 1655 | 4 |
+| Mac | this branch with the temporal and island fixes | 0 | 1662 | 4 |
+| replica (amd64, the deployed versions) | `prototype` | 5 | 1640 | 4 |
+| replica | this branch | 2 | 1653 | 4 |
+| replica | this branch with the temporal and island fixes | **0** | 1662 | 4 |
+
+The two failures on this branch alone are the temporal and island tests, which
+`claude/temporal-numeric-code-columns` and `claude/distance-band-no-island` fix. "With the
+temporal and island fixes" means with those two branches' code and tests applied. They touch no
+file this stage touches. Each suite run mounted a fresh copy of the tree. An image built from
+`rag_pipeline/Dockerfile` the same day fails exactly the six on `prototype` (6 failed, 1639
+passed, 4 skipped). Its pip layer resolved that day's versions rather than the deployed ones, so
+it is the reference only for the QGIS test.
+
+Nothing was deployed. The running image still offers "GeoJSON" to the geocoder.
+
+---
+
+## Stage 17 — The image installs a list, not a laptop {#stage-17}
+
+`reproject_vector` failed on every call in the deployed agent, and nobody had noticed. It writes
+GeoParquet, which needs pyarrow, and the image had no pyarrow. Chasing that turned up more
+packages the code reaches for and the image lacks, most of them latent, because only ingestion
+uses them and ingestion does not run in the container yet.
+
+### Stage S17.1 Why a missing declaration shows only in production
+
+`rag_pipeline/Dockerfile` installs `requirements.txt` and nothing else. A development machine has
+far more: anaconda's own packages, plus whatever `pip install --user` left in `~/.local`. Code
+that reaches for a package the file never names therefore passes every local test and every
+manual check, and fails only in the container.
+
+Two properties of the code hid it further. None of these packages is imported at module scope,
+and pyarrow is never imported *by name*: pandas and geopandas load it inside `to_parquet` and
+`read_parquet`, where an import grep cannot see it. And where the absence does bite, most of the
+code degrades instead of raising: a pickle instead of parquet, an empty string instead of a
+PDF's text, a note instead of a NetCDF file's variables.
+
+| package | reached from | in the deployed image, without it |
+|---|---|---|
+| pyarrow | `reproject_vector` on every call; `vector_spatial_join` above `AGENT_GEOJSON_MAX_FEATURES`; `read_vector`, the temporal tools and `extractors/geo_handles.py` reading parquet back | `reproject_vector` answered `Missing optional dependency 'pyarrow.parquet'` every time; `geo_handles` silently wrote pickles that only it can open |
+| pypdf | `publication_extractor` | every PDF read as empty text, filed under the note `no_text_extracted`, which does not say why |
+| python-docx | `publication_extractor` | every `.docx` read as empty text, the same way |
+| xarray | `data_extractor` | every NetCDF, HDF or GRIB file answered `raster reader unavailable/failed` |
+
+All four were confirmed inside the deployed `agent-api` container on 2026-10-01: each import
+raises `ModuleNotFoundError`, and `GeoDataFrame.to_parquet` raises the error above. pyarrow was
+never declared. No commit ever added it to `requirements.txt`, and a local image built on
+2026-06-25 lacks it too. The parquet writes date from `421fc8da` (2026-06-12).
+
+### Stage S17.2 Why the suite never caught one
+
+A replica of the deployed environment was built by installing `requirements.txt` into
+`python:3.11-slim` (amd64), with the deployed container's own `pip freeze` as constraints. Its
+freeze matches production's in 175 of 176 packages; the one missing, py-spy, comes from a later
+layer of the real Dockerfile. The full suite inside it gave **5 failed, 1640 passed, 4 skipped,
+and not one failure was an import error.** Nothing in the suite reached any of the four:
+
+- `test_spatial_join`'s three points stay under the GeoJSON limit and come back as GeoJSON, and
+  no test called `reproject_vector`. So the vector tools' tests pass without pyarrow, in the
+  replica as on dev. Dev's pyarrow was never what made them pass.
+- No test touched `publication_extractor`, `data_extractor` or `geo_handles` at all.
+
+A CI job pinned to the deployed freeze would therefore have caught none of them. Two tests in
+`test_langchain_geo_tools.py` now cover the parquet round trip: `reproject_vector` writes it and
+`inspect_vector` reads it back, and a spatial join over the limit does the same.
+`test_declared_dependencies.py` covers the rest. **None of them uses `importorskip`,
+deliberately:** a skip is exactly how a missing package passes. In the replica all six fail, and
+none skips:
+
+| test | in the replica |
+|---|---|
+| reproject round trip; spatial join over the limit | `ImportError: Missing optional dependency 'pyarrow.parquet'` |
+| `geo_handles` frame passing | `assert '.pkl' == '.parquet'` |
+| PDF text | `assert 'Flood exposure by census tract' in ''` |
+| `.docx` text | `ModuleNotFoundError: No module named 'docx'` |
+| NetCDF metadata | `raster reader unavailable/failed: ModuleNotFoundError: No module named 'xarray'` |
+
+With the four packages added, all six pass.
+
+The five replica-only failures are the same gap running the other way: there, dev is *older*
+than production. They are not fixed here, and a CI job pinned to the deployed freeze will see all
+five. Each was checked by changing one package in the replica to dev's version.
+
+| failing test | dev | deployed | swap that makes it pass |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through`, a stray `Beat` column | pandas 2.2.3 | pandas 3.0.5 | pandas 2.2.3 |
+| three in `test_spatial_locations.py`, e.g. `'the Great Plains' == 'Great Plains'` | no spaCy model, so the regex fallback | `en_core_web_sm` | removing the model |
+| `test_distance_band_without_a_threshold_leaves_no_island` | | | **none found.** Dev's pandas, numpy, scipy, esda, libpysal, geopandas, pyogrio and scikit-learn each still fail. Cause not established. |
+
+### Stage S17.3 The pins
+
+The four are pinned, unlike most of the file, because each version was checked against what
+production runs. Installed on top of the replica, with the deployed freeze as constraints, they
+add exactly four packages and move none of production's. pyarrow 25.0.1 is the sandbox image's
+version (`iguide-codeexec`), which reads the same files. pypdf 6.6.2, python-docx 1.2.0 and
+xarray 2026.7.0 are the versions `backend_swap`'s lock pinned when its Linux CI went green at
+`4e8d327`.
+
+### Stage S17.4 What this stage did not fix
+
+- **xarray opens NetCDF3 and nothing newer.** Its only file engine in the image is scipy.
+  NetCDF4/HDF5 needs `netCDF4` or `h5netcdf`, GRIB needs `cfgrib`, and neither dev nor the image
+  has any of them, so this is a format `data_extractor` has never read rather than a missing
+  declaration. rasterio's GDAL in the image does have netCDF, HDF5 and GRIB drivers, but
+  `data_extractor` sends those extensions to xarray alone.
+- **`data_extractor` reads `ds.dims` as a mapping**, which xarray 2026.7 warns will become a set
+  of names. The pin holds it. A bump past that change would fail silently into the same
+  `raster reader unavailable` note; `ds.sizes` is the fix.
+- **pystac-client** is on dev and not in the image, but nothing reaches it: STAC is commented out
+  of `_DEFAULT_PROVIDERS`, and neither caller of `get_opengeodata_results` passes providers.
+- **colbert** is imported at module scope by `rag_pipeline/reranker.py`, which only
+  `scripts/demo_reranker.py` imports, and `scripts/` is not copied into the image.
+- **Twelve packages are imported directly but declared nowhere**, arriving only as somebody
+  else's dependency: numpy, pyproj, pyogrio, pillow, scikit-learn, Werkzeug, uvicorn, PyYAML,
+  anthropic, affine, langgraph-checkpoint and langgraph-prebuilt. None is missing today; each
+  stays only as long as its parent keeps bringing it.
+
+### Stage S17.5 Three more, found by scanning against the replica
+
+The replica's suite raised no import errors, so the rest came from a static pass over every
+import in the five packages the image ships, plus every pandas or xarray call that loads an engine
+on demand (`to_parquet`, `read_parquet`, `read_excel`, `open_dataset`), each checked in the
+replica. Three more packages are reached by the code, present on dev, and absent from the image:
+
+| package | reached from | in the image, without it | on dev |
+|---|---|---|---|
+| openpyxl | `detect_time_column` and `time_series` on a `.xlsx` with no coordinate columns. GDAL opens the file, `read_vector` refuses a table without coordinates, and `_read_plain_table` falls back to `pd.read_excel`. | ``ImportError: `Import openpyxl` failed``. With it, the same upload gives three monthly periods. | 3.1.5, from anaconda |
+| mapclassify | `choropleth_image(scheme=...)`, which the analysis peer binds whether or not files are attached | the scheme is dropped and a continuous ramp drawn, and nothing in the result says so | 2.10.0, from `~/.local` |
+| IPython | `notebook_extractor`, at ingestion | a regex fallback. Of seven typical cells, `np.mean?` and a `!command` inside a loop fail to parse; IPython parses all seven. | 8.30.0, from anaconda |
+
+openpyxl and mapclassify are live on the deployed agent's path; IPython is latent, like the
+readers. openpyxl 3.1.5 and mapclassify 2.10.0 match the sandbox image. IPython 8.30.0 is dev's
+version, the one the notebook front end was written against. Each has a test in
+`test_declared_dependencies.py` that fails in the replica: the spreadsheet test cannot even write
+its fixture without openpyxl, `choropleth_image` never passes `scheme` to the plot, and
+`transform_cell` cannot parse either cell. With all seven pins on top of the replica, the install
+adds 20 packages, the seven plus 13 dependencies (12 of them IPython's), and moves none of
+production's.
+
+Not declared, because it never worked on dev either: `.xls` needs xlrd, which neither dev nor the
+image has, and the GDAL inside the pyogrio wheel has no XLS driver.
+
+### Stage S17.6 Building it, and what the next deploy will change
+
+The real `rag_pipeline/Dockerfile`, built from this `requirements.txt` on `python:3.11-slim` for
+amd64, installs all seven, and a GeoParquet round trip works inside the result. The full suite
+inside that image gives **6 failed, 1648 passed, 4 skipped.** Every new test passes and no failure
+is an import error. The six are the replica's five plus `test_pyqgis_available_probes_worker_python`,
+which fails in any image with QGIS installed, with or without this change: it points
+`QGIS_PYTHON_BIN` at a missing interpreter and expects "unavailable", while
+`qgis_python_candidates()` deliberately falls back to `/usr/bin/python3`, which has QGIS. It fails
+the same way with the unmodified tree, and in a local image built on 2026-06-25.
+
+**Deploying this changes more than these seven packages.** A changed `requirements.txt`
+invalidates the image's pip layer, so the build that ships it re-resolves every unpinned name in
+the file to whatever is newest that day. Against the deployed freeze, the fresh build changes 42
+packages, none by a major version, and adds 21: the 20 above, plus opentelemetry-api, now pulled
+in by an upgraded dependency. The moves most likely to change behaviour:
+
+| package | deployed | fresh build |
+|---|---|---|
+| openai | 3.14.1 | 3.23.0 |
+| anthropic | 1.6.0 | 1.11.0 |
+| langsmith | 0.12.6 | 0.14.3 |
+| langchain, langchain-core, langchain-openai | 1.4.1, 1.6.3, 1.6.2 | 1.4.3, 1.6.6, 1.6.7 |
+| geopandas | 1.1.4 | 1.2.0 |
+| sentence-transformers | 6.0.1 | 6.1.0 |
+
+Installing with the deployed freeze as constraints ships only the additions, as the replica
+shows. That is the job of a lock file, like the one on `backend_swap`; this stage does not add
+one.
+
+---
+
+## Stage 18 — Testing what is deployed {#stage-18}
+
+Until this stage the test suite ran in one place, the development Mac. It had never run in the
+environment the deployment runs, which is Linux x86-64 with CPython 3.11
+(`rag_pipeline/Dockerfile` is `python:3.11-slim`), and nothing recorded what that environment's
+packages were.
+
+### Stage S18.1 The deployed stack was an accident of build day
+
+`requirements.txt` names 42 packages and pins none of them exactly. 35 are bare names, among them
+geopandas, shapely, fiona, rasterio, libpysal and pandas; seven carry only a lower bound. numpy
+and scipy are not named at all, because they arrive transitively. So the image's
+`pip install -r requirements.txt` installed whatever was newest on the day it was built, and the
+result was written down nowhere. Until this stage, "the deployed stack" existed only inside the
+running container.
+
+How fast that accident drifts, measured: the running image was built on 2026-09-22. Resolving
+the same `requirements.txt` unpinned nine days later (2026-10-01, CPython 3.11.16, x86_64)
+already differs from it on 42 of the 175 packages both contain, geopandas 1.1.4 → 1.2.0 and
+pandas 3.0.5 → 3.0.6 among them, and adds a package the image does not have at all
+(`opentelemetry-api`). A CI job that installed `requirements.txt` bare would have been testing
+that stack, which nobody runs.
+
+`constraints.txt` is now that record: the running `agent-api` container's `pip freeze`, 177
+packages, taken 2026-10-01 from image `deeb331964f6` (built 2026-09-22; CPython 3.11.16,
+x86_64), committed verbatim under a header that says how to retake it. Before committing it was
+checked against the live container again, and the two freezes hash identically.
+
+**The lock comes from the image, never from a development machine.** A lock frozen on the Mac
+describes the Mac. `origin/backend_swap` has one, and it disagrees with the deployed image on 34
+of the 40 packages the two share: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6. Its
+rasterio 1.5.0 pin needs Python 3.12 or later, so it could not install on any 3.11 build, and
+nobody noticed until that branch's CI first ran (`51035b2`). The Mac also supplies pypdf,
+python-docx and xarray from `~/.local` (`backend_swap` `4e8d327`), so a suite that is green
+there says nothing about a build without them.
+
+### Stage S18.2 CI installs through the lock
+
+`.github/workflows/verify.yml` runs `python3 -m pytest rag_pipeline/tests/ -q` on
+`ubuntu-latest` with CPython 3.11, after `pip install -r requirements.txt -c constraints.txt`. It
+needs no secret, because `conftest.py` already replaces `load_dotenv` with a no-op (S9.7).
+
+A constraint binds only what is requested. A requirement added after the freeze therefore
+floats to latest-at-run-time while everything else stays pinned, and CI would test a mix that is
+neither deployed nor latest without saying so. A step after the install prints every installed
+`name==version` that the lock does not contain. It warns rather than fails, because until the
+next deploy there is no deployed version to pin the newcomer to.
+
+### Stage S18.3 What the first Linux run found
+
+The first run (`36943761445`, on `ubuntu-24.04` with CPython 3.11.16, the deployed interpreter
+exactly) installed all 175 packages at the deployed versions and reported:
+
+| | passed | failed | skipped |
+|---|---|---|---|
+| development Mac, its own versions | 1645 | 0 | 4 |
+| CI, the deployed versions | 1643 | 2 | 4 |
+
+The four skips are the same opt-in live-service tests in both. Before the push, the workflow's
+steps were run verbatim in a `python:3.11-slim` container on x86-64, which gave the same counts
+once it had the system library described below.
+
+**The Mac's baseline was measured on a stack that is not deployed.** Of ten version-sensitive
+packages, eight differ: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6, scipy 1.15.3
+against 1.17.1, libpysal 4.15.0 against 4.14.1, and fiona is not installed there at all. One of
+the two failures comes from that difference rather than from the platform, and it is the one
+that matters in production:
+
+* **pandas 3 parses years before 1677, so four-digit codes became dates.**
+  `test_csv_with_coordinates_flows_through` expects `detect_time_column` to ignore `Beat`, a
+  column of police beat numbers; on the deployed versions it lists it as a time candidate. Two
+  things combine. GDAL reads a CSV's columns as text, so the guard in `_candidate_columns` that
+  skips numeric columns without a time-like name never sees a number. And
+  `pd.to_datetime(..., errors="coerce")` turns `"1234"` into NaT on pandas 2, whose nanosecond
+  timestamps cannot reach before 1677, but into 1234-01-01 on pandas 3, which infers microsecond
+  resolution. Ranking sorts by parse rate before the name hint, so the code column wins whenever
+  the real date has a gap. Measured on the deployed versions: with one blank date in four rows,
+  `detect_time_column` chooses `Beat` (parse rate 1.0) over `Date` (0.75); pandas 2.2.3 chooses
+  `Date`. The deployed agent does this today. The fix is a separate change.
+* **The distance band sits on a tie.** `test_distance_band_without_a_threshold_leaves_no_island`
+  passes on macOS/arm64 and leaves one island on Linux x86-64 with identical libpysal 4.14.1,
+  scipy 1.17.1 and numpy 2.4.6; it was reproduced inside the deployed container on 2026-10-01.
+  `analysis_spatial_stats_tools.py` passes `min_threshold_distance` to `DistanceBand` exactly,
+  and the margin on the test lattice is 0.0 m. The fix (pad the threshold by a relative 1e-9) is
+  a separate change, and the test is deliberately not skipped in the meantime.
+* **rasterio and fiona need a system library the slim base image lacks.** Their wheels bundle
+  GDAL but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so
+  `import rasterio` fails there. Under pytest 9 a module that is present but cannot load is a
+  collection error, not a skip, so that session stopped at `test_raster_routing.py` with no test
+  run. The deployed image has the library only as an automatic dependency of its GDAL and QGIS
+  apt layers (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others).
+  Dropping those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and
+  fiona unimportable. GitHub's runner has the library (both import there), so CI on the runner
+  does not see this; a job built on the slim image would.
+* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
+  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
+  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
+  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
+  them a PDF, a .docx or a NetCDF file. A green run does not mean the deployment can read those
+  formats. Declaring them is a separate change.
+
+The workflow also imports every module the suite `importorskip`s before running it. That call
+skips when a module is absent, so a package dropped from the install would turn whole spatial
+modules into skips and leave the job green with far fewer tests.
+
+### Stage S18.4 The images install through the lock
+
+The first version of this stage left the image installing unpinned, because installing through
+the lock changes what the next deploy installs. That decision is taken here.
+`rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside `requirements.txt` and
+pass `-c constraints.txt` to every `pip install`. A rebuild therefore reproduces the versions the
+deployment runs. Before, each rebuild resolved that day's newest, and nine days after the
+2026-09-22 build 42 of 175 packages had already moved (S18.1).
+
+**What the next deploy installs changes in one direction: it stops upgrading.** On 2026-10-02 the
+deployed agent-api container still matched the lock line for line, so the rebuild that ships this
+change reinstalls the same 177 versions. Its pip layer reruns once, because the `COPY` above it
+changed. Without this change, the next deploy that touches `requirements.txt` re-resolves the
+whole stack. For PR #36's seven new packages that meant 42 moved packages; with it, the same
+deploy adds the new packages and moves nothing else. The cost is that upstream fixes no longer
+arrive by accident of build day. An upgrade is now a change to the lock, and CI tests it like any
+other change.
+
+**The spaCy model goes through the lock too.** `python -m spacy download en_core_web_sm` became
+`pip install -c constraints.txt en_core_web_sm`. `spacy download` fetches spaCy's compatibility
+table from GitHub at build time and installs whichever model version that table names for the
+installed spaCy, with no lock and no hash check. A bare name constrained by the lock's direct-URL
+line installs exactly that wheel instead, and pip checks the sha256 the URL carries. With one
+digit of the hash changed, the image's pip 24.0 refused: `Expected sha256 0000… Got 1932…`. Today
+both routes give the same wheel. The table lists only 3.8.0 for spaCy 3.8, and the wheel declares
+no dependencies of its own. So the switch changes nothing now; it stops a future model release
+from changing the image unannounced. py-spy likewise installs at its locked 0.4.2.
+
+**MCP_server follows the same rule, because it installs the same file.** Its running container
+was built in the same compose build as agent-api on 2026-09-22. Its `pip freeze` is the lock minus
+exactly `en_core_web_sm` and `py-spy`: 175 packages, each at the locked version. So locking it
+changes nothing it runs. It also keeps the two images on the same versions whenever either is
+rebuilt, including the usual `up -d --build agent-api`, which rebuilds only one.
+`metadata-extraction-server/Dockerfile` installs the same root `requirements.txt` and gets the
+same change. It is not deployed: the VM has only a stopped container from 2026-06-12, and the
+service sits outside compose's default profile.
+
+**libexpat1 is named in all three apt layers.** `python:3.11-slim` for amd64 does not have the
+package: not the tag cached here since 2026-09-19 (CPython 3.11.16, Debian 13.7), and not the one
+the build pulled on 2026-10-02 (3.11.17). With the locked wheels installed on the first,
+`import rasterio` and `import fiona` both fail with
+`libexpat.so.1: cannot open shared object file`. The two libraries that need it are the GDALs
+those wheels bundle,
+`rasterio.libs/libgdal-c8c9c467.so.36.3.10.3` and `fiona.libs/libgdal-fiona-e8f6bdb0.so.35.3.9.2`.
+`apt-get install libexpat1` alone fixes both. pyogrio 0.13.0 imports without it. The images keep
+their GDAL and QGIS packages, which pull it in anyway, so nothing they contain changes. In the
+deployed agent-api it was an automatic package that 16 others depend on, libgdal36,
+libqgis-core3.40.6, python3.13-minimal and the mesa libraries among them. Naming it puts the
+dependency where the next person to trim those layers will read it.
+
+**How a new requirement is handled: it floats until the lock is retaken.** A constraint binds only
+a name it lists. A package added to `requirements.txt` after the freeze resolves at build time to
+its newest version that fits the pins, and so does any new dependency it brings. Nothing already
+pinned moves to make room; if no version fits, the build fails with `ResolutionImpossible`. CI's
+drift step (S18.2) names each floating package in a warning. After the deploy that ships it, the
+lock is retaken from the running container with the command in its header. That pins the
+newcomer and clears the warning. Otherwise the retake is a check: it should change nothing below
+the marker, and any other difference means the image did not install what the lock says.
+
+The newcomer is not pinned in the lock at once because its lines would be a guess. The lock's
+lines come from an image's own `pip freeze`, and a newcomer usually brings dependencies of its
+own: IPython brought twelve in PR #36. Writing that closure by hand predicts a resolution the
+build performs anyway. Two things narrow the window instead:
+
+* Pin the newcomer itself in `requirements.txt` when the version CI tests must be the version
+  deployed, as PR #36 does. Then only its new dependencies float.
+* To move a package the lock already lists, edit that one line in the same change. CI installs
+  and tests it, and the retake after the deploy reproduces it.
+
+**A package a Dockerfile installs by name must be in the lock already.** CI installs only what
+`requirements.txt` asks for, so its drift step never sees py-spy or the model, and a floating one
+would never be flagged. `rag_pipeline/tests/test_image_installs_through_lock.py` fails in that
+case. It also fails for any `pip install` without `-c constraints.txt` or before the lock is
+copied in, for `spacy download`, and for an image without `libexpat1` in an apt layer. It reads
+the Dockerfiles as text and finds the images itself, so a new image is covered as soon as it
+copies `requirements.txt`. Run against prototype's three Dockerfiles, it reports the five unlocked
+installs (three in agent-api's) and the missing `libexpat1` in all three. Fourteen synthetic
+Dockerfiles, and five for the apt reader, check that it rejects each wrong answer and accepts
+each right one.
+
+### Stage S18.5 Verified on local builds, not by a deploy
+
+All three images were built from this change on the development Mac with
+`docker build --platform linux/amd64 --pull`, emulated, on 2026-10-02. The agent-api build took
+2,257 s, mcp-server 1,330 s and metadata-extraction-server 1,495 s, the three running at once.
+
+| image | `pip freeze` inside it | against the deployment |
+|---|---|---|
+| agent-api | the lock's 177 lines, byte for byte, including `torch==2.14.0+cpu` and the model's URL line with its sha256 | identical to the running agent-api; the lock, the running container and the build hash alike (sha256 `ea8da91e6ce73d84…`) |
+| mcp-server | 175 lines: the lock minus `en_core_web_sm` and `py-spy`, which it does not install | identical to the running mcp-server |
+| metadata-extraction-server | the same 175 lines | not deployed |
+
+Every line of each freeze is a line of the lock, so CI's drift step has nothing to report for
+any of them; run inside the mcp-server image, it printed nothing. The model layer resolved the
+bare name straight to the lock's URL. It read no compatibility table, installed 3.8.0 in 10 s,
+and `spacy.load("en_core_web_sm")` works. `apt-mark` lists `libexpat1` as manually installed in
+agent-api and metadata-extraction-server, and mcp-server names it on the same kind of install
+line. In agent-api the same 16 packages depend on it as in the deployed container, and both
+bundled GDALs resolve `libexpat.so.1` to `/lib/x86_64-linux-gnu/libexpat.so.1`.
+
+The test suite was started inside the built agent-api image and did not finish. Partway through,
+the Mac's disk filled and Docker Desktop stopped ("no space left on device"). The disk held
+several sessions' amd64 images, these three among them, at 4 to 7 GB each. No result from that
+run is recorded here. CI runs the suite on Linux under the same lock.
+
+**The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
+deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
+every compiled wheel here is built for cp311, not for a patch release. It is the float this stage
+leaves, in S18.6.
+
+### Stage S18.6 What this stage did not fix
+
+* **The base image and the apt layers still float.** `FROM python:3.11-slim` is a moving tag, as
+  S18.5 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
+  build day. None of that shows in `pip freeze`. Pinning the base by digest is a separate
+  decision, with its own cost: security updates to the base stop arriving by themselves.
+* **pip, setuptools and wheel come from the base image, not the lock.** `pip freeze` omits them,
+  so the lock cannot pin them. Today they agree: 24.0, 79.0.1 and 0.46.3 in the deployed image and
+  in both base tags above. torch requires `setuptools>=77.0.3`, which the base satisfies. A base
+  with an older setuptools would let pip upgrade it unpinned and unreported.
+* **The lock aligns versions, not the set of packages.** A requirement added later reaches only
+  the images that are rebuilt. `up -d --build agent-api` leaves mcp-server without it.
+* **Other images are outside this lock.** `embedding-server/` installs its own `requirements.txt`,
+  and `sandbox/Dockerfile`, `Dockerfile.claude` and `Dockerfile.opencode` install bare names. The
+  lock describes the root `requirements.txt` stack only.
+* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
+  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
+  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
+  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
+  neither runs for real anywhere in CI.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
+
+> **Landed after the fixes it found.** Both failures recorded above were fixed before this stage merged: the island under the default distance band is [Stage 14](#stage-14), and `Beat` read as a date on pandas 3 is [Stage 15](#stage-15). Merged in that order on 2026-10-03, so the workflow's first run on `prototype` is against code that already contains both.
+
+---
+
+## Stage 19 — What runs in the agent's own process {#stage-19}
+
+Every tool a peer is offered runs inside `agent-api`, and `docker-compose.yml` runs that container
+as `user: root` with `/var/run/docker.sock` mounted: code executing there has root-equivalent
+control of the host's Docker daemon. The sandbox in `agent_runtime/code_execution.py` (a fresh
+container per run, `--network none`, read-only root filesystem, capabilities dropped) exists so
+that untrusted code never runs there. One tool went around it.
+
+### Stage S19.1 A tool that ran knowledge-base code with no sandbox
+
+`kb_run_geofunction` (`extractors/geo_handles.py`) loaded a block with `get_kb_block(doc_id)`, cut
+one function out of the block's stored source with `ast`, and `exec()`'d it in the agent process.
+Block source is notebook code submitted to the I-GUIDE platform: third-party code. It was bound to
+the analysis peer **unconditionally** — `default_analyze_fn` extended its tools with
+`make_geo_analysis_tools()` inside a bare `try/except`, with no flag and no upload gate.
+
+It was latent, not live. Verified 2026-10-01 in the deployed container, read-only: the model was
+offered the tool, but the deployed knowledge base is the `local` backend and empty
+(`agent_kb_search("flood inundation")` returned `count: 0`), so `get_kb_block` found nothing and
+the `exec` was never reached. What made it urgent is the next step on the extraction branch
+(`claude/extraction-integration`, "B1: one shared store"): pointing `get_kb_block` at the populated
+Postgres record would have armed this `exec()` with that record's 3,830 notebook cells (the
+extraction session's count) in the same commit. That branch held B1 until this landed.
+
+| analysis-peer configuration | tools offered before | after | tools reaching an in-process `exec` |
+|---|---|---|---|
+| nothing attached | 38 | 37 | 1 → 0 |
+| a file attached | 72 | 71 | 1 → 0 |
+| unified search+analyze peer | 50 | 49 | 1 → 0 |
+
+The search and code peers never had it; their lists (25 tools, and 35 or 65 for code) are
+unchanged. Why it was bound in the first place is **not recorded**: the function and its binding
+arrived in `af1ead0` ("Fix repeated search with no result"), whose message describes none of it.
+It is the same commit the known-gaps list names as holding the docker-out-of-docker work.
+
+### Stage S19.2 Dropped, not re-routed
+
+There were two fixes: re-route the call through the sandbox, or stop offering it. It was dropped.
+The extraction plan already reserves the sandbox as the execution path for generated tools, later
+and behind its `AGENT_EXTRACTION` flag (its B7), so re-routing now would build that twice. The
+route models are taught to use is `get_kb_block` + `execute_code`: `CODE_PEER_PROMPT` and the
+`chicago-crime-analysis` skill say so, and no prompt ever named `kb_run_geofunction`.
+
+What dropping it costs, stated now rather than discovered later:
+
+* **The default analysis peer can no longer run KB code at all.** It has no `get_kb_block` — only
+  the code peer and the unified peer do — so this tool was its one way to load a block. Reusing KB
+  code is now the code peer's job, which is where the prompt that teaches it lives;
+  `ANALYSIS_WORKFLOW_PROMPT` never mentioned KB code.
+* **A KB loader that fetches from a URL loses its only working route in the deployment.**
+  In-process code has the network and the sandbox does not, so such a loader could run through
+  this tool and cannot run in `execute_code`. `CODE_PEER_PROMPT` already covers the case: when the
+  data is not attached and no tool returns it as a file, the peer says so and asks for the file.
+
+What changed:
+
+* `make_geo_analysis_tools()` returns three tools — `kb_select_rows`, `heatmap_image`,
+  `choropleth_image` — none of which executes stored source. `supervisor/graph.py` and
+  `capabilities.py` are untouched, so the extraction branch's edits there do not collide.
+* The function stays, for the hand-run `extractors/examples/geo_mixed_chain_demo.py` and as a
+  starting point for B7, but it now **refuses** unless `AGENT_CODE_EXEC_BACKEND=local`, the switch
+  that already means "run untrusted code on this host, unsandboxed". The deployment pins `docker`,
+  so even a direct call fails closed before any block is read. It also left `__all__`.
+* The capability atlas (`docs/spatial-toolkit.html`) lists 57 tools, not 58. Its standfirst said
+  fifty-one while its footer said 58; the standfirst, strip and footer now all say 57.
+
+### Stage S19.3 The guard tests the class, not the name
+
+`rag_pipeline/tests/test_no_peer_execs_stored_code.py` captures the FINAL tool list each peer
+hands to `create_agent` — search, analyze and code; with and without a file attached; unified;
+and with MCP tools forced onto the local-import fallback — and walks each tool's code
+transitively (module globals, function-local imports, closures, `functools.wraps` chains, nested
+functions) for `exec`/`eval` or an importlib/runpy runner. A name check would only stop this
+function coming back; this also fails for the next tool built the same way. Positive controls pin
+what the walk sees, so an interpreter change that renamed an opcode cannot turn it into a silent
+pass. Against the original `geo_handles.py` it fails 13 of its 42 tests; on this branch all 42
+pass.
+
+Its blind spot is an attribute call on an object it cannot type statically (`obj.run(src)`).
+Running code in another process is out of scope on purpose: that is how `execute_code` reaches
+its sandbox.
+
+### Stage S19.4 What this stage did not fix
+
+The guard found a second path on its first run. With MCP tools on and no module list — the API's
+default for the search peer — and the MCP server unreachable when tools are built,
+`make_langchain_mcp_tools` falls back, with nothing but a log warning, to importing the MCP tool
+modules into `agent-api` (10 tools). `mcp_create_notebook_workflow_tool` is one of them: it
+registers a generated tool whose body `exec()`s notebook-derived source, and the next tool build
+binds that tool in-process.
+Normally the same code runs in the `mcp-server` container, which has no Docker socket. The test
+records it as a known gap that fails the moment the gap closes, rather than fixing it here: the
+notebook workflow builder is live work, and whether to unbind it is not this change's call.
+
+Still true: `agent-api` runs as root with the Docker socket. Every in-process tool inherits that
+blast radius. This stage removes one way in, not the exposure.
+
+### Stage S19.5 The MCP fallback stops importing tools that exec
+
+S19.4's gap, closed on 2026-10-02. The local-import fallback in `make_langchain_mcp_tools` now
+refuses three modules: `notebook_workflow_tools`, `generated_notebook_tools` and
+`generic_executor_tools`. It refuses them whether they come from `DEFAULT_MCP_MODULES` (the first
+two were on it) or from a request's `mcpModules`. Their tools still exist on the MCP server, and
+the agent still binds them from there. Only the copies that ran inside `agent-api` are gone.
+
+The path was reproduced before the fix. With the remote server forced unreachable, a one-cell
+notebook wrote the id of the process that ran it to a file. The fallback bound
+`mcp_create_notebook_workflow_tool`. Calling it registered `mcp_probe_nb` in the module globals
+of `generated_notebook_tools`. The next build bound that tool (the 60 s cache TTL was cleared in
+the probe), and calling it ran the notebook in the agent's own process: the id written was the
+probe's own. The reproduction showed two things S19.4 had not said:
+
+* The registered tool lives in module state. Every later request in that worker would have been
+  offered it, whoever uploaded the notebook.
+* `mcpModules` reaches the analysis peer's fallback unchanged, so that peer was exposed too, and
+  `generic_executor_tools` could be named into either peer. Its `AGENT_ALLOW_WORKFLOW_EXEC` gate
+  is an environment variable, not a sandbox.
+
+| local-fallback configuration | tools offered before → after | MCP tools | tools reaching an in-process `exec` |
+|---|---|---|---|
+| search peer, MCP on, no module list (the API default) | 35 → 33 | 10 → 8 | 1 → 0 |
+| search peer, `mcpModules` naming every MCP module | 39 → 35 | 14 → 10 | 3 → 0 |
+| analysis peer, `mcpModules` naming every MCP module | 48 → 44 | 14 → 10 | 3 → 0 |
+
+The other six configurations the guard captures are unchanged. The gap was latent in the
+deployment. Its journal from 2026-09-22 to 2026-10-02 15:15 UTC records 35 remote MCP builds of
+14 tools each and not one fallback build.
+
+This fix was chosen over the two alternatives:
+
+* **Unbinding by name** (`_DEFAULT_UNBOUND_MCP_TOOLS`) would also drop the remote builder. That
+  builder is live work, and it runs in `mcp-server`, not here. A name list also cannot hold a
+  generated tool in advance, because each one is named after its notebook. And
+  `AGENT_MCP_UNBIND` replaces the default list wholesale, so `AGENT_MCP_UNBIND=none` would have
+  bound everything back.
+* **Routing generated tools through the sandbox** is where notebook-derived code should
+  eventually run. The extraction plan already reserves that for generated tools (its B7). It does
+  not fix the fallback, though. The same code runs in `mcp-server`, which has no Docker socket to
+  reach a sandbox through.
+
+The set is fixed in code and is not a setting, because an override is exactly what would bring
+S19.4's path back. Whether to unbind the remote builder as well was put to the maintainer and
+declined. What this costs: with the MCP server unreachable, the agent has no
+`mcp_create_notebook_workflow_tool` or `mcp_list_generated_notebook_workflow_tools`, and a request
+naming `generic_executor_tools` gets nothing from it. With the server reachable, which covers
+every build in that journal, nothing changes.
+
+Changes to the guard:
+
+* **The gap left `KNOWN_IN_PROCESS_PATHS`.** On the fixed code, `test_the_known_gaps_are_still_real`
+  failed until the entry was deleted, which is the exit S19.4 built in for it.
+* **Two configurations were added.** A request naming every module under `MCP_server/tools` is
+  now captured for the search and analysis peers. The path through a named module was outside
+  what the guard captured before.
+* **A provenance check was added.** No peer is offered code defined in a skipped module. It holds
+  where the sink scan is blind, and it covers a generated tool by module, not by name.
+* **Each skipped module has a witness.** One tool per module shows that it reaches `exec`. This
+  keeps the list from growing into a general switch, and from keeping a module whose `exec` has
+  moved into the sandbox.
+
+Mutation-checked:
+
+* Removing the request-name filter fails 4 tests.
+* Restoring the original behaviour (filter off, both modules back on the default list) fails 6:
+  the scan and the provenance check, each for the API default and for both request-named
+  configurations.
+* Putting the two modules back on the default list, with the filter in place, still passes,
+  because the filter alone holds.
+* An unexplained module on the list fails the witness test.
+
+The file has 58 tests, up from 42.
+
+Found, and not fixed here:
+
+* **Scoping still imports named modules.** When the remote server answers, a request's
+  `mcpModules` still makes the agent import the named modules (`_allowed_remote_tool_names`) to
+  learn which remote tools to keep. Nothing imported there is bound or called in this process.
+* **`mcp-server` is unchanged.** It runs the same tools, loads `.env` and mounts the shared file
+  volume. S19.4's path is closed for `agent-api` only.
+* **`AGENT_MCP_UNBIND` cannot unbind some tools.** It fails for any tool whose name begins with
+  `c`, `m`, `p` or `_`, which includes this builder. `lstrip("mcp_")` strips characters, not a
+  prefix, so `create_notebook_workflow_tool` becomes `reate_notebook_workflow_tool` and matches
+  nothing. The default list never passes through that code, and neither of its two names begins
+  with one of those letters, so only an operator's override is affected.
+
+---
+
+## Stage 20 — A layer is what went into it {#stage-20}
+
+*2026-10-01. Branch `claude/layer-identity-by-inputs` (S20.1–S20.6), then
+`claude/layer-identity-remaining-tools` (S20.7–S20.11), cut from it.*
+
+S7.7 made the embedding layers' ids a digest of the inputs that decide what they show. Every
+other layer kept an id derived from its label or from the file it had just written, and one
+re-grounded turn showed both kinds failing.
+
+### Stage S20.1 A re-ground stacked a city on itself
+
+A real browser run, on a local server built from prototype plus the extraction branch (the
+layer code was prototype's), asked to buffer the Champaign city boundary by 2 km. The turn
+re-grounded once and re-ran `admin_boundary`, `qgis_metric_buffer` and `add_map_layer`. That
+run's file store and the browser's saved session record what happened:
+
+| | first pass | re-ground |
+|---|---|---|
+| boundary file | `file_0224334ad1dd`, 85,497 bytes | `file_37778aec7010`, 85,497 bytes, byte-identical |
+| boundary layer id | `boundary-file_0224334ad1dd` | `boundary-file_37778aec7010` |
+| QGIS buffer output | `file_7e8178fd7165` | the same id, rewritten (`overwrite=True` reuses by filename) |
+| `add_map_layer` copy | `file_04535529a562` | `file_33c7d10f5c71`, identical but for GDAL's `"name"` member |
+| buffer layer id | `agent-champaign_city_2_km_buffer` | the same |
+
+The session saved at the end of that turn held three layers: two identical outlines and one
+buffer. The report from the run counted four. The saved state shows the buffer escaped only by
+luck. `add_map_layer` set no id, so `build_map_layer` derived one from the label, and the model
+happened to pass the same `name` on both passes. A renamed repeat stacks it, and the new test
+reproduces four layers on prototype. The label-derived id also fails the other way: four
+different buffers named "2 km buffer" (two distances, two places, one dissolved) collapse into
+one layer, `agent-2_km_buffer`.
+
+**The reason, which is general.** An identity keyed on an output artefact stacks identical
+results, because every repeat writes a new artefact: a file_id, a filename, a label the model
+words differently. An identity keyed on the inputs that produced the result replaces, because a
+repeat has the same inputs. Those inputs must exclude everything the model words and include
+everything that decides the content.
+
+### Stage S20.2 What changed
+
+- `map_layers.content_key` and `content_layer_id` hold the S7.7 rule, moved out of
+  `rs_embed_tools._layer_id`, which now delegates. Seven golden ids pin that no embedding layer
+  moved.
+- `file_store.file_content_key(ref)` says what a file holds. It returns the `content_key` the
+  producer recorded, else a digest of the bytes, else the reference itself. The byte digest skips
+  GDAL's top-level layer-name member, which was the only difference between the run's two buffer
+  copies. Producers record a key through `create_output_file_from_path(..., content_key=)`.
+- `admin_boundary` records a key of the resolved level, GEOIDs, subdivision and truncation.
+  `boundary_layer_id(file_id)` now keys on the file's content key, so a repeat lands on the same
+  id, and `embed_zones` still rebuilds that id from either copy.
+- `qgis_metric_buffer` records a key of its input's key, the distance, both CRSs, `dissolve` and
+  `segments`. It still emits no layer of its own; `add_map_layer` draws it.
+- `add_map_layer` and `buffer_layer` set explicit ids from their inputs. For the first these are
+  the source as read, the render, the column and any sampling. For the second they are the
+  source, the distance in metres, the measuring CRS and `dissolve`. `name` is excluded from both.
+
+### Stage S20.3 Revised during the work: what counts as the input
+
+The first version put `sibling_file_ids` in the key, and the live check in Chrome caught it. One
+`add_map_layer` call passed the boundary as a "sibling" of the GeoJSON buffer, its repeat passed
+none, and the same buffer drew as two layers. Siblings matter only when they are read, which is
+when a shapefile is rebuilt from its parts. `langchain_geo_tools.source_content_key` now
+identifies an input as it was read. A self-contained file is its content key. A shapefile is a
+digest of every part staged beside its `.shp`, whichever file_ids those parts arrived under.
+
+### Stage S20.4 Why not at the boundary, and why not suppress the repeat
+
+`build_map_layers` is the one place every layer crosses, and the obvious home for a uniform rule.
+It was rejected because only the OUTPUT is visible there. An id derived from output content
+merges two different analyses that happen to produce the same features: "within 2 km" and
+"within 3 km" selecting the same five hospitals would become one layer. The inputs are known only
+inside the tool.
+
+Suppressing the re-run was rejected too. The re-ground exists to recover from a wrong first pass,
+and its result sometimes differs. With input-derived ids, a repeat that produces the same thing
+replaces its layer, and one that differs gets its own.
+
+### Stage S20.5 Verification
+
+- `test_layer_identity_by_inputs.py`, 25 tests. On prototype 15 fail: 7 on the defect itself, as
+  stacked or merged ids, and 8 because the new helpers do not exist there.
+- The full suite: 1670 passed, 4 skipped, against a baseline of 1645 and 4.
+- In Chrome, against a local server on this branch, a forced re-run of all three tools with new
+  output names and a new layer name. Two layers before, two after, with the same two ids, both
+  now drawn from the new files, and the buffer relabelled.
+
+The live run also hit an unrelated local defect. After the server's first PROJ lookup, every
+subprocess it forked crashed in PROJ's fork handler before exec. macOS logged eleven such crashes
+between 19:11 and 19:15, and both QGIS and code execution failed until the server restarted. The
+verification restarted the server between turns. This stage does not fix it.
+
+### Stage S20.6 What the first change did not fix
+
+Kept as written. S20.7–S20.10 close the first two items, and S20.11 says what remains.
+
+- The rest of the spatial toolkit still takes layer ids from labels: clip, dissolve, intersect,
+  erase, simplify and geometry summary, the aggregate, spatial-statistics and temporal tools, and
+  `layers_for_artifacts` for the CLI peers. So does the client's artifact fallback
+  (`artifact-<filename>`). Each has both failure modes.
+- The embedding, terrain and prediction layers digest their input FILE ids, so a re-ground that
+  re-fetches their input stacks them. `file_content_key` is the drop-in.
+- `qgis_metric_buffer` writes with `overwrite=True`. That reuses the file_id of any existing output
+  with the same filename, from any session, and rewrites that record's session and owner.
+- In a restored session, a layer saved under an old id stacks once with its re-run under the new
+  id.
+
+### Stage S20.7 The rest of the toolkit, measured before it was changed
+
+A probe ran each of the 18 remaining label-keyed tools on PR #38's head three times. First as
+asked. Then again on re-fetched copies of its inputs, under a name the model chose. Then as a
+genuinely different analysis of the same inputs (another place, distance, cell size, k or
+period). All 18 stacked the renamed re-ground. 13 also merged the different analysis into the
+first one's layer. The five that kept the two apart (intersect, dissolve, geometry summary,
+filter_by_time, compare_periods) did so by luck of wording: their default label happens to spell
+out the parameter that differed (`how`, `by`, the summary kind, the window, the two periods).
+
+Reading the rest found three gaps the S20.6 list does not name:
+
+- `terrain_derivative` and `inundation_at_level` keyed their layers on the raster's bbox alone,
+  never on the raster. Clipping a DEM to a shape keeps the grid and its bounds and only blanks
+  pixels, so the slope of a clipped DEM and of the unclipped DEM of the same box were one layer.
+  Measured in the live check (S20.10): identical bounds, 131,115 against 234,496 pixels with data,
+  and PR #38's formula gives both slopes `embed-slope-40_113__88_278-1d1ac13c72`. Two hillshades
+  under different suns were one layer too.
+- `dem_for_region` recorded WHETHER a DEM was clipped, not which shape cut it. A polygon and its
+  own bounding box from geometry_summary share a box and cut different pixels.
+- `embed_zones` digested its period as the caller wrote it, but the service is sent `_iso_date`'s
+  dates. "2025-03".."2025-05" and "2025-03-01".."2025-05-31" are one composite and were two layers.
+
+### Stage S20.8 What changed
+
+Every layer producer now takes its id from a `map_layers.content_key` of its inputs and records
+the same key on the file it writes, as `_finish` already did for `buffer_layer`. A later step that
+reads the file then keys it by what it holds.
+
+- Overlay. Each tool keys on its inputs as read (`source_content_key`, on the path `_load` keeps
+  staged) and on its parameters: `keep_geom_type`, `how`, `tolerance_m` and `keep_topology`, the
+  normalised summary kind and `per_feature`. `dissolve_layer` is the one overlay tool whose view is
+  a parameter, so its key holds the view as drawn. `_resolve_view` came out of `_finish` and runs
+  first, which makes `render='auto'` and `render='choropleth'` on polygons one layer.
+- Aggregate, spatial statistics, temporal. Their readers delete the staging directory before they
+  return, so `langchain_geo_tools.input_content_key` stages the input again with the same rules and
+  keys what that reads. A self-contained file costs a path lookup. Only a shapefile assembled from
+  its parts is copied twice. Each key is normalised to what the tool applied: a value column only
+  when the statistic reads it, m and km as one (they write the same columns), a selection by its
+  criterion, the regression model that ran rather than the one requested, a weights parameter only
+  when the scheme reads it, variable lists sorted, a time window and time column as resolved.
+  `classes`, label columns and `zone_id_field` change a CSV or the reported breaks, not the layer,
+  and stay out.
+- Code peers. `layers_for_artifacts` keys a written file on its content, through a new
+  `map_layers.drawn_layer_key` that `add_map_layer` now also uses with an unchanged formula. A file
+  a peer wrote and the same file redrawn by add_map_layer with the same view are one layer.
+- Embedding, prediction, terrain. File ids became content keys: the polygons in `embed_zones`, both
+  inputs of `fit_zone_model` and `zonal_stats_for_raster`, and the packages and the basis in
+  `align_embedding_colors`' fallback id. The readable hint went with them, because a file_id there
+  moved the id on every re-fetch whatever the digest said. `siblings` left the keys, since
+  `source_content_key` already digests every part read. `embed_zones` records keys on its vectors
+  CSV (without `clusters`, which the vectors do not depend on) and on its group GeoJSON.
+  `fit_zone_model`, `zonal_stats_for_raster`, `dem_for_region` and the two derived rasters record
+  theirs. Derived rasters key on the raster they read and, for a hillshade, the sun. A clipped DEM
+  keys on its shape, and an unclipped DEM keeps the id it always had.
+- `content_layer_id` itself is unchanged, so the seven golden embedding ids still hold.
+
+### Stage S20.9 Revised during the work
+
+- Two tool bodies already used the name `key`. `count_points_in_areas` reassigns it to the CSV's
+  label column, and `regionalize` loops `for key in result`. Both lines run between computing the
+  layer key and building the descriptor, so the first draft would have shipped `agent-area` and an
+  id named after a pygeoda result field. It was caught in review before any run. The local is now
+  `layer_key`, and every new test asserts its id's kind prefix.
+- An embedding package was assumed to carry its write time in its zip headers, which would have
+  made `file_content_key` useless on it. Measured: `np.savez` writes identical bytes for identical
+  arrays, so the byte digest survives a deterministic re-run.
+- The first spatial-statistics fixture built its lattice as `-88.3 + c/100` and `-88.29 + c/100`.
+  In floating point those edges do not meet (-88.28999999999999 against -88.29), so the columns
+  stopped touching, and `pygeoda.skater` segfaulted the test process (exit 139) on a graph of five
+  components with no island. `regionalize` guards only `has_isolates()`, so such a layer crashes a
+  server worker the same way. The fixture now builds each edge from one expression. The crash is
+  not fixed here and was raised as a task of its own.
+
+### Stage S20.10 Verification
+
+- `test_layer_identity_by_inputs.py` gains 31 tests, 56 in all. On PR #38's head 30 of the 31 fail,
+  each on a defect assertion: a re-ground stacked, a different analysis merged, an equal request
+  split, or a CSV recorded nothing. The one that passes pins a normalisation that PR #38's label
+  already happened to give (a month and its first-to-last dates are one window).
+- Four existing stubs of `create_output_file_from_path` took no `content_key` and were widened.
+- The full suite: 1701 passed, 4 skipped, against PR #38's 1670 and 4.
+- In Chrome, against a local server on this branch, one tab per test. Layer ids were read from the
+  client's saved session after each turn. Counts include the attached upload's own layer.
+
+| test | turns | layers after each turn |
+|---|---|---|
+| erase | county minus city, unnamed; the same on re-fetched files, named "county outside the city"; Urbana, unnamed | 4; 4, same id, relabelled; 6, new id |
+| hex grid | 2 km, unnamed; the same, named "incident density"; 5 km, unnamed, the 2 km grid's default label | 2; 2, same id, relabelled; 3 |
+| terrain | clipped DEM and its slope; the unclipped DEM and its slope | 4; 6, two slope ids |
+| code peer | one opencode script writing a file, an exact copy of it, and a different file | 3, the copy deduplicated |
+
+- The live check found what the tests could not. Two opencode runs that kept the same 25
+  incidents gave two ids. One wrote through geopandas, which rewrote "2026-06-01" as
+  "2026-06-01T00:00:00" and added `crs` and `name` members. For a producer whose inputs are
+  invisible, the file is the only identity there is, and two serialisations of one result read as
+  two results.
+- Met on the way, none caused by this change. The main checkout's `.env` sets `AGENT_MODE=token`,
+  which refuses an anonymous chat. The analysis families load only with an attached file, so in a
+  bare chat `request_capability` did not provide `erase_layer`. The two-month-old opencode image
+  sends `max_tokens`, which gpt-5.6-luna rejects, so the check pinned
+  `AGENT_OPENCODE_MODEL=gpt-4o-2024-11-20`. One follow-up opencode turn reported the attached file
+  missing from its working directory; that was not investigated. And the same `.env` pins
+  `OPENSEARCH_NODE` to the production cluster, which wins over `PLATFORM_TIER=dev` (the boot log
+  warns of it), so seven local test conversations wrote their chat memory there before it was
+  noticed. A local check needs `OPENSEARCH_NODE=` as well.
+
+### Stage S20.11 What this stage still does not fix
+
+- The client's artifact fallback, `artifact-<filename>` in `loadVectorArtifacts`, still keys on the
+  filename.
+- A code peer's layer is keyed on the bytes it wrote. Identical files share a layer, including two
+  different analyses that wrote identical files. The same result serialised differently does not
+  (S20.10).
+- `embed_zones`' replay memo still keys on the file_id and the name, so a re-ground re-runs the
+  whole sweep. Its layers now replace rather than stack.
+- A recorded key names the request. A re-fetch that returns different data for the same request (a
+  3DEP update, a sweep that lost tiles) replaces the old layer, which is the intended reading of a
+  re-run, but the steps downstream cannot tell that the content moved.
+- `qgis_metric_buffer` still writes with `overwrite=True` (S20.6).
+- In a restored session, every layer whose id moved here stacks once with its re-run: all the
+  analysis layers, the zonal, prediction and derived terrain layers, clipped DEMs and the shared-PCA
+  fallback. Unclipped DEMs, embed_region's rasters and segments, boundaries and buffers keep their
+  ids.
+- `build_map_layer` still derives an id from the label for any descriptor without one, and nothing
+  checks that a new tool sets one.
+- `regionalize` segfaults on a disconnected contiguity graph (S20.9).
+
+---
+
+## Stage 21 — A filename names this conversation's file {#stage-21}
+
+*2026-10-02. Branch `claude/read-by-name-scoping`.*
+
+S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 15 on
+`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S15.6).
+
+### Stage S21.1 What a read by name did
+
+`read_text_file` and `inspect_file_for_analysis` resolve `path` through `_resolve_allowed_path`. A
+file_id goes to the store. Anything else went to `_resolve_local_allowed_path`, which first called
+`_find_managed_file_by_name`: for a bare filename, the newest file in `uploads/` or `outputs/` whose
+on-disk name ended in `__<filename>`. It read no record, so it never saw `session` or `owner_id`.
+
+Measured with a probe on prototype `5ae6d92`, first on 2026-10-01 and again on 2026-10-02. Alice
+wrote `summary.md` in `conv-alice`. Bob, in `conv-bob`, read `ALICE PRIVATE` back by name through
+both tools, while `find_files("summary.md")` returned `[]` for him. The same read worked from
+alice's other conversation, and in dev mode from any conversation. The scan had four more
+consequences:
+
+- `execute_code(input_files=["summary.md"])` staged alice's file into bob's sandbox, because
+  `_resolve_input_file` falls back to `_resolve_allowed_path`. It went in under its on-disk name,
+  `file_<id>__summary.md`, so even alice's own `open("summary.md")` would have found nothing.
+- `write_text_file` sends a name that starts with "." down its path branch,
+  `_resolve_allowed_path(..., must_exist=False)`. The scan matched a suffix of the on-disk name, so
+  `".md"` found alice's `notes__.md` (on disk `file_<id>__notes__.md`) and overwrote it.
+  `secure_filename` strips leading dots, so only a stored name containing `__.` can be reached this
+  way. It is narrow, but it is a write into another user's file.
+- The suffix is not the filename: `"summary.md"` also matched `final__summary.md`.
+- A conversation's own file lost to a newer one elsewhere. Once alice had written a newer
+  `summary.md`, bob's read returned hers instead of his own.
+
+The scan arrived in `1017671` (2026-04-28), four months before records carried a session
+(`9b83546`), when the store was one namespace anyway. Reason not recorded.
+
+### Stage S21.2 What changed
+
+- `_find_managed_record_by_name` replaces the scan. It calls `find_files(name=...)`, which applies
+  both scopes and orders newest first, and keeps only a record whose `filename` is exactly the
+  name given, case included.
+- It asks for every match, with no page. `find_files` sorts all substring matches newest first and
+  only then cuts its page of 20. With 25 newer `draft*_summary.md` files, the exact `summary.md`
+  was not on that page.
+- `_resolve_allowed_path` tries it after the file_id and before a raw path, and returns the
+  record. A read by name now reports the `file_id` and `download_url` it resolved, where both were
+  null. `execute_code` stages the file under its filename as well as its id.
+- A refusal is the "file does not exist" error a missing name gets, word for word apart from the
+  name. The download endpoint answers 404 rather than 403 for the same reason (S9.3): a different
+  answer would tell bob that alice has a file by that name.
+
+### Stage S21.3 The unowned legacy pool, decided
+
+A record with no session and no owner stays readable by name, from any conversation. That is the
+answer `find_files` already gives, because the pool is reused, and `may_read`'s docstring keeps the
+opposite answer for a browser download, which is a different caller.
+
+It competes on recency like everything else. Ranking this conversation's own files first looked
+safer and was rejected. **An upload carries no conversation.** The upload route binds the user and
+not the thread, and the map UI posts only the files. Measured through the route in dev mode, with a
+`thread_id` sent in the query, the form and a header, the record was stored with `session: null`.
+So "own first" cannot tell a legacy record from this conversation's upload. It would rank an earlier
+turn's output above the corrected file the user had just uploaded under the same name. That is the
+wrong-file bug `_build_staging` was already fixed for, in the comment above its second pass.
+`test_a_newer_upload_outranks_an_older_output_of_the_same_name` pins this choice.
+
+### Stage S21.4 Verification, and what it costs
+
+- `test_read_by_name_scope.py`, 26 tests. On prototype 17 fail and 9 pass. The 9 are what scoping
+  must not break: a conversation's own file, the same in dev mode, and the legacy pool, each
+  through both tools, plus three ordering cases (the newest of several, the newer upload, and the
+  near-misses a page would hide). With the fix, 26 pass.
+- Re-running the probe on the branch, every by-name case is refused, and the raw paths in S21.5
+  still get through.
+- That file and eight neighbouring modules (file ownership, conversation listing, input staging,
+  the ledger's file rows, code execution, upload ownership, the download route and the sweep):
+  168 pass.
+- The full suite: 1671 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus
+  this file's 26.
+
+The price is a parse of every metadata record on each by-name read, since the store has no index.
+On a synthetic store of 1,400 records (the store's own comments count 1,325 legacy ones), a
+by-name read took 74 to 91 ms against 9 to 14 ms for the scan. At 5,000 records it was 460 ms against 45 ms. These are
+medians of 30 warm runs on the Mac, three runs at 1,400 and one at 5,000. `list_conversation_files`,
+`resolve_file_ref` and `overwrite=True` already pay for the same scan. If it starts to matter, the
+fix is an index, not an unscoped scan.
+
+### Stage S21.5 What this stage did not fix
+
+This change scopes a bare filename and nothing else. Two other routes reach a stored file without
+passing through `find_files`, and each needs a decision of its own:
+
+- **Raw paths.** The storage root is an allowed root, so a path into it is resolved with no session
+  or owner check, for reads and for writes. That leaves open whether a managed file should be
+  reachable by raw path at all, once it can be named by id or by filename.
+- **File ids.** A read by file_id is not checked against the owner. Outside the store itself,
+  `may_read` is called only by the download endpoint. Whether an id should then be honoured across
+  all of its owner's conversations, or only inside its own, is undecided.
+
+Two scoping gaps sit upstream of the lookup:
+
+- **Uploads are never stamped with a conversation** (S21.3). In dev and demo mode an upload is in
+  the pool every conversation reads by name, and `list_conversation_files` does not list it even
+  in the conversation that uploaded it. In token mode the owner check still confines it to its
+  user.
+- **A request with no `thread_id` binds no conversation**, and `find_files` then searches all of
+  them, though the owner check still applies. The map UI mints its thread id before the first turn
+  (from reading the code, not measured). Other API clients may not.
+
+---
+
+## Stage 22 — A file_id names one write {#stage-22}
+
+*2026-10-01. Branch `claude/output-overwrite-scope`.*
+
+S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
+the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
+`claude/layer-identity-by-inputs` (its S13.6) lists it among what it did not fix.
+
+### Stage S22.1 What overwrite did
+
+`create_output_file` and `create_output_file_from_path` each scanned every metadata record and took
+the first output with the same filename, in directory order, from any conversation and any owner.
+They then reused its file_id, copied the new bytes over the old file and re-stamped the record
+with the current session and owner.
+
+Of the 44 producer call sites, two hard-coded it: `qgis_metric_buffer` and `pyqgis_render_map`.
+Their model-facing defaults are `buffer.geojson` and `map.png`, and the supervisor's own QGIS
+workflow passes `buffer.geojson` and `qgis_map.png` for every caller. Two more passed the model's
+flag through: `write_output_file`, and `write_text_file` given a bare filename. The other 40
+always write a new file.
+
+So the second person to buffer anything took over the first person's file. The first person's
+link served the second person's buffer, and their record no longer said it was theirs.
+`find_files` then hid it from the conversation that made it. In token mode their own link
+answered 404: the download endpoint's `may_read` check found a record that named someone else.
+
+Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
+(`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
+re-grounding pass (the S13.1 table on that branch). That pass repeated the same buffer. A re-run
+with a corrected distance would have changed what the first answer's link served, with nothing in
+the transcript to show it.
+
+`overwrite=True` arrived in `8dc7f25` (2026-05-07), before conversations or owners existed, when
+the store was one namespace anyway. Reason not recorded.
+
+### Stage S22.2 What changed
+
+- `file_store._output_to_replace` is now the single scan behind both create functions. It reuses
+  only an output that THIS conversation wrote for THIS caller. The session must match, and a
+  session must be bound: with none, the records that match are the unstamped legacy pool every
+  conversation reads. The owner must match exactly, because the conversation id arrives from the
+  client and a borrowed one must not reach another user's file. In dev and demo it is None on
+  both sides. Of several matches, the newest is replaced, in the same order `find_files` uses.
+  Directory order was no order: on prototype the new test of it failed on one run and passed on
+  the next.
+- `qgis_metric_buffer` and `pyqgis_render_map` no longer pass `overwrite`, so every run is a new
+  file. An earlier answer links to the buffer or embeds the map image, and a re-run can differ.
+- `test_no_producer_hard_codes_overwrite` walks the producers' source and fails on any
+  `create_output_file*` call with a literal `overwrite=True`. Passing the caller's own flag through
+  is still allowed.
+
+### Stage S22.3 Why both halves
+
+Two fixes were offered: drop the flag in the tool, or scope the reuse. They fail different tests
+in `test_output_overwrite_scope.py` (19 tests):
+
+| | fail |
+|---|---|
+| prototype | 14 every run, plus the newest-match test on some runs; the 4 that pin a conversation still overwriting its own file pass |
+| scoping alone | 2: the same-conversation re-run (the 2026-10-01 case) and the guard |
+| dropping the flag alone | 10, plus the newest-match test on some runs: the model's write tools still reach another conversation's file |
+
+Scoping alone leaves a real case open. Inside one conversation, two different buffers under the
+default name, or a corrected re-run under the old name, still share one file_id.
+
+### Stage S22.4 Layer identity, and the merge order
+
+This depends on `claude/layer-identity-by-inputs`, and must merge after it. On prototype,
+`add_map_layer` called without a `name` builds its layer id from the input's on-disk stem, and that
+stem carries the buffer's file_id. Measured on two identical buffers written as separate files:
+`agent-file_524b820f3452_buffer` and `agent-file_f5deaf380dcc_buffer`. File reuse was what kept
+a repeated buffer on one layer. With a `name`, both are `agent-2_km_buffer`, and nothing changes.
+
+With the two branches combined, a re-grounded buffer is a new file (`file_04a5ecb661d2`, then
+`file_6463dacb8698`) and still the same layer (`agent-map-shapes-d6163870f2`), because the layer
+is keyed on `file_content_key`. In code the two branches conflict in one hunk, at the buffer's
+call to `create_output_file_from_path`. The resolution keeps `content_key=key` and drops
+`overwrite=True`.
+
+### Stage S22.5 Verification
+
+- `test_output_overwrite_scope.py`: 19 pass, stable over five runs.
+- The full suite: 1664 passed, 4 skipped, against a baseline of 1645 and 4.
+- Combined with `claude/layer-identity-by-inputs` in a throwaway worktree, with the conflict
+  resolved as above: this file, that branch's `test_layer_identity_by_inputs.py`, and the QGIS,
+  map-layer-identity and file-ownership tests, 89 passed.
+
+### Stage S22.6 What this stage did not fix
+
+- `read_text_file` and `inspect_file_for_analysis` resolve a bare filename through
+  `_find_managed_file_by_name`, which scans every conversation's uploads and outputs. In a probe,
+  bob read alice's `summary.md` by name while `find_files` correctly hid it from him. This is the
+  read-side twin of this stage, and a separate change.
+- The write tools report `"overwritten": true` whenever the model asked for it, not when a file
+  was actually replaced.
+- Every buffer and map is now kept. The only collection is the opt-in TTL sweep
+  (`AGENT_FILE_RETENTION_DAYS`, off by default).
+- On `claude/layer-identity-by-inputs`, the docstring of `_content_digest` gives "qgis_metric_buffer
+  overwrites by name" as its example of a file rewritten in place. The example goes stale here. The
+  reason stands, because a conversation's own `write_output_file(overwrite=True)` still rewrites in
+  place.
+
+---
+
+## Stage 23 — An upload names its conversation {#stage-23}
+
+*2026-10-02. Branch `claude/stamp-upload-session`.*
+
+S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
+upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 17 on
+`claude/read-by-name-scoping` lists that gap in its S17.5, and its S17.3 was shaped by it.
+
+### Stage S23.1 What an unstamped upload did
+
+Measured through the route with the Flask test client in dev mode on 2026-10-02: with a thread id
+sent in the query string, in the form and in a header, the record was stored with `session: null`.
+`find_files` reads a record with no session as the legacy pool that every conversation shares.
+Three consequences:
+
+- `list_conversation_files` asks `find_files` for `include_unowned=False`, so it never listed an
+  upload, not even in the conversation that uploaded it. Its docstring promises every file the
+  conversation has "made or been given".
+- Nobody is identified in dev and demo mode, so the owner check passes everyone. Any conversation
+  could find another's upload through `find_files` and open it through `resolve_file_ref`. In
+  token mode the owner check still confined it to its user.
+- Stage 17 ranks a read by bare name by recency rather than "this conversation's own files first",
+  because an upload could not be told apart from a legacy record (its S17.3).
+
+### Stage S23.2 What changed
+
+- The map UI sends `thread_id` as a form field beside the files. The value is `threadRef.current`,
+  the id its turns send, which `newThreadId()` mints before the first turn. A restored conversation
+  gets its saved id back before anything else, so its uploads and its turns still agree.
+- `_upload_thread_id()` reads `threadId` or `thread_id` from the form, then from the query string.
+  These are the chat routes' two spellings, normalised by the same `_coalesce` and strip, so a blank
+  or padded id cannot become a conversation of its own. The form wins, because it is what the client
+  composed for this upload. No header is read, because no route takes a thread id from one. Nor is
+  `memoryId`: the chat routes bind the file store to `threadId` alone.
+- The route binds that id with `set_file_store_session` around `save_uploaded_file`, as the chat
+  routes do around a turn, and resets it in `finally`. Production runs gunicorn with `--threads 4`,
+  and each thread serves one request after another, so a binding left set would outlive its request
+  on that thread. Nothing reads it there today: every route that uses the store binds its own id
+  first, the upload route included, even when the id is None. A route added later without a binding
+  of its own would run in the last caller's conversation. `test_the_binding_ends_with_the_request`
+  pins the reset; S23.5 says why its first version did not.
+- The response keeps its shape. Each file record already carried `session`, null until now.
+- The map UI counts every upload's file id as already drawn, when the upload returns and again
+  when its conversation is reopened. S23.4 says why.
+
+### Stage S23.3 An upload with no thread id, decided
+
+It is stored exactly as before: no session, in the pool. The clients that send none are
+`examples/iguide_chat_prototype.html` (the reference client), `examples/agent_chat_stream_demo.html`
+(the dashboard page), any map UI tab still running the bundle from before this change, and callers
+outside this repo. All but the last are known to send a thread id with their turns.
+
+- **Refusing it** would break every one of those uploads.
+- **Minting a session for it** would keep the upload out of other conversations, and out of the one
+  that uses it too. Those clients send their thread id on turns, so a minted id would never match:
+  the upload would drop out of that conversation's listing and its lookups by name, though it stays
+  reachable by file id. Once Stage 17 routes the file tools' bare-name read through `find_files`,
+  the model could not open its own upload by name.
+- **Adopting it into the first conversation that attaches it** by `fileIds` was not taken either.
+  The chat route would start writing the records it reads, and a record has one `session`, so an
+  upload attached in two conversations would belong to whichever came first.
+
+Such an upload logs `Upload with no thread id` at INFO. The fallback can be tightened once that line
+stops appearing. Until then `test_an_upload_with_no_thread_id_is_stored_as_before` pins it, so that
+tightening it is a decision rather than an accident.
+
+### Stage S23.4 Revised during the work: the listing redrew the upload
+
+The first run in Chrome, with only the server change and `uploadFiles`, answered correctly and left
+two copies of the upload on the map: the preview `Upload: stamp_probe_points` and a second
+`stamp_probe_points` layer, 3 points each. The listing now returns the upload's record, and the
+client harvests download records from every event. When no `map_layer` event fired, the artifact
+fallback (`loadVectorArtifacts`) draws every GeoJSON among them. It skips a file it has drawn
+before (`loadedArtifacts`) or one a `map_layer` event drew (`layerSourceFiles`). The preview is
+drawn locally from the `File`, so it was in neither set.
+
+The listing made this common but did not create it. `read_text_file` and
+`inspect_file_for_analysis` return the same record when called by file id, which the turn prompt
+asks for, so an "inspect my upload" turn reached the same fallback. That is from reading the code,
+not measured.
+
+The first fix registered the file only when the record's name matched the preview's, the way
+`onUpload` already attaches `sourceUrl`, and registered each reopened layer by its URL. Both miss
+every name `secure_filename` rewrites: `My Data.geojson` is stored as `My_Data.geojson`, and
+`roads(1).geojson` as `roads1.geojson`. A preview whose name did not match never gets a
+`sourceUrl`, so it comes back from its inline copy, with no URL to register. So `onUpload` now
+registers every returned file id with no name match, and `restoreSession` registers the
+conversation's upload ids the same way. The URL registration was dropped. Beyond uploads, the only
+duplicate it prevented was of a layer a `map_layer` event drew, which is an older gap this stage
+leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` replaces it by id.
+
+### Stage S23.5 Verification
+
+- `test_upload_session.py`, 15 tests. On prototype 9 fail and 6 pass. The 6 are guards that hold
+  either way: the binding ends with the request, a later thread-less upload names no conversation,
+  another conversation lists nothing, a thread-less upload is stored and found as before, and a
+  blank id, twice. With the fix all 15 pass.
+- An independent re-derivation of this section deleted the reset and found the first version of
+  `test_the_binding_ends_with_the_request` still passing. That version checked the session after a
+  second upload, which binds its own id before it writes. The test now checks straight after the
+  first upload, and fails without the reset. A second mutation, binding only when an id is present,
+  fails five tests.
+- `npm run check:upload` calls `uploadFiles` against a stubbed `fetch` and reads the multipart body.
+  With prototype's `agentClient.ts` the thread-id check fails. With the change all four checks pass,
+  `npm run build` is clean, and `check:auth`, `check:fold` and `check:hooks` still pass.
+- The full suite: 1660 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus this
+  file's 15.
+- A probe through the route in dev mode, in four trees. The upload is made in `sess-a`. The last two
+  columns are what `sess-b` gets when it asks for the file by name:
+
+  | | stored `session` | listed in `sess-a` | `find_files` / `resolve_file_ref` | `read_text_file` / `inspect_file_for_analysis` |
+  | --- | --- | --- | --- | --- |
+  | prototype `5ae6d92` | null | no | finds it | reads it |
+  | Stage 17 alone | null | no | finds it | reads it |
+  | this stage alone | `sess-a` | yes | nothing | reads it |
+  | both | `sess-a` | yes | nothing | refused |
+
+  Neither change closes that read on its own. On prototype the file tools' bare-name read is the
+  directory scan S17.1 describes, which never opens a record, so no stamp can scope it. Stage 17's
+  route through `find_files` honours the stamp, but on its own it finds an unstamped upload in the
+  pool. The two merge cleanly in code. Merged, eight file-store test modules (107 tests) pass, and so
+  does the full suite: 1686 passed, 4 skipped, which is 1645 + 26 + 15.
+- In Chrome, against this branch served locally in dev mode with a scratch file store, one new tab
+  per test. Tab 1 ran with no client fix, tabs 2 to 4 with the first fix in S23.4, and tabs 5 to 7
+  with the by-id registration. A layer count proves something only when the turn carried the upload's
+  download record (the answer then shows a DOWNLOAD box); without it the fallback has nothing to draw.
+
+  | tab | gesture | what the turn did | record in the turn | layers |
+  | --- | --- | --- | --- | --- |
+  | 1 | upload `stamp_probe_points.geojson`, ask "Which files are saved in this conversation?" | `list_conversation_files`: 1 result, the upload by name and id | yes | 2 |
+  | 2 | the same, in a new conversation | 1 result: its own upload, not tab 1's of the same name | yes | 1 |
+  | 3 | the question alone, nothing uploaded | 0 results; the answer: "No files are saved in this conversation." | no | 0 |
+  | 4 | reopen tab 2's conversation from History, ask again | answered from the earlier turn, no tool call | no | 1, proving nothing |
+  | 5 | upload `renamed probe (1).geojson`, stored as `renamed_probe_1.geojson`; ask, then name the tool | the first answer came from the attachment note; the second called the tool: 1 result | yes, the second | 1 |
+  | 6 | reopen tab 5's conversation, name the tool, then ask to inspect the upload | the earlier result reused, then `inspect_vector`, whose result carries no record | no | 1, proving nothing |
+  | 7 | restart the API server, which clears the process-local ledger; reopen tab 5's conversation, name the tool | called the tool: 1 result | yes | 1 |
+
+  Tab 5's preview was saved inline, with no `sourceUrl`, which is the name mismatch S23.4 describes.
+  So tab 7 is a reopened upload that only the id registration covers. The thread ids of tabs 1, 2 and
+  5, read back from their saved session records, equal the `session` on their uploads. A `curl`
+  upload with no thread id was stored with `session: null` and logged the one
+  `Upload with no thread id` line. The UI uploads logged none.
+
+### Stage S23.6 What this stage did not fix
+
+- A thread-less upload is still in the pool in dev and demo mode (S23.3). Of the two example pages,
+  the reference client mints a thread id per page load, so it needs a one-line change. The
+  dashboard page defaults every visitor to `demo-thread-1`, so stamping its uploads with that would
+  move them from the pool into one conversation that everyone shares.
+- Until Stage 17 lands, `read_text_file` and `inspect_file_for_analysis` still read another
+  conversation's upload by bare name (S23.5).
+- S17.3's choice of recency over "own conversation first" is not revisited here. Its premise no
+  longer holds for an upload from a client that sends its thread id, but a legacy record and a
+  thread-less upload still cannot be told apart.
+- A request with no `thread_id` binds no conversation, and raw-path and file-id access are
+  unscoped. Both are as S17.5 describes.
+- Two older gaps in the same client code, found by reading it and not measured. A reopened
+  conversation does not register the layers a `map_layer` event drew, so a later turn that lists the
+  conversation's outputs can draw one of them a second time. And an upload whose name
+  `secure_filename` rewrites never gets its `sourceUrl`, so one too large to keep inline cannot be
+  restored.
+
+---
+
+## Stage 24 — A laptop that writes nothing {#stage-24}
+
+### Stage S24.1 The recipe failed twice, so it became a mode
+
+Running the agent locally meant inheriting the main checkout's `.env`, which points at shared
+infrastructure: the PRODUCTION OpenSearch cluster, a remote embedding server, the production
+agent's public URL, dev object storage, the VM's rs-embed, and `AGENT_MODE=token`. Every
+`load_dotenv` in the code walks up from a worktree and finds that file.
+
+The safe way to run locally was therefore a list of overrides, and the list failed twice. On
+2026-10-01 a local verification run wrote seven conversations into prod; nothing errored, because
+a write that should not happen does not fail — it succeeds. The recipe recorded afterwards
+(`PLATFORM_TIER=dev` with `OPENSEARCH_NODE` blank) still wrote, to the DEV cluster: with the
+explicit host empty, `platform_endpoints.opensearch_url()` falls back to the tier's. It was caught
+only by reading the code while planning a local model test.
+
+A guarantee that depends on remembering eight variables is not a guarantee. `AGENT_MODE=local`
+is a fourth mode beside `dev`, `demo` and `token`.
+
+### Stage S24.2 What it guarantees, and where each guarantee lives
+
+**Persistent memory is off, checked in three places.** The failure it prevents is silent, so no
+single check is trusted alone:
+
+* **The request flag**, in `_normalize_agent_chat_request` and at the second call site. The map
+  UI hard-codes `use_persistent_memory: true`, so a flag the client controls cannot be the switch;
+  local mode overrides it.
+* **The conversation endpoints.** The map UI saves snapshots by `PUT /agent/conversations/<id>`
+  DIRECTLY, outside the per-request flag. In local mode a PUT is declined in the body
+  (`{"stored": false}`, HTTP 200 — the client keeps its own copy, and a store that is deliberately
+  off is not an error for it to report); GET and traces answer 404. These checks run BEFORE
+  `assert_memory_owner`, which reads the store.
+* **The store's own client.** `memory_module._get_opensearch_client()` raises
+  `PersistentMemoryDisabled` before it builds anything — and before it consults the cache, since
+  a guard behind the cache is bypassed by any client built earlier. Every read and write of the
+  conversation store comes through here, which is what makes the mode a guarantee rather than a
+  convention.
+
+**Knowledge-base search keeps reading.** Memory and search shared `OPENSEARCH_NODE`, so "no memory
+writes" used to imply "no search", and a model tested without search is being tested on a crippled
+agent. The five search modules build their own clients, so closing the memory store leaves them
+untouched.
+
+**Download links stay on the machine.** `AGENT_PUBLIC_BASE_URL` is ignored; the `.env` sets it to
+the production agent, which made every local link a 404 against a host that never had the file.
+
+**Access is `dev`'s.** No identity, settings shown, model chosen per request. Every existing call
+site tests `is_token()` or demo — none compares `== DEV` — so `local` inherited dev behaviour at
+each of them without a change.
+
+### Stage S24.3 The banner is the part that prevents a repeat
+
+The 2026-10-01 writes went unnoticed because nothing ever said *this process will write to
+149.165.155.195*. In local mode the server logs, at boot, every endpoint it can still reach,
+tagged `[local ]` or `[REMOTE]`, with credentials in URLs masked and `AGENT_PUBLIC_BASE_URL` listed
+as `[ignored]` rather than silently dropped.
+
+### Stage S24.4 How it was tested
+
+`test_local_mode.py` targets the two real failing configurations by name and asserts the store is
+never OPENED — a constructor that raises if called — rather than that a write fails, since "it
+raised" and "it did not touch the cluster" are different claims. Both load-bearing guards were
+mutation-tested: removing the store guard fails the four store tests; removing the request
+override fails the one that covers it.
+
+`/agent/ui-config` gained `persistent_memory`. The endpoint is unauthenticated, and
+`test_demo_mode.py` pins its whole body so that any new field is a deliberate edit; that pin was
+extended rather than loosened.
+
+### Stage S24.5 What it does not do
+
+It does not make a local run OFFLINE. The LLM, the remote embedding server and knowledge-base
+reads are still real network calls; the banner names them. It does not change any deployed mode:
+`token` on the VM is untouched. And the map UI's own word "local" — its mock mode, `runLocal` —
+is a different thing from this server mode; a comment in both places says so.

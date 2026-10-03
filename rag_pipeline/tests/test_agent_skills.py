@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from agent_runtime.skills import SkillError, SkillRegistry, make_skill_tools, parse_frontmatter
+from agent_runtime import skills as skills_module
+from agent_runtime.skills import (
+    SkillError,
+    SkillRegistry,
+    default_skill_roots,
+    make_skill_tools,
+    parse_frontmatter,
+)
 from agent_runtime.tool_policy import select_allowed_tools
 
 
@@ -186,3 +193,62 @@ def test_skill_tools_survive_intent_filtering():
 
     assert "load_skill" in allowed
     assert "list_available_skills" in allowed
+
+
+# ------------------------------------------------------------------ the default roots
+#
+# Every production caller — graph_runtime, tool_policy, the supervisor, capabilities — passes
+# ``skill_roots=None`` unless a request supplies ``skillPaths``, so what the agent sees is
+# exactly ``DEFAULT_SKILL_ROOTS`` plus whatever ``AGENT_SKILL_PATHS`` adds. The tests above
+# all pass explicit roots and never exercise that path. These do, against two roots laid out
+# the way the defaults resolve inside the agent-api image, where REPO_ROOT is /app.
+
+
+def _image_shaped_roots(tmp_path, monkeypatch):
+    app = tmp_path / "app"
+    roots = (app / "skills", app / ".agents" / "skills")
+    monkeypatch.setattr(skills_module, "DEFAULT_SKILL_ROOTS", roots)
+    for name in ("AGENT_SKILL_PATHS", "AGENT_SKILLS_PATHS", "AGENT_SKILLS_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    return roots
+
+
+def test_discovery_with_no_explicit_roots_reads_every_default_root(tmp_path, monkeypatch):
+    curated, generated = _image_shaped_roots(tmp_path, monkeypatch)
+    _write_skill(curated, "curated-skill")
+    _write_skill(generated, "generated-skill")
+
+    registry = SkillRegistry.discover()
+
+    assert registry.errors == []
+    found = {skill.name: skill.source_root.resolve() for skill in registry.list()}
+    assert found == {"curated-skill": curated.resolve(), "generated-skill": generated.resolve()}
+
+
+def test_a_missing_default_root_is_skipped_without_an_error(tmp_path, monkeypatch):
+    """The behaviour that let the packaging defect hide: a root that is not there is not an
+    error, so a registry that degrades to one root (or none) reports nothing. Pinned here so
+    the Dockerfile test in test_deployment_contract.py is understood as the only guard."""
+    curated, generated = _image_shaped_roots(tmp_path, monkeypatch)
+    _write_skill(curated, "curated-skill")
+    assert not generated.exists()
+
+    registry = SkillRegistry.discover()
+
+    assert [skill.name for skill in registry.list()] == ["curated-skill"]
+    assert registry.errors == []
+
+
+def test_extra_roots_from_the_environment_are_added_not_substituted(tmp_path, monkeypatch):
+    """A deployment that points AGENT_SKILL_PATHS at a writable volume for generated skills
+    must keep the curated roots baked into the image."""
+    curated, generated = _image_shaped_roots(tmp_path, monkeypatch)
+    volume = tmp_path / "agent_chat_files" / "skills"
+    _write_skill(curated, "curated-skill")
+    _write_skill(generated, "generated-skill")
+    _write_skill(volume, "volume-skill")
+    monkeypatch.setenv("AGENT_SKILL_PATHS", str(volume))
+
+    assert default_skill_roots() == [curated, generated, volume]
+    names = [skill.name for skill in SkillRegistry.discover().list()]
+    assert names == ["curated-skill", "generated-skill", "volume-skill"]

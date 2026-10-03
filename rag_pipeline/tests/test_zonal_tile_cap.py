@@ -106,7 +106,7 @@ def test_truncated_counts_the_tiles_the_zones_touch_not_the_whole_grid(tmp_path,
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}",
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}",
                                                   "filename": filename,
                                                   "download_url": f"/f/{filename}",
                                                   "size_bytes": 10})

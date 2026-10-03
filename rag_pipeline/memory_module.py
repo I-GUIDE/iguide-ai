@@ -79,8 +79,36 @@ def configure_opensearch_client(client: OpenSearch) -> None:
     _OPENSEARCH_CLIENT = client
 
 
+class PersistentMemoryDisabled(RuntimeError):
+    """Raised instead of opening a client when this process may not touch the shared store.
+
+    ``AGENT_MODE=local`` sets it. Callers that already treat an unreachable store as "carry on
+    without memory" keep doing so; the conversation endpoints catch this type specifically so
+    they can answer the way a store that is OFF should, rather than with a 500.
+    """
+
+
 def _get_opensearch_client() -> OpenSearch:
     global _OPENSEARCH_CLIENT
+    # FIRST, ahead of the cached client: a guard after the cache would be bypassed by any client
+    # built before the mode was read. This is the layer that makes local mode a guarantee rather
+    # than a convention — the request flag and the endpoint checks above it can each be missed by
+    # a new code path, but every read and write of this store comes through here.
+    try:
+        from agent_runtime import deployment_mode
+    except ImportError:  # noqa: BLE001 - memory predates the mode table; never hard-depend
+        deployment_mode = None
+    allowed = True
+    if deployment_mode is not None:
+        try:
+            allowed = deployment_mode.persistent_memory_allowed()
+        except ValueError:
+            # An unknown AGENT_MODE raises by design elsewhere; here, refusing is the safe answer.
+            allowed = False
+    if not allowed:
+        raise PersistentMemoryDisabled(
+            "AGENT_MODE=local: persistent memory is off, so the conversation store is never "
+            "opened. Knowledge-base search is unaffected — it uses its own clients.")
     if _OPENSEARCH_CLIENT is not None:
         return _OPENSEARCH_CLIENT
 
