@@ -285,7 +285,7 @@ def test_run_success(monkeypatch, tmp_path):
             "num_turns": 3, "total_cost_usd": 0.01,
         }), "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ccp.fork_safe, "run", fake_run)
     monkeypatch.setattr(ccp, "_persist_artifacts",
                         lambda work, exclude: [{"filename": p.name} for p in work.iterdir()
                                                if p.is_file() and not p.name.startswith(".")])
@@ -303,7 +303,7 @@ def test_run_reports_an_envelope_error_even_on_exit_zero(monkeypatch, tmp_path):
     would report a failed analysis as a successful one."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+    monkeypatch.setattr(ccp.fork_safe, "run", lambda argv, **kw: subprocess.CompletedProcess(
         argv, 0, json.dumps({"result": "hit the turn limit", "is_error": True}), ""))
     monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
     res = ccp.run_claude("something")
@@ -323,7 +323,7 @@ def test_run_timeout_kills_the_container(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise subprocess.TimeoutExpired(argv, 35)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ccp.fork_safe, "run", fake_run)
     monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
     res = ccp.run_claude("loop forever")
     assert res["ok"] is False and res["timed_out"] is True

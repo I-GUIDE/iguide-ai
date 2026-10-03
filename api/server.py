@@ -785,8 +785,8 @@ def _list_code_peers():
     tell "not configured" apart from "not built".
     """
     import os as _os
-    import subprocess as _sp
 
+    from agent_runtime import fork_safe
     from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, SELECTABLE_MODELS,
                                            resolve_claude_settings, selects_claude)
     from agent_runtime.opencode_peer import (CODE_PEER_ENV, DEFAULT_OPENCODE_IMAGE,
@@ -795,8 +795,8 @@ def _list_code_peers():
     def _image_present(env_var, default_name):
         name = _os.getenv(env_var, default_name)
         try:
-            return _sp.run(["docker", "image", "inspect", name],
-                           capture_output=True, timeout=5).returncode == 0
+            return fork_safe.run(["docker", "image", "inspect", name],
+                                 capture_output=True, timeout=5).returncode == 0
         except Exception:  # noqa: BLE001 - no docker, no answer, never a page error
             return False
 

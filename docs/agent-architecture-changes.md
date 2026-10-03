@@ -38,6 +38,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 22 | [A file_id names one write](#stage-22) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
 | 23 | [An upload names its conversation](#stage-23) | 2026-10-02 | the upload route binds the thread id as well as the caller; the map UI sends it |
 | 24 | [A laptop that writes nothing](#stage-24) | 2026-10-03 | `AGENT_MODE=local` makes a laptop run write to no shared store; an override list wrote seven conversations into prod |
+| 25 | [Starting a child without forking the agent](#stage-25) | 2026-10-01 | on macOS every child starts by `posix_spawn`; nothing in the agent process forks |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -3904,3 +3905,171 @@ It does not make a local run OFFLINE. The LLM, the remote embedding server and k
 reads are still real network calls; the banner names them. It does not change any deployed mode:
 `token` on the VM is untouched. And the map UI's own word "local" — its mock mode, `runLocal` —
 is a different thing from this server mode; a comment in both places says so.
+
+---
+
+## Stage 25 — Starting a child without forking the agent {#stage-25}
+
+On 2026-10-01 a local agent server on the maintainer's Mac ran one turn that called
+`admin_boundary`, `qgis_metric_buffer` and `add_map_layer`, all successfully. After that, every
+child the same process started died before `exec`. `qgis_metric_buffer` returned returncode -11
+with empty stdout and stderr at its first step (`native:reprojectlayer`), and the `execute_code`
+fallback "failed during dependency installation". Neither program ever ran. macOS wrote 11 crash
+reports, each for a `python3.13` child of the server, each faulting inside PROJ's `pthread_atfork`
+child handler. The workaround at the time was to restart the server between turns. The same day
+had 11 more reports with the identical signature from a Python 3.11 process, and while this entry
+was being written another session's local server wrote four more, so it is not one interpreter
+or one session.
+
+This is a stage rather than a fix in one tool because the agent process is the parent of every
+QGIS run, every sandbox container and every CLI peer, so how it starts a child is a property of
+the whole process. One function now owns it, and a test keeps every other route out. Stages 13
+to 15 are claimed by open branches; this takes the next free number.
+
+### Stage S25.1 The chain
+
+Read from the crash reports, PROJ's source, the libsystem_trace and libsqlite3 code in the dyld
+shared cache, and an `atfork` probe in the child:
+
+1. **PROJ registers a fork handler on its first database lookup.** It is pyproj 3.7.2's bundled
+   PROJ 9.5.1, from the user site-packages here. In the child, the handler empties
+   `SQLiteHandleCache` (`invalidateHandles()` → `cache_.clear()`), which `sqlite3_close`s every
+   proj.db handle that no live PROJ object still holds. That code is unchanged through PROJ master.
+2. **That PROJ links Apple's `/usr/lib/libsqlite3`, whose descriptor is already invalid in the
+   child.** With `PROJ_LOG_SQLITE3=1` every child printed `cannot fstat db file …/proj.db` and
+   `close(…/proj.db) - Bad file descriptor`. Apple's `sqlite3_log` forwards each message to
+   `os_log`; an initializer inside `sqlite3_initialize` switches that route on.
+3. **libsystem_trace reads a mapping the child did not inherit.** `os_log_type_enabled` compares
+   the log object's generation with the process's, and on a mismatch it refreshes the object by
+   reading its subsystem key (`com.apple.libsqlite3` / `logging`). That key lives in logd's shared
+   "Activity Tracing" mapping. Probed in the child before PROJ's handler ran, the key's page was
+   unmapped and the generations had been reset (0 and -1, against 1 and 1 in the parent), so
+   every child takes the refresh. The refresh maps a fresh copy first, and the stale pointer is
+   valid again only if that copy lands where the parent had it. The faulting instruction is
+   `ldrb w23, [x8, #0x2]` with `x8` the key, and the fault address is the key plus 2, "not in any
+   region".
+
+### Stage S25.2 Why three lines never reproduced it, and what does
+
+The minimal script (a `Transformer.from_crs` lookup, then a subprocess from a thread) survives
+because nothing has freed address space below the preferences mapping, so the child maps it back
+at the parent's address. After PROJ's handler the probe found the key mapped again. The extra
+condition the server supplied was not logging state held by another thread, the hypothesis at the
+time. It was the address-space layout.
+
+Measured, with the reprojection in a worker thread and the launch from another:
+
+| freed between the first reprojection and the launch | child |
+|---|---|
+| nothing (the three-line script) | 0 |
+| request threads that exited (1 and 4) | 0 |
+| a 1 MB or 8 MB buffer, or a 6.5 MB HTTP body (libmalloc keeps their address space) | 0 |
+| 200,000 or 500,000 small objects (CPython unmaps the emptied 1 MiB arenas) | **-11** |
+
+`scripts/repro_macos_fork_crash.py` is the last row. It runs in 0.7 s, and its crash reports
+match the server's frame for frame (the first 16 frames, offsets inside libsqlite3 and
+libsystem_trace included). It points SIGSEGV at `_exit`, so a doomed child exits with status 11
+and no report is written; `--crash-report` keeps the real one.
+
+### Stage S25.3 The options, measured in that state
+
+| how the child was started | child |
+|---|---|
+| `subprocess.run(cwd=job_dir)`, what `qgis_headless_tools._run_subprocess` did | **-11** |
+| `subprocess.run` with an absolute path and the default `close_fds` | **-11** |
+| `os.fork()` | **-11** |
+| multiprocessing `'spawn'`, which starts its child with fork_exec | **-11** |
+| `SQLITE_ENABLE_LOGGING=0` (Apple's switch), then the original call | **-11** |
+| multiprocessing `'forkserver'`, started before any PROJ use | 0 |
+| `posix_spawn`: absolute path, `close_fds=False` | 0 |
+| `posix_spawn` through `/bin/sh` that changes directory and `exec`s | 0, in the right directory |
+| real `qgis_process --version` and `docker version`, by `posix_spawn` | 0 |
+
+Turning Apple's logging off does not help, because `sqlite3_close` also asks `os_signpost` about
+the same log object, and that crash came through the same refresh. A forkserver or helper works,
+but only if it exists before the first PROJ lookup in every entry point: the server, gunicorn, a
+script, a test. A fork handler cannot be unregistered, and keeping a live PROJ object does not
+stop the close: with a `pyproj.CRS` held for the life of the process, the child still died.
+`posix_spawn` needs no ordering, because nothing in this process runs at all in the child.
+
+CPython 3.13 already uses `posix_spawn` on macOS, but only when the program is a path, `close_fds`
+is false (macOS has no `POSIX_SPAWN_CLOSEFROM`), and there is no `cwd`, `preexec_fn`, `pass_fds`,
+new session, process group or identity change. Anything else falls back to fork_exec without a
+word. `_run_subprocess` missed two of those conditions: `cwd=job_dir`, and the default
+`close_fds`.
+
+### Stage S25.4 `fork_safe.run`
+
+`agent_runtime/fork_safe.py`, a `subprocess.run` that takes the arguments the agent uses:
+
+* The program is resolved on the child's `PATH` as subprocess would, and a missing one raises the
+  same `FileNotFoundError`, so every caller's "qgis_process not found" and "docker executable not
+  found" branch keeps its meaning.
+* `close_fds=False` costs nothing. PEP 446 makes every descriptor Python opens non-inheritable,
+  and a process with `api.server` imported and the turn's tools run had nothing inheritable but 0,
+  1 and 2.
+* A working directory is reached through `/bin/sh -c 'cd -- "$1" && shift && exec "$@"'`. The
+  `exec` matters: the command, not the shell, is the agent's child, so the exit status is the
+  command's and a kill on timeout reaches it instead of orphaning it behind a dead shell. A test
+  pins it by checking that the command's parent pid is the agent's.
+* Options that would bring fork back (`preexec_fn`, `pass_fds`, `start_new_session`,
+  `close_fds=True`, …) are refused on every platform, so a Linux-only run still catches them.
+* Off macOS it is `subprocess.run`, unchanged.
+
+Fifteen launches moved to it: QGIS (2), `code_execution` (8), the two CLI peers (2 each), and the
+server's docker image check (1). Measured end to end in the crashing state, with the real tools:
+`qgis_metric_buffer_tool` through `fork_safe` returned ok with its three steps at 0, the same call
+through the old launch failed at `reproject_input`, and `execute_code` ran in the
+`iguide-codeexec` sandbox. The reproduction and these tests also pass under the Mac's Python
+3.11.12, whose `posix_spawn` conditions differ in detail. `test_fork_safe.py` scans
+`agent_runtime/`, `rag_pipeline/` and `api/` and fails on a direct `subprocess`, `os.fork`,
+`os.system` or multiprocessing start, because a new tool calling `subprocess.run` would bring the
+crash back on a Mac and nowhere else. It also runs the reproduction: the guarded child must run in
+its directory, and on a Mac the unguarded one must die, or that test skips and says the
+environment does not reproduce it.
+
+Seventeen test fakes moved from `subprocess.run` to `fork_safe.run`, and one test that starts a
+real child now uses it too: `test_numpy_stand_ins_reproduce_scikit_learn` skips when its
+scikit-learn child exits non-zero, so a child killed by this crash would have been reported as
+"scikit-learn unavailable". On macOS `subprocess.run` now receives `/bin/sh` and no `cwd`, and
+four QGIS tests that asserted on `argv[0]` and `cwd` failed until their fake replaced the function
+the module actually calls. The peer and code-execution fakes passed either way, but only because
+`docker` is on this Mac's PATH, which is not something a fake should depend on.
+
+### Stage S25.5 The deployed container is not affected
+
+Checked inside `agent-api` (Python 3.11.16, glibc 2.41) with throwaway scripts in `/tmp`. Nothing
+was deployed.
+
+* **PROJ registers the handler there too.** All four PROJ copies in the image import
+  `__register_atfork`: pyproj's 9.5.1, rasterio's 9.7.1, fiona's 9.4.1, and the system 9.6.0 that
+  QGIS 3.40.6 uses. **Revised during the work:** the first check searched those libraries for
+  `pthread_atfork`, found nothing, and would have recorded "Linux PROJ has no fork handler". On
+  glibc `pthread_atfork` is linked statically from `libc_nonshared.a`, and what a library imports
+  is `__register_atfork`.
+* **What protects Linux is how CPython starts children there.** With libc's `abort` registered
+  as a fork child handler, `subprocess.run(["pwd"], cwd=dir)` exited 0 in the container and
+  aborted on the Mac. `os.fork()` aborted on both, which proves the handler was live. CPython 3.11
+  uses `vfork` or `posix_spawn` for subprocess on Linux, and neither runs fork handlers.
+* **Even a real fork is harmless there.** In the same 500,000-object state, `os.fork()`, which
+  does run PROJ's handler, exited 0. So did `subprocess.run(["pwd"], cwd=dir)` and a real
+  `qgis_process --version`. `PROJ_LOG_SQLITE3=1` printed nothing in the child: the image's bundled
+  SQLite has a valid descriptor there and nothing to report, and Linux has no `os_log`.
+
+So this change is a no-op on the deployment, and no Linux CI run would ever have shown the bug.
+
+### Stage S25.6 What this does not fix
+
+* The two defects are upstream and unreported. PROJ calls `sqlite3_close`, which is not
+  async-signal-safe, from a fork child handler, and libsystem_trace refreshes a logging object
+  through a pointer the child never inherited.
+* Any real `fork()` of the agent process on macOS still runs PROJ's handler. Our code has none,
+  and the scan forbids adding one, but a library can. joblib does: `esda.G_Local` defaults to
+  `n_jobs=-1`, and its loky pool starts each worker with `os.fork()` and then `exec`. That is the
+  same mechanism, though it was not reproduced in a realistic order: importing esda and numba
+  after the reprojection filled the free gap, so the next fork survived. Passing `n_jobs=1`
+  would close that route and is also cheaper at the agent's sizes (on 144 features with 999
+  permutations, 5 s serial against 30–36 s for the pool). It is left for a separate change,
+  because it changes how a statistics tool computes rather than how a child is started.
+* The 11 crash reports from the incident, and the ones made while reproducing it before the
+  script learned to avoid them, are still in `~/Library/Logs/DiagnosticReports`.
