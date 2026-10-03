@@ -423,7 +423,7 @@ def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {
@@ -580,7 +580,7 @@ def test_embed_zones_delivers_the_picture_and_the_groups(tmp_path, monkeypatch):
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     reply = {"ok": True, "model": "gse", "year": 2022, "zones": 2, "dim": 3,
@@ -690,7 +690,7 @@ def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_pa
     monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
     monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
     monkeypatch.setattr(FS, "create_output_file_from_path",
-                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                        lambda p, filename=None, **_: {"file_id": f"id_{filename}", "filename": filename,
                                                   "download_url": f"/files/{filename}",
                                                   "size_bytes": 10})
     monkeypatch.setattr(T, "_svc", lambda *a, **k: {

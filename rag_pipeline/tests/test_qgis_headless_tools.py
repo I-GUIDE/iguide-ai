@@ -391,9 +391,17 @@ def test_resolve_layer_ref_passthrough_for_raw_path():
 
 
 def test_pyqgis_available_probes_worker_python(monkeypatch):
+    """A worker interpreter that cannot import qgis means no PyQGIS, unless overridden.
+
+    The candidate list is pinned, not just ``QGIS_PYTHON_BIN``. ``qgis_python_candidates`` falls
+    back to this interpreter and then /usr/bin/python3 on purpose, and in the agent image that
+    distro python HAS the bindings, so a nonexistent ``QGIS_PYTHON_BIN`` alone left PyQGIS
+    available there. The test passed only on machines without QGIS.
+    """
     monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
-    qgis_headless_tools._PYQGIS_PROBE_CACHE.clear()
-    monkeypatch.setenv("QGIS_PYTHON_BIN", "/nonexistent/python_zzz")   # cannot import qgis
+    monkeypatch.setattr(qgis_headless_tools, "_PYQGIS_PROBE_CACHE", {})
+    monkeypatch.setattr(qgis_headless_tools, "qgis_python_candidates",
+                        lambda: ["/nonexistent/python_zzz"])            # cannot import qgis
     assert qgis_headless_tools.pyqgis_available() is False
     monkeypatch.setenv("AGENT_QGIS_ENABLED", "1")                      # override wins
     assert qgis_headless_tools.pyqgis_available() is True

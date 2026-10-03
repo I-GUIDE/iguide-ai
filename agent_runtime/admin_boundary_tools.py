@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent_runtime.map_layers import boundary_layer_id
+from agent_runtime.map_layers import boundary_layer_id, content_key
 from agent_runtime.tool_args import accept_null_defaults
 
 logger = logging.getLogger(__name__)
@@ -154,8 +154,11 @@ def resolve_state(text: str) -> Tuple[Optional[str], List[str]]:
     return None, near[:8]
 
 
-def _write_layer(features: List[Dict[str, Any]], stem: str) -> Dict[str, Any]:
-    """Persist a FeatureCollection to the file store; returns its record."""
+def _write_layer(features: List[Dict[str, Any]], stem: str,
+                 key: Optional[str] = None) -> Dict[str, Any]:
+    """Persist a FeatureCollection to the file store; returns its record. ``key`` is what the
+    file holds (see _boundary_key), recorded so that the layer drawn from it, and every later
+    step that reads it, identifies it by content rather than by this write's file_id."""
     from agent_runtime.file_store import create_output_file_from_path
 
     fname = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_")[:60] or "boundary"
@@ -164,7 +167,25 @@ def _write_layer(features: List[Dict[str, Any]], stem: str) -> Dict[str, Any]:
     out = Path(tempfile.mkdtemp(prefix="admin_boundary_")) / fname
     out.write_text(json.dumps({"type": "FeatureCollection", "features": features}),
                    encoding="utf-8")
-    return create_output_file_from_path(out, filename=fname)
+    return create_output_file_from_path(out, filename=fname, content_key=key)
+
+
+def _boundary_key(level: str, geoids: List[str], subdivide: Optional[str],
+                  limit: Optional[int]) -> str:
+    """What a boundary result IS: its resolved level and GEOIDs, plus what it was cut into.
+
+    The question as worded is left out on purpose. "Champaign", "Champaign city" and
+    name='Champaign' resolve to one place, so they must produce one key, and therefore one
+    map layer (see map_layers.boundary_layer_id). So are the output name and the file_id: a
+    re-grounding pass that asked again wrote a byte-identical file under a new id, and a key
+    built from either would have stacked a second copy of the outline (2026-10-01).
+
+    ``limit`` is set only when MAX_FEATURES actually truncated the result. In that case it
+    decides the content, and otherwise it does not.
+    """
+    ids = sorted(str(g or "") for g in geoids)
+    return content_key(subdivide or level, ids[0] if len(ids) == 1 else f"{len(ids)}_places",
+                       level=level, geoids=ids, subdivide=subdivide, limit=limit)
 
 
 def _bbox(features: List[Dict[str, Any]]) -> Optional[List[float]]:
@@ -347,6 +368,7 @@ def make_admin_boundary_tools() -> List[Any]:
 
         # --- optionally return what is INSIDE it, which is what embed_zones wants ---------
         zone_note = None
+        sub: Optional[str] = None
         if subdivide:
             sub = str(subdivide).strip().lower().rstrip("s").replace(" ", "_")
             layer = {"tract": _TRACTS_LAYER, "block_group": _BG_LAYER,
@@ -382,8 +404,11 @@ def make_admin_boundary_tools() -> List[Any]:
 
         stem = output_name or (zone_note and f"{matched[0]['name']}_{subdivide}") or \
             (matched[0]["name"] if len(matched) == 1 else f"{area_text}_{lvl}")
+        key = _boundary_key(lvl, [str(m.get("geoid") or "") for m in matched],
+                            {"blockgroup": "block_group"}.get(sub or "", sub),
+                            MAX_FEATURES if truncated else None)
         try:
-            rec = _write_layer(feats, str(stem))
+            rec = _write_layer(feats, str(stem), key)
         except Exception as exc:  # noqa: BLE001
             return json.dumps({"ok": False,
                                "error": f"could not save the boundary: {type(exc).__name__}: {exc}"})
@@ -408,11 +433,12 @@ def make_admin_boundary_tools() -> List[Any]:
                           "zone_id_field='GEOID') embeds each of these polygons"),
             # Drawn as an OUTLINE: a boundary is a frame for whatever is analysed inside it,
             # and a filled polygon would hide the raster embed_zones puts underneath.
-            # Keyed on the FILE, not on the label. embed_zones redraws these same polygons
-            # with what it found inside them, and it knows this file_id — so an explicit id
-            # lets it take this layer's place instead of adding a second outline of the same
-            # city. Without one, build_map_layer invents `agent-<slug of the label>`, which
-            # nothing downstream can reconstruct.
+            # Keyed on what the FILE HOLDS, not on the label. embed_zones redraws these same
+            # polygons with what it found inside them, and it knows this file_id — so an
+            # explicit id lets it take this layer's place instead of adding a second outline of
+            # the same city. Without one, build_map_layer invents `agent-<slug of the label>`,
+            # which nothing downstream can reconstruct. boundary_layer_id reads the key
+            # recorded above, so asking for the same place again REPLACES this layer.
             "map_layer": {"url": rec.get("download_url"), "label": label, "render": "shapes",
                           "id": boundary_layer_id(str(rec.get("file_id") or "")),
                           "source": "analysis", "count": len(feats), "outline": True},

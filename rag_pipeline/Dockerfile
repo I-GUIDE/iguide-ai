@@ -2,6 +2,14 @@ FROM python:3.11-slim
 
 # Install system dependencies (GDAL for geopandas/fiona used by the in-process
 # MCP spatial tools the analysis agent loads)
+#
+# libexpat1 is named although the GDAL and QGIS packages pull it in anyway, because the Python
+# side needs it on its own: the rasterio and fiona wheels bundle their own GDAL, and that GDAL
+# links the system's libexpat.so.1, which python:3.11-slim does not ship. Until it was named
+# here the image had it only as an automatic dependency of 16 of those packages (libgdal36,
+# libqgis-core3.40.6 and python3.13-minimal among them), so dropping them, which looks safe
+# because the wheels bring their own GDAL, would leave `import rasterio` and `import fiona`
+# failing with "libexpat.so.1: cannot open shared object file".
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -9,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     gdal-bin \
     libgdal-dev \
+    libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (client only) so sandboxed code execution can shell out to the HOST
@@ -46,29 +55,52 @@ ENV MPLBACKEND=Agg \
     QGIS_PREFIX_PATH=/usr \
     QT_QPA_PLATFORM=offscreen
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install Python dependencies, through the lock. requirements.txt names
+# packages, not versions; constraints.txt is the deployed image's own `pip freeze`. Without -c
+# every rebuild installed whatever was newest that day: nine days after the 2026-09-22 build,
+# an unpinned resolve already differed from the running image on 42 of 175 packages. Every
+# pip install below goes through the same file. A requirement the lock does not list yet
+# floats until the lock is retaken from the rebuilt image; constraints.txt's header says how.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # py-spy reads the Python stacks of a RUNNING process from outside it, without the target's
 # cooperation. deploy/agent-watchdog.sh runs it against this container before restarting one
 # that has gone unhealthy, so a hang leaves behind the stack every thread was sitting on
 # rather than just the fact that it happened. Its own layer: a few MB, and it must not
 # invalidate the requirements layer above.
-RUN pip install --no-cache-dir py-spy
+RUN pip install --no-cache-dir -c constraints.txt py-spy
 
-# Install spaCy model for NLP processing
-RUN python -m spacy download en_core_web_sm
+# spaCy's English model for NLP processing, installed from the URL and sha256 the lock records.
+# `spacy download` would install whichever model version spaCy's compatibility table, fetched
+# from GitHub at build time, names that day, outside the lock and without a hash check. Today
+# both give the same wheel: en_core_web_sm 3.8.0, which has no dependencies of its own.
+RUN pip install --no-cache-dir -c constraints.txt en_core_web_sm
 
 # Copy application packages. MCP_server is required because the agent loads MCP
 # tools in-process (agent_runtime.langchain_mcp_tools imports MCP_server/tools/*).
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
+# The page GET /agent/dashboard serves. api/server.py reads it relative to the repository root,
+# /app here, and examples/ was never on this list, so the route answered 500 (FileNotFoundError)
+# in every image while a checkout served it. Only this file: nothing in the image reads the rest
+# of examples/. rag_pipeline/tests/test_image_dashboard_page.py fails if this line is dropped or
+# sends the page elsewhere.
+COPY examples/agent_chat_stream_demo.html ./examples/
 COPY MCP_server/ ./MCP_server/
 # Agent knowledge-base ingestion package — the search/code peers' agent_kb_search and
 # get_kb_block tools import `extractors` (kb_store, indices) at call time.
 COPY extractors/ ./extractors/
+# Skill bundles. agent_runtime/skills.py discovers SKILL.md files under REPO_ROOT/skills and
+# REPO_ROOT/.agents/skills, and REPO_ROOT resolves to /app in this image. Neither root was on
+# the explicit copy list above, so every deployed container ran with an EMPTY skill registry
+# (no error: a missing root is skipped by design) while the same code on a developer checkout
+# found every skill. Copy BOTH roots: they hold different skills, and a later root only
+# overrides an earlier one when two skills share a name. rag_pipeline/tests/
+# test_image_skill_roots.py fails if either line is dropped or sends a root elsewhere.
+COPY skills/ ./skills/
+COPY .agents/ ./.agents/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request

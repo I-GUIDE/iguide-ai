@@ -625,6 +625,25 @@ def qgis_metric_buffer_tool(
                 }
             )
 
+    # What this buffer IS: the CONTENT of its input, the distance and the two projections.
+    # Recorded on the output so that the layer drawn from it (add_map_layer, which reads it
+    # back through file_content_key) is the same layer however often the step is repeated.
+    # The output name and the input's file_id stay out. On 2026-10-01 a re-grounding pass
+    # buffered a second, byte-identical copy of the same boundary under a new file_id.
+    # Never at the buffer's expense: without a key the output is still identified by its bytes.
+    key: Optional[str] = None
+    try:
+        from agent_runtime.langchain_geo_tools import source_content_key
+        from agent_runtime.map_layers import content_key
+
+        key = content_key("qgis_buffer", f"{distance:g}m",
+                          input=source_content_key(str(input_layer or "").strip(), source),
+                          distance_m=round(distance, 3),
+                          projected_crs=str(projected_crs or "").strip().upper(),
+                          target_crs=str(target_crs or "").strip().upper(),
+                          dissolve=bool(dissolve), segments=segment_count)
+    except Exception:  # noqa: BLE001
+        key = None
     payload: Dict[str, Any] = {
         "ok": final_output.exists(),
         "job_id": job_id,
@@ -638,10 +657,12 @@ def qgis_metric_buffer_tool(
     }
     if final_output.exists():
         try:
+            # A new file every run, never overwrite=True. A re-run can differ (a corrected
+            # distance), and the earlier answer's link must keep serving the buffer it showed.
             payload["managed_output"] = create_output_file_from_path(
                 final_output,
                 filename=final_output.name,
-                overwrite=True,
+                content_key=key,
             )
         except Exception as exc:
             payload["managed_output_error"] = str(exc)
@@ -770,10 +791,10 @@ def pyqgis_render_map_tool(
     output_path = result.get("output_path")
     if result.get("ok") and output_path:
         try:
+            # A new file every run, as in qgis_metric_buffer: an earlier answer embeds this image.
             record = create_output_file_from_path(
                 output_path,
                 filename=Path(str(output_path)).name,
-                overwrite=True,
             )
             result["managed_output"] = record
         except Exception as exc:
