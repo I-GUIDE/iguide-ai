@@ -3744,8 +3744,8 @@ reads the file then keys it by what it holds.
 *2026-10-02. Branch `claude/read-by-name-scoping`.*
 
 S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
-used that lookup for a bare filename. They kept a directory scan of their own. Stage 15 on
-`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S15.6).
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 22 lists
+it as the read-side twin it did not fix (its S22.6).
 
 ### Stage S21.1 What a read by name did
 
@@ -3855,8 +3855,8 @@ Two scoping gaps sit upstream of the lookup:
 *2026-10-01. Branch `claude/output-overwrite-scope`.*
 
 S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
-the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
-`claude/layer-identity-by-inputs` (its S13.6) lists it among what it did not fix.
+the store's original shape, a single flat namespace: `overwrite=True`. Stage 20, the layer-identity
+stage, lists it among what it did not fix (its S20.6).
 
 ### Stage S22.1 What overwrite did
 
@@ -3878,7 +3878,7 @@ answered 404: the download endpoint's `may_read` check found a record that named
 
 Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
 (`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
-re-grounding pass (the S13.1 table on that branch). That pass repeated the same buffer. A re-run
+re-grounding pass (the S20.1 table). That pass repeated the same buffer. A re-run
 with a corrected distance would have changed what the first answer's link served, with nothing in
 the transcript to show it.
 
@@ -3960,8 +3960,8 @@ call to `create_output_file_from_path`. The resolution keeps `content_key=key` a
 
 S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
 upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
-the thread, and the map UI's `uploadFiles` posted only the files. Stage 17 on
-`claude/read-by-name-scoping` lists that gap in its S17.5, and its S17.3 was shaped by it.
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 21
+lists that gap in its S21.5, and its S21.3 was shaped by it.
 
 ### Stage S23.1 What an unstamped upload did
 
@@ -3976,8 +3976,8 @@ Three consequences:
 - Nobody is identified in dev and demo mode, so the owner check passes everyone. Any conversation
   could find another's upload through `find_files` and open it through `resolve_file_ref`. In
   token mode the owner check still confined it to its user.
-- Stage 17 ranks a read by bare name by recency rather than "this conversation's own files first",
-  because an upload could not be told apart from a legacy record (its S17.3).
+- Stage 21 ranks a read by bare name by recency rather than "this conversation's own files first",
+  because an upload could not be told apart from a legacy record (its S21.3).
 
 ### Stage S23.2 What changed
 
@@ -4011,7 +4011,7 @@ outside this repo. All but the last are known to send a thread id with their tur
 - **Minting a session for it** would keep the upload out of other conversations, and out of the one
   that uses it too. Those clients send their thread id on turns, so a minted id would never match:
   the upload would drop out of that conversation's listing and its lookups by name, though it stays
-  reachable by file id. Once Stage 17 routes the file tools' bare-name read through `find_files`,
+  reachable by file id. Once Stage 21 routes the file tools' bare-name read through `find_files`,
   the model could not open its own upload by name.
 - **Adopting it into the first conversation that attaches it** by `fileIds` was not taken either.
   The chat route would start writing the records it reads, and a record has one `session`, so an
@@ -4068,12 +4068,12 @@ leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` r
   | | stored `session` | listed in `sess-a` | `find_files` / `resolve_file_ref` | `read_text_file` / `inspect_file_for_analysis` |
   | --- | --- | --- | --- | --- |
   | prototype `5ae6d92` | null | no | finds it | reads it |
-  | Stage 17 alone | null | no | finds it | reads it |
+  | Stage 21 alone | null | no | finds it | reads it |
   | this stage alone | `sess-a` | yes | nothing | reads it |
   | both | `sess-a` | yes | nothing | refused |
 
   Neither change closes that read on its own. On prototype the file tools' bare-name read is the
-  directory scan S17.1 describes, which never opens a record, so no stamp can scope it. Stage 17's
+  directory scan S21.1 describes, which never opens a record, so no stamp can scope it. Stage 21's
   route through `find_files` honours the stamp, but on its own it finds an unstamped upload in the
   pool. The two merge cleanly in code. Merged, eight file-store test modules (107 tests) pass, and so
   does the full suite: 1686 passed, 4 skipped, which is 1645 + 26 + 15.
@@ -4104,13 +4104,13 @@ leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` r
   the reference client mints a thread id per page load, so it needs a one-line change. The
   dashboard page defaults every visitor to `demo-thread-1`, so stamping its uploads with that would
   move them from the pool into one conversation that everyone shares.
-- Until Stage 17 lands, `read_text_file` and `inspect_file_for_analysis` still read another
+- Until Stage 21 lands, `read_text_file` and `inspect_file_for_analysis` still read another
   conversation's upload by bare name (S23.5).
-- S17.3's choice of recency over "own conversation first" is not revisited here. Its premise no
+- S21.3's choice of recency over "own conversation first" is not revisited here. Its premise no
   longer holds for an upload from a client that sends its thread id, but a legacy record and a
   thread-less upload still cannot be told apart.
 - A request with no `thread_id` binds no conversation, and raw-path and file-id access are
-  unscoped. Both are as S17.5 describes.
+  unscoped. Both are as S21.5 describes.
 - Two older gaps in the same client code, found by reading it and not measured. A reopened
   conversation does not register the layers a `map_layer` event drew, so a later turn that lists the
   conversation's outputs can draw one of them a second time. And an upload whose name
