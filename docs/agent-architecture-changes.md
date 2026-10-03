@@ -36,6 +36,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 20 | [A layer is what went into it](#stage-20) | `claude/layer-identity-by-inputs`, `claude/layer-identity-remaining-tools` | layer ids from the inputs that made them, not the files they wrote |
 | 21 | [A filename names this conversation's file](#stage-21) | 2026-10-02 | a bare filename resolves through `find_files`: this conversation, this caller, the exact name |
 | 22 | [A file_id names one write](#stage-22) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
+| 23 | [An upload names its conversation](#stage-23) | 2026-10-02 | the upload route binds the thread id as well as the caller; the map UI sends it |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -3659,3 +3660,168 @@ call to `create_output_file_from_path`. The resolution keeps `content_key=key` a
   overwrites by name" as its example of a file rewritten in place. The example goes stale here. The
   reason stands, because a conversation's own `write_output_file(overwrite=True)` still rewrites in
   place.
+
+---
+
+## Stage 23 — An upload names its conversation {#stage-23}
+
+*2026-10-02. Branch `claude/stamp-upload-session`.*
+
+S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
+upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 17 on
+`claude/read-by-name-scoping` lists that gap in its S17.5, and its S17.3 was shaped by it.
+
+### Stage S23.1 What an unstamped upload did
+
+Measured through the route with the Flask test client in dev mode on 2026-10-02: with a thread id
+sent in the query string, in the form and in a header, the record was stored with `session: null`.
+`find_files` reads a record with no session as the legacy pool that every conversation shares.
+Three consequences:
+
+- `list_conversation_files` asks `find_files` for `include_unowned=False`, so it never listed an
+  upload, not even in the conversation that uploaded it. Its docstring promises every file the
+  conversation has "made or been given".
+- Nobody is identified in dev and demo mode, so the owner check passes everyone. Any conversation
+  could find another's upload through `find_files` and open it through `resolve_file_ref`. In
+  token mode the owner check still confined it to its user.
+- Stage 17 ranks a read by bare name by recency rather than "this conversation's own files first",
+  because an upload could not be told apart from a legacy record (its S17.3).
+
+### Stage S23.2 What changed
+
+- The map UI sends `thread_id` as a form field beside the files. The value is `threadRef.current`,
+  the id its turns send, which `newThreadId()` mints before the first turn. A restored conversation
+  gets its saved id back before anything else, so its uploads and its turns still agree.
+- `_upload_thread_id()` reads `threadId` or `thread_id` from the form, then from the query string.
+  These are the chat routes' two spellings, normalised by the same `_coalesce` and strip, so a blank
+  or padded id cannot become a conversation of its own. The form wins, because it is what the client
+  composed for this upload. No header is read, because no route takes a thread id from one. Nor is
+  `memoryId`: the chat routes bind the file store to `threadId` alone.
+- The route binds that id with `set_file_store_session` around `save_uploaded_file`, as the chat
+  routes do around a turn, and resets it in `finally`. Production runs gunicorn with `--threads 4`,
+  and each thread serves one request after another, so a binding left set would outlive its request
+  on that thread. Nothing reads it there today: every route that uses the store binds its own id
+  first, the upload route included, even when the id is None. A route added later without a binding
+  of its own would run in the last caller's conversation. `test_the_binding_ends_with_the_request`
+  pins the reset; S23.5 says why its first version did not.
+- The response keeps its shape. Each file record already carried `session`, null until now.
+- The map UI counts every upload's file id as already drawn, when the upload returns and again
+  when its conversation is reopened. S23.4 says why.
+
+### Stage S23.3 An upload with no thread id, decided
+
+It is stored exactly as before: no session, in the pool. The clients that send none are
+`examples/iguide_chat_prototype.html` (the reference client), `examples/agent_chat_stream_demo.html`
+(the dashboard page), any map UI tab still running the bundle from before this change, and callers
+outside this repo. All but the last are known to send a thread id with their turns.
+
+- **Refusing it** would break every one of those uploads.
+- **Minting a session for it** would keep the upload out of other conversations, and out of the one
+  that uses it too. Those clients send their thread id on turns, so a minted id would never match:
+  the upload would drop out of that conversation's listing and its lookups by name, though it stays
+  reachable by file id. Once Stage 17 routes the file tools' bare-name read through `find_files`,
+  the model could not open its own upload by name.
+- **Adopting it into the first conversation that attaches it** by `fileIds` was not taken either.
+  The chat route would start writing the records it reads, and a record has one `session`, so an
+  upload attached in two conversations would belong to whichever came first.
+
+Such an upload logs `Upload with no thread id` at INFO. The fallback can be tightened once that line
+stops appearing. Until then `test_an_upload_with_no_thread_id_is_stored_as_before` pins it, so that
+tightening it is a decision rather than an accident.
+
+### Stage S23.4 Revised during the work: the listing redrew the upload
+
+The first run in Chrome, with only the server change and `uploadFiles`, answered correctly and left
+two copies of the upload on the map: the preview `Upload: stamp_probe_points` and a second
+`stamp_probe_points` layer, 3 points each. The listing now returns the upload's record, and the
+client harvests download records from every event. When no `map_layer` event fired, the artifact
+fallback (`loadVectorArtifacts`) draws every GeoJSON among them. It skips a file it has drawn
+before (`loadedArtifacts`) or one a `map_layer` event drew (`layerSourceFiles`). The preview is
+drawn locally from the `File`, so it was in neither set.
+
+The listing made this common but did not create it. `read_text_file` and
+`inspect_file_for_analysis` return the same record when called by file id, which the turn prompt
+asks for, so an "inspect my upload" turn reached the same fallback. That is from reading the code,
+not measured.
+
+The first fix registered the file only when the record's name matched the preview's, the way
+`onUpload` already attaches `sourceUrl`, and registered each reopened layer by its URL. Both miss
+every name `secure_filename` rewrites: `My Data.geojson` is stored as `My_Data.geojson`, and
+`roads(1).geojson` as `roads1.geojson`. A preview whose name did not match never gets a
+`sourceUrl`, so it comes back from its inline copy, with no URL to register. So `onUpload` now
+registers every returned file id with no name match, and `restoreSession` registers the
+conversation's upload ids the same way. The URL registration was dropped. Beyond uploads, the only
+duplicate it prevented was of a layer a `map_layer` event drew, which is an older gap this stage
+leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` replaces it by id.
+
+### Stage S23.5 Verification
+
+- `test_upload_session.py`, 15 tests. On prototype 9 fail and 6 pass. The 6 are guards that hold
+  either way: the binding ends with the request, a later thread-less upload names no conversation,
+  another conversation lists nothing, a thread-less upload is stored and found as before, and a
+  blank id, twice. With the fix all 15 pass.
+- An independent re-derivation of this section deleted the reset and found the first version of
+  `test_the_binding_ends_with_the_request` still passing. That version checked the session after a
+  second upload, which binds its own id before it writes. The test now checks straight after the
+  first upload, and fails without the reset. A second mutation, binding only when an id is present,
+  fails five tests.
+- `npm run check:upload` calls `uploadFiles` against a stubbed `fetch` and reads the multipart body.
+  With prototype's `agentClient.ts` the thread-id check fails. With the change all four checks pass,
+  `npm run build` is clean, and `check:auth`, `check:fold` and `check:hooks` still pass.
+- The full suite: 1660 passed, 4 skipped, none failed. That is the baseline's 1645 and 4 plus this
+  file's 15.
+- A probe through the route in dev mode, in four trees. The upload is made in `sess-a`. The last two
+  columns are what `sess-b` gets when it asks for the file by name:
+
+  | | stored `session` | listed in `sess-a` | `find_files` / `resolve_file_ref` | `read_text_file` / `inspect_file_for_analysis` |
+  | --- | --- | --- | --- | --- |
+  | prototype `5ae6d92` | null | no | finds it | reads it |
+  | Stage 17 alone | null | no | finds it | reads it |
+  | this stage alone | `sess-a` | yes | nothing | reads it |
+  | both | `sess-a` | yes | nothing | refused |
+
+  Neither change closes that read on its own. On prototype the file tools' bare-name read is the
+  directory scan S17.1 describes, which never opens a record, so no stamp can scope it. Stage 17's
+  route through `find_files` honours the stamp, but on its own it finds an unstamped upload in the
+  pool. The two merge cleanly in code. Merged, eight file-store test modules (107 tests) pass, and so
+  does the full suite: 1686 passed, 4 skipped, which is 1645 + 26 + 15.
+- In Chrome, against this branch served locally in dev mode with a scratch file store, one new tab
+  per test. Tab 1 ran with no client fix, tabs 2 to 4 with the first fix in S23.4, and tabs 5 to 7
+  with the by-id registration. A layer count proves something only when the turn carried the upload's
+  download record (the answer then shows a DOWNLOAD box); without it the fallback has nothing to draw.
+
+  | tab | gesture | what the turn did | record in the turn | layers |
+  | --- | --- | --- | --- | --- |
+  | 1 | upload `stamp_probe_points.geojson`, ask "Which files are saved in this conversation?" | `list_conversation_files`: 1 result, the upload by name and id | yes | 2 |
+  | 2 | the same, in a new conversation | 1 result: its own upload, not tab 1's of the same name | yes | 1 |
+  | 3 | the question alone, nothing uploaded | 0 results; the answer: "No files are saved in this conversation." | no | 0 |
+  | 4 | reopen tab 2's conversation from History, ask again | answered from the earlier turn, no tool call | no | 1, proving nothing |
+  | 5 | upload `renamed probe (1).geojson`, stored as `renamed_probe_1.geojson`; ask, then name the tool | the first answer came from the attachment note; the second called the tool: 1 result | yes, the second | 1 |
+  | 6 | reopen tab 5's conversation, name the tool, then ask to inspect the upload | the earlier result reused, then `inspect_vector`, whose result carries no record | no | 1, proving nothing |
+  | 7 | restart the API server, which clears the process-local ledger; reopen tab 5's conversation, name the tool | called the tool: 1 result | yes | 1 |
+
+  Tab 5's preview was saved inline, with no `sourceUrl`, which is the name mismatch S23.4 describes.
+  So tab 7 is a reopened upload that only the id registration covers. The thread ids of tabs 1, 2 and
+  5, read back from their saved session records, equal the `session` on their uploads. A `curl`
+  upload with no thread id was stored with `session: null` and logged the one
+  `Upload with no thread id` line. The UI uploads logged none.
+
+### Stage S23.6 What this stage did not fix
+
+- A thread-less upload is still in the pool in dev and demo mode (S23.3). Of the two example pages,
+  the reference client mints a thread id per page load, so it needs a one-line change. The
+  dashboard page defaults every visitor to `demo-thread-1`, so stamping its uploads with that would
+  move them from the pool into one conversation that everyone shares.
+- Until Stage 17 lands, `read_text_file` and `inspect_file_for_analysis` still read another
+  conversation's upload by bare name (S23.5).
+- S17.3's choice of recency over "own conversation first" is not revisited here. Its premise no
+  longer holds for an upload from a client that sends its thread id, but a legacy record and a
+  thread-less upload still cannot be told apart.
+- A request with no `thread_id` binds no conversation, and raw-path and file-id access are
+  unscoped. Both are as S17.5 describes.
+- Two older gaps in the same client code, found by reading it and not measured. A reopened
+  conversation does not register the layers a `map_layer` event drew, so a later turn that lists the
+  conversation's outputs can draw one of them a second time. And an upload whose name
+  `secure_filename` rewrites never gets its `sourceUrl`, so one too large to keep inline cannot be
+  restored.
