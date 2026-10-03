@@ -394,6 +394,11 @@ export default function App() {
         const fc = await res.json();
         if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
         restored.push({ ...(l as any), data: fc } as LayerArtifact);
+        // Back on the map, so it counts as drawn, as onMapLayer counts a live layer. The set
+        // starts empty in a new tab, and the first turn whose results carried this file's
+        // download record (list_conversation_files does) drew it again through the artifact
+        // fallback: a second copy, filled, over the restored one.
+        layerSourceFiles.current.add(fileKey(url));
       } catch { /* the file is gone — leave the layer out rather than showing an empty one */ }
     }
     setLayers(restored);

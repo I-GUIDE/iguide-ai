@@ -1082,6 +1082,28 @@ stray file configured them. They self-skip when unconfigured, so they now skip b
 `RUN_REAL_OPEN_GEODATA_TEST=1`. Offline and deterministic by default, live when asked for.
 **1597 passed, 4 skipped, 86 seconds** — the twenty-five minutes was the network, not the work.
 
+### Stage S9.8 What a reopened conversation forgot
+
+Two gaps in the client's restore path. Both were found by reading `restoreSession` and `onUpload`
+on 2026-10-02, and both were reproduced in Chrome on 2026-10-03 before either was fixed: a local
+API in dev mode, the map UI on a fresh port, one new tab per test.
+
+**A restored layer did not count as drawn.** The artifact fallback (`loadVectorArtifacts`) skips
+any file in `layerSourceFiles`, the files the conversation's layers were drawn from. `onMapLayer`
+adds each live layer's file to that set. `restoreSession` re-fetched each stored layer from its
+`sourceUrl` and added nothing, so a conversation reopened in a new tab started with the set
+empty. Reproduced with *"Show me the city boundary of Savoy, Illinois"*, which delivered one
+`map_layer`. The conversation was reopened from History in a new tab, with the API restarted
+first so the ledger could not answer from memory. *"Which files does this conversation have?"*
+then called `list_conversation_files`, whose result carried the boundary's download record (the
+DOWNLOAD box), and the fallback drew the same file again as `savoy_illinois_city_boundary`, a
+filled copy over the restored outline: **2 layers**. The restore now adds `fileKey(url)` for each
+layer it re-fetched. The same sequence, with the same precondition (the tool ran, and the turn
+carried `file_baf1e36df7c1`, the restored layer's own file), leaves **1 layer**.
+
+Only a layer that came back is counted. A layer whose re-fetch failed is not on the map, and the
+fallback drawing it later restores it rather than duplicating it.
+
 ---
 
 *Still open:* one conversation produced **two** memory documents — the agent's own
