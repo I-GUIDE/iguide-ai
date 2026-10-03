@@ -404,7 +404,9 @@ def _unbound_mcp_tool_names() -> frozenset:
         return frozenset(_DEFAULT_UNBOUND_MCP_TOOLS)
     if raw.lower() in {"none", "0", "false", "off"}:
         return frozenset()
-    return frozenset(n.strip().lstrip("mcp_") for n in raw.split(",") if n.strip())
+    # removeprefix, not lstrip: lstrip("mcp_") strips the CHARACTERS m/c/p/_, so
+    # "create_notebook_workflow_tool" became "reate_notebook_workflow_tool" and matched nothing.
+    return frozenset(n.strip().removeprefix("mcp_") for n in raw.split(",") if n.strip())
 
 
 def _is_unbound_mcp_tool(bare_name: str) -> bool:
