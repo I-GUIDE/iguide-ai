@@ -139,6 +139,93 @@ def test_parse_time_series_reads_epoch_and_years():
     assert years.dt.year.tolist() == [2019, 2020, 2021]
 
 
+def test_parse_time_series_never_reads_codes_as_years():
+    """Beats, ids and clock times are numbers, not dates, whether typed or CSV text.
+
+    The deployed failure: pandas 3 parses text at microsecond resolution, so "1234" became the
+    year 1234 where pandas 2 had returned NaT. Chicago's real beats run 111-2535, so the year
+    branch declines them, and they used to fall through to the text ladder instead.
+    """
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    chicago_beats = [111, 112, 1011, 1834, 2535, 421, 631, 1124] * 5
+    for values in ([1234, 1235, 1236],      # the failing fixture: inside the year branch's range
+                   chicago_beats,           # below 1000: only the text fall-through could take them
+                   [1001, 1002, 1003],      # incident ids
+                   [830, 1415, 2359, 5]):   # HHMM clock times
+        for series in (pd.Series(values), pd.Series([str(v) for v in values])):
+            parsed, method = parse_time_series(series)
+            assert method == "unparsed" and parsed.isna().all(), (values[:4], str(series.dtype), method)
+
+
+def test_parse_time_series_reads_yyyymmdd_numbers():
+    """An 8-digit date stored as a number still parses, typed or as CSV text, by an explicit rule."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    expected = [pd.Timestamp("2019-01-01"), pd.Timestamp("2019-02-15"), pd.Timestamp("2020-12-31")]
+    for series in (pd.Series([20190101, 20190215, 20201231]),
+                   pd.Series(["20190101", "20190215", "20201231"])):
+        parsed, method = parse_time_series(series)
+        assert list(parsed) == expected and method == "YYYYMMDD number"
+    parsed, _ = parse_time_series(pd.Series([20190101, 20191340]))   # month 13 is a failed row
+    assert parsed.iloc[0] == pd.Timestamp("2019-01-01") and pd.isna(parsed.iloc[1])
+
+
+def test_parse_time_series_reads_numbers_that_arrive_as_text():
+    """GDAL hands every CSV field over as text: a year column, one with a gap, epoch seconds."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    years, method = parse_time_series(pd.Series(["2019", "2020", "2021"]))
+    assert method == "year number" and years.dt.year.tolist() == [2019, 2020, 2021]
+    gappy, method = parse_time_series(pd.Series(["2019.0", "", "2021.0"]))   # how to_csv writes NaN
+    assert method == "year number" and gappy.dt.year.tolist()[::2] == [2019, 2021]
+    assert pd.isna(gappy.iloc[1])
+    epoch, method = parse_time_series(pd.Series(["1767225600", "1769904000"]))
+    assert method == "epoch seconds" and epoch.dt.year.tolist() == [2026, 2026]
+
+
+def test_parse_time_series_year_window_does_not_move_with_pandas():
+    """1678-2262 on every pandas version: the window pandas 2 enforced implicitly, now explicit."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    edges, method = parse_time_series(pd.Series([1677, 1678, 2262, 2263]))
+    assert method == "year number"
+    assert [None if pd.isna(v) else v.year for v in edges] == [None, 1678, 2262, None]
+    text, _ = parse_time_series(pd.Series(["1556-01-23", "1700-01-26"]))   # text is held to it too
+    assert pd.isna(text.iloc[0]) and text.iloc[1] == pd.Timestamp("1700-01-26")
+
+
+def test_parse_time_series_converts_mixed_offsets_to_utc():
+    """Offsets that differ within one column, as a US feed's do either side of daylight saving.
+
+    The deployed failure: pandas 3 raises "Mixed timezones detected" where pandas 2 returned
+    objects, so every text strategy failed and the column read as 0% parsed.
+    """
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    dst, method = parse_time_series(pd.Series(["2026-01-05T09:00:00-06:00", "2026-07-26T20:00:00-05:00"]))
+    assert method == "inferred single format"
+    assert list(dst) == [pd.Timestamp("2026-01-05 15:00"), pd.Timestamp("2026-07-27 01:00")]
+    mixed, _ = parse_time_series(pd.Series(["2026-07-26T20:00:00Z", "2026-01-05T09:00:00+01:00"]))
+    assert list(mixed) == [pd.Timestamp("2026-07-26 20:00"), pd.Timestamp("2026-01-05 08:00")]
+    assert dst.dt.tz is None and mixed.dt.tz is None
+    # Text with no offset beside text with one is read as UTC, as pandas 2 always did; pandas 3
+    # raised here too, and the unfixed parser kept only the rows the first format fitted.
+    both, _ = parse_time_series(pd.Series(["2026-01-05 09:00:00", "2026-07-26T20:00:00-05:00"]))
+    assert list(both) == [pd.Timestamp("2026-01-05 09:00"), pd.Timestamp("2026-07-27 01:00")]
+
+
+def test_parse_time_series_utc_leaves_other_columns_as_they_were():
+    """One offset is still converted to UTC, and text without an offset keeps its clock time."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    single, _ = parse_time_series(pd.Series(["2026-01-05T09:00:00-06:00", "2026-02-05T09:00:00-06:00"]))
+    assert list(single) == [pd.Timestamp("2026-01-05 15:00"), pd.Timestamp("2026-02-05 15:00")]
+    naive, method = parse_time_series(pd.Series(["2026-01-05T09:00:00", "2026-07-26T20:00:00"]))
+    assert method == "inferred single format"
+    assert list(naive) == [pd.Timestamp("2026-01-05 09:00"), pd.Timestamp("2026-07-26 20:00")]
+
+
 # ----------------------------------------------------------------- detect_time_column
 def test_detect_time_column(incidents):
     res = _call(_tools()["detect_time_column"], file_id=incidents)
@@ -425,6 +512,125 @@ def test_csv_with_coordinates_flows_through(store):
     assert sliced["ok"] is True and sliced["matched"] == 2
     assert sliced["map_layer"]["render"] == "points"
     assert len(gpd.read_file(_read_output(sliced["file_id"]))) == 2
+
+
+def test_csv_beat_cannot_outrank_a_date_with_a_blank_row(store):
+    """The deployed failure in full: one blank date, and the beats became THE time column.
+
+    GDAL hands the blank cell over as "", which counts against Date: 3 of 4 rows parse. On
+    pandas 3, before the name gate covered a CSV's numbers, the beats parsed 4 of 4 as the years
+    1234-1237 and outranked it. The test above, whose Date has no gap, could only ever catch the
+    beats as a runner-up, because there the name hint broke a 1.0 against 1.0 tie.
+    """
+    path = store / "crimes_with_gap.csv"
+    pd.DataFrame({
+        "ID": [1, 2, 3, 4],
+        "Date": ["07/26/2026 08:00:00 PM", "07/27/2026 01:00:00 AM", None,
+                 "01/02/2026 08:00:00 AM"],
+        "Latitude": [41.900, 41.901, 41.902, 41.903],
+        "Longitude": [-87.660, -87.661, -87.662, -87.663],
+        "Beat": [1234, 1235, 1236, 1237],
+    }).to_csv(path, index=False)
+    detected = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert detected["ok"] is True and detected["time_column"] == "Date"
+    assert "Beat" not in [c["column"] for c in detected["candidates"]]
+    date = detected["candidates"][0]
+    assert date["parsed_rows"] == 3 and date["failed_rows"] == 1   # the blank is reported, not hidden
+
+
+def test_csv_code_columns_are_never_time_candidates(store):
+    """Every kind of code column a crime CSV carries, read the way GDAL reads them: as text.
+
+    On the deployed image (pandas 3) the unfixed tool picked incident_id as THE time column,
+    and the IUCR codes tied this Date column, which has one dirty row.
+    """
+    path = store / "codes.csv"
+    pd.DataFrame({
+        "incident_id": [1001, 1002, 1003, 1004, 1005],    # time-ish name, so it IS tried, and fails
+        "Date": ["07/26/2026 08:00:00 PM", "07/27/2026 01:00:00 AM", "01/02/2026 08:00:00 AM",
+                 "02/03/2026 09:30:00 AM", "not a date"],
+        "IUCR": ["0486", "0820", "1310", "041A", "2820"],  # mostly digits, so still text
+        "Beat": [111, 1834, 2535, 421, 1124],
+        "Ward": [1, 2, 3, 4, 5],
+        "Latitude": [41.90, 41.91, 41.92, 41.93, 41.94],
+        "Longitude": [-87.66, -87.67, -87.68, -87.69, -87.70],
+    }).to_csv(path, index=False)
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == "Date"
+    assert [c["column"] for c in res["candidates"]] == ["Date"]
+
+
+@pytest.mark.parametrize("column, suffix", [
+    pytest.param("yr", ".csv", id="csv-yr"),             # the text ladder read it with no hint
+    pytest.param("YRBUILT", ".csv", id="csv-YRBUILT"),   # run-together, so the hint is a substring
+    pytest.param("yr", ".geojson", id="geojson-yr"),     # typed integers: never even tried before
+])
+def test_year_column_named_yr_is_a_time_column(store, column, suffix):
+    """A year column's name is all that gets it past the name gate, so yr has to be a hint.
+
+    These beats sit inside 1678-2262, so the year window cannot be what keeps them out: only the
+    gate does, and the year column faces the same gate. Without the hint, both CSV shapes came
+    back with no time column at all, where the text ladder used to read them as years.
+    """
+    path = store / f"annual{suffix}"
+    frame = pd.DataFrame({
+        column: [2019, 2020, 2021],
+        "Beat": [1834, 2011, 2012],
+        "Latitude": [41.900, 41.901, 41.902],
+        "Longitude": [-87.660, -87.661, -87.662],
+    })
+    if suffix == ".csv":
+        frame.to_csv(path, index=False)
+    else:
+        gpd.GeoDataFrame(frame, geometry=gpd.points_from_xy(frame["Longitude"], frame["Latitude"]),
+                         crs="EPSG:4326").to_file(path, driver="GeoJSON")
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == column
+    assert [c["column"] for c in res["candidates"]] == [column]
+    best = res["candidates"][0]
+    assert best["parse_method"] == "year number" and best["granularity"] == "year"
+
+
+def test_csv_year_column_is_still_a_time_column(store):
+    """A CSV's year column is text holding numbers too; its NAME is what keeps it detectable."""
+    path = store / "annual.csv"
+    pd.DataFrame({
+        "Year": [2019, 2020, 2021],
+        "Beat": [1234, 1235, 1236],
+        "Latitude": [41.900, 41.901, 41.902],
+        "Longitude": [-87.660, -87.661, -87.662],
+    }).to_csv(path, index=False)
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path))
+    assert res["ok"] is True and res["time_column"] == "Year"
+    assert [c["column"] for c in res["candidates"]] == ["Year"]
+    best = res["candidates"][0]
+    assert best["parse_method"] == "year number" and best["granularity"] == "year"
+    assert best["span"]["start"].startswith("2019-01-01") and best["span"]["end"].startswith("2021-01-01")
+
+
+def test_csv_with_daylight_saving_offsets_is_a_time_column(store):
+    """A US feed's local times: -06:00 in winter, -05:00 in summer, read as text like every CSV field.
+
+    On the deployed image (pandas 3) the unfixed tool reported that no time column existed.
+    """
+    path = store / "dst.csv"
+    pd.DataFrame({
+        "reported_at": ["2026-01-05T09:00:00-06:00", "2026-03-10T23:30:00-05:00",
+                        "2026-07-26T20:00:00-05:00", "2026-11-02T08:00:00-06:00"],
+        "Latitude": [41.90, 41.91, 41.92, 41.93],
+        "Longitude": [-87.66, -87.67, -87.68, -87.69],
+    }).to_csv(path, index=False)
+    file_id = _upload(path)
+    tools = _tools()
+
+    detected = _call(tools["detect_time_column"], file_id=file_id)
+    assert detected["ok"] is True and detected["time_column"] == "reported_at"
+    best = detected["candidates"][0]
+    assert best["parsed_rows"] == 4 and best["failed_rows"] == 0
+    assert best["span"]["start"].startswith("2026-01-05T15:00")     # in UTC
+    # Windows apply in UTC too: 23:30 at -05:00 on March 10 is 04:30 UTC on March 11.
+    sliced = _call(tools["filter_by_time"], file_id=file_id, start="2026-03-11", end="2026-03-11")
+    assert sliced["ok"] is True and sliced["matched"] == 1
 
 
 def test_unknown_file_id_fails_cleanly():

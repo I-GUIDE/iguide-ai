@@ -621,6 +621,25 @@ def qgis_metric_buffer_tool(
                 }
             )
 
+    # What this buffer IS: the CONTENT of its input, the distance and the two projections.
+    # Recorded on the output so that the layer drawn from it (add_map_layer, which reads it
+    # back through file_content_key) is the same layer however often the step is repeated.
+    # The output name and the input's file_id stay out. On 2026-10-01 a re-grounding pass
+    # buffered a second, byte-identical copy of the same boundary under a new file_id.
+    # Never at the buffer's expense: without a key the output is still identified by its bytes.
+    key: Optional[str] = None
+    try:
+        from agent_runtime.langchain_geo_tools import source_content_key
+        from agent_runtime.map_layers import content_key
+
+        key = content_key("qgis_buffer", f"{distance:g}m",
+                          input=source_content_key(str(input_layer or "").strip(), source),
+                          distance_m=round(distance, 3),
+                          projected_crs=str(projected_crs or "").strip().upper(),
+                          target_crs=str(target_crs or "").strip().upper(),
+                          dissolve=bool(dissolve), segments=segment_count)
+    except Exception:  # noqa: BLE001
+        key = None
     payload: Dict[str, Any] = {
         "ok": final_output.exists(),
         "job_id": job_id,
@@ -638,6 +657,7 @@ def qgis_metric_buffer_tool(
                 final_output,
                 filename=final_output.name,
                 overwrite=True,
+                content_key=key,
             )
         except Exception as exc:
             payload["managed_output_error"] = str(exc)

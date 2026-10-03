@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
 from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -526,6 +529,7 @@ def create_output_file_from_path(
     source_path: str | Path,
     filename: Optional[str] = None,
     overwrite: bool = False,
+    content_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     maybe_sweep_expired_files()
     source = Path(source_path).expanduser().resolve()
@@ -568,12 +572,94 @@ def create_output_file_from_path(
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
+    # What the file HOLDS, as its producer derived it from its inputs — read back by
+    # file_content_key when this file becomes the input to the next step.
+    if content_key:
+        record["content_key"] = str(content_key)
     return _with_public_url(_write_record(record))
+
+
+# ---------------------------------------------------------------------------
+# WHAT a file holds, as distinct from WHICH write produced it
+# ---------------------------------------------------------------------------
+# A file_id names one write. A step that is re-run writes the same thing again under a NEW
+# file_id, so anything keyed on the id treats the repeat as new. Observed 2026-10-01: a
+# re-grounding pass re-ran admin_boundary for Champaign, the second write was byte-identical
+# to the first, and because the map layer was keyed on the file_id the map ended up holding
+# two copies of the same outline.
+#
+# GDAL's GeoJSON writer puts the layer name, which is the output filename, into the file as a
+# top-level "name" member. The two 2 km buffers of that run differed in that member and in
+# nothing else, so hashing raw bytes would have told them apart. Only that one member, in the
+# position GDAL writes it, is dropped before hashing.
+_GDAL_LAYER_NAME = re.compile(
+    rb'^(\s*\{\s*"type"\s*:\s*"FeatureCollection"\s*,\s*)"name"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*')
+_DIGEST_HEAD_BYTES = 4096
+
+
+@lru_cache(maxsize=512)
+def _content_digest(path: str, size: int, mtime_ns: int) -> str:
+    """sha1 of a file's bytes without GDAL's layer-name member. size and mtime_ns key the
+    cache, so a file rewritten in place (qgis_metric_buffer overwrites by name) is re-read."""
+    digest = hashlib.sha1()
+    with open(path, "rb") as handle:
+        head = handle.read(_DIGEST_HEAD_BYTES)
+        digest.update(_GDAL_LAYER_NAME.sub(rb"\1", head, count=1))
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def file_content_key(ref: Any) -> str:
+    """A stable token for what a file HOLDS, whichever run wrote it.
+
+    Used wherever a file is an INPUT to something that needs an identity, such as the id of a
+    map layer drawn from it. Its file_id cannot serve, because a repeat of the step that wrote
+    the file writes the same content under a new id. Three sources, in order:
+
+    1. the ``content_key`` the producer recorded on the file: a digest of the inputs that
+       produced it. Preferred over the bytes, because the same result can be written in
+       different bytes (see _GDAL_LAYER_NAME).
+    2. a digest of the bytes, for a file nothing recorded (an upload, a sandbox output).
+       Identical content gives the same key, whatever the file is called.
+    3. the reference itself, stripped, when it resolves to no file. It is still stable and
+       still distinct.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        return ""
+    path: Optional[Path] = None
+    try:
+        record = get_file_record(text)
+    except Exception:  # noqa: BLE001 - an unreadable record is treated as no record
+        record = None
+    if record:
+        recorded = str(record.get("content_key") or "").strip()
+        if recorded:
+            return recorded
+        try:
+            path = _record_path(record)
+        except Exception:  # noqa: BLE001
+            path = None
+    else:
+        try:
+            candidate = Path(text).expanduser()
+            path = candidate if candidate.is_file() else None
+        except (OSError, ValueError):  # a reference no filesystem can hold (e.g. a NUL byte)
+            path = None
+    if path is not None:
+        try:
+            stat = path.stat()
+            return "sha1-" + _content_digest(str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            pass
+    return text
 
 
 __all__ = [
     "create_output_file",
     "create_output_file_from_path",
+    "file_content_key",
     "find_files",
     "resolve_file_ref",
     "get_file_record",

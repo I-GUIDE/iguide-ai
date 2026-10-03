@@ -523,6 +523,13 @@ reaches the map: `map_layers.layers_for_artifacts` turns any `.geojson` it wrote
 descriptor and the peer wrapper emits it, from the request's trace context, through the same
 `build_map_layers` boundary every tool's layer crosses.
 
+**The supervisor is told which code peer will run.** The decider's `code` line is generated per
+backend by `_code_capability_line` (`agent_runtime/supervisor/graph.py`), through the same
+`_code_peer_backend` resolution the code node uses. The LangChain peer gets its inventory from
+`capability_registry`; a CLI peer gets `CLI_PEER` from the same file. That CLI description is
+declared, not derived, so a change to a CLI container's posture (its network, what is staged,
+what reaches its brief) has to be mirrored in `CLI_PEER`. Only the network clause is held by a test.
+
 **A conversation keeps its project directory between turns** (`claudesess_<thread>` under
 `AGENT_CODE_EXEC_WORK_ROOT`), so the CLI resumes with `--continue` and its `pip install
 --user` cache survives; the container is still fresh each run. Two things that forced
@@ -597,5 +604,14 @@ for streams in flight first — recent `POST /agent/chat/stream` lines in the ng
 `docker compose up -d --no-deps --force-recreate agent-api`: without `--no-deps`, the same
 command also recreated `mcp-server` and `embedding-server`, and agent-api then waited on their
 health checks, lengthening the outage for a change that touched neither.
+**The images install through `constraints.txt`, the deployed image's own `pip freeze`.** Every
+`pip install` in `rag_pipeline/Dockerfile`, `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` passes `-c constraints.txt`, so a rebuild reproduces the
+running versions instead of that day's newest. A package you add to `requirements.txt` floats
+(to its newest version that fits the lock) until the lock is retaken after the deploy that ships
+it, with the command in its header; CI's drift step warns until then. If the build fails with
+`ResolutionImpossible`, the newcomer needs a locked package at another version: change that one
+line of the lock on purpose, never drop `-c`. Never regenerate the lock on a development machine.
+`rag_pipeline/tests/test_image_installs_through_lock.py` fails if an install goes around it.
 
 Never commit `.env`, API keys, or Earth Engine credentials.
