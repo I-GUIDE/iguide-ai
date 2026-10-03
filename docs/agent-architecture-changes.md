@@ -29,6 +29,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 13 | [Shapes nobody owned](#stage-13) | 2026-10-01 → 2026-10-03 | downloads named, qwen3.8, rs-embed off a personal credential, a restart that cut off live turns |
 | 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
 | 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
+| 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1814,3 +1815,127 @@ In the deployed container each version of `agent_runtime/` was imported from `/t
 `/app`, whose copy of the module is identical to `prototype`'s; nothing was deployed. The six new
 tests pin the three rules, the YYYYMMDD and bare-year readings, and the CSV shapes above. The
 original test is unchanged.
+## Stage 16 — Six tests only the Mac passed {#stage-16}
+
+A replica of the deployed `agent-api` Python environment was built on 2026-10-01 and again on
+2026-10-02: `python:3.11-slim` for linux/amd64, the image's GDAL apt layer, `requirements.txt`
+installed with the running container's `pip freeze` as constraints, and the `en_core_web_sm`
+3.8.0 wheel. Its own `pip freeze` matches the deployed container's (image `deeb331964f6`) on 176
+of 177 lines; the missing one is `py-spy`, which the real Dockerfile adds in a later layer. Five
+tests that pass on the development Mac fail in it, and an image built from
+`rag_pipeline/Dockerfile` fails a sixth. Each passed on the Mac because the Mac lacks something
+production has, or has something production does not.
+
+| test | why the Mac passed it | which side was wrong | fixed in |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through` | pandas 2.2.3, whose nanosecond range turns `"1234"` into NaT | **the code**. In the replica, a CSV with one blank date in four rows gets `Beat` as its time column, and `filter_by_time(start="2026-07")` answers `ok` with 0 matches | `claude/temporal-numeric-code-columns` (stage 13 there) |
+| three in `test_spatial_locations.py` | no spaCy model, so the capitalization fallback ran | **the code**. Production's NER path skipped the vocabulary and the normalization the fallback applies | this stage, S16.1 |
+| `test_distance_band_without_a_threshold_leaves_no_island` | the Mac's floating point kept a pair that sits exactly on the threshold | **the code**. The threshold had no margin | `claude/distance-band-no-island` (stage 14) |
+| `test_pyqgis_available_probes_worker_python` | no QGIS installed | **the test**. It assumed the machine had no QGIS | this stage, S16.2 |
+
+The island's cause was measured again in the replica rather than taken from the stage 14 branch.
+The automatic threshold, 110,884.46616304158 m, is bit-identical on both machines. The Mac
+projects the critical pair's easting one ulp higher (`0x1.e7c562adf9522p+19` against
+`...9521p+19`). On both machines the square of the threshold is one ulp below the pair's squared
+distance as Python computes it. The Mac's KD-tree keeps the pair anyway and the replica's drops
+it: 146 links and no island against 144 links and one. With stage 14's relative pad of 1e-9,
+both give 146 links and no island.
+
+### Stage S16.1 Production's NER path never saw the fallback's filters
+
+`extract_locations_from_query` (`rag_pipeline/search/spatial.py`) turns a question into the
+place names it geocodes. It has two paths. Where `en_core_web_sm` is installed, as in the agent
+image, it offers spaCy's GPE, LOC and FAC entities. Where it is absent, as on the Mac and in CI,
+it offers capitalized phrases filtered through `_NOT_PLACES`. The fallback produces exactly the
+three tests' expectations: with the model uninstalled in the replica, all 15 tests in the file
+pass. With the model, measured on spaCy 3.8.16 and `en_core_web_sm` 3.8.0, the NER path differs
+in two ways.
+
+* **It keeps the article.** "the Great Plains" (FAC), "the Chesapeake Bay" (LOC), "the United
+  States", "the Gulf of Mexico", "the Rocky Mountains" and "the Great Lakes" all come back with
+  the "the". The fallback has never offered it, so the same place reached the geocoder and
+  `_BBOX_CACHE` under two spellings, depending on which path ran.
+* **It labels formats, tools and agencies as places.** "GeoJSON" is a GPE in three of the
+  queries below, and "NetCDF", "MODIS", "USGS", "LAS" and "Python" are GPEs elsewhere. Every
+  one is in `_NOT_PLACES`, whose comment says these terms are never places, but only the
+  fallback consults that set. So for "convert a GeoJSON to a COG with GDAL" the deployed
+  extractor offers "GeoJSON" to Google's geocoder, which is paid and rate-limited, and a box that
+  came back would scope the spatial search to wherever Google put it.
+
+The tests stated the intended behaviour and the code was wrong. NER cannot know that a file
+format is not a place, and the vocabulary that says so was skipped on the one path production
+runs. The article is the weaker half. Whether it ever changed what Google returned was not
+measured, because that takes paid calls, so dropping it is normalization: one spelling per place,
+whichever path ran. The changes are these:
+
+1. A leading **lowercase** "the" is dropped from an entity (`_without_article`). A capitalized
+   one is kept. NER returns "The Hague" as a GPE, and at the start of a query a capital "The"
+   cannot be told apart from a name.
+2. An entity whose every word is in `_NOT_PLACES` is dropped (`_only_non_places`).
+3. Dropping such an entity does not open the fallback, which is for text NER could not parse,
+   such as the search peer's keyword form. Here NER parsed the sentence and found only a file
+   format. Falling back would offer the capitalized words instead: "Convert" for "Convert a
+   GeoJSON to a COG with GDAL", where spaCy reads "Convert" as a PERSON.
+
+**Measured on 176 queries in the replica, with the real model.** The queries are the file's
+test queries, 30 written around articles, 32 around technical terms, GeoAnalystBench's 44
+distinct task titles and its 50 instructions, and the 10 prompts in
+`geopathfinder_top10_tasks.csv`. 21 of them change. In 12 a leading "the" goes, and in 9 a
+technical term goes (GeoJSON 3, Python 2, and one each of USGS, MODIS, LAS and NetCDF). No
+candidate is added and no place is lost: where a technical term sat beside a place, Colorado and
+Chicago remain. Six queries go from one non-place candidate to none. For scale, the deployed
+container logged 9 candidates resolved to a box between its start (2026-10-01 15:15 UTC) and this
+measurement, and none of them begins with an article or is a technical term.
+
+The three tests pass as written, now on both paths. Ten new tests give the NER path the entities
+the model returned, through a blank English pipeline with those spans set, so the path
+production runs is tested on machines without the model. Against the old code, 8 of the 10 fail
+on the Mac.
+
+Found and **not** fixed, because each needs its own measurement:
+
+* **The fallback offers a request's first word.** It takes any capitalized word that is not in
+  `_NOT_PLACES`, and an imperative request starts with one. 30 of the 44 GeoAnalystBench task
+  titles and 7 of the 10 geopathfinder prompts name no place that NER finds, and each offers its
+  first word as a place: "Identify", "Use", "Find". Whether Google returns a box for these was not
+  measured, because that takes paid calls.
+* NER also labels "Kriging" (LOC), "Tsunami" (GPE) and "node" (GPE) as places, and no vocabulary
+  covers them.
+* CI as proposed on `claude/ci-deployed-constraints` runs the fallback path, not production's.
+  The freeze's `en_core_web_sm @ <url>` line constrains a package that nothing requests, so pip
+  installs no model. The new NER tests are what cover production's path there.
+
+### Stage S16.2 A test that assumed QGIS was absent
+
+`test_pyqgis_available_probes_worker_python` set `QGIS_PYTHON_BIN` to a nonexistent path and
+expected `pyqgis_available()` to be False. But `qgis_python_candidates()` falls back to
+`sys.executable` and then `/usr/bin/python3` on purpose, so that a developer's `.env` naming
+QGIS.app does not disable PyQGIS inside the container. In the agent image `/usr/bin/python3` is
+the distro Python 3.13.5 that `python3-qgis` installs into, in the deployed container as in a
+fresh build, so the probe found QGIS, and the test failed in every image with QGIS. The code was
+right. The test now pins the whole candidate list, and a fresh probe cache, instead of one
+environment variable. No production behaviour changes.
+
+In an image built from `rag_pipeline/Dockerfile` (linux/amd64, 2026-10-02),
+`test_qgis_headless_tools.py` went from 1 failed and 20 passed to 21 passed.
+
+### Stage S16.3 Verification, and what is not deployed
+
+| where | tree | failed | passed | skipped |
+|---|---|---|---|---|
+| Mac (arm64, Python 3.13.5, pandas 2.2.3, no spaCy model) | `prototype` | 0 | 1645 | 4 |
+| Mac | this branch | 0 | 1655 | 4 |
+| Mac | this branch with the temporal and island fixes | 0 | 1662 | 4 |
+| replica (amd64, the deployed versions) | `prototype` | 5 | 1640 | 4 |
+| replica | this branch | 2 | 1653 | 4 |
+| replica | this branch with the temporal and island fixes | **0** | 1662 | 4 |
+
+The two failures on this branch alone are the temporal and island tests, which
+`claude/temporal-numeric-code-columns` and `claude/distance-band-no-island` fix. "With the
+temporal and island fixes" means with those two branches' code and tests applied. They touch no
+file this stage touches. Each suite run mounted a fresh copy of the tree. An image built from
+`rag_pipeline/Dockerfile` the same day fails exactly the six on `prototype` (6 failed, 1639
+passed, 4 skipped). Its pip layer resolved that day's versions rather than the deployed ones, so
+it is the reference only for the QGIS test.
+
+Nothing was deployed. The running image still offers "GeoJSON" to the geocoder.
