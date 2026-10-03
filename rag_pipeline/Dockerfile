@@ -82,10 +82,25 @@ RUN pip install --no-cache-dir -c constraints.txt en_core_web_sm
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
+# The page GET /agent/dashboard serves. api/server.py reads it relative to the repository root,
+# /app here, and examples/ was never on this list, so the route answered 500 (FileNotFoundError)
+# in every image while a checkout served it. Only this file: nothing in the image reads the rest
+# of examples/. rag_pipeline/tests/test_image_dashboard_page.py fails if this line is dropped or
+# sends the page elsewhere.
+COPY examples/agent_chat_stream_demo.html ./examples/
 COPY MCP_server/ ./MCP_server/
 # Agent knowledge-base ingestion package — the search/code peers' agent_kb_search and
 # get_kb_block tools import `extractors` (kb_store, indices) at call time.
 COPY extractors/ ./extractors/
+# Skill bundles. agent_runtime/skills.py discovers SKILL.md files under REPO_ROOT/skills and
+# REPO_ROOT/.agents/skills, and REPO_ROOT resolves to /app in this image. Neither root was on
+# the explicit copy list above, so every deployed container ran with an EMPTY skill registry
+# (no error: a missing root is skipped by design) while the same code on a developer checkout
+# found every skill. Copy BOTH roots: they hold different skills, and a later root only
+# overrides an earlier one when two skills share a name. rag_pipeline/tests/
+# test_image_skill_roots.py fails if either line is dropped or sends a root elsewhere.
+COPY skills/ ./skills/
+COPY .agents/ ./.agents/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request

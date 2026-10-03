@@ -81,16 +81,25 @@ Two providers are wired:
   argument is dropped for models that would refuse it, so a UI leaving the control set while
   switching to gpt-4o cannot break the request.
 - **AnvilGPT** (Purdue RCAC, Open WebUI) — set `AGENT_LLM_PROVIDER=anvilgpt` for the
-  process default, or select a model per request. Its ids look like `qwen3.6:27b`, NOT the
-  HuggingFace `Qwen/Qwen3.6-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
+  process default, or select a model per request. Its ids look like `qwen3.8:27b`, NOT the
+  HuggingFace `Qwen/Qwen3.8-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
   `/api/chat/completions`, which `normalize_openai_base_url` reduces to the `/api` base.
 
-**Do not set `max_tokens` for a reasoning model.** qwen3.6:27b and the gpt-5.x line spend
-their first tokens on reasoning and only then write `content`, so a tight ceiling returns
+  **Probe the roster before trusting it.** Purdue's catalogue changes under us and has lied in
+  both directions: `qwen3.6:27b` was listed and "Recommended" while returning zero bytes in 90s,
+  and by 2026-10-01 it had been removed and replaced by `qwen3.8:27b`. A ten-second
+  `GET /api/models` plus one "Say OK" separates "model is dead" from "agent is stuck" instantly,
+  and a benchmark run once sat 2h23m on exactly that confusion. Measured 2026-10-01, qwen3.8:27b
+  answers in 0.7s, emits correct `tool_calls` (`finish_reason: tool_calls`), and completes a
+  tool-result round trip in 2.2s — so unlike its predecessor it is usable as an agent model.
+
+**Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
+spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
 `finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads
 blank as "no answer", so a truncated reasoning model looks like a failed peer rather than a
 cut-off one. Measured on qwen3.6:27b: `max_tokens=20` produced no content at all; unset
-completes normally.
+completes normally. Its successor leans on reasoning even harder — qwen3.8:27b spent 34 of 38
+completion tokens thinking in order to reply "OK" — so the ceiling stays off.
 
 **A reasoning model over an OpenAI-compatible shim loses its own thinking unless we keep
 it.** `gpt-oss:120b` on AnvilGPT answers a tool-calling step with `content: None`,
@@ -154,6 +163,19 @@ An analysis result reaches the user as an **interactive map layer**, not a file 
 - **Geometry never goes into the LLM-visible documents.** Evidence documents carry titles and
   abstracts; footprints and coordinates go to the map on the side channel. Widening the
   documents floods the context and gets truncated.
+- **The Downloads panel is whatever your tool's result looks like.** Nothing server-side
+  assembles it. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`) walks the whole SSE
+  payload and harvests ANY object carrying a `download_url` plus a `file_id` or `filename`,
+  treating the three as one file. So every object you emit with a `download_url` must name the
+  same file in all three keys. A missing `filename` renders as `unnamed file (file_…)`; and an
+  id from one file beside another's url renders a row whose label and link disagree — which
+  `align_embedding_colors` shipped, labelled with each `.npz` package while downloading its
+  `.png`. When a result involves two files, NEST the second as its own complete object rather
+  than adding sibling `image_*` keys: the flat shape is what let the pairing go wrong.
+  `rag_pipeline/tests/test_download_descriptors.py` mirrors the client's rule in Python, because
+  a test checking some other rule would pass while the panel stayed wrong. The converse also
+  holds: a url under a non-standard key (`image_file_id`, `predictions_file_id`) is never
+  harvested at all, so that file silently never appears in the panel.
 
 ## Conventions that are deliberate
 
@@ -344,7 +366,8 @@ county, which is the many-zone input that tool is for.
 
 It reads the Census **TIGERweb** REST API, not Earth Engine, for three reasons: the agent
 container has no `ee` and no Earth Engine credential (that lives only in the rs-embed service,
-under a personal Google account); TIGERweb needs no credential; and it has the one layer Earth
+which authenticates as a service account rather than a person since 2026-10-01); TIGERweb needs
+no credential; and it has the one layer Earth
 Engine lacks — incorporated places. `TIGER/*/Places` is not in the EE catalogue at any vintage,
 and GAUL/geoBoundaries stop at district, so a *city* boundary is simply unavailable there
 (geoBoundaries has no ADM2 named "Nairobi" at all — Kenya's ADM2 are sub-counties).
@@ -564,6 +587,16 @@ state, and `py-spy` stacks for every thread. If you are debugging a hang, look t
 restarting anything, and never recover with `--force-recreate`: it deletes the container and the
 evidence with it. `journalctl -u iguide-agent-watchdog` is every decision it has made.
 
+**A recreate is an outage for whoever is mid-turn.** Changing `.env` (model, tier, cookie name)
+needs the container recreated, and that hard-stops every open SSE stream — an agent turn runs for
+tens of seconds to minutes. Switching the default model on 2026-10-02 cut off eight live turns:
+four 502s and four 200 streams truncated mid-answer, across the prod platform backend and real
+users, with nothing reported until a user complained hours later. Two habits prevent it. Check
+for streams in flight first — recent `POST /agent/chat/stream` lines in the nginx access log, or
+`Streaming agent chat` in the agent's journal without a matching `chat_traces` PUT. And use
+`docker compose up -d --no-deps --force-recreate agent-api`: without `--no-deps`, the same
+command also recreated `mcp-server` and `embedding-server`, and agent-api then waited on their
+health checks, lengthening the outage for a change that touched neither.
 **The images install through `constraints.txt`, the deployed image's own `pip freeze`.** Every
 `pip install` in `rag_pipeline/Dockerfile`, `MCP_server/Dockerfile` and
 `metadata-extraction-server/Dockerfile` passes `-c constraints.txt`, so a rebuild reproduces the
