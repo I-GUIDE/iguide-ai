@@ -82,7 +82,7 @@ def _buffer(monkeypatch, tag, **kwargs):
                 Path(arg.removeprefix("OUTPUT=")).write_text(body, encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", run)
     out = json.loads(qgis_metric_buffer_tool(f"/data/{tag}.geojson", distance_meters=2000, **kwargs))
     assert out["ok"] is True, out
     return out["managed_output"]
@@ -100,7 +100,7 @@ def _render(monkeypatch, tag):
                                              encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", run)
     out = json.loads(pyqgis_render_map_tool(
         json.dumps([{"path": "/data/points.geojson", "provider": "ogr"}])))
     assert out["ok"] is True, out
