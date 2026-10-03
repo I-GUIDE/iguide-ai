@@ -597,5 +597,14 @@ for streams in flight first — recent `POST /agent/chat/stream` lines in the ng
 `docker compose up -d --no-deps --force-recreate agent-api`: without `--no-deps`, the same
 command also recreated `mcp-server` and `embedding-server`, and agent-api then waited on their
 health checks, lengthening the outage for a change that touched neither.
+**The images install through `constraints.txt`, the deployed image's own `pip freeze`.** Every
+`pip install` in `rag_pipeline/Dockerfile`, `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` passes `-c constraints.txt`, so a rebuild reproduces the
+running versions instead of that day's newest. A package you add to `requirements.txt` floats
+(to its newest version that fits the lock) until the lock is retaken after the deploy that ships
+it, with the command in its header; CI's drift step warns until then. If the build fails with
+`ResolutionImpossible`, the newcomer needs a locked package at another version: change that one
+line of the lock on purpose, never drop `-c`. Never regenerate the lock on a development machine.
+`rag_pipeline/tests/test_image_installs_through_lock.py` fails if an install goes around it.
 
 Never commit `.env`, API keys, or Earth Engine credentials.
