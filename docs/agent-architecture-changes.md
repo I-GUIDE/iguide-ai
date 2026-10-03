@@ -1220,6 +1220,61 @@ stray file configured them. They self-skip when unconfigured, so they now skip b
 `RUN_REAL_OPEN_GEODATA_TEST=1`. Offline and deterministic by default, live when asked for.
 **1597 passed, 4 skipped, 86 seconds** — the twenty-five minutes was the network, not the work.
 
+### Stage S9.8 What a reopened conversation forgot
+
+Two gaps in the client's restore path. Both were found by reading `restoreSession` and `onUpload`
+on 2026-10-02, and both were reproduced in Chrome on 2026-10-03 before either was fixed: a local
+API in dev mode, the map UI on a fresh port, one new tab per test.
+
+**A restored layer did not count as drawn.** The artifact fallback (`loadVectorArtifacts`) skips
+any file in `layerSourceFiles`, the files the conversation's layers were drawn from. `onMapLayer`
+adds each live layer's file to that set. `restoreSession` re-fetched each stored layer from its
+`sourceUrl` and added nothing, so a conversation reopened in a new tab started with the set
+empty. Reproduced with *"Show me the city boundary of Savoy, Illinois"*, which delivered one
+`map_layer`. The conversation was reopened from History in a new tab, with the API restarted
+first so the ledger could not answer from memory. *"Which files does this conversation have?"*
+then called `list_conversation_files`, whose result carried the boundary's download record (the
+DOWNLOAD box), and the fallback drew the same file again as `savoy_illinois_city_boundary`, a
+filled copy over the restored outline: **2 layers**. The restore now adds `fileKey(url)` for each
+layer it re-fetched. The same sequence, with the same precondition (the tool ran, and the turn
+carried `file_baf1e36df7c1`, the restored layer's own file), leaves **1 layer**.
+
+Only a layer that came back is counted. A layer whose re-fetch failed is not on the map, and the
+fallback drawing it later restores it rather than duplicating it.
+
+**An upload whose name the server rewrites never got its url.** `onUpload` attached each stored
+file's url to its preview layer by name: `upload-${stem}`, with the stem taken from the server's
+record. The route stores the name werkzeug's `secure_filename` gives it, so "My Data.geojson"
+comes back as `My_Data.geojson` and "roads(1).geojson" as `roads1.geojson`. Such a preview kept
+no `sourceUrl`, so `toStoredLayer` kept its geometry inline, and `INLINE_KEEP_BYTES` (2,000,000
+characters of JSON) dropped it. Measured with a 3.8 MB "My Data.geojson" of 24,000 points: the
+stored layer had `sourceUrl: null` and no geometry, and the conversation reopened as *"0 layer(s)
+restored, 1 no longer available"*.
+
+Records are now paired with files by **position**. The route answers one record per file in the
+order sent (`_normalize_uploaded_files`, then one `save_uploaded_file` each), and a failed save
+fails the whole request rather than dropping one record. Porting `secure_filename` was the
+alternative, and it was rejected: it would be a copy of werkzeug's rules (NFKD folding, the
+character strip, Windows device names) that stops matching the day werkzeug changes them. If the
+counts disagree, nothing is paired, because a wrong pairing would restore one file's geometry
+under another's name. Measured with both test files in one upload: each preview stored its own
+url (`My_Data.geojson` → `file_bd22e90f6cd3`, `roads1.geojson` → `file_4cc83d190bc9`), and the
+reopened conversation restored both layers, with 24,000 and 3 features.
+
+**Found here, not fixed: the end-of-turn snapshot saves the turn as it was before its last
+render.** `snapshotSession` runs in `runLive`'s `finally` and reads `messagesRef` and
+`layersRef2`, which are assigned only during a render. The turn's final `patch` (the answer's
+html and `streaming: false`) and any layer the fallback adds are state updates React has not
+rendered yet when `finally` runs, unless something in between awaited real I/O. Five of the six
+turns in these tests saved their answer as `streaming: true` with no html, so a reopened
+conversation shows its last answer as an open trace with no text. The sixth kept its answer only
+because it awaited the fallback's fetch, and that turn lost the layer the fallback drew: 2 layers
+on screen, 1 stored. The comment above that awaited call says the await fixed this. It moved the
+snapshot after `putLayer`, but not after the render that copies the new layers into
+`layersRef2`. In token mode the copy PUT to the server is built from the same record (read from
+the code; these tests ran in dev mode). Fixing the first gap removes that accidental fetch from a
+reopened list turn, so that turn's answer is now lost the same way the others are.
+
 ---
 
 *Still open:* one conversation produced **two** memory documents — the agent's own
