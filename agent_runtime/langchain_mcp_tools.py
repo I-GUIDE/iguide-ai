@@ -585,9 +585,13 @@ def make_langchain_mcp_tools(
         # and it would receive the entire remote tool surface (latency + mis-selection).
         allowed = _allowed_remote_tool_names(include_modules)
         if allowed:
-            scoped = [t for t in remote_tools if getattr(t, "name", "") in allowed]
-            if scoped:
-                remote_tools = scoped
+            # Exactly the modules' tools, even when that is none. This used to keep the whole
+            # list whenever nothing matched, which turned a scope into no scope: search_tools'
+            # one tool is unbound by default, so ["search_tools"] bound all 14 remote tools.
+            remote_tools = [t for t in remote_tools if getattr(t, "name", "") in allowed]
+            if not remote_tools:
+                logger.warning("MCP modules %s match none of the remote MCP tools; binding none",
+                               include_modules)
         if ttl > 0:
             with _mcp_cache_lock:
                 _mcp_tool_cache[cache_key] = (time.monotonic(), list(remote_tools))
