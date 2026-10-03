@@ -281,6 +281,8 @@ of the 3-tier dispatcher added in `ad6361b`, so the hierarchy had been unreachab
 since it was written. The same shape as stage 7's `list_conversation_files`: registered, wired,
 documented, and not actually reachable.
 
+---
+
 ## Stage 5 — Supervisor over peers {#stage-5}
 
 *2026-06 → 2026-07. 42 commits. This is the pivot of the project.*
@@ -1016,8 +1018,6 @@ the orphan rather than explaining it, and why the two ids diverge is not yet und
 
 ---
 
----
-
 ## Stage 10 — Removing the second path {#stage-10}
 
 *Branch `claude/evidence-summary`. Removes what stages 2 and 3 left behind.*
@@ -1494,6 +1494,7 @@ Not changed by this: with a tiered node and **no** tiered pair, `tiered_env` sti
 the bare pair, per variable. All four search clients share that rule now. `search_cluster()`'s
 credential-follows-host rule is its replacement once they call it, and that is the sibling
 branch's change, so it is not asserted here either way.
+
 ---
 
 ## Stage 13 — Shapes nobody owned {#stage-13}
@@ -1621,6 +1622,9 @@ recreating. Use `--no-deps`, because without it the same command also recreated 
   absent. Making them appear changes what users see, so that is a decision rather than a fix.
 - **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
 - **This file's numbering**, as noted at the top of the stage.
+
+---
+
 ## Stage 14 — A promise kept by rounding luck {#stage-14}
 
 `spatial_weights` with `weights='distance_band'` and no `threshold_km` tells the user it *"used
@@ -1709,6 +1713,9 @@ test that perturbs its input past the rounding instead of waiting for an unlucky
 
 Not deployed: the running image still has the unpadded threshold, so a caller that omits
 `threshold_km` can still get an island until the next image rebuild.
+
+---
+
 ## Stage 15 — What counts as a date is decided here, not by pandas {#stage-15}
 
 *2026-10-01, `claude/temporal-numeric-code-columns`.*
@@ -2034,6 +2041,76 @@ In the deployed container each version of `agent_runtime/` was imported from `/t
 `/app`, whose copy of the module is identical to `prototype`'s; nothing was deployed. The six new
 tests pin the three rules, the YYYYMMDD and bare-year readings, and the CSV shapes above. The
 original test is unchanged.
+
+### Stage S15.8 A year column is found by its name, and the blank row that let Beat win
+
+*2026-10-02, `claude/temporal-yr-and-blank-date`, stacked on `claude/temporal-numeric-code-columns`.*
+
+Rule 1 of S15.2 sends a CSV's numbers through the name gate, which is what keeps the beats out.
+The same gate decides whether a real year column is tried at all, and no hint matched `yr`. On
+`prototype` a CSV's `yr` column never needed one: GDAL hands it over as text, text is always a
+candidate, and the text ladder read `"2019"` as a year. Counted as numbers, the column faced the
+gate and failed it, so a dataset whose only time is a `yr` column reported no time column. `Year`
+passed only because `year` was already a hint. A typed `yr` column, from GeoJSON or a GeoPackage,
+had never been tried on any branch, for the same reason.
+
+**The name is the fix, because nothing else tells the two apart.** The year window cannot separate
+a year column from a code column whose values fall inside it: Chicago's beats include 1834 and
+2011. `yr` is now a hint. Hints match as substrings, which catches run-together assessor names such
+as `YRBUILT`, `SALEYR` and `TAXYR` that a whole-word rule would miss. A substring also matches
+names like `gyro` or `copyright`, but such a column still has to hold years, YYYYMMDD or epochs to
+parse, and a count like `yr2020_pop` is tried exactly as `year2020_pop` already was.
+
+**The blank date row is the deployed failure in full, and no test had it.** On the deployed
+versions `test_csv_with_coordinates_flows_through` failed only at
+`assert 'Beat' not in ['Date', 'Beat']`: its `Date` has no gap, so the two tied at 1.0, the name
+hint broke the tie, and `Date` still won. The first Linux CI run, on
+`claude/ci-deployed-constraints`, measured the sharper form. GDAL hands a blank cell over as `""`,
+which counts against `Date`, so with one blank in four rows `Date` parses 0.75 and `Beat`, read as
+the years 1234–1237, wins at 1.0: the deployed tool chose a beat number as the time column.
+`test_csv_beat_cannot_outrank_a_date_with_a_blank_row` pins that shape and keeps the original's
+`Beat` assertion.
+
+Measured through the real upload path, in a linux/amd64 `python:3.11-slim` replica of the deployed
+versions (`pip install -r requirements.txt -c constraints.txt`, the lock from
+`claude/ci-deployed-constraints`: CPython 3.11.16, pandas 3.0.5, geopandas 1.1.4, pyogrio 0.13.0
+with GDAL 3.12.4):
+
+| upload | `prototype` | S15.2 without `yr` | with `yr` |
+|---|---|---|---|
+| CSV: `Date` blank in one row of four, `Beat` 1234–1237 | **`Beat`** chosen, 1.0 against 0.75 | `Date` | `Date` |
+| CSV: `Year` beside `Beat` 1234–1236 | `Year`, with `Beat` offered too | `Year` | `Year` |
+| CSV: `yr` beside `Beat` 1834–2012 | `yr`, with `Beat` offered too | **no time column** | `yr` |
+| CSV: `YRBUILT` beside `Beat` 1834–2012 | `YRBUILT`, with `Beat` offered too | **no time column** | `YRBUILT` |
+| GeoJSON: integer `yr` beside `Beat` 1834–2012 | no time column | no time column | `yr` |
+
+**Behaviour that changed on purpose:** a column whose name contains `yr` is now tried when it holds
+numbers, typed or as CSV text, and gets the numeric readings any hinted number gets.
+
+**Found here, not fixed:** a CSV year column named without any hint, such as `FY` or `season`, is
+still not auto-detected. `prototype` read both through the text ladder; under S15.2 they report no
+time column, with or without `yr`, measured the same way as the table. `time_column=` still reads
+them. Each further hint widens what the gate lets through, so which names to add is a separate
+decision.
+
+**Verified where the failure lives**, in the same replica, with this section's four new test cases
+copied into each version's test file:
+
+| `agent_runtime/` | the 39 temporal tests |
+|---|---|
+| `prototype` | 11 fail: this stage's original 7, the blank-row test (`Beat` chosen) and the 3 `yr` cases |
+| `claude/temporal-numeric-code-columns` | 3 fail: the 3 `yr` cases, each with no time column |
+| with `yr` | all pass |
+
+The full suite in the same replica gives 1 failed, 1654 passed and 4 skipped with this change, and 2
+failed, 1643 passed and 4 skipped on `prototype`, the counts of the first Linux CI run. The failure
+left is `test_distance_band_without_a_threshold_leaves_no_island`, the platform-rounding failure
+`prototype` has too, which a separate change fixes; the one this change and its parent remove is
+`test_csv_with_coordinates_flows_through`. The development machine (pandas 2.2.3) passes the 39
+temporal tests as well. Nothing was deployed.
+
+---
+
 ## Stage 16 — Six tests only the Mac passed {#stage-16}
 
 A replica of the deployed `agent-api` Python environment was built on 2026-10-01 and again on
@@ -2158,6 +2235,9 @@ passed, 4 skipped). Its pip layer resolved that day's versions rather than the d
 it is the reference only for the QGIS test.
 
 Nothing was deployed. The running image still offers "GeoJSON" to the geocoder.
+
+---
+
 ## Stage 17 — The image installs a list, not a laptop {#stage-17}
 
 `reproject_vector` failed on every call in the deployed agent, and nobody had noticed. It writes

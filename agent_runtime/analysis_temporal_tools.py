@@ -78,9 +78,13 @@ _PLAIN_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 _NA_TEXT = ("na", "n/a", "nan", "-nan", "null", "none", "#n/a", "#n/a n/a", "#na", "<na>")
 
 # Column names that suggest time. Used only to BREAK TIES / to justify trying a numeric
-# column — the decision is made by how many values actually parse.
+# column — the decision is made by how many values actually parse. A CSV's numbers count as
+# numeric (_as_numbers), so a year column is tried only if its name matches a hint here. "yr"
+# keeps a CSV's yr, YRBUILT or SALE_YR column detectable; the text ladder used to read those as
+# years with no hint at all. Hints match as substrings, which is how the run-together YRBUILT
+# is caught; a numeric column still has to hold years, YYYYMMDD or epochs to parse as time.
 _TIME_NAME_HINTS = (
-    "date", "time", "timestamp", "datetime", "_dt", "dt_", "year", "month", "day", "hour",
+    "date", "time", "timestamp", "datetime", "_dt", "dt_", "year", "yr", "month", "day", "hour",
     "period", "when", "occur", "report", "observ", "record", "creat", "updat", "modif",
     "start", "end", "begin", "epoch", "collect", "sampl", "visit", "arrest", "incident",
 )
