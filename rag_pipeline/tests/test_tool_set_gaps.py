@@ -325,6 +325,42 @@ def test_the_unbind_list_is_overridable(monkeypatch):
     assert m._is_unbound_mcp_tool("describe_image")
 
 
+def test_the_override_removes_a_prefix_not_a_character_set(monkeypatch):
+    """The parser used lstrip("mcp_"), which strips the CHARACTERS m, c, p and _. Any name
+    starting with one of them was mangled with or without the prefix, so the override silently
+    unbound nothing. describe_image starts with d, which is why the test above passed anyway."""
+    from agent_runtime import langchain_mcp_tools as m
+
+    monkeypatch.setenv(
+        "AGENT_MCP_UNBIND",
+        "mcp_create_notebook_workflow_tool,create_notebook_workflow_tool,mcp_count_crimes_per_community",
+    )
+    assert m._unbound_mcp_tool_names() == {"create_notebook_workflow_tool", "count_crimes_per_community"}
+
+    # c: two real tools. m, p: a generated tool is named by whoever builds it.
+    for bare in ("create_notebook_workflow_tool", "count_crimes_per_community",
+                 "map_flood_extent", "plot_flood_extent"):
+        for written in (bare, f"mcp_{bare}"):
+            monkeypatch.setenv("AGENT_MCP_UNBIND", written)
+            assert m._is_unbound_mcp_tool(bare), written
+
+
+def test_the_override_reaches_the_remote_build(monkeypatch):
+    """The remote path is the one the deployment takes. A name in the override must not come back
+    from it, whichever way it was written."""
+    from types import SimpleNamespace
+
+    from agent_runtime import langchain_mcp_tools as m
+
+    async def _listed(url):
+        return [SimpleNamespace(name=n, description=n, inputSchema={})
+                for n in ("create_notebook_workflow_tool", "count_crimes_per_community", "describe_image")]
+
+    monkeypatch.setattr(m, "_remote_mcp_list_tools_async", _listed)
+    monkeypatch.setenv("AGENT_MCP_UNBIND", "mcp_create_notebook_workflow_tool,count_crimes_per_community")
+    assert [t.name for t in m._make_remote_mcp_tools("http://mcp.invalid/mcp/")] == ["mcp_describe_image"]
+
+
 def test_both_build_paths_apply_the_filter():
     """The remote path and the local-import fallback each build tools; filtering only the
     remote one would quietly re-bind them whenever the MCP server is unreachable."""
