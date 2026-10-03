@@ -1435,3 +1435,131 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 13 — Shapes nobody owned {#stage-13}
+
+Four fixes from 2026-10-01 to 10-03 (#28, #29 and two operational changes) share one cause: an
+interface with no owner. One was a payload shape that the server emits and the client reads, with
+no code standing between them. One was a model id that only a remote catalogue decides. One was
+an initialisation path written twice. One was the moment a config change becomes an outage. Each
+broke silently, and in each the visible symptom pointed somewhere other than the cause.
+
+> **On numbering.** This is Stage 13 on `prototype` because it merged first. At the time of
+> writing, nine open PRs also call themselves Stage 13 (#32, #34, #36, #37, #38, #40, #44, #45,
+> #46), several with different content under the same `{#stage-13}` anchor, and #30 and #31 both
+> claim S12.8. Whoever lands them must renumber; merged order is the honest sequence.
+
+### Stage S13.1 The download panel is whatever the tools emit
+
+The Downloads panel showed `unnamed file (file_f2929f3dec7d)` three times. The files downloaded,
+so it read as cosmetic. It was not.
+
+Nothing server-side assembles that panel. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`)
+walks the entire SSE payload and harvests any object holding a `download_url` and a `file_id` or
+`filename`, on the assumption that the three describe one file. The shape a tool emits is
+therefore the whole contract, and no code sits between the two ends to enforce it.
+
+`align_embedding_colors` broke it in both directions at once. Each region entry carried the
+embedding **package**'s `file_id` (an `.npz`) next to the re-coloured **image**'s `download_url`
+(a `.png`), and no filename. Each row was labelled from one file and linked to the other. It
+appeared to work only because the click still downloaded *something*. `embed_zones`'
+`pixel_image` had the milder half: its id and url agreed, but it had no name.
+
+The store had the names all along (`drawn_region_2018_gse_2018-06_2018-09_vectors.npz` and its
+siblings). That was established from evidence, not by reading code. `chat_traces` showed that
+turn calling `align_embedding_colors` on exactly those three ids, and the store's metadata held
+intact names for each. This was the first time the trace store answered a production question.
+
+Each file now travels as its own complete object. The second file **nests** instead of sitting
+under sibling `image_*` keys, because the flat shape is what allowed one file's id to be paired
+with another's url. `test_download_descriptors.py` mirrors the client's harvesting rule in
+Python, since a test checking any other rule would pass while the panel stayed wrong. It also
+includes the shape that shipped, to prove the check rejects it.
+
+### Stage S13.2 A model replaced under us, and a test that asserted a fact about the world
+
+Purdue withdrew `qwen3.6:27b` and put `qwen3.8:27b` in its place. Unlike its predecessor, which
+was listed and "Recommended" while returning zero bytes in 90 s, the replacement is usable as an
+agent model. Verified through `build_llm` rather than raw HTTP:
+
+- it answers in 0.7 s
+- it emits correct `tool_calls` with `finish_reason=tool_calls`
+- it keeps `reasoning_content` through `ReasoningPreservingChatOpenAI`
+- it completes a tool-result round trip in 2.2 s
+
+It reasons harder than 3.6, spending 34 of 38 completion tokens to say "OK", so the deliberate
+absence of `max_tokens` matters more with it, not less.
+
+Both hardcoded fallback defaults moved, along with `_ANVIL_FALLBACK_MODELS`. The second default,
+in the per-request path of `build_llm`, was nearly missed. Measured claims keep the model they
+were measured on: the `max_tokens` numbers still name qwen3.6, with 3.8's own measurement added
+beside them.
+
+The instructive part was a test. `test_the_model_defaults_to_the_verified_id` asserted that
+"qwen3.6:27b is the id AnvilGPT actually serves". No local test talks to Purdue, so that claim
+could not fail when it went stale, and it did go stale. A unit test can pin a **shape** (Open
+WebUI `name:tag`, never HuggingFace `Qwen/...`). It cannot pin a fact owned by a remote service.
+The test now pins the shape and states that the roster is probed. `/agent/models` fetches it
+live, so the picker corrected itself; the fallback tuple is consulted only when that fetch fails.
+
+qwen3.8 was the deployment default from 10-01 until 10-02, when the VM returned to OpenAI
+`gpt-5.6-luna`. It remains selectable per request.
+
+### Stage S13.3 rs-embed: three weeks of 500s behind a green health check
+
+rs-embed (a separate repository on the same host) returned 500 on every `/api/embed` from
+2026-09-08 until 10-01. Its Earth Engine credential was a person's `earthengine authenticate`
+token, and that token stopped being accepted. `/api/models` and `/api/health` kept answering 200
+throughout, the pattern already recorded for services that succeed at nothing.
+
+Two defects hid it, and both are worth recognising elsewhere.
+
+- **The error you saw was not the error that happened.** `ensure_ready()` caught
+  `ee.Initialize`'s exception into a variable it never used, tried a geemap fallback, and
+  propagated only the fallback's failure. The expired credential therefore surfaced as
+  `module 'geemap' has no attribute 'ee_initialize'` (geemap removed that function in 0.38),
+  which sent debugging after the wrong library. A fallback that can fail must chain the primary
+  error, not replace it.
+- **Initialisation was written twice, and the copies disagreed.** The library half reads
+  `EE_PROJECT`. The web app's `_ensure_ee` read `EARTHENGINE_PROJECT` and called `ee.Initialize()`
+  itself with no credentials. A fix applied only to the library changed nothing, because
+  `/api/embed` goes through the web app. The web app now defers to the library's helper.
+
+It now authenticates as a service account, and the unit sets `EE_PROJECT` explicitly. The unit
+previously set no environment at all, so it had been running with no project and inheriting
+whatever project the personal credential named. Verified from inside the agent container:
+`ok=True`, `backend=gee`, `nodata_fraction=0.0`, and a grid that is 100% finite. The status code
+alone was not enough: with no model named, the service returns `{"results":[]}` and still
+answers 200.
+
+Where the fix lives is uneven, and the next maintainer needs to know it. The library half is
+committed on the VM on a branch that has never been pushed. The web-app half cannot be committed
+at all, because rs-embed gitignores `examples/**`. It exists only on that host and in a backup.
+
+### Stage S13.4 A restart is an outage for whoever is mid-turn
+
+Switching the default model on 2026-10-02 at 14:33 UTC was an env-only change, and it cut off
+eight live turns: four 502s and four 200 streams truncated mid-answer, across the prod platform
+backend and real users. Nothing reported it. It surfaced only because a later, unrelated error
+report led to reading the nginx log.
+
+The Deployment section of AGENTS.md said never to *recover* with `--force-recreate`, to preserve
+evidence. It did not cover the other reason to recreate: a config change, which needs one and
+has a different cost. Two habits are now written down. Check for streams in flight before
+recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
+`embedding-server`, and agent-api then waited on their health checks.
+
+### Stage S13.5 What this stage did not fix
+
+- **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
+  The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
+  (11 started, 11 traces written, each ending `node_completed`, none with an error event inside
+  the stream). No chat request reached it between 17:42 and 18:35. The failure therefore
+  happened in the platform frontend or backend, whose logs this repository cannot see.
+- **Four emitters whose files never reach the panel**: `image_file_id` at three sites in
+  `rs_embed_tools.py` and `predictions_file_id` at one. These files are not unnamed; they are
+  absent. Making them appear changes what users see, so that is a decision rather than a fix.
+- **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
+- **This file's numbering**, as noted at the top of the stage.
