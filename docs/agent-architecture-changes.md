@@ -31,6 +31,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
 | 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
 | 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
+| 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -2525,3 +2526,129 @@ in by an upgraded dependency. The moves most likely to change behaviour:
 Installing with the deployed freeze as constraints ships only the additions, as the replica
 shows. That is the job of a lock file, like the one on `backend_swap`; this stage does not add
 one.
+
+---
+
+## Stage 18 — Testing what is deployed {#stage-18}
+
+Until this stage the test suite ran in one place, the development Mac. It had never run in the
+environment the deployment runs, which is Linux x86-64 with CPython 3.11
+(`rag_pipeline/Dockerfile` is `python:3.11-slim`), and nothing recorded what that environment's
+packages were.
+
+### Stage S18.1 The deployed stack was an accident of build day
+
+`requirements.txt` names 42 packages and pins none of them exactly. 35 are bare names, among them
+geopandas, shapely, fiona, rasterio, libpysal and pandas; seven carry only a lower bound. numpy
+and scipy are not named at all, because they arrive transitively. So the image's
+`pip install -r requirements.txt` installed whatever was newest on the day it was built, and the
+result was written down nowhere. Until this stage, "the deployed stack" existed only inside the
+running container.
+
+How fast that accident drifts, measured: the running image was built on 2026-09-22. Resolving
+the same `requirements.txt` unpinned nine days later (2026-10-01, CPython 3.11.16, x86_64)
+already differs from it on 42 of the 175 packages both contain, geopandas 1.1.4 → 1.2.0 and
+pandas 3.0.5 → 3.0.6 among them, and adds a package the image does not have at all
+(`opentelemetry-api`). A CI job that installed `requirements.txt` bare would have been testing
+that stack, which nobody runs.
+
+`constraints.txt` is now that record: the running `agent-api` container's `pip freeze`, 177
+packages, taken 2026-10-01 from image `deeb331964f6` (built 2026-09-22; CPython 3.11.16,
+x86_64), committed verbatim under a header that says how to retake it. Before committing it was
+checked against the live container again, and the two freezes hash identically.
+
+**The lock comes from the image, never from a development machine.** A lock frozen on the Mac
+describes the Mac. `origin/backend_swap` has one, and it disagrees with the deployed image on 34
+of the 40 packages the two share: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6. Its
+rasterio 1.5.0 pin needs Python 3.12 or later, so it could not install on any 3.11 build, and
+nobody noticed until that branch's CI first ran (`51035b2`). The Mac also supplies pypdf,
+python-docx and xarray from `~/.local` (`backend_swap` `4e8d327`), so a suite that is green
+there says nothing about a build without them.
+
+### Stage S18.2 CI installs through the lock
+
+`.github/workflows/verify.yml` runs `python3 -m pytest rag_pipeline/tests/ -q` on
+`ubuntu-latest` with CPython 3.11, after `pip install -r requirements.txt -c constraints.txt`. It
+needs no secret, because `conftest.py` already replaces `load_dotenv` with a no-op (S9.7).
+
+A constraint binds only what is requested. A requirement added after the freeze therefore
+floats to latest-at-run-time while everything else stays pinned, and CI would test a mix that is
+neither deployed nor latest without saying so. A step after the install prints every installed
+`name==version` that the lock does not contain. It warns rather than fails, because until the
+next deploy there is no deployed version to pin the newcomer to.
+
+### Stage S18.3 What the first Linux run found
+
+The first run (`36943761445`, on `ubuntu-24.04` with CPython 3.11.16, the deployed interpreter
+exactly) installed all 175 packages at the deployed versions and reported:
+
+| | passed | failed | skipped |
+|---|---|---|---|
+| development Mac, its own versions | 1645 | 0 | 4 |
+| CI, the deployed versions | 1643 | 2 | 4 |
+
+The four skips are the same opt-in live-service tests in both. Before the push, the workflow's
+steps were run verbatim in a `python:3.11-slim` container on x86-64, which gave the same counts
+once it had the system library described below.
+
+**The Mac's baseline was measured on a stack that is not deployed.** Of ten version-sensitive
+packages, eight differ: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6, scipy 1.15.3
+against 1.17.1, libpysal 4.15.0 against 4.14.1, and fiona is not installed there at all. One of
+the two failures comes from that difference rather than from the platform, and it is the one
+that matters in production:
+
+* **pandas 3 parses years before 1677, so four-digit codes became dates.**
+  `test_csv_with_coordinates_flows_through` expects `detect_time_column` to ignore `Beat`, a
+  column of police beat numbers; on the deployed versions it lists it as a time candidate. Two
+  things combine. GDAL reads a CSV's columns as text, so the guard in `_candidate_columns` that
+  skips numeric columns without a time-like name never sees a number. And
+  `pd.to_datetime(..., errors="coerce")` turns `"1234"` into NaT on pandas 2, whose nanosecond
+  timestamps cannot reach before 1677, but into 1234-01-01 on pandas 3, which infers microsecond
+  resolution. Ranking sorts by parse rate before the name hint, so the code column wins whenever
+  the real date has a gap. Measured on the deployed versions: with one blank date in four rows,
+  `detect_time_column` chooses `Beat` (parse rate 1.0) over `Date` (0.75); pandas 2.2.3 chooses
+  `Date`. The deployed agent does this today. The fix is a separate change.
+* **The distance band sits on a tie.** `test_distance_band_without_a_threshold_leaves_no_island`
+  passes on macOS/arm64 and leaves one island on Linux x86-64 with identical libpysal 4.14.1,
+  scipy 1.17.1 and numpy 2.4.6; it was reproduced inside the deployed container on 2026-10-01.
+  `analysis_spatial_stats_tools.py` passes `min_threshold_distance` to `DistanceBand` exactly,
+  and the margin on the test lattice is 0.0 m. The fix (pad the threshold by a relative 1e-9) is
+  a separate change, and the test is deliberately not skipped in the meantime.
+* **rasterio and fiona need a system library the slim base image lacks.** Their wheels bundle
+  GDAL but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so
+  `import rasterio` fails there. Under pytest 9 a module that is present but cannot load is a
+  collection error, not a skip, so that session stopped at `test_raster_routing.py` with no test
+  run. The deployed image has the library only as an automatic dependency of its GDAL and QGIS
+  apt layers (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others).
+  Dropping those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and
+  fiona unimportable. GitHub's runner has the library (both import there), so CI on the runner
+  does not see this; a job built on the slim image would.
+* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
+  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
+  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
+  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
+  them a PDF, a .docx or a NetCDF file. A green run does not mean the deployment can read those
+  formats. Declaring them is a separate change.
+
+The workflow also imports every module the suite `importorskip`s before running it. That call
+skips when a module is absent, so a package dropped from the install would turn whole spatial
+modules into skips and leave the job green with far fewer tests.
+
+### Stage S18.4 What this stage did not fix
+
+* **The image still installs unpinned.** `rag_pipeline/Dockerfile` does not read
+  `constraints.txt`, so the lock describes the image as it was on 2026-10-01 and goes stale at
+  the next rebuild. Retake it after every deploy that rebuilds the image. Installing through the
+  lock in the Dockerfile would make the image reproducible, but it changes what the next deploy
+  installs, so it is a separate decision.
+* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
+  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
+  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
+  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
+  neither runs for real anywhere in CI.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
+
+> **Landed after the fixes it found.** Both failures recorded above were fixed before this stage merged: the island under the default distance band is [Stage 14](#stage-14), and `Beat` read as a date on pandas 3 is [Stage 15](#stage-15). Merged in that order on 2026-10-03, so the workflow's first run on `prototype` is against code that already contains both.
+
