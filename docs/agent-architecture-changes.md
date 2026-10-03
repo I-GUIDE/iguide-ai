@@ -25,6 +25,13 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 13 | [Shapes nobody owned](#stage-13) | 2026-10-01 → 2026-10-03 | downloads named, qwen3.8, rs-embed off a personal credential, a restart that cut off live turns |
+| 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
+| 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
+| 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
+| 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
+| 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -274,6 +281,8 @@ finds binding half the tool surface out of reach.
 of the 3-tier dispatcher added in `ad6361b`, so the hierarchy had been unreachable from the agent
 since it was written. The same shape as stage 7's `list_conversation_files`: registered, wired,
 documented, and not actually reachable.
+
+---
 
 ## Stage 5 — Supervisor over peers {#stage-5}
 
@@ -1081,8 +1090,6 @@ the orphan rather than explaining it, and why the two ids diverge is not yet und
 
 ---
 
----
-
 ## Stage 10 — Removing the second path {#stage-10}
 
 *Branch `claude/evidence-summary`. Removes what stages 2 and 3 left behind.*
@@ -1506,3 +1513,1332 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+### Stage S12.8 The fifth value kept outside the tier rule: the agent search client's credential
+
+S12.7's rule is that *a value the platform sets per tier, stored anywhere other than the tier
+table, does not move when the tier does*. S12.7 lists three instances. The fourth is on the
+extraction path, `agent_kb._os_client`, which `claude/extraction-integration` moves. The fifth
+was found on 2026-10-01 at `5ae6d92`, in the deployed container's copy as well as the
+repository's, and it is in the platform search itself: `rag_pipeline/search/agents.py`'s
+`_os_client` resolved `OPENSEARCH_NODE` through the tier rule and `OPENSEARCH_USERNAME` /
+`OPENSEARCH_PASSWORD` bare. **A tiered host with the untiered credential.** The three clients
+beside it (`keyword.py`, `semantic.py`, `spatial.py`) resolve all three names through
+`search/utils.getenv`, `<NAME>_<SEARCH_TIER>` first, and `agents.py`'s own `_getenv` already
+delegated to that helper. It was used for one of the three names.
+
+Why nothing failed: the bare pair **is** prod's. Reproduced inside the deployed container,
+`SEARCH_TIER=prod` resolves the node to prod's cluster (`149.165.155.195`) and the bare pair
+authenticates there. The same pair returned 401 against the dev cluster on 2026-09-22, so
+`SEARCH_TIER=dev` would send prod's password to dev's cluster, and the agent search would fail
+with a 401 that reads as a network problem. It is the trap S12.6 records for
+`opensearch_credentials()`, reached by another path. Latent, not live: the deployment searches
+prod.
+
+The fix is the two lines `keyword.py` already had. `claude/extraction-integration` makes the
+same change to `agents.py`, byte for byte including its comment, so the two branches merge
+cleanly there. No resolver was added. That branch introduces `platform_endpoints.search_cluster()`,
+returning `(node, user, pwd)` under a credential-follows-host rule, and a second resolver here
+would be a second answer to the same question for it to unpick. When it lands, the four search
+clients (`agents.py`, `keyword.py`, `semantic.py`, `spatial.py`) share one shape and can move
+onto it together.
+
+Pinned by `rag_pipeline/tests/test_search_tier_credential.py` (seven tests; the suite goes from
+1645 to 1652 passed, 4 skipped before and after):
+
+- The client built under `SEARCH_TIER=dev`, with the `_DEV` triple beside a different bare
+  triple, carries the DEV pair. It is recorded where `agents.py` binds `OpenSearch`, and checked
+  once more through the `Authorization` header the real client would send. Three more
+  configurations pin the precedence: bare names alone, `SEARCH_TIER=dev` under
+  `PLATFORM_TIER=prod` (the pair follows the SEARCH tier), and prod beside the bare triple.
+  Assertions name hosts and pairs by where they came from (dev, prod, bare), never by value.
+- The drift guard: no module under `rag_pipeline/search/` or `extractors/emitters/` reads the
+  three names bare (`os.getenv`, `os.environ`). It carries two named carve-outs, `agent_kb.py`
+  and `opensearch_emitter.py`, which `claude/extraction-integration` moves onto
+  `search_cluster()`. Each carve-out expires itself: the test fails the moment its file stops
+  reading the bare names, so the list cannot go stale.
+- `@lru_cache(maxsize=1)` is on `_os_client` and not on `_os_index`, the settings helper beside
+  it. On the sibling branch an anchored edit here moved the decorator onto a settings helper,
+  caching a setting; targeted runs passed and the full suite caught it. Pinned so the next edit
+  near it fails by name.
+
+Not changed by this: with a tiered node and **no** tiered pair, `tiered_env` still falls back to
+the bare pair, per variable. All four search clients share that rule now. `search_cluster()`'s
+credential-follows-host rule is its replacement once they call it, and that is the sibling
+branch's change, so it is not asserted here either way.
+
+### Stage S12.9 What the image carries, and what quietly did not ship
+
+S12.7's fault has a packaging twin: **a directory the runtime reads, named anywhere other than
+the Dockerfile's copy list, does not reach the container.** `agent_runtime/skills.py` discovers
+skill bundles under `REPO_ROOT/skills` and `REPO_ROOT/.agents/skills`, and `REPO_ROOT` is `/app`
+in the image. `rag_pipeline/Dockerfile` builds `/app` from an explicit list of `COPY`
+instructions, one package added each time one was needed, and no version of it on `prototype`
+has copied either skill root since skills landed on 2026-05-06 (`d51cd25`): 148 days. Discovery
+skips a root that does not exist, by design, so the registry degraded to empty and nothing said
+so.
+
+| image | `/app/skills` | `/app/.agents/skills` | `SkillRegistry.discover()` |
+| --- | --- | --- | --- |
+| deployed `agent-api`, measured 2026-10-01 | absent | absent | 0 skills |
+| `prototype` @ `5ae6d92`, built locally | absent | absent | 0 skills, 0 errors |
+| the same commit with this change | 2 skills | 1 skill | 3 skills, 0 errors |
+
+The deployed agents did not have skill tools that returned nothing; they had no skill tools.
+`make_skill_tools()` returns an empty list for an empty registry, so `list_available_skills` and
+`load_skill` were never offered, and `available_skills` was `[]` in every response and in the
+stream's `initialized` event. The image now copies both roots, and all three skills load in it as
+the image's non-root user.
+
+**The first fix was partial.** `f8f99ef` on `backend_swap` (2026-08-13) copied `.agents/` alone:
+one skill of three, with `/app/skills`, the first root, still missing. The test it added passed,
+because it asked whether *any* root was copied. That is S12.7's lesson again: a check that
+recognises one wrong answer (no root) certifies another (one root of two). The commit is still on
+`backend_swap` and in `claude/extraction-integration`'s merge `b911191`; whichever branch meets
+this change should keep both `COPY` lines and drop that test.
+
+The guard is `rag_pipeline/tests/test_image_skill_roots.py`. It builds the part of `/app` that
+holds the skill roots in a temporary directory by the Dockerfile's own rules (`WORKDIR`, each
+`COPY` of the last stage, then `.dockerignore`), plants a skill in each root, and runs the real
+discovery with no explicit roots, as every production caller does. Eleven cases check that it
+rejects the ways a root can be lost, the partial fix among them. It reads text, so it does not
+replace building the image, but it fails on a checkout before anyone builds one.
+
+`.dockerignore` was checked, not assumed. Its `*.md` reads as though it drops every `SKILL.md`,
+but Docker anchors patterns at the context root, so it drops only the root's own markdown. The
+test's matcher was cross-checked against a real build of this context: of 390 paths on disk it
+predicted exactly the 365 that Docker sent.
+
+`AGENT_SKILL_PATHS` appends roots after the defaults; it does not replace them. A deployment that
+points it at a writable volume for generated skills (`backend_swap` uses
+`/app/agent_chat_files/skills`) keeps the baked-in ones: the built image found four skills with a
+third root mounted, and a test pins the order.
+
+Two of the three skills deserve a look before this is deployed, because deploying it is what
+puts them in front of the model. `example-skill` is a stub whose description says it exists to
+verify skill loading. `ai-agent-for-chicago-crime-analysis` names `mcp_run_nbwf_d01e717421c1b0ff`
+as its tool, and no such tool exists on `prototype`. `allowed-tools` is advisory, so loading that
+skill tells the agent to call a tool it does not have; nothing blocks it.
+
+The rule this leaves, beside S12.7's: **anything the runtime reads relative to `REPO_ROOT` is a
+deployment input, and the copy list is where it has to be named.** The other repository-root
+paths in the copied packages are import paths, `.env` files the image leaves out on purpose, a
+boundary for user-supplied notebook paths, and the skill emitter's output directory. One is a
+real gap and is not fixed here: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+and `examples/` is not in the image either.
+
+### Stage S12.10 The page `/agent/dashboard` serves
+
+The skill-roots fix (S12.8 in I-GUIDE/iguide-ai#31, open at the time of writing) ended by naming
+one more gap of its class: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+which `api/server.py` reads relative to the repository root, and no revision of
+`rag_pipeline/Dockerfile` on any branch has copied `examples/`. The Dockerfile has built `/app`
+from an explicit list since it was created (`1c78e59`, 2025-12-14), and the route landed into it
+(`7f71a90`, 2026-05-07). Every image built in the 148 days since answers the route with a 500.
+
+| where | `GET /agent/dashboard`, 2026-10-02 |
+| --- | --- |
+| `https://agent.i-guide.io` (production) | 500, Flask's default 265-byte page; `/health` 200 at the same time |
+| `prototype` @ `5ae6d92`, built locally, under the image's own gunicorn `CMD` | 500; one ERROR traceback per request, `FileNotFoundError: ... '/app/examples/agent_chat_stream_demo.html'` |
+| the same commit with this change | 200, `text/html`, byte-identical to the checkout's file |
+
+**Revised during the work: the first decision was the opposite.** The task allowed either
+answer, copy the page in or make the route answer 404 cleanly, and `prototype` on its own
+pointed to the second. README.md, AGENTS.md and `docs/` never mention the route. Its docstring
+calls it "the local streaming agent dashboard". And `CORS(app)` lets the page reach the live
+agent from `file://` anyway: a preflight from `Origin: null` was allowed, `x-api-key` included.
+A 404 version was written and tested, and the suite passed with it (1647 passed). It was
+withdrawn because `backend_swap`, read afterwards, records the opposite intent:
+
+- `8fd97f58` (2026-08-12) closed two holes it described as "reachable from the open internet"
+  and kept `/agent/dashboard` open on purpose, as "static HTML with no data".
+- `66e71d54` (2026-08-12) fixed hardcoded tool checkboxes in the page that an earlier fix had
+  corrected only in the prototype: "fixing one shipped client had left the other broken".
+- M0.2b (2026-08-07 in that branch's `docs/DEVLOG.md`) updated it, with the prototype, to
+  describe the new auth contract.
+
+That branch also scopes CORS to `AGENT_CORS_ORIGINS`, falling back to `ALLOWED_DOMAIN_LIST`. A
+page opened from disk sends `Origin: null`, so unless `null` is on that list, being served by the
+agent is the only way the page works against a deployment.
+"Nobody noticed the 500 for 148 days" is no evidence either way: the skill roots went unnoticed
+for the same 148 days and were plainly meant to ship. `git log -S` on one branch found where the
+route came from. The reasons were in another branch's commit messages.
+
+**The change** is one `COPY`, of this file only, placed after `api/`:
+`COPY examples/agent_chat_stream_demo.html ./examples/`. Nothing else in the copied packages
+reads the root `examples/`, and its other page, `iguide_chat_prototype.html`, is only named in a
+docstring. `.dockerignore` does not exclude it: its patterns are anchored at the context root and
+none reaches `examples/`, and the image builds with it. The route's path moved into a module
+constant, `_DASHBOARD_PAGE`, unchanged in value, so a test reads the path from the code instead
+of restating it.
+
+**The guard** is `rag_pipeline/tests/test_image_dashboard_page.py`. It follows the page through
+the Dockerfile's own rules (`WORKDIR`, each `COPY` of the last stage, then `.dockerignore`) and
+checks that it lands beside wherever `api/` lands, which is where the route reads it. The
+readers are #31's, copied byte for byte with one addition. A directory named as a `COPY` source
+always has its contents land inside the destination. A single file lands *inside* a destination
+that ends in `/`, and *as* any other destination. Fourteen cases check the audit's verdicts, and
+all fourteen were also built for real. Every accepted Dockerfile served the page. Five of the six
+rejected ones built without an error and left a route that would answer 500. The sixth, an
+ignore pattern that drops a file a `COPY` names, failed the build. The subtlest is a missing
+trailing slash: `COPY … ./examples` builds cleanly and writes the page as a *file* named
+`/app/examples`. Removing the new line fails the guard with "no COPY in the Dockerfile carries
+it". Moving it to `./` fails with both paths named.
+
+Not fixed here:
+
+- **Production still answers 500** until the image is rebuilt with this change, and deploying
+  is a separate decision. Once it is deployed, the page is public at
+  `https://agent.i-guide.io/agent/dashboard`, as `backend_swap` decided it should be.
+- On `backend_swap`, `test_api_auth.py`'s docstring says `/agent/dashboard` is asserted to stay
+  open, but its `OPEN` list holds only `/health`. That assertion was never written, so nothing
+  there notices the route being closed or broken. Add it when that branch meets this one.
+- Once #31 merges, the Dockerfile and `.dockerignore` readers exist in two test files. They
+  belong in one module, and this file's `_lands_at` is the superset.
+
+S12.8's rule held: **anything the runtime reads relative to `REPO_ROOT` is a deployment input.**
+The one path that looked like an exception was not one. What showed that was another branch's
+commit messages, not this branch's code or docs.
+
+---
+
+## Stage 13 — Shapes nobody owned {#stage-13}
+
+Four fixes from 2026-10-01 to 10-03 (#28, #29 and two operational changes) share one cause: an
+interface with no owner. One was a payload shape that the server emits and the client reads, with
+no code standing between them. One was a model id that only a remote catalogue decides. One was
+an initialisation path written twice. One was the moment a config change becomes an outage. Each
+broke silently, and in each the visible symptom pointed somewhere other than the cause.
+
+> **On numbering.** This is Stage 13 on `prototype` because it merged first. At the time of
+> writing, nine open PRs also call themselves Stage 13 (#32, #34, #36, #37, #38, #40, #44, #45,
+> #46), several with different content under the same `{#stage-13}` anchor, and #30 and #31 both
+> claim S12.8. Whoever lands them must renumber; merged order is the honest sequence.
+
+### Stage S13.1 The download panel is whatever the tools emit
+
+The Downloads panel showed `unnamed file (file_f2929f3dec7d)` three times. The files downloaded,
+so it read as cosmetic. It was not.
+
+Nothing server-side assembles that panel. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`)
+walks the entire SSE payload and harvests any object holding a `download_url` and a `file_id` or
+`filename`, on the assumption that the three describe one file. The shape a tool emits is
+therefore the whole contract, and no code sits between the two ends to enforce it.
+
+`align_embedding_colors` broke it in both directions at once. Each region entry carried the
+embedding **package**'s `file_id` (an `.npz`) next to the re-coloured **image**'s `download_url`
+(a `.png`), and no filename. Each row was labelled from one file and linked to the other. It
+appeared to work only because the click still downloaded *something*. `embed_zones`'
+`pixel_image` had the milder half: its id and url agreed, but it had no name.
+
+The store had the names all along (`drawn_region_2018_gse_2018-06_2018-09_vectors.npz` and its
+siblings). That was established from evidence, not by reading code. `chat_traces` showed that
+turn calling `align_embedding_colors` on exactly those three ids, and the store's metadata held
+intact names for each. This was the first time the trace store answered a production question.
+
+Each file now travels as its own complete object. The second file **nests** instead of sitting
+under sibling `image_*` keys, because the flat shape is what allowed one file's id to be paired
+with another's url. `test_download_descriptors.py` mirrors the client's harvesting rule in
+Python, since a test checking any other rule would pass while the panel stayed wrong. It also
+includes the shape that shipped, to prove the check rejects it.
+
+### Stage S13.2 A model replaced under us, and a test that asserted a fact about the world
+
+Purdue withdrew `qwen3.6:27b` and put `qwen3.8:27b` in its place. Unlike its predecessor, which
+was listed and "Recommended" while returning zero bytes in 90 s, the replacement is usable as an
+agent model. Verified through `build_llm` rather than raw HTTP:
+
+- it answers in 0.7 s
+- it emits correct `tool_calls` with `finish_reason=tool_calls`
+- it keeps `reasoning_content` through `ReasoningPreservingChatOpenAI`
+- it completes a tool-result round trip in 2.2 s
+
+It reasons harder than 3.6, spending 34 of 38 completion tokens to say "OK", so the deliberate
+absence of `max_tokens` matters more with it, not less.
+
+Both hardcoded fallback defaults moved, along with `_ANVIL_FALLBACK_MODELS`. The second default,
+in the per-request path of `build_llm`, was nearly missed. Measured claims keep the model they
+were measured on: the `max_tokens` numbers still name qwen3.6, with 3.8's own measurement added
+beside them.
+
+The instructive part was a test. `test_the_model_defaults_to_the_verified_id` asserted that
+"qwen3.6:27b is the id AnvilGPT actually serves". No local test talks to Purdue, so that claim
+could not fail when it went stale, and it did go stale. A unit test can pin a **shape** (Open
+WebUI `name:tag`, never HuggingFace `Qwen/...`). It cannot pin a fact owned by a remote service.
+The test now pins the shape and states that the roster is probed. `/agent/models` fetches it
+live, so the picker corrected itself; the fallback tuple is consulted only when that fetch fails.
+
+qwen3.8 was the deployment default from 10-01 until 10-02, when the VM returned to OpenAI
+`gpt-5.6-luna`. It remains selectable per request.
+
+### Stage S13.3 rs-embed: three weeks of 500s behind a green health check
+
+rs-embed (a separate repository on the same host) returned 500 on every `/api/embed` from
+2026-09-08 until 10-01. Its Earth Engine credential was a person's `earthengine authenticate`
+token, and that token stopped being accepted. `/api/models` and `/api/health` kept answering 200
+throughout, the pattern already recorded for services that succeed at nothing.
+
+Two defects hid it, and both are worth recognising elsewhere.
+
+- **The error you saw was not the error that happened.** `ensure_ready()` caught
+  `ee.Initialize`'s exception into a variable it never used, tried a geemap fallback, and
+  propagated only the fallback's failure. The expired credential therefore surfaced as
+  `module 'geemap' has no attribute 'ee_initialize'` (geemap removed that function in 0.38),
+  which sent debugging after the wrong library. A fallback that can fail must chain the primary
+  error, not replace it.
+- **Initialisation was written twice, and the copies disagreed.** The library half reads
+  `EE_PROJECT`. The web app's `_ensure_ee` read `EARTHENGINE_PROJECT` and called `ee.Initialize()`
+  itself with no credentials. A fix applied only to the library changed nothing, because
+  `/api/embed` goes through the web app. The web app now defers to the library's helper.
+
+It now authenticates as a service account, and the unit sets `EE_PROJECT` explicitly. The unit
+previously set no environment at all, so it had been running with no project and inheriting
+whatever project the personal credential named. Verified from inside the agent container:
+`ok=True`, `backend=gee`, `nodata_fraction=0.0`, and a grid that is 100% finite. The status code
+alone was not enough: with no model named, the service returns `{"results":[]}` and still
+answers 200.
+
+Where the fix lives is uneven, and the next maintainer needs to know it. The library half is
+committed on the VM on a branch that has never been pushed. The web-app half cannot be committed
+at all, because rs-embed gitignores `examples/**`. It exists only on that host and in a backup.
+
+### Stage S13.4 A restart is an outage for whoever is mid-turn
+
+Switching the default model on 2026-10-02 at 14:33 UTC was an env-only change, and it cut off
+eight live turns: four 502s and four 200 streams truncated mid-answer, across the prod platform
+backend and real users. Nothing reported it. It surfaced only because a later, unrelated error
+report led to reading the nginx log.
+
+The Deployment section of AGENTS.md said never to *recover* with `--force-recreate`, to preserve
+evidence. It did not cover the other reason to recreate: a config change, which needs one and
+has a different cost. Two habits are now written down. Check for streams in flight before
+recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
+`embedding-server`, and agent-api then waited on their health checks.
+
+### Stage S13.5 What this stage did not fix
+
+- **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
+  The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
+  (11 started, 11 traces written, each ending `node_completed`, none with an error event inside
+  the stream). No chat request reached it between 17:42 and 18:35. The failure therefore
+  happened in the platform frontend or backend, whose logs this repository cannot see.
+- **Four emitters whose files never reach the panel**: `image_file_id` at three sites in
+  `rs_embed_tools.py` and `predictions_file_id` at one. These files are not unnamed; they are
+  absent. Making them appear changes what users see, so that is a decision rather than a fix.
+- **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
+- **This file's numbering**, as noted at the top of the stage.
+
+---
+
+## Stage 14 — A promise kept by rounding luck {#stage-14}
+
+`spatial_weights` with `weights='distance_band'` and no `threshold_km` tells the user it *"used
+the smallest distance that leaves no island"*. On the deployed Linux image that was false: the
+test lattice came back with one island. The test that checks the promise arrived with the tool
+(`7cb9f47`, 2026-08-19) and passes on a Mac, so nobody saw it fail until the suite ran on
+Linux: in `backend_swap`'s CI, which fixed it in `4e8d327`; in the deployed-version CI being
+added to `prototype` (`460cd25`, branch `claude/ci-deployed-constraints`); and inside the deployed
+`agent-api` container on 2026-10-01.
+
+This is stage 14 because that CI change opens stage 13, *Testing what is deployed*. Its first
+Linux run found this tie, recorded it, and left the test failing for a separate change. This is
+that change.
+
+### Stage S14.1 Where the island came from
+
+The automatic threshold is `libpysal.weights.min_threshold_distance`, which returns the critical
+pair's distance as a square root. `DistanceBand` then admits a pair when its **squared** distance
+is at most the threshold squared, because scipy's KD-tree compares in squared space. Squaring a
+rounded square root can come back one ulp short of where it started, and on the 8×8 test lattice
+(projected to UTM 31N) it does. Measured on both machines:
+
+* Both compute the same threshold to the last bit, 110,884.46616304158 m, and the distance the
+  KD-tree reports for the critical pair equals it exactly: the "margin of 0.0 m". The Linux band
+  still drops the pair, because its squared distance is one ulp above the squared threshold.
+  Dropping it leaves one cell with no neighbour at all.
+* The two machines project one easting of that pair **one ulp apart** (1.2e-10 m at about
+  999 km), with identical PROJ 9.5.1 and GEOS 3.13.1. Their KD-trees also disagree on the same
+  coordinates: on the Mac's, the Mac's KD-tree keeps the pair and the Linux one drops it.
+  Computed by hand, that sum of squares lands exactly on the squared threshold if `dy*dy` is
+  fused into the final addition, and one ulp above it with plain arithmetic.
+
+Swapping the pair's exact coordinates between the machines shows that either difference alone
+drops the pair:
+
+| pair's coordinates from | macOS/arm64 KD-tree | Linux/x86-64 KD-tree |
+|---|---|---|
+| macOS | kept | **dropped** |
+| Linux | **dropped** | **dropped** |
+
+The coincidence was the Mac passing, not Linux failing. The pair survived only where the Mac's
+coordinates met the Mac's arithmetic. These two machines also run different library versions
+(libpysal 4.15.0, scipy 1.15.3, numpy 2.1.3 on the Mac; 4.14.1, 1.17.1, 2.4.6 in the container),
+but the session working on the extraction branch pinned CI's exact versions on a Mac and still got
+no island, so the split follows the platform rather than a version.
+
+### Stage S14.2 The fix, and what it costs
+
+One line after `min_threshold_distance`: `thresh *= 1.0 + 1e-9`. That is about 0.1 mm at 100 km
+and 7.6 million ulps at this threshold, so it absorbs any last-bit disagreement while staying far
+below any distance an analysis could care about. It is the line `backend_swap` carries in
+`4e8d327`, after which that branch's Linux CI went green. This is the only place the code derives
+a band from `min_threshold_distance`.
+
+**Revised during the work:** the line and its comment are now copied from `4e8d327` verbatim.
+The first version reworded the comment, and the extraction-integration branch already carries
+`4e8d327`, so a test merge of `prototype` into it conflicted in this file. With identical lines
+the same test merge has no conflict at all. The note's caveat is a separate comment two lines
+further down, where it cannot collide.
+
+What it changes, measured on the lattice: nothing on the Mac (146 links before and after), and on
+Linux exactly the dropped pair (144 links and 1 island before, 146 and 0 after). Only two
+directed pairs lie within a relative 1e-9 of the threshold, and they are that pair. The note
+keeps its wording and prints the padded distance. That differs from the strict minimum far below
+the note's metre precision, and the unpadded value is not reliably island-free, so "the smallest
+distance that leaves no island" is now true on every platform instead of one.
+
+`test_default_distance_band_survives_a_rounding_disagreement` makes the failure reproducible
+anywhere. It shrinks the computed minimum by a relative 1e-12, far more than one ulp and a
+thousandth of the pad. Without the pad it fails on the Mac with one island, which the original
+test never could.
+
+Verification ran inside the deployed `agent-api` container (Python 3.11.16, x86-64). Before ran
+against the deployed module, byte-identical to `prototype`'s; after ran against a copy of
+`agent_runtime/` in `/tmp` with only this module replaced. Nothing was deployed.
+`test_spatial_stats_tools.py` went from 2 failed and 33 passed to 35 passed. The Mac's full suite
+went from 1645 passed and 4 skipped to 1646 and 4, the difference being the new test.
+
+### Stage S14.3 The reason worth keeping
+
+A correctness promise was being met by rounding luck, and only a Linux run could show it. The
+developer's machine was the one platform where the luck held, so the test that encoded the
+promise passed there from the day it was written while the deployed image broke it. A promise of
+the form "the smallest X such that…" over floating point needs a margin by construction, and a
+test that perturbs its input past the rounding instead of waiting for an unlucky platform.
+
+Not deployed: the running image still has the unpadded threshold, so a caller that omits
+`threshold_km` can still get an island until the next image rebuild.
+
+---
+
+## Stage 15 — What counts as a date is decided here, not by pandas {#stage-15}
+
+*2026-10-01, `claude/temporal-numeric-code-columns`.*
+
+A pandas major upgrade silently widened what counts as a date, and only a run on the deployed
+versions could show it. `test_csv_with_coordinates_flows_through` failed inside the deployed
+`agent-api` container (Python 3.11.16, pandas 3.0.5) and passed on the development machine
+(pandas 2.2.3), with nothing in the repository changed: `requirements.txt` names `pandas`
+without a version, so the image takes whatever is current when it is built. `prototype` has no
+lock file and no CI; separate tasks cover both.
+
+### Stage S15.1 The mechanism, and why the obvious fix would have missed it
+
+The test's `Beat` column (1234, 1235, 1236) was offered as a time column beside `Date`. The
+diagnosis this work started from suspected the numeric path, numbers falling through to the
+text ladder where pandas 3 infers formats differently, and proposed skipping that ladder for
+numeric columns. It also flagged that 1234 sits inside the year branch's range, so which branch
+fired had to be checked first. Checked in a replica of the deployed image, built from the
+container's own `pip freeze`, the numeric path was not involved and the version difference was
+not format inference:
+
+* **`Beat` was never numeric.** GDAL's CSV reader types every field as text, so the column
+  reached `parse_time_series` as `"1234"` (dtype `str` on pandas 3, `object` on pandas 2). The
+  year branch never ran. The name gate in `_candidate_columns`, which skips a numeric column
+  without a time-ish name, asked the dtype, so for a CSV upload it never fired. Skipping the
+  text ladder for numeric series would not have touched this fixture.
+* **Format inference did not change; resolution did.** On each version the three text
+  strategies agree with one another. pandas 3 parses strings at microsecond resolution, so
+  `"1234"` became 1234-01-01. pandas 2 parsed at nanoseconds, whose range starts at 1677-09-21,
+  and coerced it to NaT. The test had been passing on an accident of `datetime64[ns]`.
+
+Across 31 column shapes, every difference between the two versions but one is a year outside
+1678–2262; the exception is in S15.4. Measured on the two versions:
+
+| input | pandas 2.2.3 | pandas 3.0.5, deployed |
+|---|---|---|
+| CSV: `incident_id` 1001–1005 beside a clean `Date` | `Date` | **`incident_id`** chosen as the time column |
+| CSV: IUCR-style codes (`0486`, `0820`, `1310`, `041A`, `2820`) beside a `Date` with two unusable rows | `Date` | **`IUCR`** chosen, 0.8 against 0.6 |
+| Chicago-style beats 111–2535, 40 values | 5 read as years | 20 read as years |
+| CSV: `Year` beside a `Beat` holding 1711–2212 | **crash**, `OutOfBoundsDatetime` in `_span` | `Beat` offered beside `Year` |
+
+The last row is pandas 2's own failure: the beats parse as years there too, and their 501-year
+span overflows its nanosecond `Timedelta`.
+
+### Stage S15.2 Three rules, each stated where pandas used to decide
+
+1. **A column is numeric by what it holds, not by its dtype.** `_as_numbers` accepts typed
+   numbers, and text in which every value is a plain number; blanks and the NA markers
+   `read_csv` would read as NaN are allowed. The name gate now treats a CSV's numbers exactly as
+   it always treated typed ones.
+2. **A number gets only numeric readings:** a four-digit year, YYYYMMDD (19000101–21001231),
+   epoch seconds or milliseconds. It no longer falls through to the text ladder, and a number
+   that fits none of them is a code and stays unparsed. YYYYMMDD is a new explicit branch; it
+   used to work only because the text ladder happened to infer `%Y%m%d`.
+3. **Every inferred time must fall in 1678–2262** (`_YEAR_FLOOR`, `_YEAR_CEILING`), on the text
+   ladder too. That is the window pandas 2 enforced implicitly, and stating it keeps the verdict
+   from moving with the pandas version. It is the rule that stops the IUCR column, which `041A`
+   keeps from counting as numeric. A column the source already typed as datetime is not clamped.
+
+After the change the 31 shapes give identical results on both versions, apart from S15.4, and
+every CSV in the table detects `Date` (or `Year`) alone.
+
+### Stage S15.3 Behaviour that changed on purpose
+
+* A CSV column of epoch seconds now parses. It parsed as nothing on either version.
+* A CSV year column with a gap, which `to_csv` writes as `2019.0` and an empty cell, now reads as
+  years: 2 of 3 values, where both versions read 0.
+* An 8-digit date held as digits in a CSV column **without** a time-ish name is no longer
+  auto-detected. That is the treatment a typed integer column always had; `time_column=` still
+  reads it.
+* Text dates outside 1678–2262, which pandas 3 had started parsing, are unparsed again, as on
+  pandas 2.
+* `parse_method` has a new value, `YYYYMMDD number`.
+
+Cost, measured on the development machine with both versions interleaved in one process: a
+million Chicago-format dates took 1.83 s against 1.77 s, with identical results. The added work
+is 0.04 s for the number check and 0.04 s per strategy for the window, so the slowest case, a
+column whose blank cells force the whole 22-strategy ladder, pays under a second on top of about
+43 s. A million beats held as text got cheaper, 0.74 s against 1.39 s, because the text ladder no
+longer runs on them; before the change pandas 2.2.3 read 125,531 of them as years.
+
+### Stage S15.4 Found here, not fixed
+
+* **Mixed UTC offsets stopped parsing on pandas 3.** An ISO column mixing `Z` and `+01:00`, or a
+  US daylight-saving pair such as `-06:00` and `-05:00`, parses 2 of 2 on pandas 2.2.3 and 0 of 2
+  on 3.0.5. pandas 3 raises `Mixed timezones detected` unless given `utc=True`, every strategy
+  fails, and the column reads as having no time at all. It is the same upgrade moving the line
+  the other way, so dates that should parse no longer do. Fixed in S15.5.
+* **`_span` overflows on pandas 2** when parsed times span more than about 292 years, and the
+  whole `detect_time_column` call then fails. This affects the development machine only.
+* **A code column inside 1678–2262 with a time-ish name** still parses as years: a `Report Area`
+  holding 1711–2212 would. Only the name tells it from a year column, and here the name says time.
+
+### Stage S15.5 Offsets are converted to UTC by pandas, on every version
+
+*2026-10-02, `claude/temporal-mixed-utc-offsets`, stacked on `claude/temporal-numeric-code-columns`.*
+
+This fixes the first item in S15.4. The module docstring promises that a time carrying a UTC
+offset is converted to UTC and made naive. On pandas 2 that promise rested on a deprecated path:
+`pd.to_datetime` returned a column whose offsets differ as objects, and `_naive` converted the
+objects. Its `FutureWarning` named both the change and the fix: such a column *"will raise an
+error unless `utc=True`"*. pandas 3 made it the error, `ValueError: Mixed timezones detected`,
+and `errors="coerce"` does not suppress it. The
+strategy loop's `except Exception: continue` swallowed it in the inferred and the mixed strategy
+alike, and no explicit format has a `%z`, so none can match a time with an offset. On the deployed
+image a CSV of a US feed's local times, `-06:00` in winter and `-05:00` in summer, got
+`found: false` from `detect_time_column`, and `filter_by_time`, `time_series` and
+`temporal_hotspots` each answered "no time/date column could be detected in this dataset".
+
+**The rule:** the inferred and mixed strategies pass `utc=True`, so pandas converts every offset
+itself and `_naive` only drops the zone. Checked on both versions, on the raw `pd.to_datetime`
+calls and then through `parse_time_series`:
+
+* With `utc=True` the two strategies give the same instants on 2.2.3 and 3.0.5 for all 13 offset
+  shapes tried inside pandas 2's nanosecond range: `Z` beside `+01:00`; `-06:00` beside `-05:00`
+  with a `T` or a space, without the colon, with fractional seconds, or in RFC 2822; with garbage,
+  blanks and nulls among them; the two `01:30` of a fall-back night; single offsets; and text
+  with an offset beside text without.
+* Text without an offset is read as UTC and made naive again, so its values do not move: ISO,
+  Chicago, date-only, day-first, month names, `YYYY-MM`.
+* The explicit formats are left as they were. None of the 20 matches any of those offset strings
+  on either version, with `utc=True` or without it, because none has a `%z`.
+
+Then `parse_time_series` itself, on 49 column shapes:
+
+| shapes | pandas 2.2.3 (development) | pandas 3.0.5 (deployed) |
+|---|---|---|
+| 12 whose offsets differ | parsed; unchanged | **0% unfixed**; fixed, the same instants as 2.2.3 |
+| 4 mixing text with an offset and text without | 2 of 2; unchanged | **1 of 2 unfixed**, only the rows that fit the first value's layout; fixed, 2 of 2 |
+| 3 of offset times outside or at the edges of 1678–2262 | unchanged but one, below | 0 unfixed; fixed, as on 2.2.3 but one, below |
+| the other 30 | unchanged | unchanged |
+
+Fixed, the deployed version returns what pandas 2.2.3 always returned on 48 of the 49 shapes. The
+49th is an offset time that lands on 2262-04-12 UTC: the year window of S15.2 admits it and pandas
+3 keeps it, but it is past pandas 2's nanosecond ceiling of 2262-04-11 23:47. On 2.2.3 the fix
+moves one shape, the wrong way; it is the first item under *Found here, not fixed* below.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ parses again on pandas 3, in UTC, as the docstring says.
+* In a column mixing times that carry an offset with times that do not, the ones without are read
+  as UTC. pandas 2 did this all along, through `_naive`'s own `utc=True`. Unfixed, pandas 3 kept
+  only the rows that fit the first value's layout.
+
+**Found here, not fixed:**
+
+* **pandas 2.2.3 wraps around instead of failing** when `utc=True` pushes an offset time past its
+  nanosecond range, in the inferred strategy only. `2262-04-11T23:00:00-05:00` becomes
+  1677-09-21, which the year window drops. `1677-09-21T00:30:00+01:00` becomes 2262-04-11 23:04,
+  which the window keeps: a wrong time where the unfixed code gave NaT. Only a clock time on
+  1677-09-21 with a positive offset can reach it, and only on pandas 2, so only on the
+  development machine. pandas 3 does not wrap.
+* **`summary_statistics(by=<date column>, period=...)`** in `analysis_aggregate_tools.py` parses
+  the column with its own `pd.to_datetime`. A daylight-saving column fails there on both versions,
+  with `Can only use .dt accessor with datetimelike values` on 2.2.3 and `Mixed timezones
+  detected` on 3.0.5. A single offset is bucketed by local clock time: `2026-01-31T20:00:00-06:00`
+  counts in January there and in February in `time_series`, which works in UTC. Fixed in S15.6.
+* **Abbreviated zone names** (`CST`, `CDT`) parse on neither version, fixed or not.
+
+**Cost**, as the best of interleaved rounds in one process, with every value distinct so that
+`to_datetime`'s cache never helps:
+
+| 100,000 values, deployed container (3.0.5) | unfixed | fixed |
+|---|---|---|
+| Chicago format | 5.34 s | 5.24 s |
+| ISO with no offset; with one offset | 0.04 s; 0.42 s | 0.04 s; 0.42 s |
+| ISO with `-06:00` and `-05:00` | 2.78 s, nothing parsed | 0.42 s |
+
+On the deployed version the rule costs nothing measurable, and a daylight-saving column, which
+used to run all 22 strategies to fail, now parses at the first. The development machine was not
+timed, because other work held its load average at 63, so pandas 2.2.3's cost is not measured.
+
+**Verified where the failure lives:**
+
+| | unfixed (`claude/temporal-numeric-code-columns`) | fixed |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 38 temporal tests | the 2 new mixed-offset tests fail | all pass |
+| development machine (pandas 2.2.3), the 38 temporal tests | all pass | all pass |
+
+The live module in the same container, `prototype`'s, fails 9 of the 38: the 7 of S15.7 and the
+same 2. On the development machine the full suite gives 1654 passed and 4 skipped: S15.7's 1651
+and the three new tests.
+
+Three tests are new. Two fail unfixed on pandas 3: offsets that differ (the daylight-saving pair,
+`Z` beside `+01:00`, and text with and without an offset), and a CSV of daylight-saving local
+times through `detect_time_column` and `filter_by_time`, whose window is checked in UTC. The third
+is a guard that passes either way: one offset is still converted, and text without one keeps its
+clock time. The development machine passes all three unfixed, so it cannot show this failure. As
+in S15.7, each version of `agent_runtime/` was imported from `/tmp` ahead of `/app` in the
+deployed container; nothing was deployed.
+
+### Stage S15.6 `summary_statistics` reads a date the way the temporal tools do
+
+*2026-10-02, `claude/summary-statistics-utc-periods`, stacked on `claude/temporal-mixed-utc-offsets`.*
+
+This fixes the second item in S15.5's *Found here, not fixed*. `summary_statistics(by=<column>,
+period=day|week|month|quarter|year)` read the `by` column with its own
+`pd.to_datetime(errors="coerce")`, so none of this stage's rules reached it: an offset was not
+converted to UTC, a number got pandas' default reading, and nothing held the years to 1678–2262.
+Through the tool, on CSVs of points:
+
+* **A daylight-saving column failed on both versions**: `Can only use .dt accessor with
+  datetimelike values` on 2.2.3, `Mixed timezones detected` on 3.0.5. `Z` beside `+01:00` failed
+  the same way.
+* **One offset was bucketed by local clock time.** `2026-01-31T20:00:00-06:00` is 02:00 UTC on
+  February 1, so the same three rows gave January 1 and February 2 here and February 3 in
+  `time_series`.
+* **On pandas 3 a CSV's beats became years.** `"1234"`, `"1235"` and `"1236"` grouped by year came
+  back as the years 1234, 1235 and 1236. pandas 2.2.3 refused the column.
+
+Two more turned up, the first while checking what a numeric `by` does, and a GeoJSON input showed
+where the daylight-saving failure lives:
+
+* **A typed number was read as nanoseconds since 1970**, `pd.to_datetime`'s default for an
+  integer. A GeoJSON's years (2019, 2020), its beat codes (1234–1236) and its epoch seconds each
+  came back as a single `1970` or `1970-01` bucket, with `ok: true`, on both versions.
+* **An undated row's group was named by the pandas version**: `NaT` on 2.2.3, `(missing)` on
+  3.0.5. pandas 3's `astype(str)` keeps a missing value missing, so the `fillna("(missing)")`
+  after it worked there only.
+* **GDAL types a GeoJSON's ISO date-times itself**, so the daylight-saving failure was a CSV one.
+  One offset arrives as `datetime64[ms, UTC-06:00]` and was bucketed by local clock too; offsets
+  that differ arrive already converted to UTC, and were right before.
+
+**The change:** the `period` branch reads the column with `parse_time_series`, so it gets the
+reading every temporal tool gets: an offset converted to UTC, a number only numeric readings, a
+year in 1678–2262. The import sits inside the branch, not at the top of the module. The supervisor
+imports each analysis factory separately so that one module's failure costs only its own tools,
+and `analysis_spatial_stats_tools` imports this module when it loads, so a top-level import would
+have tied both to the temporal module. An undated row is grouped as `(missing)` on both versions
+and counted in a note; `time_series` drops such rows instead and reports them as
+`excluded_unparsed_time`. The tool description, which the model reads, and the docstring now say
+that the buckets are in UTC when the dates carry an offset.
+
+Through the tool on both versions, 16 column shapes:
+
+| shapes | 2.2.3, before | 3.0.5, before | after, both versions |
+|---|---|---|---|
+| 2 CSVs whose offsets differ (`-06:00` and `-05:00`; `Z` and `+01:00`) | `.dt` error | `Mixed timezones` error | UTC buckets |
+| 2 with one offset, CSV and GeoJSON | local clock | local clock | UTC buckets |
+| beats as text, `"1234"`–`"1236"`, by year | refused | the years 1234–1236 | refused |
+| epoch seconds as text | refused | refused | their dates |
+| 3 typed numbers: years, beat codes, epoch seconds | all `1970` | all `1970` | years; refused; dates |
+| one row reading `not a date` | group `NaT` | group `(missing)` | group `(missing)`, and a note |
+| 6 others: ISO, Chicago format, years as text, weeks, GeoJSON dates, GeoJSON offsets that differ | | | unchanged |
+
+After the change the two versions agree on all 16; before, they disagreed on 4, two of them only in
+the error message. The tool now gives `time_series`'s buckets on 12 of the 16, against 5. The other
+4 differ on purpose or from before: both tools refuse the two code columns, in different words; the
+undated row is kept here and dropped there; and a week is the same bucket in both, labelled
+`2026-01-05/2026-01-11` here and `2026-01-05` in `time_series`.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ is bucketed, in UTC, on both versions.
+* One offset is bucketed in UTC, as in `time_series`, so a row within a few hours of midnight UTC
+  can move to the next or the previous bucket.
+* Typed years give their years and typed epoch seconds their dates, where both gave `1970`; epoch
+  seconds held as text, which were refused, read as dates too.
+* A code column outside 1678–2262, such as the beats 1234–1236, is refused with *"could not be
+  read as dates"*, typed or as text, where a typed one gave `1970` and, on pandas 3, a text one
+  gave years.
+* On 2.2.3 an undated row's group is `(missing)`, no longer `NaT`, and on both versions a note
+  counts those rows.
+
+**Found here, not fixed:**
+
+* **`time_series`' hour-of-day profile calls UTC hours local.** Its axis reads *"hour of day
+  (local clock time)"*, but a time that carried an offset is in UTC by then: `09:00:00-06:00`
+  counts at hour 15. For a Chicago feed the peak moves by six hours in winter and five in
+  summer, under a label that says it did not.
+* **A code column inside 1678–2262 is read as years**, typed or as text, whatever its name: beats
+  1711, 1712 and 2212 grouped by year come back as those years. S15.4 records the same ambiguity
+  for detection. Here the caller has named the column and asked for periods, and only the values
+  could say otherwise.
+* **A week has two labels for one bucket**, as above. Each label is part of its tool's output,
+  so neither was changed here.
+
+**Cost** of parsing and bucketing the column, without reading the file, interleaved in one
+process, the median of three rounds, every date distinct:
+
+| 100,000 values, deployed container (3.0.5) | before | after |
+|---|---|---|
+| ISO, no offset | 0.03 s | 0.06 s |
+| ISO, one offset | 0.40 s | 0.43 s |
+| Chicago format | 5.19 s | 5.23 s |
+| ISO with 1 value in 100 unreadable | 0.06 s | 1.94 s |
+
+A column that reads in full stops at the first strategy and costs about 0.03 s more. The last row
+is the slowest case S15.3 describes for blank cells: a column holding any value no strategy reads
+runs all 22 strategies, which `time_series` already does on the same column. Only the deployed
+container was timed, at a load average under 0.7 on 8 cores.
+
+**Verified where the failure lives:**
+
+| | before (`claude/temporal-mixed-utc-offsets`) | after |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 36 aggregate tests | the 4 new tests fail | all pass |
+| deployed container, the 38 temporal tests | | all pass |
+| development machine (pandas 2.2.3), the 36 aggregate tests | the 4 new tests fail | all pass |
+| development machine, full suite | 1654 passed, 4 skipped | 1658 passed, 4 skipped |
+
+Four tests are new, and each fails before on both versions: a daylight-saving CSV grouped by month,
+whose buckets are UTC ones; a CSV with one offset, whose months are the ones `time_series` counts;
+typed years and epoch seconds read as dates and the beats 1234–1236 refused, typed and as text; and
+an undated row grouped as `(missing)` with a note, which fails at the label on 2.2.3 and at the
+note on 3.0.5. In the deployed container *before* was `/app`'s `agent_runtime/` with S15.5's
+`analysis_temporal_tools.py`, and *after* was that plus this module. Each was imported from `/tmp`
+ahead of `/app`, `diff -rq` named only those files, and it was the same container from the first
+run to the last. `prototype`'s `summary_statistics`, live in the same container, gives *before*'s
+answer on all 16 shapes. Nothing was deployed.
+
+### Stage S15.7 Verified where the failure lives (S15.1–S15.4)
+
+| | unfixed | fixed |
+|---|---|---|
+| deployed container, `test_csv_with_coordinates_flows_through` | fails | passes |
+| deployed container, the 35 temporal tests | 7 fail | all pass |
+| local replica of the deployed versions, the 35 temporal tests | the same 7 fail | all pass |
+| development machine (pandas 2.2.3), the 35 temporal tests | 4 fail | all pass |
+| development machine, full suite | 1645 passed, 4 skipped | 1651 passed, 4 skipped |
+
+In the deployed container each version of `agent_runtime/` was imported from `/tmp` ahead of
+`/app`, whose copy of the module is identical to `prototype`'s; nothing was deployed. The six new
+tests pin the three rules, the YYYYMMDD and bare-year readings, and the CSV shapes above. The
+original test is unchanged.
+
+### Stage S15.8 A year column is found by its name, and the blank row that let Beat win
+
+*2026-10-02, `claude/temporal-yr-and-blank-date`, stacked on `claude/temporal-numeric-code-columns`.*
+
+Rule 1 of S15.2 sends a CSV's numbers through the name gate, which is what keeps the beats out.
+The same gate decides whether a real year column is tried at all, and no hint matched `yr`. On
+`prototype` a CSV's `yr` column never needed one: GDAL hands it over as text, text is always a
+candidate, and the text ladder read `"2019"` as a year. Counted as numbers, the column faced the
+gate and failed it, so a dataset whose only time is a `yr` column reported no time column. `Year`
+passed only because `year` was already a hint. A typed `yr` column, from GeoJSON or a GeoPackage,
+had never been tried on any branch, for the same reason.
+
+**The name is the fix, because nothing else tells the two apart.** The year window cannot separate
+a year column from a code column whose values fall inside it: Chicago's beats include 1834 and
+2011. `yr` is now a hint. Hints match as substrings, which catches run-together assessor names such
+as `YRBUILT`, `SALEYR` and `TAXYR` that a whole-word rule would miss. A substring also matches
+names like `gyro` or `copyright`, but such a column still has to hold years, YYYYMMDD or epochs to
+parse, and a count like `yr2020_pop` is tried exactly as `year2020_pop` already was.
+
+**The blank date row is the deployed failure in full, and no test had it.** On the deployed
+versions `test_csv_with_coordinates_flows_through` failed only at
+`assert 'Beat' not in ['Date', 'Beat']`: its `Date` has no gap, so the two tied at 1.0, the name
+hint broke the tie, and `Date` still won. The first Linux CI run, on
+`claude/ci-deployed-constraints`, measured the sharper form. GDAL hands a blank cell over as `""`,
+which counts against `Date`, so with one blank in four rows `Date` parses 0.75 and `Beat`, read as
+the years 1234–1237, wins at 1.0: the deployed tool chose a beat number as the time column.
+`test_csv_beat_cannot_outrank_a_date_with_a_blank_row` pins that shape and keeps the original's
+`Beat` assertion.
+
+Measured through the real upload path, in a linux/amd64 `python:3.11-slim` replica of the deployed
+versions (`pip install -r requirements.txt -c constraints.txt`, the lock from
+`claude/ci-deployed-constraints`: CPython 3.11.16, pandas 3.0.5, geopandas 1.1.4, pyogrio 0.13.0
+with GDAL 3.12.4):
+
+| upload | `prototype` | S15.2 without `yr` | with `yr` |
+|---|---|---|---|
+| CSV: `Date` blank in one row of four, `Beat` 1234–1237 | **`Beat`** chosen, 1.0 against 0.75 | `Date` | `Date` |
+| CSV: `Year` beside `Beat` 1234–1236 | `Year`, with `Beat` offered too | `Year` | `Year` |
+| CSV: `yr` beside `Beat` 1834–2012 | `yr`, with `Beat` offered too | **no time column** | `yr` |
+| CSV: `YRBUILT` beside `Beat` 1834–2012 | `YRBUILT`, with `Beat` offered too | **no time column** | `YRBUILT` |
+| GeoJSON: integer `yr` beside `Beat` 1834–2012 | no time column | no time column | `yr` |
+
+**Behaviour that changed on purpose:** a column whose name contains `yr` is now tried when it holds
+numbers, typed or as CSV text, and gets the numeric readings any hinted number gets.
+
+**Found here, not fixed:** a CSV year column named without any hint, such as `FY` or `season`, is
+still not auto-detected. `prototype` read both through the text ladder; under S15.2 they report no
+time column, with or without `yr`, measured the same way as the table. `time_column=` still reads
+them. Each further hint widens what the gate lets through, so which names to add is a separate
+decision.
+
+**Verified where the failure lives**, in the same replica, with this section's four new test cases
+copied into each version's test file:
+
+| `agent_runtime/` | the 39 temporal tests |
+|---|---|
+| `prototype` | 11 fail: this stage's original 7, the blank-row test (`Beat` chosen) and the 3 `yr` cases |
+| `claude/temporal-numeric-code-columns` | 3 fail: the 3 `yr` cases, each with no time column |
+| with `yr` | all pass |
+
+The full suite in the same replica gives 1 failed, 1654 passed and 4 skipped with this change, and 2
+failed, 1643 passed and 4 skipped on `prototype`, the counts of the first Linux CI run. The failure
+left is `test_distance_band_without_a_threshold_leaves_no_island`, the platform-rounding failure
+`prototype` has too, which a separate change fixes; the one this change and its parent remove is
+`test_csv_with_coordinates_flows_through`. The development machine (pandas 2.2.3) passes the 39
+temporal tests as well. Nothing was deployed.
+
+---
+
+## Stage 16 — Six tests only the Mac passed {#stage-16}
+
+A replica of the deployed `agent-api` Python environment was built on 2026-10-01 and again on
+2026-10-02: `python:3.11-slim` for linux/amd64, the image's GDAL apt layer, `requirements.txt`
+installed with the running container's `pip freeze` as constraints, and the `en_core_web_sm`
+3.8.0 wheel. Its own `pip freeze` matches the deployed container's (image `deeb331964f6`) on 176
+of 177 lines; the missing one is `py-spy`, which the real Dockerfile adds in a later layer. Five
+tests that pass on the development Mac fail in it, and an image built from
+`rag_pipeline/Dockerfile` fails a sixth. Each passed on the Mac because the Mac lacks something
+production has, or has something production does not.
+
+| test | why the Mac passed it | which side was wrong | fixed in |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through` | pandas 2.2.3, whose nanosecond range turns `"1234"` into NaT | **the code**. In the replica, a CSV with one blank date in four rows gets `Beat` as its time column, and `filter_by_time(start="2026-07")` answers `ok` with 0 matches | `claude/temporal-numeric-code-columns` (stage 13 there) |
+| three in `test_spatial_locations.py` | no spaCy model, so the capitalization fallback ran | **the code**. Production's NER path skipped the vocabulary and the normalization the fallback applies | this stage, S16.1 |
+| `test_distance_band_without_a_threshold_leaves_no_island` | the Mac's floating point kept a pair that sits exactly on the threshold | **the code**. The threshold had no margin | `claude/distance-band-no-island` (stage 14) |
+| `test_pyqgis_available_probes_worker_python` | no QGIS installed | **the test**. It assumed the machine had no QGIS | this stage, S16.2 |
+
+The island's cause was measured again in the replica rather than taken from the stage 14 branch.
+The automatic threshold, 110,884.46616304158 m, is bit-identical on both machines. The Mac
+projects the critical pair's easting one ulp higher (`0x1.e7c562adf9522p+19` against
+`...9521p+19`). On both machines the square of the threshold is one ulp below the pair's squared
+distance as Python computes it. The Mac's KD-tree keeps the pair anyway and the replica's drops
+it: 146 links and no island against 144 links and one. With stage 14's relative pad of 1e-9,
+both give 146 links and no island.
+
+### Stage S16.1 Production's NER path never saw the fallback's filters
+
+`extract_locations_from_query` (`rag_pipeline/search/spatial.py`) turns a question into the
+place names it geocodes. It has two paths. Where `en_core_web_sm` is installed, as in the agent
+image, it offers spaCy's GPE, LOC and FAC entities. Where it is absent, as on the Mac and in CI,
+it offers capitalized phrases filtered through `_NOT_PLACES`. The fallback produces exactly the
+three tests' expectations: with the model uninstalled in the replica, all 15 tests in the file
+pass. With the model, measured on spaCy 3.8.16 and `en_core_web_sm` 3.8.0, the NER path differs
+in two ways.
+
+* **It keeps the article.** "the Great Plains" (FAC), "the Chesapeake Bay" (LOC), "the United
+  States", "the Gulf of Mexico", "the Rocky Mountains" and "the Great Lakes" all come back with
+  the "the". The fallback has never offered it, so the same place reached the geocoder and
+  `_BBOX_CACHE` under two spellings, depending on which path ran.
+* **It labels formats, tools and agencies as places.** "GeoJSON" is a GPE in three of the
+  queries below, and "NetCDF", "MODIS", "USGS", "LAS" and "Python" are GPEs elsewhere. Every
+  one is in `_NOT_PLACES`, whose comment says these terms are never places, but only the
+  fallback consults that set. So for "convert a GeoJSON to a COG with GDAL" the deployed
+  extractor offers "GeoJSON" to Google's geocoder, which is paid and rate-limited, and a box that
+  came back would scope the spatial search to wherever Google put it.
+
+The tests stated the intended behaviour and the code was wrong. NER cannot know that a file
+format is not a place, and the vocabulary that says so was skipped on the one path production
+runs. The article is the weaker half. Whether it ever changed what Google returned was not
+measured, because that takes paid calls, so dropping it is normalization: one spelling per place,
+whichever path ran. The changes are these:
+
+1. A leading **lowercase** "the" is dropped from an entity (`_without_article`). A capitalized
+   one is kept. NER returns "The Hague" as a GPE, and at the start of a query a capital "The"
+   cannot be told apart from a name.
+2. An entity whose every word is in `_NOT_PLACES` is dropped (`_only_non_places`).
+3. Dropping such an entity does not open the fallback, which is for text NER could not parse,
+   such as the search peer's keyword form. Here NER parsed the sentence and found only a file
+   format. Falling back would offer the capitalized words instead: "Convert" for "Convert a
+   GeoJSON to a COG with GDAL", where spaCy reads "Convert" as a PERSON.
+
+**Measured on 176 queries in the replica, with the real model.** The queries are the file's
+test queries, 30 written around articles, 32 around technical terms, GeoAnalystBench's 44
+distinct task titles and its 50 instructions, and the 10 prompts in
+`geopathfinder_top10_tasks.csv`. 21 of them change. In 12 a leading "the" goes, and in 9 a
+technical term goes (GeoJSON 3, Python 2, and one each of USGS, MODIS, LAS and NetCDF). No
+candidate is added and no place is lost: where a technical term sat beside a place, Colorado and
+Chicago remain. Six queries go from one non-place candidate to none. For scale, the deployed
+container logged 9 candidates resolved to a box between its start (2026-10-01 15:15 UTC) and this
+measurement, and none of them begins with an article or is a technical term.
+
+The three tests pass as written, now on both paths. Ten new tests give the NER path the entities
+the model returned, through a blank English pipeline with those spans set, so the path
+production runs is tested on machines without the model. Against the old code, 8 of the 10 fail
+on the Mac.
+
+Found and **not** fixed, because each needs its own measurement:
+
+* **The fallback offers a request's first word.** It takes any capitalized word that is not in
+  `_NOT_PLACES`, and an imperative request starts with one. 30 of the 44 GeoAnalystBench task
+  titles and 7 of the 10 geopathfinder prompts name no place that NER finds, and each offers its
+  first word as a place: "Identify", "Use", "Find". Whether Google returns a box for these was not
+  measured, because that takes paid calls.
+* NER also labels "Kriging" (LOC), "Tsunami" (GPE) and "node" (GPE) as places, and no vocabulary
+  covers them.
+* CI as proposed on `claude/ci-deployed-constraints` runs the fallback path, not production's.
+  The freeze's `en_core_web_sm @ <url>` line constrains a package that nothing requests, so pip
+  installs no model. The new NER tests are what cover production's path there.
+
+### Stage S16.2 A test that assumed QGIS was absent
+
+`test_pyqgis_available_probes_worker_python` set `QGIS_PYTHON_BIN` to a nonexistent path and
+expected `pyqgis_available()` to be False. But `qgis_python_candidates()` falls back to
+`sys.executable` and then `/usr/bin/python3` on purpose, so that a developer's `.env` naming
+QGIS.app does not disable PyQGIS inside the container. In the agent image `/usr/bin/python3` is
+the distro Python 3.13.5 that `python3-qgis` installs into, in the deployed container as in a
+fresh build, so the probe found QGIS, and the test failed in every image with QGIS. The code was
+right. The test now pins the whole candidate list, and a fresh probe cache, instead of one
+environment variable. No production behaviour changes.
+
+In an image built from `rag_pipeline/Dockerfile` (linux/amd64, 2026-10-02),
+`test_qgis_headless_tools.py` went from 1 failed and 20 passed to 21 passed.
+
+### Stage S16.3 Verification, and what is not deployed
+
+| where | tree | failed | passed | skipped |
+|---|---|---|---|---|
+| Mac (arm64, Python 3.13.5, pandas 2.2.3, no spaCy model) | `prototype` | 0 | 1645 | 4 |
+| Mac | this branch | 0 | 1655 | 4 |
+| Mac | this branch with the temporal and island fixes | 0 | 1662 | 4 |
+| replica (amd64, the deployed versions) | `prototype` | 5 | 1640 | 4 |
+| replica | this branch | 2 | 1653 | 4 |
+| replica | this branch with the temporal and island fixes | **0** | 1662 | 4 |
+
+The two failures on this branch alone are the temporal and island tests, which
+`claude/temporal-numeric-code-columns` and `claude/distance-band-no-island` fix. "With the
+temporal and island fixes" means with those two branches' code and tests applied. They touch no
+file this stage touches. Each suite run mounted a fresh copy of the tree. An image built from
+`rag_pipeline/Dockerfile` the same day fails exactly the six on `prototype` (6 failed, 1639
+passed, 4 skipped). Its pip layer resolved that day's versions rather than the deployed ones, so
+it is the reference only for the QGIS test.
+
+Nothing was deployed. The running image still offers "GeoJSON" to the geocoder.
+
+---
+
+## Stage 17 — The image installs a list, not a laptop {#stage-17}
+
+`reproject_vector` failed on every call in the deployed agent, and nobody had noticed. It writes
+GeoParquet, which needs pyarrow, and the image had no pyarrow. Chasing that turned up more
+packages the code reaches for and the image lacks, most of them latent, because only ingestion
+uses them and ingestion does not run in the container yet.
+
+### Stage S17.1 Why a missing declaration shows only in production
+
+`rag_pipeline/Dockerfile` installs `requirements.txt` and nothing else. A development machine has
+far more: anaconda's own packages, plus whatever `pip install --user` left in `~/.local`. Code
+that reaches for a package the file never names therefore passes every local test and every
+manual check, and fails only in the container.
+
+Two properties of the code hid it further. None of these packages is imported at module scope,
+and pyarrow is never imported *by name*: pandas and geopandas load it inside `to_parquet` and
+`read_parquet`, where an import grep cannot see it. And where the absence does bite, most of the
+code degrades instead of raising: a pickle instead of parquet, an empty string instead of a
+PDF's text, a note instead of a NetCDF file's variables.
+
+| package | reached from | in the deployed image, without it |
+|---|---|---|
+| pyarrow | `reproject_vector` on every call; `vector_spatial_join` above `AGENT_GEOJSON_MAX_FEATURES`; `read_vector`, the temporal tools and `extractors/geo_handles.py` reading parquet back | `reproject_vector` answered `Missing optional dependency 'pyarrow.parquet'` every time; `geo_handles` silently wrote pickles that only it can open |
+| pypdf | `publication_extractor` | every PDF read as empty text, filed under the note `no_text_extracted`, which does not say why |
+| python-docx | `publication_extractor` | every `.docx` read as empty text, the same way |
+| xarray | `data_extractor` | every NetCDF, HDF or GRIB file answered `raster reader unavailable/failed` |
+
+All four were confirmed inside the deployed `agent-api` container on 2026-10-01: each import
+raises `ModuleNotFoundError`, and `GeoDataFrame.to_parquet` raises the error above. pyarrow was
+never declared. No commit ever added it to `requirements.txt`, and a local image built on
+2026-06-25 lacks it too. The parquet writes date from `421fc8da` (2026-06-12).
+
+### Stage S17.2 Why the suite never caught one
+
+A replica of the deployed environment was built by installing `requirements.txt` into
+`python:3.11-slim` (amd64), with the deployed container's own `pip freeze` as constraints. Its
+freeze matches production's in 175 of 176 packages; the one missing, py-spy, comes from a later
+layer of the real Dockerfile. The full suite inside it gave **5 failed, 1640 passed, 4 skipped,
+and not one failure was an import error.** Nothing in the suite reached any of the four:
+
+- `test_spatial_join`'s three points stay under the GeoJSON limit and come back as GeoJSON, and
+  no test called `reproject_vector`. So the vector tools' tests pass without pyarrow, in the
+  replica as on dev. Dev's pyarrow was never what made them pass.
+- No test touched `publication_extractor`, `data_extractor` or `geo_handles` at all.
+
+A CI job pinned to the deployed freeze would therefore have caught none of them. Two tests in
+`test_langchain_geo_tools.py` now cover the parquet round trip: `reproject_vector` writes it and
+`inspect_vector` reads it back, and a spatial join over the limit does the same.
+`test_declared_dependencies.py` covers the rest. **None of them uses `importorskip`,
+deliberately:** a skip is exactly how a missing package passes. In the replica all six fail, and
+none skips:
+
+| test | in the replica |
+|---|---|
+| reproject round trip; spatial join over the limit | `ImportError: Missing optional dependency 'pyarrow.parquet'` |
+| `geo_handles` frame passing | `assert '.pkl' == '.parquet'` |
+| PDF text | `assert 'Flood exposure by census tract' in ''` |
+| `.docx` text | `ModuleNotFoundError: No module named 'docx'` |
+| NetCDF metadata | `raster reader unavailable/failed: ModuleNotFoundError: No module named 'xarray'` |
+
+With the four packages added, all six pass.
+
+The five replica-only failures are the same gap running the other way: there, dev is *older*
+than production. They are not fixed here, and a CI job pinned to the deployed freeze will see all
+five. Each was checked by changing one package in the replica to dev's version.
+
+| failing test | dev | deployed | swap that makes it pass |
+|---|---|---|---|
+| `test_csv_with_coordinates_flows_through`, a stray `Beat` column | pandas 2.2.3 | pandas 3.0.5 | pandas 2.2.3 |
+| three in `test_spatial_locations.py`, e.g. `'the Great Plains' == 'Great Plains'` | no spaCy model, so the regex fallback | `en_core_web_sm` | removing the model |
+| `test_distance_band_without_a_threshold_leaves_no_island` | | | **none found.** Dev's pandas, numpy, scipy, esda, libpysal, geopandas, pyogrio and scikit-learn each still fail. Cause not established. |
+
+### Stage S17.3 The pins
+
+The four are pinned, unlike most of the file, because each version was checked against what
+production runs. Installed on top of the replica, with the deployed freeze as constraints, they
+add exactly four packages and move none of production's. pyarrow 25.0.1 is the sandbox image's
+version (`iguide-codeexec`), which reads the same files. pypdf 6.6.2, python-docx 1.2.0 and
+xarray 2026.7.0 are the versions `backend_swap`'s lock pinned when its Linux CI went green at
+`4e8d327`.
+
+### Stage S17.4 What this stage did not fix
+
+- **xarray opens NetCDF3 and nothing newer.** Its only file engine in the image is scipy.
+  NetCDF4/HDF5 needs `netCDF4` or `h5netcdf`, GRIB needs `cfgrib`, and neither dev nor the image
+  has any of them, so this is a format `data_extractor` has never read rather than a missing
+  declaration. rasterio's GDAL in the image does have netCDF, HDF5 and GRIB drivers, but
+  `data_extractor` sends those extensions to xarray alone.
+- **`data_extractor` reads `ds.dims` as a mapping**, which xarray 2026.7 warns will become a set
+  of names. The pin holds it. A bump past that change would fail silently into the same
+  `raster reader unavailable` note; `ds.sizes` is the fix.
+- **pystac-client** is on dev and not in the image, but nothing reaches it: STAC is commented out
+  of `_DEFAULT_PROVIDERS`, and neither caller of `get_opengeodata_results` passes providers.
+- **colbert** is imported at module scope by `rag_pipeline/reranker.py`, which only
+  `scripts/demo_reranker.py` imports, and `scripts/` is not copied into the image.
+- **Twelve packages are imported directly but declared nowhere**, arriving only as somebody
+  else's dependency: numpy, pyproj, pyogrio, pillow, scikit-learn, Werkzeug, uvicorn, PyYAML,
+  anthropic, affine, langgraph-checkpoint and langgraph-prebuilt. None is missing today; each
+  stays only as long as its parent keeps bringing it.
+
+### Stage S17.5 Three more, found by scanning against the replica
+
+The replica's suite raised no import errors, so the rest came from a static pass over every
+import in the five packages the image ships, plus every pandas or xarray call that loads an engine
+on demand (`to_parquet`, `read_parquet`, `read_excel`, `open_dataset`), each checked in the
+replica. Three more packages are reached by the code, present on dev, and absent from the image:
+
+| package | reached from | in the image, without it | on dev |
+|---|---|---|---|
+| openpyxl | `detect_time_column` and `time_series` on a `.xlsx` with no coordinate columns. GDAL opens the file, `read_vector` refuses a table without coordinates, and `_read_plain_table` falls back to `pd.read_excel`. | ``ImportError: `Import openpyxl` failed``. With it, the same upload gives three monthly periods. | 3.1.5, from anaconda |
+| mapclassify | `choropleth_image(scheme=...)`, which the analysis peer binds whether or not files are attached | the scheme is dropped and a continuous ramp drawn, and nothing in the result says so | 2.10.0, from `~/.local` |
+| IPython | `notebook_extractor`, at ingestion | a regex fallback. Of seven typical cells, `np.mean?` and a `!command` inside a loop fail to parse; IPython parses all seven. | 8.30.0, from anaconda |
+
+openpyxl and mapclassify are live on the deployed agent's path; IPython is latent, like the
+readers. openpyxl 3.1.5 and mapclassify 2.10.0 match the sandbox image. IPython 8.30.0 is dev's
+version, the one the notebook front end was written against. Each has a test in
+`test_declared_dependencies.py` that fails in the replica: the spreadsheet test cannot even write
+its fixture without openpyxl, `choropleth_image` never passes `scheme` to the plot, and
+`transform_cell` cannot parse either cell. With all seven pins on top of the replica, the install
+adds 20 packages, the seven plus 13 dependencies (12 of them IPython's), and moves none of
+production's.
+
+Not declared, because it never worked on dev either: `.xls` needs xlrd, which neither dev nor the
+image has, and the GDAL inside the pyogrio wheel has no XLS driver.
+
+### Stage S17.6 Building it, and what the next deploy will change
+
+The real `rag_pipeline/Dockerfile`, built from this `requirements.txt` on `python:3.11-slim` for
+amd64, installs all seven, and a GeoParquet round trip works inside the result. The full suite
+inside that image gives **6 failed, 1648 passed, 4 skipped.** Every new test passes and no failure
+is an import error. The six are the replica's five plus `test_pyqgis_available_probes_worker_python`,
+which fails in any image with QGIS installed, with or without this change: it points
+`QGIS_PYTHON_BIN` at a missing interpreter and expects "unavailable", while
+`qgis_python_candidates()` deliberately falls back to `/usr/bin/python3`, which has QGIS. It fails
+the same way with the unmodified tree, and in a local image built on 2026-06-25.
+
+**Deploying this changes more than these seven packages.** A changed `requirements.txt`
+invalidates the image's pip layer, so the build that ships it re-resolves every unpinned name in
+the file to whatever is newest that day. Against the deployed freeze, the fresh build changes 42
+packages, none by a major version, and adds 21: the 20 above, plus opentelemetry-api, now pulled
+in by an upgraded dependency. The moves most likely to change behaviour:
+
+| package | deployed | fresh build |
+|---|---|---|
+| openai | 3.14.1 | 3.23.0 |
+| anthropic | 1.6.0 | 1.11.0 |
+| langsmith | 0.12.6 | 0.14.3 |
+| langchain, langchain-core, langchain-openai | 1.4.1, 1.6.3, 1.6.2 | 1.4.3, 1.6.6, 1.6.7 |
+| geopandas | 1.1.4 | 1.2.0 |
+| sentence-transformers | 6.0.1 | 6.1.0 |
+
+Installing with the deployed freeze as constraints ships only the additions, as the replica
+shows. That is the job of a lock file, like the one on `backend_swap`; this stage does not add
+one.
+
+---
+
+## Stage 18 — Testing what is deployed {#stage-18}
+
+Until this stage the test suite ran in one place, the development Mac. It had never run in the
+environment the deployment runs, which is Linux x86-64 with CPython 3.11
+(`rag_pipeline/Dockerfile` is `python:3.11-slim`), and nothing recorded what that environment's
+packages were.
+
+### Stage S18.1 The deployed stack was an accident of build day
+
+`requirements.txt` names 42 packages and pins none of them exactly. 35 are bare names, among them
+geopandas, shapely, fiona, rasterio, libpysal and pandas; seven carry only a lower bound. numpy
+and scipy are not named at all, because they arrive transitively. So the image's
+`pip install -r requirements.txt` installed whatever was newest on the day it was built, and the
+result was written down nowhere. Until this stage, "the deployed stack" existed only inside the
+running container.
+
+How fast that accident drifts, measured: the running image was built on 2026-09-22. Resolving
+the same `requirements.txt` unpinned nine days later (2026-10-01, CPython 3.11.16, x86_64)
+already differs from it on 42 of the 175 packages both contain, geopandas 1.1.4 → 1.2.0 and
+pandas 3.0.5 → 3.0.6 among them, and adds a package the image does not have at all
+(`opentelemetry-api`). A CI job that installed `requirements.txt` bare would have been testing
+that stack, which nobody runs.
+
+`constraints.txt` is now that record: the running `agent-api` container's `pip freeze`, 177
+packages, taken 2026-10-01 from image `deeb331964f6` (built 2026-09-22; CPython 3.11.16,
+x86_64), committed verbatim under a header that says how to retake it. Before committing it was
+checked against the live container again, and the two freezes hash identically.
+
+**The lock comes from the image, never from a development machine.** A lock frozen on the Mac
+describes the Mac. `origin/backend_swap` has one, and it disagrees with the deployed image on 34
+of the 40 packages the two share: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6. Its
+rasterio 1.5.0 pin needs Python 3.12 or later, so it could not install on any 3.11 build, and
+nobody noticed until that branch's CI first ran (`51035b2`). The Mac also supplies pypdf,
+python-docx and xarray from `~/.local` (`backend_swap` `4e8d327`), so a suite that is green
+there says nothing about a build without them.
+
+### Stage S18.2 CI installs through the lock
+
+`.github/workflows/verify.yml` runs `python3 -m pytest rag_pipeline/tests/ -q` on
+`ubuntu-latest` with CPython 3.11, after `pip install -r requirements.txt -c constraints.txt`. It
+needs no secret, because `conftest.py` already replaces `load_dotenv` with a no-op (S9.7).
+
+A constraint binds only what is requested. A requirement added after the freeze therefore
+floats to latest-at-run-time while everything else stays pinned, and CI would test a mix that is
+neither deployed nor latest without saying so. A step after the install prints every installed
+`name==version` that the lock does not contain. It warns rather than fails, because until the
+next deploy there is no deployed version to pin the newcomer to.
+
+### Stage S18.3 What the first Linux run found
+
+The first run (`36943761445`, on `ubuntu-24.04` with CPython 3.11.16, the deployed interpreter
+exactly) installed all 175 packages at the deployed versions and reported:
+
+| | passed | failed | skipped |
+|---|---|---|---|
+| development Mac, its own versions | 1645 | 0 | 4 |
+| CI, the deployed versions | 1643 | 2 | 4 |
+
+The four skips are the same opt-in live-service tests in both. Before the push, the workflow's
+steps were run verbatim in a `python:3.11-slim` container on x86-64, which gave the same counts
+once it had the system library described below.
+
+**The Mac's baseline was measured on a stack that is not deployed.** Of ten version-sensitive
+packages, eight differ: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6, scipy 1.15.3
+against 1.17.1, libpysal 4.15.0 against 4.14.1, and fiona is not installed there at all. One of
+the two failures comes from that difference rather than from the platform, and it is the one
+that matters in production:
+
+* **pandas 3 parses years before 1677, so four-digit codes became dates.**
+  `test_csv_with_coordinates_flows_through` expects `detect_time_column` to ignore `Beat`, a
+  column of police beat numbers; on the deployed versions it lists it as a time candidate. Two
+  things combine. GDAL reads a CSV's columns as text, so the guard in `_candidate_columns` that
+  skips numeric columns without a time-like name never sees a number. And
+  `pd.to_datetime(..., errors="coerce")` turns `"1234"` into NaT on pandas 2, whose nanosecond
+  timestamps cannot reach before 1677, but into 1234-01-01 on pandas 3, which infers microsecond
+  resolution. Ranking sorts by parse rate before the name hint, so the code column wins whenever
+  the real date has a gap. Measured on the deployed versions: with one blank date in four rows,
+  `detect_time_column` chooses `Beat` (parse rate 1.0) over `Date` (0.75); pandas 2.2.3 chooses
+  `Date`. The deployed agent does this today. The fix is a separate change.
+* **The distance band sits on a tie.** `test_distance_band_without_a_threshold_leaves_no_island`
+  passes on macOS/arm64 and leaves one island on Linux x86-64 with identical libpysal 4.14.1,
+  scipy 1.17.1 and numpy 2.4.6; it was reproduced inside the deployed container on 2026-10-01.
+  `analysis_spatial_stats_tools.py` passes `min_threshold_distance` to `DistanceBand` exactly,
+  and the margin on the test lattice is 0.0 m. The fix (pad the threshold by a relative 1e-9) is
+  a separate change, and the test is deliberately not skipped in the meantime.
+* **rasterio and fiona need a system library the slim base image lacks.** Their wheels bundle
+  GDAL but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so
+  `import rasterio` fails there. Under pytest 9 a module that is present but cannot load is a
+  collection error, not a skip, so that session stopped at `test_raster_routing.py` with no test
+  run. The deployed image has the library only as an automatic dependency of its GDAL and QGIS
+  apt layers (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others).
+  Dropping those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and
+  fiona unimportable. GitHub's runner has the library (both import there), so CI on the runner
+  does not see this; a job built on the slim image would.
+* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
+  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
+  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
+  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
+  them a PDF, a .docx or a NetCDF file. A green run does not mean the deployment can read those
+  formats. Declaring them is a separate change.
+
+The workflow also imports every module the suite `importorskip`s before running it. That call
+skips when a module is absent, so a package dropped from the install would turn whole spatial
+modules into skips and leave the job green with far fewer tests.
+
+### Stage S18.4 The images install through the lock
+
+The first version of this stage left the image installing unpinned, because installing through
+the lock changes what the next deploy installs. That decision is taken here.
+`rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside `requirements.txt` and
+pass `-c constraints.txt` to every `pip install`. A rebuild therefore reproduces the versions the
+deployment runs. Before, each rebuild resolved that day's newest, and nine days after the
+2026-09-22 build 42 of 175 packages had already moved (S18.1).
+
+**What the next deploy installs changes in one direction: it stops upgrading.** On 2026-10-02 the
+deployed agent-api container still matched the lock line for line, so the rebuild that ships this
+change reinstalls the same 177 versions. Its pip layer reruns once, because the `COPY` above it
+changed. Without this change, the next deploy that touches `requirements.txt` re-resolves the
+whole stack. For PR #36's seven new packages that meant 42 moved packages; with it, the same
+deploy adds the new packages and moves nothing else. The cost is that upstream fixes no longer
+arrive by accident of build day. An upgrade is now a change to the lock, and CI tests it like any
+other change.
+
+**The spaCy model goes through the lock too.** `python -m spacy download en_core_web_sm` became
+`pip install -c constraints.txt en_core_web_sm`. `spacy download` fetches spaCy's compatibility
+table from GitHub at build time and installs whichever model version that table names for the
+installed spaCy, with no lock and no hash check. A bare name constrained by the lock's direct-URL
+line installs exactly that wheel instead, and pip checks the sha256 the URL carries. With one
+digit of the hash changed, the image's pip 24.0 refused: `Expected sha256 0000… Got 1932…`. Today
+both routes give the same wheel. The table lists only 3.8.0 for spaCy 3.8, and the wheel declares
+no dependencies of its own. So the switch changes nothing now; it stops a future model release
+from changing the image unannounced. py-spy likewise installs at its locked 0.4.2.
+
+**MCP_server follows the same rule, because it installs the same file.** Its running container
+was built in the same compose build as agent-api on 2026-09-22. Its `pip freeze` is the lock minus
+exactly `en_core_web_sm` and `py-spy`: 175 packages, each at the locked version. So locking it
+changes nothing it runs. It also keeps the two images on the same versions whenever either is
+rebuilt, including the usual `up -d --build agent-api`, which rebuilds only one.
+`metadata-extraction-server/Dockerfile` installs the same root `requirements.txt` and gets the
+same change. It is not deployed: the VM has only a stopped container from 2026-06-12, and the
+service sits outside compose's default profile.
+
+**libexpat1 is named in all three apt layers.** `python:3.11-slim` for amd64 does not have the
+package: not the tag cached here since 2026-09-19 (CPython 3.11.16, Debian 13.7), and not the one
+the build pulled on 2026-10-02 (3.11.17). With the locked wheels installed on the first,
+`import rasterio` and `import fiona` both fail with
+`libexpat.so.1: cannot open shared object file`. The two libraries that need it are the GDALs
+those wheels bundle,
+`rasterio.libs/libgdal-c8c9c467.so.36.3.10.3` and `fiona.libs/libgdal-fiona-e8f6bdb0.so.35.3.9.2`.
+`apt-get install libexpat1` alone fixes both. pyogrio 0.13.0 imports without it. The images keep
+their GDAL and QGIS packages, which pull it in anyway, so nothing they contain changes. In the
+deployed agent-api it was an automatic package that 16 others depend on, libgdal36,
+libqgis-core3.40.6, python3.13-minimal and the mesa libraries among them. Naming it puts the
+dependency where the next person to trim those layers will read it.
+
+**How a new requirement is handled: it floats until the lock is retaken.** A constraint binds only
+a name it lists. A package added to `requirements.txt` after the freeze resolves at build time to
+its newest version that fits the pins, and so does any new dependency it brings. Nothing already
+pinned moves to make room; if no version fits, the build fails with `ResolutionImpossible`. CI's
+drift step (S18.2) names each floating package in a warning. After the deploy that ships it, the
+lock is retaken from the running container with the command in its header. That pins the
+newcomer and clears the warning. Otherwise the retake is a check: it should change nothing below
+the marker, and any other difference means the image did not install what the lock says.
+
+The newcomer is not pinned in the lock at once because its lines would be a guess. The lock's
+lines come from an image's own `pip freeze`, and a newcomer usually brings dependencies of its
+own: IPython brought twelve in PR #36. Writing that closure by hand predicts a resolution the
+build performs anyway. Two things narrow the window instead:
+
+* Pin the newcomer itself in `requirements.txt` when the version CI tests must be the version
+  deployed, as PR #36 does. Then only its new dependencies float.
+* To move a package the lock already lists, edit that one line in the same change. CI installs
+  and tests it, and the retake after the deploy reproduces it.
+
+**A package a Dockerfile installs by name must be in the lock already.** CI installs only what
+`requirements.txt` asks for, so its drift step never sees py-spy or the model, and a floating one
+would never be flagged. `rag_pipeline/tests/test_image_installs_through_lock.py` fails in that
+case. It also fails for any `pip install` without `-c constraints.txt` or before the lock is
+copied in, for `spacy download`, and for an image without `libexpat1` in an apt layer. It reads
+the Dockerfiles as text and finds the images itself, so a new image is covered as soon as it
+copies `requirements.txt`. Run against prototype's three Dockerfiles, it reports the five unlocked
+installs (three in agent-api's) and the missing `libexpat1` in all three. Fourteen synthetic
+Dockerfiles, and five for the apt reader, check that it rejects each wrong answer and accepts
+each right one.
+
+### Stage S18.5 Verified on local builds, not by a deploy
+
+All three images were built from this change on the development Mac with
+`docker build --platform linux/amd64 --pull`, emulated, on 2026-10-02. The agent-api build took
+2,257 s, mcp-server 1,330 s and metadata-extraction-server 1,495 s, the three running at once.
+
+| image | `pip freeze` inside it | against the deployment |
+|---|---|---|
+| agent-api | the lock's 177 lines, byte for byte, including `torch==2.14.0+cpu` and the model's URL line with its sha256 | identical to the running agent-api; the lock, the running container and the build hash alike (sha256 `ea8da91e6ce73d84…`) |
+| mcp-server | 175 lines: the lock minus `en_core_web_sm` and `py-spy`, which it does not install | identical to the running mcp-server |
+| metadata-extraction-server | the same 175 lines | not deployed |
+
+Every line of each freeze is a line of the lock, so CI's drift step has nothing to report for
+any of them; run inside the mcp-server image, it printed nothing. The model layer resolved the
+bare name straight to the lock's URL. It read no compatibility table, installed 3.8.0 in 10 s,
+and `spacy.load("en_core_web_sm")` works. `apt-mark` lists `libexpat1` as manually installed in
+agent-api and metadata-extraction-server, and mcp-server names it on the same kind of install
+line. In agent-api the same 16 packages depend on it as in the deployed container, and both
+bundled GDALs resolve `libexpat.so.1` to `/lib/x86_64-linux-gnu/libexpat.so.1`.
+
+The test suite was started inside the built agent-api image and did not finish. Partway through,
+the Mac's disk filled and Docker Desktop stopped ("no space left on device"). The disk held
+several sessions' amd64 images, these three among them, at 4 to 7 GB each. No result from that
+run is recorded here. CI runs the suite on Linux under the same lock.
+
+**The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
+deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
+every compiled wheel here is built for cp311, not for a patch release. It is the float this stage
+leaves, in S18.6.
+
+### Stage S18.6 What this stage did not fix
+
+* **The base image and the apt layers still float.** `FROM python:3.11-slim` is a moving tag, as
+  S18.5 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
+  build day. None of that shows in `pip freeze`. Pinning the base by digest is a separate
+  decision, with its own cost: security updates to the base stop arriving by themselves.
+* **pip, setuptools and wheel come from the base image, not the lock.** `pip freeze` omits them,
+  so the lock cannot pin them. Today they agree: 24.0, 79.0.1 and 0.46.3 in the deployed image and
+  in both base tags above. torch requires `setuptools>=77.0.3`, which the base satisfies. A base
+  with an older setuptools would let pip upgrade it unpinned and unreported.
+* **The lock aligns versions, not the set of packages.** A requirement added later reaches only
+  the images that are rebuilt. `up -d --build agent-api` leaves mcp-server without it.
+* **Other images are outside this lock.** `embedding-server/` installs its own `requirements.txt`,
+  and `sandbox/Dockerfile`, `Dockerfile.claude` and `Dockerfile.opencode` install bare names. The
+  lock describes the root `requirements.txt` stack only.
+* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
+  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
+  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
+  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
+  neither runs for real anywhere in CI.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
+
+> **Landed after the fixes it found.** Both failures recorded above were fixed before this stage merged: the island under the default distance band is [Stage 14](#stage-14), and `Beat` read as a date on pandas 3 is [Stage 15](#stage-15). Merged in that order on 2026-10-03, so the workflow's first run on `prototype` is against code that already contains both.
+
