@@ -122,7 +122,30 @@ def _known_tools():
     return {n for n in names if n}
 
 
-_KNOWN_TOOLS = _known_tools()
+def _without_an_mcp_server(build):
+    """Run *build* with the remote MCP server unreachable.
+
+    The inventory is built at import, before any fixture runs, and one of the factories it
+    calls is `make_langchain_mcp_tools`, which asks the server at 127.0.0.1:8000 for the
+    deployment's tool list before importing this repo's. That was a network call during
+    collection, on every run, and its answer depended on what was listening on the machine.
+    The repo's own tools are what the local-import fallback builds, which is what an
+    unreachable server gets.
+    """
+    from agent_runtime import langchain_mcp_tools as mcp
+
+    async def unreachable(url):
+        raise ConnectionError(f"no MCP server is asked while listing this repo's tools ({url})")
+
+    original = mcp._remote_mcp_list_tools_async
+    mcp._remote_mcp_list_tools_async = unreachable
+    try:
+        return build()
+    finally:
+        mcp._remote_mcp_list_tools_async = original
+
+
+_KNOWN_TOOLS = _without_an_mcp_server(_known_tools)
 
 
 def test_the_known_tool_inventory_is_not_empty():

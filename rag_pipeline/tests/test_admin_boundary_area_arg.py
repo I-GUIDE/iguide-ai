@@ -25,11 +25,47 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from agent_runtime import admin_boundary_tools as ab  # noqa: E402
 from agent_runtime.admin_boundary_tools import make_admin_boundary_tools  # noqa: E402
 
 
+def _feature(props):
+    return {"type": "Feature", "properties": props,
+            "geometry": {"type": "Polygon",
+                         "coordinates": [[[-88.4, 39.9], [-87.9, 39.9], [-87.9, 40.4],
+                                          [-88.4, 40.4], [-88.4, 39.9]]]}}
+
+
+# The two places these calls name, shaped as TIGERweb returns them (the fields
+# test_admin_boundary.py captured from the live service), keyed by the layer and the BASENAME
+# the tool asks for.
+_PLACES = {
+    (ab._LEVELS["city"][0], "URBANA"): _feature(
+        {"GEOID": "1777005", "NAME": "Urbana city", "BASENAME": "Urbana", "STATE": "17"}),
+    (ab._LEVELS["county"][0], "CHAMPAIGN"): _feature(
+        {"GEOID": "17019", "NAME": "Champaign County", "BASENAME": "Champaign", "STATE": "17"}),
+}
+
+
+def _tigerweb(layer, where, *args, **kwargs):
+    return {"features": [f for (lyr, base), f in _PLACES.items()
+                         if lyr == layer and f"UPPER(BASENAME)='{base}'" in where]}
+
+
 @pytest.fixture
-def boundary():
+def boundary(tmp_path, monkeypatch):
+    """The tool, with TIGERweb stubbed at its HTTP seam the way test_admin_boundary.py does it.
+
+    The real service used to answer here: every test that got as far as resolving its state
+    queried tigerweb.geo.census.gov, six of them on every run (measured 2026-10-02). Offline, the
+    same six stopped at "unknown state", because the state list comes from TIGERweb too, and
+    there an absent note and an unwritten file are true anyway: they passed whether or not the
+    arguments were read right. Answering deterministically keeps the lookup succeeding, which is
+    what makes those assertions bite.
+    """
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(ab, "_states_cache", [{"fips": "17", "name": "Illinois", "usps": "IL"}])
+    monkeypatch.setattr(ab, "_query", _tigerweb)
     return {t.name: t for t in make_admin_boundary_tools()}["admin_boundary"]
 
 
@@ -39,21 +75,13 @@ def call(boundary, **kwargs):
 
 # --- recovery --------------------------------------------------------------------
 
-def test_the_inverted_call_is_understood(boundary, monkeypatch):
+def test_the_inverted_call_is_understood(boundary):
     """The exact first call from the trace. It should not need three more."""
-    seen = {}
-
-    def fake_query(*args, **kwargs):
-        seen["args"] = (args, kwargs)
-        raise RuntimeError("stop here — the argument reading is what is under test")
-
-    monkeypatch.setattr("agent_runtime.admin_boundary_tools._tigerweb_query", fake_query,
-                        raising=False)
     out = call(boundary, state="Illinois", level="city", name="Urbana", area="city")
-    # Either it got far enough to query (arguments read correctly), or it failed later for an
-    # unrelated reason — what must NOT happen is the "no incorporated place named 'city'" dead
-    # end, which means it took the level as the name.
+    # What must NOT happen is the "no incorporated place named 'city'" dead end, which means it
+    # took the level as the name.
     assert "named 'city'" not in json.dumps(out)
+    assert out["ok"] is True and out["matched"][0]["name"] == "Urbana city"
 
 
 def test_an_unrecoverable_swap_says_exactly_what_to_do(boundary):
@@ -77,8 +105,9 @@ def test_every_level_word_is_caught_not_just_city(boundary, word):
 def test_a_real_place_name_is_left_alone(boundary):
     """The fix must not touch a correct call. 'Urbana' is not a level word."""
     out = call(boundary, area="Urbana", state="Illinois", level="city")
-    # Whatever the network does, it must not be refused for looking like a level.
+    # Whatever the lookup finds, it must not be refused for looking like a level.
     assert "place NAME" not in json.dumps(out)
+    assert out["ok"] is True
 
 
 def test_a_place_actually_named_like_a_level_still_needs_care(boundary):
@@ -104,12 +133,14 @@ def test_the_call_the_sweep_caught(boundary):
     out = call(boundary, state="IL", level="county", name="Champaign")
     assert "validation" not in json.dumps(out).lower()
     assert "no place named" not in json.dumps(out)
+    assert out["ok"] is True
 
 
 def test_name_alone_is_not_reported_as_a_correction(boundary):
     """It is the same request said the other way round — both words mean the place now, so
     there is nothing to warn about."""
     out = call(boundary, name="Champaign", state="IL")
+    assert out["ok"] is True       # a refusal carries no note either
     assert out.get("note") is None
 
 
@@ -124,7 +155,12 @@ def test_neither_given_says_what_to_pass(boundary):
 def _capture_stem(monkeypatch):
     written = {}
 
-    def fake_write(feats, stem):
+    # _write_layer takes the layer's content_key since layer identity moved to inputs
+    # (`key`, stage 20). The fake used to take two arguments, so the tool's own call raised
+    # TypeError inside it — and the old assertion accepted the resulting None ("None if the
+    # lookup failed first"), so it passed while proving nothing. Offline, the lookup cannot
+    # fail, the assertion is exact, and a stale fake shows up as the failure it is.
+    def fake_write(feats, stem, key=None):
         written["stem"] = stem
         return {"file_id": "f", "download_url": "u", "filename": f"{stem}.geojson"}
 
@@ -136,11 +172,11 @@ def _capture_stem(monkeypatch):
 def test_output_name_sets_the_file_stem(boundary, monkeypatch):
     written = _capture_stem(monkeypatch)
     call(boundary, area="Champaign", state="IL", output_name="my_county")
-    assert written.get("stem") in (None, "my_county")     # None if the lookup failed first
+    assert written.get("stem") == "my_county"
 
 
 def test_name_still_means_the_filename_when_area_is_given(boundary, monkeypatch):
     """Backwards compatible: a caller passing BOTH meant `name` the old way."""
     written = _capture_stem(monkeypatch)
     call(boundary, area="Champaign", state="IL", name="legacy_stem")
-    assert written.get("stem") in (None, "legacy_stem")
+    assert written.get("stem") == "legacy_stem"

@@ -325,7 +325,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
 
         serialized["name"] is the class, and AnvilGPT, vLLM and any other
         OpenAI-compatible endpoint all arrive as ChatOpenAI — so the trace read
-        "ChatOpenAI started" while qwen3.6:27b or gpt-oss:120b did the work. That is the
+        "ChatOpenAI started" while qwen3.8:27b or gpt-oss:120b did the work. That is the
         same confusion active_llm_description() exists to prevent: the transport does not
         tell you who answered. The invocation params carry the id the user actually picked.
         """

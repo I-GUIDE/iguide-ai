@@ -32,7 +32,7 @@ def test_qgis_processing_run_uses_session_job_dir_and_rewrites_relative_output(q
         calls.append({"command": command, "kwargs": kwargs})
         return subprocess.CompletedProcess(command, 0, stdout='{"OUTPUT": "done"}', stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(
         qgis_processing_run_tool(
@@ -73,7 +73,7 @@ def test_pyqgis_worker_invocation_is_per_session_and_reads_result(qgis_job_root,
         )
         return subprocess.CompletedProcess(command, 0, stdout="worker ok", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(
         pyqgis_layer_summary_tool(
@@ -126,7 +126,7 @@ def test_pyqgis_layer_summary_resolves_uploaded_file_id(qgis_job_root, monkeypat
         Path(spec["result_path"]).write_text(json.dumps({"ok": True}), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="worker ok", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(pyqgis_layer_summary_tool("file_demo", provider="ogr", session_id="memory:demo"))
 
@@ -149,7 +149,7 @@ def test_pyqgis_render_map_registers_binary_output(qgis_job_root, monkeypatch):
         )
         return subprocess.CompletedProcess(command, 0, stdout="worker ok", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(
         pyqgis_render_map_tool(
@@ -206,7 +206,7 @@ def test_pyqgis_render_map_resolves_uploaded_file_id_in_layer_specs(qgis_job_roo
         )
         return subprocess.CompletedProcess(command, 0, stdout="worker ok", stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(
         pyqgis_render_map_tool(
@@ -252,7 +252,7 @@ def test_qgis_metric_buffer_reprojects_before_buffering(qgis_job_root, monkeypat
             Path(kwargs["cwd"]) / "buffer.geojson"
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
-    monkeypatch.setattr(qgis_headless_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(qgis_headless_tools.fork_safe, "run", fake_run)
 
     result = json.loads(
         qgis_metric_buffer_tool(
@@ -391,9 +391,17 @@ def test_resolve_layer_ref_passthrough_for_raw_path():
 
 
 def test_pyqgis_available_probes_worker_python(monkeypatch):
+    """A worker interpreter that cannot import qgis means no PyQGIS, unless overridden.
+
+    The candidate list is pinned, not just ``QGIS_PYTHON_BIN``. ``qgis_python_candidates`` falls
+    back to this interpreter and then /usr/bin/python3 on purpose, and in the agent image that
+    distro python HAS the bindings, so a nonexistent ``QGIS_PYTHON_BIN`` alone left PyQGIS
+    available there. The test passed only on machines without QGIS.
+    """
     monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
-    qgis_headless_tools._PYQGIS_PROBE_CACHE.clear()
-    monkeypatch.setenv("QGIS_PYTHON_BIN", "/nonexistent/python_zzz")   # cannot import qgis
+    monkeypatch.setattr(qgis_headless_tools, "_PYQGIS_PROBE_CACHE", {})
+    monkeypatch.setattr(qgis_headless_tools, "qgis_python_candidates",
+                        lambda: ["/nonexistent/python_zzz"])            # cannot import qgis
     assert qgis_headless_tools.pyqgis_available() is False
     monkeypatch.setenv("AGENT_QGIS_ENABLED", "1")                      # override wins
     assert qgis_headless_tools.pyqgis_available() is True
@@ -451,7 +459,7 @@ def test_pyqgis_available_accepts_a_working_fallback_interpreter(monkeypatch):
 
     def fake_run(argv, **kwargs):
         return _Probe(0 if argv[0] == "/usr/bin/python3" else 1)
-    monkeypatch.setattr(q.subprocess, "run", fake_run)
+    monkeypatch.setattr(q.fork_safe, "run", fake_run)
     assert q.pyqgis_available() is True          # first candidate fails, second imports qgis
     q._PYQGIS_PROBE_CACHE.clear()
 
@@ -475,7 +483,7 @@ def test_execution_uses_the_resolved_binary_not_the_raw_env(monkeypatch):
         class R:
             returncode, stdout, stderr = 0, "", ""
         return R()
-    monkeypatch.setattr(q.subprocess, "run", fake_run)
+    monkeypatch.setattr(q.fork_safe, "run", fake_run)
     q.qgis_processing_help_tool("native:buffer")
     # the executed command must be the RESOLVED binary, never the unusable configured path
     assert captured["argv"][0] == "/usr/bin/qgis_process"
@@ -489,7 +497,7 @@ def test_qgis_python_bin_agrees_with_pyqgis_available(monkeypatch):
 
     class _P:
         def __init__(self, rc): self.returncode = rc
-    monkeypatch.setattr(q.subprocess, "run",
+    monkeypatch.setattr(q.fork_safe, "run",
                         lambda argv, **kw: _P(0 if argv[0] == "/usr/bin/python3" else 1))
     assert q.pyqgis_available() is True
     assert q.qgis_python_bin() == "/usr/bin/python3"     # execution picks the working interpreter

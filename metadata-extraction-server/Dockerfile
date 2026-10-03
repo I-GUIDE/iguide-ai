@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 
-# Install system dependencies for GDAL, PROJ, and spatial libraries
+# Install system dependencies for GDAL, PROJ, and spatial libraries. libexpat1 is named on its
+# own account: the rasterio and fiona wheels (extract_metadata.py imports both) bundle their
+# own GDAL, which links the system's libexpat.so.1, and python:3.11-slim does not ship it
+# (see rag_pipeline/Dockerfile).
 RUN apt-get update && apt-get install -y \
     build-essential \
     gdal-bin \
@@ -8,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libproj-dev \
     proj-data \
     proj-bin \
+    libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set GDAL environment variables
@@ -16,9 +20,10 @@ ENV C_INCLUDE_PATH=/usr/include/gdal
 
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install Python dependencies through the lock, as rag_pipeline/Dockerfile
+# does: this is the same root requirements.txt, and constraints.txt pins what it resolves to.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy application code
 COPY metadata-extraction-server/ ./metadata-extraction-server/
