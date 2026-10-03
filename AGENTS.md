@@ -13,18 +13,32 @@ claim names a file so you can verify it rather than trust it.
 Agent API (Flask + gunicorn in prod, `app.run` locally):
 
 ```bash
-PYTHONPATH="$PWD" PORT=5055 AGENT_PUBLIC_BASE_URL= AGENT_CHAT_API_KEY= python3 api/server.py
+PYTHONPATH="$PWD" PORT=5055 AGENT_MODE=local AGENT_CHAT_API_KEY= python3 api/server.py
 ```
 
-All four matter, and each failure is silent or misleading:
+**`AGENT_MODE=local` is not optional on a laptop.** The main checkout's `.env` points at shared
+infrastructure — the PRODUCTION OpenSearch cluster among it — and every `load_dotenv` in the code
+walks up from a worktree and finds it. Without the mode, a local turn writes its conversation,
+snapshot and trace into prod, and nothing errors: on 2026-10-01 seven test conversations landed
+there unnoticed. Local mode closes the conversation store entirely (whatever the request asks —
+the map UI always asks for memory), keeps knowledge-base search READING, ignores
+`AGENT_PUBLIC_BASE_URL`, and gives dev-style access. It must be set on the command line or in the
+environment: `.env` loads with `override=False`, so the command line wins over the `.env`'s own
+`AGENT_MODE=token`.
+
+**Read the boot banner.** In local mode the server logs every endpoint it can still reach, tagged
+`[local ]` or `[REMOTE]` — the remote embedding server, the LLM, rs-embed, the KB cluster (marked
+READ ONLY). Anything `[REMOTE]` there is a real network call your test will make.
+
+The rest still matters, and each failure is silent or misleading:
 
 - no `PYTHONPATH` → `ModuleNotFoundError: rag_pipeline` (`api/server.py` imports it, and running
   a script puts only `api/` on `sys.path`)
-- `AGENT_PUBLIC_BASE_URL` inherited from a deployment `.env` → every `download_url` becomes
-  absolute against the *remote* host, so local downloads 404 with `unknown file_id`
 - `AGENT_CHAT_API_KEY` set → `/agent/chat*` answers 403 (`_get_agent_chat_api_key`); empty
   disables the gate
 - `PORT` defaults to 5002; the compose deployment maps host 3500 → container 5002
+- outside local mode, an inherited `AGENT_PUBLIC_BASE_URL` makes every `download_url` absolute
+  against the *remote* host, so local downloads 404 with `unknown file_id`
 
 Map UI prototype (`map-ui-prototype/`, Vite + React + MapLibre + deck.gl):
 
@@ -38,24 +52,45 @@ panel. Node 18+ required.
 
 ## Tests
 
+**Neither suite loads a `.env` unless `RUN_LIVE_BACKEND_TESTS=1`.** A bare `load_dotenv()` walks
+up from its module's directory, so from a worktree under `.claude/worktrees/` it finds the main
+checkout's file, with the developer's real credentials. Both conftests make it a no-op unless
+the variable is set, and `tests/live/` is skipped without it.
+
 ```bash
 python3 -m pytest rag_pipeline/tests/ -q
+python3 -m pytest tests/ -q        # 135 passed, 32 skipped (all of tests/live/)
 ```
 
-Baseline is **1634 passed, 4 skipped, 0 failed on Linux**. If something fails there, it is
-yours. On a Windows checkout, 11 of those currently fail for reasons that have nothing to do
-with the code: five hit `.read_text()` with no `encoding=` on a file containing a non-ASCII
-byte, which falls back to the OS locale codepage rather than UTF-8 and is exactly the kind of
-thing that passes on every Linux CI box and on most English-locale Windows machines too; three
-assert a forward-slash path fragment against a `WindowsPath`'s backslashes, or that `/etc/passwd`
-reads as absolute (it doesn't, without a drive letter); one tries to delete a file this same
-process still has open, which Windows refuses and POSIX does not; and two
-(`test_csv_with_coordinates_flows_through`,
-`test_distance_band_without_a_threshold_leaves_no_island`) trace to `geopandas`/GDAL's and
-`libpysal`'s own type-inference and threshold heuristics differing by
-installed version — both are unpinned in `requirements.txt`. None of this was chased down to a
-specific GDAL/libpysal version; if one of these two starts failing on Linux too, that is worth
-knowing, not assuming away.
+Baseline is **2036 passed, 4 skipped, 0 failed** (3 Oct 2026). If something fails, it is yours.
+
+**A passing run says nothing about whether the suite stayed offline.** Until 2026-10-02 every
+run reached eight search engines (the supervisor's web fallback, through `ddgs`), the Census
+TIGERweb service, and whatever listened on localhost:8077 and 127.0.0.1:8000, and every test
+passed, because each of those paths degrades quietly when its service does not answer.
+`rag_pipeline/tests/conftest.py` now stubs the three the code reaches on its own
+(`_no_live_services`), and `test_admin_boundary_area_arg.py` stubs TIGERweb at `_query`, as
+`test_admin_boundary.py` always did. A new test whose code path calls another live service
+stubs it at the point of use the same way. The conftest also takes back the one `.env` it cannot
+prevent: `rag_pipeline/__init__.py` loads the repo root's `.env` by explicit path, and pytest
+imports that package before it can import a conftest inside it. In a copy laid out like the main
+checkout, 56 of that file's variables reached the tests, the three self-skipping live tests ran,
+and seven tests failed. To check a change, deny the network to the whole process and count what
+was attempted. A probe on Python's `socket` module is not enough, because `ddgs` sends through
+`primp`, a Rust client, and its requests never pass through that module. `sandbox-exec` with
+outbound IP denied catches them on macOS, and `docker run --network none` on Linux.
+
+**On Windows, nine more fail for platform reasons, not code** (measured 2026-09-23, on the
+suite of the time). Five call `.read_text()` with no `encoding=` on a file holding a non-ASCII
+byte, which falls back to the locale codepage rather than UTF-8. Three assert a forward-slash
+path fragment against a `WindowsPath`, or that `/etc/passwd` reads as absolute (with no drive
+letter it does not). One deletes a file the same process still holds open, which Windows
+refuses and POSIX allows. Two more were blamed at the time on unpinned `geopandas`/`libpysal`
+versions — `test_csv_with_coordinates_flows_through` and
+`test_distance_band_without_a_threshold_leaves_no_island`. They were real bugs. CI on Linux
+found them again, and both were fixed by construction: Stage 15 (what counts as a date) and
+Stage 14 (an island-free distance band). The images now install through `constraints.txt`,
+so version drift is no longer the open question it was.
 
 That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
 is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
@@ -110,16 +145,25 @@ Two providers are wired:
   argument is dropped for models that would refuse it, so a UI leaving the control set while
   switching to gpt-4o cannot break the request.
 - **AnvilGPT** (Purdue RCAC, Open WebUI) — set `AGENT_LLM_PROVIDER=anvilgpt` for the
-  process default, or select a model per request. Its ids look like `qwen3.6:27b`, NOT the
-  HuggingFace `Qwen/Qwen3.6-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
+  process default, or select a model per request. Its ids look like `qwen3.8:27b`, NOT the
+  HuggingFace `Qwen/Qwen3.8-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
   `/api/chat/completions`, which `normalize_openai_base_url` reduces to the `/api` base.
 
-**Do not set `max_tokens` for a reasoning model.** qwen3.6:27b and the gpt-5.x line spend
-their first tokens on reasoning and only then write `content`, so a tight ceiling returns
+  **Probe the roster before trusting it.** Purdue's catalogue changes under us and has lied in
+  both directions: `qwen3.6:27b` was listed and "Recommended" while returning zero bytes in 90s,
+  and by 2026-10-01 it had been removed and replaced by `qwen3.8:27b`. A ten-second
+  `GET /api/models` plus one "Say OK" separates "model is dead" from "agent is stuck" instantly,
+  and a benchmark run once sat 2h23m on exactly that confusion. Measured 2026-10-01, qwen3.8:27b
+  answers in 0.7s, emits correct `tool_calls` (`finish_reason: tool_calls`), and completes a
+  tool-result round trip in 2.2s — so unlike its predecessor it is usable as an agent model.
+
+**Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
+spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
 `finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads
 blank as "no answer", so a truncated reasoning model looks like a failed peer rather than a
 cut-off one. Measured on qwen3.6:27b: `max_tokens=20` produced no content at all; unset
-completes normally.
+completes normally. Its successor leans on reasoning even harder — qwen3.8:27b spent 34 of 38
+completion tokens thinking in order to reply "OK" — so the ceiling stays off.
 
 **A reasoning model over an OpenAI-compatible shim loses its own thinking unless we keep
 it.** `gpt-oss:120b` on AnvilGPT answers a tool-calling step with `content: None`,
@@ -189,6 +233,19 @@ An analysis result reaches the user as an **interactive map layer**, not a file 
 - **Geometry never goes into the LLM-visible documents.** Evidence documents carry titles and
   abstracts; footprints and coordinates go to the map on the side channel. Widening the
   documents floods the context and gets truncated.
+- **The Downloads panel is whatever your tool's result looks like.** Nothing server-side
+  assembles it. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`) walks the whole SSE
+  payload and harvests ANY object carrying a `download_url` plus a `file_id` or `filename`,
+  treating the three as one file. So every object you emit with a `download_url` must name the
+  same file in all three keys. A missing `filename` renders as `unnamed file (file_…)`; and an
+  id from one file beside another's url renders a row whose label and link disagree — which
+  `align_embedding_colors` shipped, labelled with each `.npz` package while downloading its
+  `.png`. When a result involves two files, NEST the second as its own complete object rather
+  than adding sibling `image_*` keys: the flat shape is what let the pairing go wrong.
+  `rag_pipeline/tests/test_download_descriptors.py` mirrors the client's rule in Python, because
+  a test checking some other rule would pass while the panel stayed wrong. The converse also
+  holds: a url under a non-standard key (`image_file_id`, `predictions_file_id`) is never
+  harvested at all, so that file silently never appears in the panel.
 
 ## Conventions that are deliberate
 
@@ -270,19 +327,23 @@ check rather than making it wrong — the map-denial check needs no catalog and 
 ## The tool surface
 
 Do not hand-enumerate the factories — that drifted before and will again.
-`agent_runtime/capability_registry.py` is now the single list of which toolset factory does
-what, and
-`rag_pipeline/tests/test_supervisor_knows_its_peers.py` holds it against the peer builders in
-`agent_runtime/supervisor/graph.py`: bind a new toolset there without adding it to the registry
-and the test fails naming it. Read the registry for the current inventory rather than trusting
-a count in this file — the previous version's "36 tools in six families" had already been wrong
-for weeks by the time anyone noticed, because the registry it should have pointed at did not
-exist yet and nothing enforced the paragraph against reality.
+`agent_runtime/capability_registry.py` is the single list of which toolset factory does what,
+and `rag_pipeline/tests/test_supervisor_knows_its_peers.py` holds it against the peer builders
+in `agent_runtime/supervisor/graph.py`: bind a new toolset there without adding it to the
+registry and the test fails naming it. Read the registry for the current inventory rather than
+a count in this file. This paragraph has been wrong twice: "36 tools in six families" stood
+for weeks, and the correction to "53 in nine" was already one tool out ten days later.
 
-Two peers, `analyze` and `code`, share nearly all of it (`_SHARED` in the registry); each also
-has toolsets the other does not (`_ANALYZE_ONLY`, `_CODE_ONLY`). The shared/analyze-only/
-code-only split in the registry mirrors `supervisor/graph.py`'s actual peer builders — reread
-both together if you touch either.
+Two peers, `analyze` and `code`, share nearly all of it (`_SHARED`); each also has toolsets the
+other does not (`_ANALYZE_ONLY`, `_CODE_ONLY`). That split mirrors `supervisor/graph.py`'s
+actual peer builders — reread both together if you touch either.
+
+`make_geo_analysis_tools` is the factory that hides: it lives in `extractors/geo_handles.py`,
+not `agent_runtime/`, so a grep scoped to the runtime package misses `heatmap_image`,
+`choropleth_image` and `kb_select_rows` and concludes they were deleted. It had a fourth tool,
+`kb_run_geofunction`, until the analysis peer stopped offering it because it `exec()`'d
+knowledge-base code in the agent's own process — Stage 19 of
+`docs/agent-architecture-changes.md`.
 
 The analysis toolsets load **only when files are attached** to the conversation
 (`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), with the boundary/geocoding/
@@ -292,19 +353,22 @@ gating them on `input_file_ids` would hide the very tool that fills that gap. `r
 calls an external service at `RS_EMBED_URL` (default `http://localhost:8077` — inside a
 container that means the container itself, not the host).
 
-**There IS raster analysis now** — this reversed a claim that stood here for months.
-`agent_runtime/terrain_tools.py` (`make_terrain_tools`) has `dem_for_region` (elevation from
-USGS 3DEP, no credential needed), `terrain_derivative` (slope/aspect/hillshade), a bathtub-fill
-`inundation_at_level`, and `zonal_stats_for_raster`, which is what joins any of the three to a
-polygon layer — `fit_zone_model` (the rs-embed zonal tools) then reads a column it writes, so
-elevation or flood depth can be fit against satellite embeddings with no change to that tool.
-Band math and reclassify still have no dedicated tool; route those through `execute_code`
-(rasterio is available) or a GDAL algorithm via `qgis_processing_run`.
+**There is raster analysis, though partial** — this said there was none for months after
+`make_terrain_tools` had shipped. `dem_for_region` fetches USGS 3DEP elevation (no credential;
+US coverage only — outside it the service answers 200 with a frame of NoData, which the tool
+detects and refuses rather than drape a blank layer). `terrain_derivative` gives slope, aspect
+or hillshade, `inundation_at_level` is a bathtub fill at a given height, and
+`zonal_stats_for_raster` turns ANY single-band raster into per-zone columns on a polygon layer —
+the shape `fit_zone_model` already reads, so elevation or flood depth can be fit beside the
+satellite embeddings with no change to that tool. Band math, reclassify and multi-band work
+still have no dedicated tool: route them through `execute_code` (rasterio is available) or a
+GDAL algorithm via `qgis_processing_run`.
 
 A raster reaches the map as an actual layer, not only as a static picture: `add_raster_layer`
 reads its bounds from the file itself rather than from a caller-restated box, specifically
 because a restated box that disagrees with the pixels draws a plausible layer in the wrong
-place and nothing downstream can catch it (`rag_pipeline/tests/test_raster_routing.py`). Before
+place and nothing downstream can catch it (`rag_pipeline/tests/test_raster_routing.py`). It
+counts as a delivery in `_MAP_LAYER_TOOLS`, so a raster answer satisfies the map check. Before
 that it took four tool calls to draw one GeoTIFF — `add_map_layer` and `add_raster_layer` each
 rejected it once for being the wrong kind of thing the other one handles — which is the
 practical reason the delivery contract below now names three routes, not two.
@@ -413,7 +477,8 @@ county, which is the many-zone input that tool is for.
 
 It reads the Census **TIGERweb** REST API, not Earth Engine, for three reasons: the agent
 container has no `ee` and no Earth Engine credential (that lives only in the rs-embed service,
-under a personal Google account); TIGERweb needs no credential; and it has the one layer Earth
+which authenticates as a service account rather than a person since 2026-10-01); TIGERweb needs
+no credential; and it has the one layer Earth
 Engine lacks — incorporated places. `TIGER/*/Places` is not in the EE catalogue at any vintage,
 and GAUL/geoBoundaries stop at district, so a *city* boundary is simply unavailable there
 (geoBoundaries has no ADM2 named "Nairobi" at all — Kenya's ADM2 are sub-counties).
@@ -455,6 +520,19 @@ pip. Consequences: code cannot fetch anything at runtime — an API call belongs
 the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
+
+**Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
+once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
+fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close
+through `os_log`, and `os_log` reads a mapping the child never inherited. On the maintainer's Mac
+every later `qgis_process` returned -11 with empty output and every `execute_code` "failed during
+dependency installation", and neither program ever ran. `fork_safe.run` starts the child with
+`posix_spawn`, which runs no fork handler; off macOS it is `subprocess.run` unchanged, and the
+deployed Linux container is unaffected, so no CI run will show this. A source scan in
+`test_fork_safe.py` fails on a direct `subprocess`, `os.fork` or `multiprocessing` start, and a
+test fake has to replace `fork_safe.run`, the function the module calls. A library that forks on
+its own is not covered: joblib's loky pool calls `os.fork()`, and `esda.G_Local` starts one by
+default (`n_jobs=-1`). `scripts/repro_macos_fork_crash.py` reproduces the crash in under a second.
 
 **A baked image saves nothing on its own.** `pip install --target` sets
 `ignore_installed=True` — pip does not consult the image's site-packages — so a package baked
@@ -575,6 +653,13 @@ reaches the map: `map_layers.layers_for_artifacts` turns any `.geojson` it wrote
 descriptor and the peer wrapper emits it, from the request's trace context, through the same
 `build_map_layers` boundary every tool's layer crosses.
 
+**The supervisor is told which code peer will run.** The decider's `code` line is generated per
+backend by `_code_capability_line` (`agent_runtime/supervisor/graph.py`), through the same
+`_code_peer_backend` resolution the code node uses. The LangChain peer gets its inventory from
+`capability_registry`; a CLI peer gets `CLI_PEER` from the same file. That CLI description is
+declared, not derived, so a change to a CLI container's posture (its network, what is staged,
+what reaches its brief) has to be mirrored in `CLI_PEER`. Only the network clause is held by a test.
+
 **A conversation keeps its project directory between turns** (`claudesess_<thread>` under
 `AGENT_CODE_EXEC_WORK_ROOT`), so the CLI resumes with `--continue` and its `pip install
 --user` cache survives; the container is still fresh each run. Two things that forced
@@ -677,13 +762,15 @@ like `"alice"`, which is exactly why the bug hid in a passing suite.
 **Platform tiers.** `PLATFORM_TIER=dev|prod` (`agent_runtime/platform_endpoints.py`) is one
 switch for what would otherwise be four separately-set hosts a deployment can leave
 half-changed — the frontend, the backend, the OpenSearch cluster this agent's own conversations
-live in, and this agent's id in that frontend's redirect allowlist. `SEARCH_TIER` is deliberately
+live in, and this agent's id in that frontend's redirect allowlist. (Prod's cluster is
+deliberately absent from the table, so a prod deployment names it in `OPENSEARCH_NODE` — Stage 12.) `SEARCH_TIER` is deliberately
 separate from `PLATFORM_TIER`: which platform mints your tokens and which knowledge base you
 search are different questions, and running the dev platform against the prod corpus is
 ordinary. Any setting can be tiered (`tiered_env`), with the tier as the fallback and an
-explicit env var always winning — except for a credential or an index name, where the tier
-supplies the value outright, because a secret or a deployment-specific name does not belong in
-this repository for an explicit variable to override. **The general rule, paid for by three
+explicit env var always winning — except for a credential or an index name, where the
+precedence reverses: the tier-specific variable (`OPENSEARCH_PASSWORD_DEV`) wins over the bare
+one, because no value for a secret lives in this repository for the table to supply, and a stale
+bare variable must not silently pin every tier to one credential. **The general rule, paid for by three
 separate silent failures in one afternoon:** anything the platform assigns per tier belongs in
 the `_TIERS` table, not in a standalone env var — a value that lives beside the table but not in
 it does not move when the tier does, and each time it happened it looked like a different bug
@@ -717,5 +804,25 @@ captures an incident bundle into `/var/log/iguide-agent/incidents/` first — lo
 state, and `py-spy` stacks for every thread. If you are debugging a hang, look there before
 restarting anything, and never recover with `--force-recreate`: it deletes the container and the
 evidence with it. `journalctl -u iguide-agent-watchdog` is every decision it has made.
+
+**A recreate is an outage for whoever is mid-turn.** Changing `.env` (model, tier, cookie name)
+needs the container recreated, and that hard-stops every open SSE stream — an agent turn runs for
+tens of seconds to minutes. Switching the default model on 2026-10-02 cut off eight live turns:
+four 502s and four 200 streams truncated mid-answer, across the prod platform backend and real
+users, with nothing reported until a user complained hours later. Two habits prevent it. Check
+for streams in flight first — recent `POST /agent/chat/stream` lines in the nginx access log, or
+`Streaming agent chat` in the agent's journal without a matching `chat_traces` PUT. And use
+`docker compose up -d --no-deps --force-recreate agent-api`: without `--no-deps`, the same
+command also recreated `mcp-server` and `embedding-server`, and agent-api then waited on their
+health checks, lengthening the outage for a change that touched neither.
+**The images install through `constraints.txt`, the deployed image's own `pip freeze`.** Every
+`pip install` in `rag_pipeline/Dockerfile`, `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` passes `-c constraints.txt`, so a rebuild reproduces the
+running versions instead of that day's newest. A package you add to `requirements.txt` floats
+(to its newest version that fits the lock) until the lock is retaken after the deploy that ships
+it, with the command in its header; CI's drift step warns until then. If the build fails with
+`ResolutionImpossible`, the newcomer needs a locked package at another version: change that one
+line of the lock on purpose, never drop `-c`. Never regenerate the lock on a development machine.
+`rag_pipeline/tests/test_image_installs_through_lock.py` fails if an install goes around it.
 
 Never commit `.env`, API keys, or Earth Engine credentials.

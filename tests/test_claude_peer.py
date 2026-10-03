@@ -25,6 +25,22 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_model_lists(monkeypatch):
+    """`list_available_models` asks AnvilGPT and Anthropic for their model lists whenever their
+    credentials are set, which several tests here do. Their `timeout=0.01` did not keep them
+    offline: the host was still resolved and a connection started, with whatever key the
+    process held in the request headers. No assertion depends on the live answer, so the
+    request fails here without leaving the machine and the tests see the fallback ids, as they
+    did whenever the 10 ms timeout won."""
+    import requests
+
+    def _offline(*args, **kwargs):
+        raise requests.ConnectionError("tests/test_claude_peer.py makes no network calls")
+
+    monkeypatch.setattr(requests, "get", _offline)
+
+
 # ---------------------------------------------------------------------------
 # Flag gating
 # ---------------------------------------------------------------------------
@@ -269,7 +285,7 @@ def test_run_success(monkeypatch, tmp_path):
             "num_turns": 3, "total_cost_usd": 0.01,
         }), "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ccp.fork_safe, "run", fake_run)
     monkeypatch.setattr(ccp, "_persist_artifacts",
                         lambda work, exclude: [{"filename": p.name} for p in work.iterdir()
                                                if p.is_file() and not p.name.startswith(".")])
@@ -287,7 +303,7 @@ def test_run_reports_an_envelope_error_even_on_exit_zero(monkeypatch, tmp_path):
     would report a failed analysis as a successful one."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+    monkeypatch.setattr(ccp.fork_safe, "run", lambda argv, **kw: subprocess.CompletedProcess(
         argv, 0, json.dumps({"result": "hit the turn limit", "is_error": True}), ""))
     monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
     res = ccp.run_claude("something")
@@ -307,7 +323,7 @@ def test_run_timeout_kills_the_container(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise subprocess.TimeoutExpired(argv, 35)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ccp.fork_safe, "run", fake_run)
     monkeypatch.setattr(ccp, "_persist_artifacts", lambda work, exclude: [])
     res = ccp.run_claude("loop forever")
     assert res["ok"] is False and res["timed_out"] is True
