@@ -65,6 +65,12 @@ RUN python -m spacy download en_core_web_sm
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
+# The page GET /agent/dashboard serves. api/server.py reads it relative to the repository root,
+# /app here, and examples/ was never on this list, so the route answered 500 (FileNotFoundError)
+# in every image while a checkout served it. Only this file: nothing in the image reads the rest
+# of examples/. rag_pipeline/tests/test_image_dashboard_page.py fails if this line is dropped or
+# sends the page elsewhere.
+COPY examples/agent_chat_stream_demo.html ./examples/
 COPY MCP_server/ ./MCP_server/
 # Agent knowledge-base ingestion package — the search/code peers' agent_kb_search and
 # get_kb_block tools import `extractors` (kb_store, indices) at call time.
