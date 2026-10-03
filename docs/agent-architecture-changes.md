@@ -1275,7 +1275,94 @@ on screen, 1 stored. The comment above that awaited call says the await fixed th
 snapshot after `putLayer`, but not after the render that copies the new layers into
 `layersRef2`. In token mode the copy PUT to the server is built from the same record (read from
 the code; these tests ran in dev mode). Fixing the first gap removes that accidental fetch from a
-reopened list turn, so that turn's answer is now lost the same way the others are.
+reopened list turn, so that turn's answer is now lost the same way the others are. Fixed in S9.9.
+
+### Stage S9.9 The snapshot waits for the render
+
+This fixes the defect S9.8 found and left open. `runLive`'s `finally` no longer calls
+`snapshotSession`. It bumps a counter, `turnsEnded`, and an effect keyed on that counter takes
+the snapshot. Every update queued before the bump (the final patch, the `agent-results` layer,
+each layer the artifact fallback put) is rendered no later than the bump itself, and effects run
+only after that render commits. By then `messagesRef` and `layersRef2`, which are assigned during
+render, hold the turn as it ended.
+
+Measured in Chrome before and after with the same three requests. The API ran locally in
+`AGENT_MODE=local` (Stage 24), and the map UI ran on two fresh ports, 5243 unfixed and 5253 fixed,
+with one new tab per test.
+
+* *"Show me the city boundary of Savoy, Illinois"* (one `map_layer`). Before: the answer was
+  stored as `streaming: true` with no html, and the conversation reopened in a new tab as an open
+  "thinking…" trace with no answer. After: it was stored as `streaming: false` with its 353
+  characters of html, and it reopened with the answer, its download box and the trace folded to 14
+  steps.
+* *"Use Python to write a GeoJSON file named three_towns.geojson with one point each for
+  Champaign, Urbana and Savoy in Illinois, and give me the download link."* `execute_code` wrote
+  the file and delivered no `map_layer`, so the artifact fallback drew it. Before: 2 layers on
+  screen and 1 stored (`live-geocode_places`). The fallback's `artifact-three_towns` was missing,
+  and the answer survived only because the fallback awaited a fetch. After: both were stored, the
+  fallback's with its `sourceUrl`, and the conversation reopened as *"2 layer(s) restored"*.
+* *"Show me the city boundary of Urbana, Illinois"*, stopped about 4 s in. Before: the screen said
+  *"⏹ Stopped. …"* and the record kept `streaming: true` with no text. After: the record had the
+  stopped message and `streaming: false`. The `catch` path patches the message the same way the
+  success path does, and only `finally` marks the turn ended.
+
+**One save per turn.** A wrapper that counted `IDBObjectStore.put` calls in each tab recorded
+exactly one save per turn, in dev under `React.StrictMode`, and none for opening a conversation
+from History. The effect saves once per value of the counter, which starts at 0, so StrictMode's
+double mount saves nothing.
+
+**Revised during the work:** the first version saved whenever the counter was non-zero, and Fast
+Refresh exposed it. An edit re-runs every effect whatever its deps, so one comment edit to
+`App.tsx` re-saved all four conversations open in the dev tabs. One of them was open in three
+tabs at different turns, and the last tab to save wins, so a tab still showing an earlier turn
+could roll the record back. The effect now remembers which counter value it saved (`savedTurns`).
+This was checked on a third port, 5263. After one turn, three hot updates left one save, and a
+`console.log` probe added by the second showed the effect re-running after it. The turns on that
+port were sent by script, because a screen saver had hidden the tabs and real typing was dropped.
+
+**A ref, not a dependency.** The effect reads `snapshotSession` through `snapshotRef`, which is
+assigned during render like the two refs the snapshot reads. As a dependency, `snapshotSession`
+would also re-run the effect whenever its own inputs changed (a drawn region, a model switch,
+`tokenMode` once `/agent/ui-config` answers), and each change would save again with no turn
+behind it. The ref still hands over the callback from the render that ended the turn, and that
+closes one more case of the S9.6 class. Declaring `snapshotSession` in `runLive`'s deps fixed every
+turn that *started* after `/agent/ui-config` answered. A turn already running when it answered
+still ended with the pre-identity callback and skipped the server PUT. That case is read from the
+code: local mode identifies nobody, so it could not be run here.
+
+**`flushSync` was the other option.** Wrapping the final `patch` in it would commit the patch
+before `finally` runs. But the tail of a turn makes several updates, so each would need wrapping,
+and the next update anyone added after the patch would be saved stale again with nothing to show
+it. A counter bumped in `finally` covers every update queued before it, wherever that update was
+made.
+
+**The await stays, for a different reason.** `await loadVectorArtifacts(...)` is still needed:
+the fallback's `putLayer` calls must be queued before `finally` bumps the counter. Its comment said
+the await had fixed the saved layer list. As S9.8 measured, it had not, and the comment now says
+what the await does.
+
+**With S9.8's first fix, a stored fallback layer is not drawn twice on reopen.** S9.8 made a
+restored layer count as drawn, and that matters more now that fallback layers are stored at all.
+The API was restarted first, so the agent could not answer from memory. The three_towns
+conversation was then reopened in a new tab and asked *"Which files does this conversation
+have?"*. It called `list_conversation_files`, and the turn carried `three_towns.geojson` as
+`file_28f8215826c1`, the restored layer's own file. The tab fetched that file once, for the
+restore, so the fallback skipped it: 2 layers on screen, 2 stored, and the answer saved.
+
+In token mode the record PUT to the server is the same `rec`, built in the same call, so the fix
+covers it unchanged. That is from reading the code, for the same reason as above.
+
+**Found here, not fixed: a layer still downloading when the stream ends.** `onMapLayer` fetches
+its geometry from a url, and `streamChat` does not wait for the handler. A download that outlasts
+the rest of the turn is therefore put after the snapshot. Measured by holding every file download
+for 60 s, with a wrapper injected into the page's `fetch`. The `map_layer` for *"Show me the city
+boundary of Champaign, Illinois"* arrived 3.1 s into the turn, and the turn ended and was saved at
+48 s. The save had the answer and `layers: []`. The layer drew at 64 s, when the hold released it,
+and the record still had no layer. The final code on port 5263 gave the same result: saved at 47 s
+with no layer, drawn at 63 s. Without the hold, the Savoy boundary's download took 15 ms, so
+this needs a download slower than everything after it in the turn. Waiting for it would keep the
+composer busy until the layer is drawn, as the fallback's await already does. That is a behaviour
+change of its own, so it was left for a separate decision.
 
 ---
 
