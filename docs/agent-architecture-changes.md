@@ -744,6 +744,77 @@ After these, a re-run sweep showed zero failed calls on boundary, tracts, geocod
 buffer, OSM and raster. Two cases got slower, which is single-run variance and not claimed as a
 regression either way.
 
+### Stage S8.5 The `code` line is generated too, per backend
+
+*Branch `claude/decider-code-line-from-registry`, off `5ae6d92`.*
+
+S8.2 (`99d71ad`) generated the decider's `analyze` line from `capability_registry`. In the same
+commit it wrote the `code` line by hand: *"It binds the same toolkit as analyze, plus packaged
+skills and saved workflows."* That one sentence drifted in both directions at once, which is the
+lesson worth keeping: **the router's description of a peer has to come from the same source as the
+peer's binding, or it drifts, toward promising too much as readily as too little.**
+
+* **Too little.** `describe("code")` had **zero** call sites outside tests. A registry entry that
+  only the code peer binds reached the drift test, which composed its own view (the framing,
+  `describe("analyze")` and `describe("code")`), and never reached the decider. The test
+  certified an artifact production did not use. This is not hypothetical: the extraction branch
+  adds `make_langchain_staging_tools` as exactly such an entry.
+* **Too much, three ways.** The code peer binds no tool that runs a saved workflow. A notebook
+  workflow the extractor packages as a skill runs through an MCP tool (`mcp_run_nbwf_*`), and MCP
+  tools are bound in the analyze and search peers behind `include_mcp_tools`, never in the code
+  peer. "Packaged skills" was false in production: the image copies neither default skill root,
+  and inside the container `SkillRegistry.discover()` finds **0** skills. And "the same toolkit as
+  analyze" is false for a CLI code peer (`claude`, `opencode`), which binds **none** of the 15 code
+  toolsets. It runs an agentic CLI in its own container, whose only writable mount is `/work`. The
+  deployment default is `langchain`, but a browser's dropdown choice persists, so CLI peers do run.
+
+| | before | after |
+|---|---|---|
+| the code line | hand-written, identical for every backend | `_code_capability_line`: the registry inventory for the LangChain peer, the CLI's own runtime for a CLI peer |
+| which backend the decider describes | none; it was never told | `_code_peer_backend(code_peer)`, the one resolution the code node also uses |
+| the skills clause | always present | present only when `SkillRegistry.discover` over the request's skill roots finds a skill, the condition `make_skill_tools` binds on |
+| "saved workflows" | promised | removed |
+| the request example | *"e.g. code needs evidence"* for every backend | *"e.g. analyze needs evidence"* when a CLI runs, since a CLI has no `request_capability` |
+| the drift test | read a separately composed description | reads the prompt captured from `default_decide_fn` itself |
+
+**The resolution was the part that would have been missed.** The request's `code_peer` reached
+`default_code_fn` and nothing else. `build_supervisor_graph` built the decider without it, so a
+per-request choice could only ever have been described as the env default. Now
+`run_supervisor_orchestration` builds the decider from the same `cfg.code_peer` and
+`cfg.skill_roots` as the code peer, and both resolve through `_code_peer_backend`. A test replaces
+that one function and watches both the runner and the description follow it.
+
+**The cost, measured with gpt-4o's tokenizer (`o200k_base`):**
+
+| | before | after |
+|---|---|---|
+| code line, LangChain peer, no skills (the deployed image) | 30 | 182 |
+| code line, LangChain peer, with skills | 30 | 194 |
+| code line, a CLI peer | 30 | 189 |
+| whole decider prompt at minimal state, deployed image | 954 | 1,106 |
+
+That is +152 tokens, about +16%, on every decision step. Every one of the deployed code line's 14
+clauses also appears in the analyze line. Rendering the code line as a difference from analyze
+would recover most of that; it is not done here.
+
+**Not fixed here:**
+
+* **The other peers bind skills too.** `build_agent_executor` has added `make_skill_tools` to
+  every preloaded-tools peer, analyze included, since `6ba1bd3`, and `collect_tools` adds it for
+  search. The registry still lists skills as code-only. The drift test scans only `graph.py` for
+  `make_*_tools(` calls, so it cannot see a binding made elsewhere. This errs toward describing
+  too little, the cheaper direction.
+* **The Dockerfile still ships no skills.** That is a separate fix. The decider is now right
+  either way, because it describes skills exactly when the peer will have them.
+* **The CLI description is declared, not derived.** `CLI_PEER` in the registry is written from
+  `claude_peer.py` and `opencode_peer.py`. One clause is held to the binding by a test: neither
+  `build_docker_argv` passes `--network none`. The others are not: staged uploads, inlined evidence
+  and analysis, and GeoJSON output becoming a layer.
+
+**For the extraction branch.** Its per-consumer capability table names these same two peers
+`code_peer` and `cli_peer`. `CODE_PEER_CONSUMER` maps each backend onto those keys, so the code
+line can read that table's rows rather than a parallel structure, whichever branch lands first.
+
 ---
 
 ## Stage 9 — Who the caller is {#stage-9}

@@ -523,6 +523,13 @@ reaches the map: `map_layers.layers_for_artifacts` turns any `.geojson` it wrote
 descriptor and the peer wrapper emits it, from the request's trace context, through the same
 `build_map_layers` boundary every tool's layer crosses.
 
+**The supervisor is told which code peer will run.** The decider's `code` line is generated per
+backend by `_code_capability_line` (`agent_runtime/supervisor/graph.py`), through the same
+`_code_peer_backend` resolution the code node uses. The LangChain peer gets its inventory from
+`capability_registry`; a CLI peer gets `CLI_PEER` from the same file. That CLI description is
+declared, not derived, so a change to a CLI container's posture (its network, what is staged,
+what reaches its brief) has to be mirrored in `CLI_PEER`. Only the network clause is held by a test.
+
 **A conversation keeps its project directory between turns** (`claudesess_<thread>` under
 `AGENT_CODE_EXEC_WORK_ROOT`), so the CLI resumes with `--continue` and its `pip install
 --user` cache survives; the container is still fresh each run. Two things that forced
