@@ -815,6 +815,135 @@ would recover most of that; it is not done here.
 `code_peer` and `cli_peer`. `CODE_PEER_CONSUMER` maps each backend onto those keys, so the code
 line can read that table's rows rather than a parallel structure, whichever branch lands first.
 
+### Stage S8.6 The skill loaders are both peers', and the drift test reads each peer
+
+*Branch `claude/skills-shared-drift-sees-all-bindings`, stacked on S8.5 (`05f562b`).*
+
+The first of S8.5's three open items was that the registry listed the skill loaders as the code
+peer's alone, though `build_agent_executor` has given them to analyze since `6ba1bd3`. This closes
+it, and closes the reason it could stay open: the drift test could not see where analyze's binding
+is made.
+
+**The registry was written from the one file its test read.** `99d71ad` (2026-09-17) created the
+registry, with a drift test that regex-scanned `graph.py` for `make_*_tools(` calls and pooled
+every peer into one set. Fifteen days earlier, `6ba1bd3` had put the skill loaders into
+`build_agent_executor` for every peer that hands it a preloaded tool list, analyze included. In
+`graph.py` only the code peer calls `make_skill_tools`, so the registry filed skills as code-only,
+and the test agreed: the factory was in the pooled set (the code peer's call) and in the registry
+(as code's). **A pooled set cannot fail a toolset described for the wrong peer**, so scanning more
+files would not have caught this either. The search peer was invisible for a plainer reason. It
+calls no factory in `graph.py` at all, and all four of its toolsets come from
+`tool_policy.collect_tools`.
+
+| | before | after |
+|---|---|---|
+| skills clause on the analyze line | never | when discovery over the request's skill roots finds a skill |
+| skills clause on the code line (LangChain peer) | under that same condition | unchanged |
+| with a CLI code peer | no line mentioned skills, though analyze could load every one | the analyze line does |
+| the analyze inventory | `describe("analyze")`, so the default roots | the request's `skill_roots`, as the code line already read |
+| what the drift test reads | one regex over `graph.py`, all peers pooled | per peer: its own function, plus a run of its real assembly |
+
+**Why shared, rather than left code-only or dropped:**
+
+* **The binding is the same.** All three peers are built with the same `cfg.skill_roots`. The code
+  peer's own call and `build_agent_executor`'s produce the same `list_available_skills` and
+  `load_skill`, and the second is de-duplicated by name.
+* **A shared capability described as one peer's is a routing signal.** On the code line alone,
+  "loading packaged skills" made matching a skill look like a reason to choose code. The difference
+  the two lines exist to draw is existing tools versus new code, and matching a skill does not
+  decide that. The checkout's three skills split three ways. `chicago-crime-analysis` names
+  `agent_kb_search`, `get_kb_block` and `execute_code`, which the code peer binds by default and
+  analyze only partly outside unified mode. `ai-agent-for-chicago-crime-analysis` names
+  `mcp_run_nbwf_d01e717421c1b0ff`, which no peer can call, because no registration path produces
+  that name. The extractor names tools `mcp_run_<workflow_id>`, generated tools are registered as
+  `notebook_<name>`, and the MCP server's one runner, `run_notebook_workflow`, refuses unless
+  `AGENT_ALLOW_WORKFLOW_EXEC=1`. `example-skill` names `keyword_search` and `semantic_search`, which
+  outside unified mode only search binds. No one peer can follow every skill. So the clause
+  promises loading, which both can do, and the rest of each line says which tools a peer has to
+  follow one with.
+* **With a CLI code peer, the old filing said nothing.** A CLI loads no skills, so the code line
+  drops the clause, and with skills filed as code-only, no other line carried it.
+* **Dropping it from both lines was the other option.** That needs a bound-but-not-told exemption
+  for both toolkit peers, and leaves a request that names a skill with no line mentioning skills.
+* **Not measured.** No routing run compares the two descriptions. The effect on decisions is
+  argued here, not observed.
+
+**Search binds them too, and is deliberately not told.** `collect_tools` gives search
+`make_skill_tools` and `make_quality_tools`, plus `make_langchain_mcp_tools` behind
+`include_mcp_tools`, beside the retrieval tools. That flag is on by default: an API request that
+omits `includeMcpTools` gets `AGENT_INCLUDE_MCP_TOOLS`, which defaults on. Its line stays
+hand-written because it states a job, "retrieve evidence", not an inventory. A skills clause
+there would make the retrieval peer a place to send analysis. The test now holds that as a
+decision rather than an accident. Each toolset search binds is either stated on its line in the
+words `REQUIRED_TERMS` gives it, or listed in `NOT_TOLD` with the reason, and an entry that
+outlives its binding fails.
+
+**The drift test reads each peer, wherever the binding is made.** A peer's bindings are the union
+of two readings:
+
+* **Static.** The `make_*_tools` calls inside the peer's own function in `graph.py`, each one
+  whatever condition guards it. They are parsed with `ast` rather than a regex, so a factory named
+  in a comment no longer counts.
+* **Probed.** The peer's real assembly code runs once with an upload and once without, with every
+  other flag a binding hides behind switched on. Every factory the repo's own discovery
+  (`capabilities._discover_registry_factories`) finds is replaced by a recorder, and
+  `create_agent` by a stop. Each recorded call keeps the file and function it came from, so a
+  failure says where the binding is made. The first run against S8.5's code failed with
+  *"the analyze peer binds make_skill_tools (from executor_factory.py:build_agent_executor), but
+  capability_registry does not describe them for analyze"*. The same run failed that regression's
+  named test, and six tests of the analyze line: whether it carries the clause, and whether it
+  reads the request's skill roots.
+
+**Why a probe and not a wider scan.** `build_agent_executor` binds different toolsets depending on
+whether it is handed `preloaded_tools`. A scan would have to restate that branch in the test, and
+a scan of `collect_tools` would credit its toolsets to analyze and code, which never reach it. The
+probe follows the branch the peer really takes, into whichever module it leads, and records every
+factory the repo's discovery knows. A synthetic test adds a toolset at the preloaded seam and
+checks that the probe sees it for analyze and code while the static reading does not, so the
+probe's reach is tested without depending on where today's bindings happen to live. One static
+check keeps the old scan's reach: every factory called anywhere in `graph.py` must be bound by
+some peer. It works per factory, so a fourth peer defined there fails it by binding a factory no
+other peer has, but not by binding only factories the three peers already bind.
+
+**The cost, measured with gpt-4o's tokenizer (`o200k_base`) at minimal state, as in S8.5.** The
+prompt changes by one inserted clause, *"; loading packaged skills: step-by-step instructions for
+particular analyses"*, which is 12 tokens:
+
+| whole decider prompt | before | after |
+|---|---|---|
+| LangChain code peer, no skills (the deployed image) | 1,106 | 1,106 |
+| LangChain code peer, the checkout's 3 skills (the image once PR #31 lands) | 1,118 | 1,130 |
+| CLI code peer (`claude`), no skills | 1,113 | 1,113 |
+| CLI code peer (`claude`), the checkout's 3 skills | 1,113 | 1,125 |
+
+That is +12 tokens, about +1.1%, on each decision step while discovery finds a skill, and nothing
+in the deployed image until it ships skill roots. The test costs more than the prompt. The probe
+imports what the peers import, `torch` included through the retrieval tools' search stack. Run
+alone, the file took 0.6–1.1 s before and 6.5–44 s after in pytest's own timing, and 73 s the
+first time on a cold cache. That was on a Mac at a load average of 20 to 46, which is why the range
+is wide. In the
+full suite those modules are imported before this file runs. Run after `test_capabilities.py`,
+which imports the same modules, all 58 tests in the file took 0.3 s together.
+
+**Not fixed here:**
+
+* **A factory is one toolset.** The probe replaces each factory whole and does not look inside it.
+  `make_langchain_granular_tools` carries `make_langchain_qgis_tools`,
+  `make_admin_boundary_tools` and `make_langchain_file_tools` into the search peer, and nothing
+  here accounts for them there.
+* **The registry describes every binding a peer can have, not the ones a request gets.** Analyze
+  is told it retrieves datasets, publications and notebooks, though it binds the retrieval tools
+  only in unified mode (`AGENT_UNIFIED_PEER`, off by default). The code peer keeps four of them
+  (`agent_kb_search`, `get_kb_block`, `web_search`, `web_fetch`). S8.2's registry has always read
+  this way, and it is unchanged here.
+* **A binding outside `graph.py` behind a condition the probe does not set** is seen by neither
+  reading. The probe sets every flag that gates a binding today.
+* **Search binds the widest MCP surface, and the decider is told about none of it.** With MCP on
+  (the API default) and no `mcp_modules`, search's MCP tools are every tool the MCP server
+  registers. Without a server, the local fallback loads the default module list instead. Analyze's
+  are scoped to `spatial_analysis_tools`, yet the analyze line is the only one that mentions MCP.
+  Found here, not changed.
+
 ---
 
 ## Stage 9 — Who the caller is {#stage-9}

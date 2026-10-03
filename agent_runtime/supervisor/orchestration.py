@@ -44,7 +44,8 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         llm=cfg.llm,
         thread_id=cfg.thread_id,
         # The decider is built from the same code_peer and skill_roots as code_fn below, so its
-        # `code` line describes the backend that will run and the skills it will actually have.
+        # `code` line describes the backend that will run, and its `code` and `analyze` lines the
+        # skills those peers will actually have (all three peers get these same skill_roots).
         # Left to build_supervisor_graph's default, it would describe the env default instead.
         decide_fn=default_decide_fn(
             llm=cfg.llm, code_peer=cfg.code_peer, skill_roots=cfg.skill_roots,

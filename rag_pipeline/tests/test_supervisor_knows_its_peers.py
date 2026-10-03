@@ -9,8 +9,19 @@ it was a correct decision from a stale description.
 
 The inventory is now GENERATED from ``agent_runtime.capability_registry``, so the prompt cannot
 fall behind the registry. What can still fall behind is the registry itself, and that is what
-the first tests hold: the factories the registry claims must be exactly the factories the peer
-builders call. Bind a new toolset without describing it and this fails with its name.
+the first tests hold: for each peer, the factories the registry claims must be exactly the
+factories that peer binds. Bind a new toolset without describing it and this fails with its name.
+
+Those bindings are read per peer and from more than ``graph.py``. These tests used to scan that one
+file and pool every peer into one set, and two facts got past them. ``build_agent_executor`` adds
+the skill loaders to every peer that hands it a preloaded tool list, so analyze had bound them
+since ``6ba1bd3`` while the registry called them the code peer's. And the search peer's whole
+toolkit comes from ``tool_policy.collect_tools``. Neither call is in ``graph.py``, and a pooled set
+cannot say WHICH peer binds a toolset, which is the question the registry answers. So a peer's
+bindings are now the union of two readings. One is the ``make_*_tools`` calls in its own function
+in ``graph.py``, every one whatever guards it. The other is the factories its real assembly code
+calls when run with each factory replaced by a recorder and ``create_agent`` by a stop. That one
+follows the path into any module and down the branch the peer actually takes.
 
 Everything after that reads the PROMPT THE DECIDER IS SENT, captured from ``default_decide_fn``
 itself. An earlier version of this file composed its own view instead — the hand-written framing
@@ -23,9 +34,11 @@ and the LangChain toolkit to CLI code peers that have none of it.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,6 +76,34 @@ REQUIRED_TERMS = {
 }
 
 ALL_ACTIONS = {"available_actions": ["search", "analyze", "code", "done"]}
+
+FACTORY = re.compile(r"make_[a-z0-9_]+_tools")
+
+#: Each peer, by the function in graph.py that builds it.
+PEER_FUNCTIONS = {"search": "default_search_fn", "analyze": "default_analyze_fn",
+                  "code": "default_code_fn"}
+
+#: Toolsets a peer binds that the decider is deliberately NOT told about, each with its reason.
+#: Only search has any. Its decider line is hand-written and states its job, "retrieve evidence",
+#: which is make_langchain_granular_tools and is held to REQUIRED_TERMS like a generated clause.
+#: Everything else it binds arrives with collect_tools, the general collection build_agent_executor
+#: falls back on when handed no tool list. A toolset added there fails these tests until it is
+#: told or listed here.
+NOT_TOLD = {
+    "search": {
+        "make_skill_tools": (
+            "the loaders analyze and code bind over the same roots, and told on their lines. "
+            "Search's line states its job, retrieving evidence, and a skill is instructions for an "
+            "analysis: told here too, it would make the retrieval peer a place to send analysis"),
+        "make_quality_tools": (
+            "rerank_evidence and audit_answer_grounding order and check what search retrieved. "
+            "That is part of retrieving evidence, not a further job to route to search"),
+        "make_langchain_mcp_tools": (
+            "behind include_mcp_tools, which an API request gets by default, and told on the "
+            "analyze line, which binds MCP tools under the same flag. Told here as well, it would "
+            "offer the retrieval peer for tool work"),
+    },
+}
 
 
 @pytest.fixture(autouse=True)
@@ -125,14 +166,126 @@ def _line(prompt: str, action: str) -> str:
     return lines[0]
 
 
-def _bound_toolsets() -> set:
-    """Every `make_*_tools(` factory the supervisor graph actually calls."""
-    return set(re.findall(r"\b(make_[a-z0-9_]+_tools)\s*\(", SOURCE))
+def _factory_calls(node) -> set:
+    """Every make_*_tools factory called inside *node*, by name, whatever condition guards it."""
+    names = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None) or ""
+            if FACTORY.fullmatch(name):
+                names.add(name)
+    return names
 
 
-def _registry_factories() -> set:
-    from agent_runtime.capability_registry import factories
-    return factories()
+def _bound_in_graph() -> dict:
+    """The static reading: ``{peer: {factory: {where}}}`` from each peer's own function."""
+    defs = {node.name: node for node in ast.parse(SOURCE).body
+            if isinstance(node, ast.FunctionDef)}
+    return {peer: {name: {f"graph.py:{fn}"} for name in _factory_calls(defs[fn])}
+            for peer, fn in PEER_FUNCTIONS.items()}
+
+
+class _ToolsAssembled(Exception):
+    """Raised in place of create_agent: the tool list is final, and nothing after it runs."""
+
+
+def _probe() -> dict:
+    """The probed reading: ``{peer: {factory: {file:function that called it}}}``.
+
+    Every factory the repo's own discovery finds (``capabilities._discover_registry_factories``)
+    is replaced, in each loaded agent_runtime or extractors module that holds it, by a recorder
+    returning one placeholder tool, and ``create_agent`` by a stop. Each peer then handles a request that reaches
+    ``build_agent_executor``, with every flag a binding hides behind switched on, once with an
+    upload and once without. That is the one condition that swaps bindings rather than adding
+    them. What counts is the call, not a tool that survives: the code peer keeps four retrieval
+    tools by name, and a placeholder survives no filter.
+    """
+    import langchain.agents
+
+    import agent_runtime.supervisor.graph as graph
+    from agent_runtime.capabilities import _discover_registry_factories
+
+    # The functions themselves are held, so no id here can be reused by a recorder.
+    factories = {id(fn): (name, fn) for name, fn in _discover_registry_factories()}
+    calls = []
+
+    def recorder(name):
+        def record(*args, **kwargs):
+            caller = sys._getframe(1).f_code
+            calls.append((name, f"{Path(caller.co_filename).name}:{caller.co_name}"))
+            return [SimpleNamespace(name=f"<{name}>")]
+        return record
+
+    def stop(**kwargs):
+        raise _ToolsAssembled()
+
+    llm = object()  # build_agent_executor only hands it to create_agent
+    runs = {
+        "search": lambda upload: graph.default_search_fn(llm=llm, include_mcp_tools=True)(
+            "probe", {"thread_id": "probe"}),
+        "analyze": lambda upload: graph.default_analyze_fn(
+            llm=llm, include_mcp_tools=True, code_exec=True, input_file_ids=upload)(
+            "probe", [], {"thread_id": "probe", "unified_peer": True}),
+        "code": lambda upload: graph.default_code_fn(
+            llm=llm, code_exec=True, input_file_ids=upload, code_peer="langchain")(
+            "probe", [], {"thread_id": "probe"}),
+    }
+    found = {peer: {} for peer in runs}
+    with pytest.MonkeyPatch.context() as mp:
+        for module_name, module in list(sys.modules.items()):
+            if module is None or not module_name.startswith(("agent_runtime", "extractors")):
+                continue
+            for attr, value in list(vars(module).items()):
+                hit = factories.get(id(value))
+                if hit and hit[1] is value:
+                    mp.setattr(module, attr, recorder(hit[0]))
+        mp.setattr(langchain.agents, "create_agent", stop)
+        for peer, run in runs.items():
+            for upload in (None, ["probe-upload"]):
+                calls.clear()
+                try:
+                    run(upload)
+                except _ToolsAssembled:
+                    pass
+                else:
+                    pytest.fail(f"the {peer} peer returned without building an executor, so "
+                                "the probe saw only part of its tool list")
+                for name, site in calls:
+                    found[peer].setdefault(name, set()).add(site)
+    return found
+
+
+def _merged(*readings) -> dict:
+    out = {peer: {} for peer in PEER_FUNCTIONS}
+    for reading in readings:
+        for peer, names in reading.items():
+            for name, sites in names.items():
+                out[peer].setdefault(name, set()).update(sites)
+    return out
+
+
+@pytest.fixture(scope="module")
+def bound() -> dict:
+    """What each peer binds, ``{peer: {factory: {where}}}``: both readings."""
+    return _merged(_bound_in_graph(), _probe())
+
+
+def _all_bound(bound: dict) -> set:
+    return set().union(*(set(names) for names in bound.values()))
+
+
+def _told(peer: str, bound: dict) -> set:
+    return set(bound[peer]) - set(NOT_TOLD.get(peer, {}))
+
+
+def _where(bound: dict, peer: str, names) -> str:
+    return "; ".join(f"{name} (from {', '.join(sorted(bound[peer][name]))})"
+                     for name in sorted(names))
+
+
+def _registry(peer: str) -> set:
+    from agent_runtime.capability_registry import CAPABILITIES
+    return {t.factory for t in CAPABILITIES.get(peer, ())}
 
 
 def _clauses_for(factory: str) -> list:
@@ -142,31 +295,96 @@ def _clauses_for(factory: str) -> list:
 
 # --- the registry against the peers' real bindings -------------------------------------------
 
-def test_the_registry_describes_everything_the_peers_bind():
-    """The drift that mattered: bound to a peer, invisible to the supervisor."""
-    undescribed = _bound_toolsets() - _registry_factories()
+@pytest.mark.parametrize("peer", ["analyze", "code"])
+def test_the_registry_describes_everything_the_peer_binds(peer, bound):
+    """The drift that mattered: bound to a peer, invisible to the supervisor. Checked per peer,
+    because a toolset described for the wrong one is a routing signal too: skills described as
+    the code peer's alone made a request that matches a skill look like code's."""
+    undescribed = _told(peer, bound) - _registry(peer)
     assert not undescribed, (
-        f"these toolsets are bound to a peer but missing from capability_registry: "
-        f"{sorted(undescribed)}. The supervisor cannot route work to a capability it has not "
-        "been told about — that is how a DEM request became a knowledge-base search.")
+        f"the {peer} peer binds {_where(bound, peer, undescribed)}, but capability_registry "
+        f"does not describe them for {peer}. The supervisor cannot route work to a capability it "
+        "has not been told about — that is how a DEM request became a knowledge-base search.")
 
 
-def test_the_registry_does_not_claim_tools_the_peers_do_not_bind():
+@pytest.mark.parametrize("peer", ["analyze", "code"])
+def test_the_registry_does_not_claim_tools_the_peer_does_not_bind(peer, bound):
     """Drift in the other direction: promising a capability that is not there sends the
     supervisor to a peer that cannot deliver, and the turn fails further downstream where the
     cause is much harder to see."""
-    phantom = _registry_factories() - _bound_toolsets()
+    phantom = _registry(peer) - set(bound[peer])
     assert not phantom, (
-        f"capability_registry claims these, but no peer binds them: {sorted(phantom)}")
+        f"capability_registry claims {sorted(phantom)} for {peer}, which binds none of them")
 
 
-def test_every_bound_toolset_has_a_stated_expectation():
+def test_every_bound_toolset_has_a_stated_expectation(bound):
     """A toolset nobody listed here is a toolset nobody thought about describing."""
-    unlisted = _bound_toolsets() - set(REQUIRED_TERMS)
+    untold = set().union(*(set(names) for names in NOT_TOLD.values()))
+    unlisted = _all_bound(bound) - set(REQUIRED_TERMS) - untold
     assert not unlisted, (
         f"these toolsets are bound to a peer but absent from REQUIRED_TERMS: {sorted(unlisted)}. "
         "Add each one here with the words the supervisor should use for it, and add those words "
-        "to the registry — otherwise the supervisor cannot route work to it.")
+        "to the registry — otherwise the supervisor cannot route work to it. If the decider is "
+        "meant not to hear about one, list it in NOT_TOLD with the reason instead.")
+
+
+def test_every_factory_graph_py_calls_is_bound_by_a_peer(bound):
+    """The static reading covers the three peer functions, and the file has more. The whole-file
+    scan it replaced saw a factory called anywhere in graph.py, so keep that reach: a factory
+    called here that no peer is found to bind is a binding nothing can attribute."""
+    unattributed = _factory_calls(ast.parse(SOURCE)) - _all_bound(bound)
+    assert not unattributed, (
+        f"graph.py calls {sorted(unattributed)}, but neither reading attributes them to a peer. "
+        "A new peer belongs in PEER_FUNCTIONS; a helper a peer calls is followed by the probe "
+        "only if the probe's requests reach it.")
+
+
+def test_what_search_binds_is_told_or_deliberately_not(bound):
+    """Search's line is hand-written, so nothing generates its toolsets into it. Each one is
+    either stated on that line, in the words REQUIRED_TERMS gives it, or kept off it on purpose
+    and listed in NOT_TOLD with the reason."""
+    stated = _line(_decider_prompt(), "search").split(":", 1)[1].lower()
+    unstated = sorted(name for name in _told("search", bound)
+                      if not any(term in stated for term in REQUIRED_TERMS.get(name, ())))
+    assert not unstated, (
+        f"the search peer binds {_where(bound, 'search', unstated)}, and the decider's search "
+        "line neither says so nor is meant not to. State it on that line, or list it in NOT_TOLD "
+        "with why the decider should not hear about it.")
+
+
+def test_no_untold_entry_outlives_its_binding(bound):
+    """An exemption for a toolset the peer no longer binds would excuse the next one silently."""
+    stale = {peer: sorted(set(names) - set(bound[peer])) for peer, names in NOT_TOLD.items()}
+    assert not any(stale.values()), f"NOT_TOLD lists toolsets these peers no longer bind: {stale}"
+
+
+def test_a_binding_made_outside_graph_py_is_seen(monkeypatch):
+    """The reach the old scan lacked, shown without leaning on where today's bindings live. A
+    toolset added inside executor_factory, at the seam the skill loaders really use, shows up for
+    the two peers that hand over a preloaded list. A scan of graph.py does not see it."""
+    import agent_runtime.executor_factory as executor_factory
+    import agent_runtime.langchain_quality_tools as quality
+
+    build = executor_factory.build_agent_executor
+
+    def build_with_quality_tools(**kwargs):
+        if kwargs.get("preloaded_tools") is not None:
+            kwargs["preloaded_tools"] = [*kwargs["preloaded_tools"], *quality.make_quality_tools()]
+        return build(**kwargs)
+
+    monkeypatch.setattr(executor_factory, "build_agent_executor", build_with_quality_tools)
+    probed = _probe()
+    for peer in ("analyze", "code"):
+        assert "make_quality_tools" not in _bound_in_graph()[peer]
+        assert "make_quality_tools" in probed[peer], f"the probe missed a binding made for {peer}"
+
+
+def test_the_regression_that_prompted_the_per_peer_view(bound):
+    """Skills reached analyze from executor_factory.py, which a scan of graph.py could not see,
+    while the registry listed them as the code peer's alone. Named so it cannot quietly return."""
+    assert "make_skill_tools" in bound["analyze"]
+    assert "make_skill_tools" in _registry("analyze"), (
+        "analyze binds the skill loaders, so the registry has to describe them for analyze")
 
 
 # --- the registry against the prompt the decider is actually sent ----------------------------
@@ -200,12 +418,12 @@ def test_a_code_only_entry_reaches_the_decider(monkeypatch):
 
 
 @pytest.mark.parametrize("factory", sorted(REQUIRED_TERMS))
-def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill):
+def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill, bound):
     """The words, in the toolset's OWN clause, and that clause in the prompt. Checking for the
     words anywhere in the prompt let framing prose satisfy them: "run a workflow" in the analyze
     line answered for a skills clause that was never there."""
-    if factory not in _bound_toolsets():
-        pytest.skip(f"{factory} is not bound in this build")
+    if not any(factory in bound[peer] for peer in ("analyze", "code")):
+        pytest.skip(f"{factory} is not bound to analyze or code in this build")
     terms = REQUIRED_TERMS[factory]
     clauses = _clauses_for(factory)
     assert clauses, f"{factory} has no clause in capability_registry"
@@ -219,20 +437,22 @@ def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill):
     assert not unseen, f"{factory} is described in the registry but not to the decider: {unseen}"
 
 
-def test_the_inventory_actually_reaches_the_prompt():
+def test_the_inventory_actually_reaches_the_prompt(one_skill):
     """The generator is not decorative: if it silently returned the fallback, every keyword
     test above would still pass against leftover hand-written prose."""
     from agent_runtime.capability_registry import describe
     from agent_runtime.supervisor.graph import _capability_inventory
     assert _capability_inventory("analyze") == describe("analyze")
+    assert (_capability_inventory("analyze", skill_roots=one_skill)
+            == describe("analyze", skill_roots=one_skill))
     assert "elevation and terrain" in _capability_inventory("analyze")
     assert "elevation and terrain" in _line(_decider_prompt(), "code"), (
         "the code line is generated too, so the shared toolkit is in it")
 
 
-def test_the_regression_that_prompted_this_guard():
+def test_the_regression_that_prompted_this_guard(bound):
     """Terrain shipped bound-but-undescribed. Named explicitly so it cannot quietly return."""
-    assert "make_terrain_tools" in _bound_toolsets()
+    assert "make_terrain_tools" in bound["analyze"]
     line = _line(_decider_prompt(), "analyze").lower()
     assert any(t in line for t in ("dem", "elevation", "terrain")), (
         "the terrain toolset is bound but the supervisor's description of `analyze` does not "
@@ -241,19 +461,52 @@ def test_the_regression_that_prompted_this_guard():
 
 # --- skills: described only when the peer would have some ------------------------------------
 
-def test_skills_are_described_only_when_discovery_finds_one(one_skill, no_skills):
+@pytest.mark.parametrize("capability", ["analyze", "code"])
+def test_skills_are_described_only_when_discovery_finds_one(capability, one_skill, no_skills):
     """make_skill_tools binds nothing for an empty registry, and the deployed image shipped no
     skill roots at all, so the clause has to follow the same discovery over the same roots."""
-    with_skill = _line(_decider_prompt(skill_roots=one_skill), "code")
-    without = _line(_decider_prompt(skill_roots=no_skills), "code")
+    with_skill = _line(_decider_prompt(skill_roots=one_skill), capability)
+    without = _line(_decider_prompt(skill_roots=no_skills), capability)
     assert "packaged skills" in with_skill
     assert "skill" not in without.lower(), without
 
 
-def test_switching_skills_off_removes_the_clause(monkeypatch, one_skill):
+@pytest.mark.parametrize("capability", ["analyze", "code"])
+def test_switching_skills_off_removes_the_clause(capability, monkeypatch, one_skill):
     """AGENT_SKILLS_ENABLED=0 empties discovery, so it empties the description too."""
     monkeypatch.setenv("AGENT_SKILLS_ENABLED", "0")
-    assert "skill" not in _line(_decider_prompt(skill_roots=one_skill), "code").lower()
+    assert "skill" not in _line(_decider_prompt(skill_roots=one_skill), capability).lower()
+
+
+def test_the_analyze_line_reads_the_requests_skill_roots(monkeypatch, one_skill, no_skills):
+    """The analyze line was built from describe("analyze") with no roots. Once it carries the
+    skills clause, that would read the DEFAULT roots while the peer loads from the request's.
+    The defaults are pointed at a skill here, so the two can only agree by reading the same
+    roots, not by both happening to be empty."""
+    import agent_runtime.skills as skills
+
+    monkeypatch.setattr(skills, "DEFAULT_SKILL_ROOTS", tuple(Path(root) for root in one_skill))
+    assert "packaged skills" in _line(_decider_prompt(), "analyze")
+    assert "skill" not in _line(_decider_prompt(skill_roots=no_skills), "analyze").lower()
+
+
+def test_both_toolkit_peers_are_told_the_same_skills_clause(one_skill):
+    """Both bind the same two loaders over the same roots, so the decider reads the same words
+    on both lines. A clause on one line only would be a reason to choose that peer."""
+    from agent_runtime.capability_registry import CAPABILITIES
+
+    clause = next(t.summary for t in CAPABILITIES["code"] if t.factory == "make_skill_tools")
+    prompt = _decider_prompt(skill_roots=one_skill)
+    assert clause in _line(prompt, "analyze") and clause in _line(prompt, "code")
+
+
+@pytest.mark.parametrize("peer", ["claude", "opencode"])
+def test_with_a_cli_code_peer_analyze_is_where_skills_are(peer, one_skill):
+    """A CLI peer binds no skill loader, so the skills clause leaves the code line, and it stays
+    on the analyze line. Code-only, the prompt said nothing about skills at all here."""
+    prompt = _decider_prompt(code_peer=peer, skill_roots=one_skill)
+    assert "packaged skills" in _line(prompt, "analyze")
+    assert "skill" not in _line(prompt, "code").lower()
 
 
 def test_nothing_promises_saved_workflows(one_skill, no_skills):
