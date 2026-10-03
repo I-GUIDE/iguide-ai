@@ -53,8 +53,58 @@ _GEO_TOOLS: Dict[str, tuple] = {
 }
 
 
+# --- layer identity -----------------------------------------------------------------------
+# The client REPLACES a layer whose id matches and ADDS one whose id does not, so the id is the
+# layer's identity. Both ways of getting it wrong have happened. An id built from too little
+# merged different results: a label cut to 40 characters made one region's raster overwrite
+# another's (see _slug_id). An id built from a per-run value split identical results: keying on
+# the OUTPUT file_id meant a re-grounding pass that re-ran admin_boundary left two copies of the
+# same city outline on the map (2026-10-01), because the repeat wrote the same content under a
+# new file_id. The rule that avoids both is to digest every input that decides what the layer
+# shows and nothing else. A file among those inputs goes in as
+# ``file_store.file_content_key(file_id)``, never as the file_id itself.
+
+def _id_part(text: Any) -> str:
+    """One readable piece of a layer id. Byte-for-byte ``rs_embed_tools._slug``, so the ids of
+    the embedding layers, which were built this way before the rule moved here, do not change."""
+    keep = [c if c.isalnum() else "_" for c in str(text).lower()]
+    return "".join(keep).strip("_")[:40] or "region"
+
+
+def content_key(kind: str, hint: Any = None, /, **content: Any) -> str:
+    """A key for what a step PRODUCES: ``<kind>[-<hint>]-<digest of content>``.
+
+    ``content`` is every input that changes the features or pixels: the region, the distance,
+    the model, the period, the parameters, and the content keys of any input files. Identical
+    inputs give an identical key, so a repeat of the step replaces its own layer. Different
+    inputs give different keys, so two genuinely different analyses never collide.
+
+    Labels and filenames stay OUT. The model words them differently from one run to the next
+    ("Champaign city 2 km buffer" one pass, "Champaign_city_2km_buffer" the next), and a key
+    that moved with the wording would turn one layer into two.
+
+    ``hint`` is for legibility in logs and the DOM only. It must itself come from the content
+    (a GEOID, a distance) so it cannot drift while the content stays the same. Uniqueness never
+    rests on it.
+
+    Generalised from ``rs_embed_tools._layer_id``, which already worked this way.
+    """
+    blob = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
+    bits = [_id_part(kind)]
+    if hint is not None and str(hint).strip():
+        bits.append(_id_part(str(hint)))
+    bits.append(digest)
+    return "-".join(bits)
+
+
+def content_layer_id(namespace: str, kind: str, hint: Any = None, /, **content: Any) -> str:
+    """A layer id: ``<namespace>-`` followed by :func:`content_key`."""
+    return f"{_id_part(namespace)}-{content_key(kind, hint, **content)}"
+
+
 def boundary_layer_id(file_id: str) -> str:
-    """The id of the map layer that SHOWS a polygon file, keyed on the file itself.
+    """The id of the map layer that SHOWS a polygon file, keyed on what the file HOLDS.
 
     Two tools draw the same polygons: admin_boundary puts the outline up, and embed_zones then
     redraws it with what the embedding found inside. They arrived as separate layers — a city
@@ -64,8 +114,16 @@ def boundary_layer_id(file_id: str) -> str:
 
     Keying on the file they both hold means the second can take the first's place instead of
     stacking on it, and means neither has to know the other's wording.
+
+    The key is the file's CONTENT KEY, not its file_id (2026-10-01). Keyed on the file_id, a
+    re-grounding pass that fetched the same city again wrote it as a new file, got a new id, and
+    stacked a second identical outline. admin_boundary now records a key derived from the place
+    it resolved (its level and GEOIDs) on the file it writes. The repeat therefore lands on the
+    same id, and embed_zones, handed either file, rebuilds that id from it.
     """
-    return f"boundary-{str(file_id or '').strip()}"
+    from agent_runtime.file_store import file_content_key
+
+    return f"boundary-{file_content_key(file_id)}"
 
 
 def _coerce_obj(output: Any) -> Optional[Any]:

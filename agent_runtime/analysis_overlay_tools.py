@@ -38,7 +38,9 @@ from agent_runtime.langchain_geo_tools import (
     _stage_vector_source,
     artifact_name,
     read_vector,
+    source_content_key,
 )
+from agent_runtime.map_layers import content_key
 from agent_runtime.tool_args import accept_null_defaults
 
 # Metres per unit. Degrees are deliberately absent — see _distance_meters.
@@ -310,8 +312,16 @@ def _write_table(df: Any, *, name: Optional[str], default: str, source: Optional
 def _finish(gdf: Any, *, name: Optional[str], default: str, render: str = "auto",
             style_by: Optional[str] = None, label: Optional[str] = None,
             source: Optional[str] = None, extra: Optional[Dict[str, Any]] = None,
-            table: bool = False, notes: Optional[List[Optional[str]]] = None) -> str:
-    """Write ``gdf`` as WGS84 GeoJSON, register it, and describe it as a map layer."""
+            table: bool = False, notes: Optional[List[Optional[str]]] = None,
+            key: Optional[str] = None) -> str:
+    """Write ``gdf`` as WGS84 GeoJSON, register it, and describe it as a map layer.
+
+    ``key`` is a ``map_layers.content_key`` of the operation's INPUTS. When given, it becomes
+    the layer's id (``agent-<key>``) and is recorded on the written file, so a repeat of the
+    same operation replaces its layer, and a later step reading this file sees what it holds.
+    Without a key the layer falls back to an id from its label, which moves when the wording
+    does and merges two operations that share a name.
+    """
     from agent_runtime.file_store import create_output_file_from_path
 
     gdf = _as_wgs84(gdf)
@@ -347,7 +357,7 @@ def _finish(gdf: Any, *, name: Optional[str], default: str, render: str = "auto"
             out.write_text(json.dumps({"type": "FeatureCollection", "features": []}), encoding="utf-8")
         else:
             gdf.to_file(out, driver="GeoJSON")
-        rec = create_output_file_from_path(out, filename=fname)
+        rec = create_output_file_from_path(out, filename=fname, content_key=key)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -376,6 +386,7 @@ def _finish(gdf: Any, *, name: Optional[str], default: str, render: str = "auto"
                              "dissolving or filtering before mapping")
         payload["on_map"] = True
         payload["map_layer"] = {
+            **({"id": f"agent-{key}"} if key else {}),
             "url": rec.get("download_url"),
             "label": label or (name or Path(fname).stem).replace("_", " "),
             "render": mode,
@@ -631,6 +642,14 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
             buffered["buffer_km"] = round(meters / 1000.0, 6)
             buffered["area_km2"] = (buffered.geometry.area / 1_000_000.0).round(6).values
             total_area = float(buffered.geometry.area.sum() / 1_000_000.0)
+            # The layer is identified by what it SHOWS: the input as it was READ (its content,
+            # never its file_id, because a re-ground that re-fetched the input wrote it under a
+            # new one), the true distance in metres (so 2 km and 2000 m are one buffer), the
+            # CRS it was measured in, and whether the zones were merged. `name` is a label and
+            # stays out.
+            key = content_key(
+                "buffer", f"{meters:g}m", input=source_content_key(file_id, rpath),
+                layer=layer, distance_m=round(meters, 3), crs=mcrs, dissolve=bool(dissolve))
             return _finish(
                 buffered, name=name,
                 default=_default_stem(file_id, f"buffer_{int(meters)}m"),
@@ -640,7 +659,7 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                        "distance_m": meters, "buffer_crs": mcrs, "dissolved": bool(dissolve),
                        "total_area_km2": round(total_area, 6),
                        "input_features": int(len(gdf))},
-                notes=[crs_note],
+                notes=[crs_note], key=key,
             )
         except Exception as exc:  # noqa: BLE001
             return _fail(exc, hint="distance units must be metric/imperial length (km, m, mi, "
