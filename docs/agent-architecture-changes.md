@@ -32,6 +32,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 16 | [Six tests only the Mac passed](#stage-16) | 2026-10-02 | production's spaCy path gets the fallback's filters; a QGIS test stops assuming no QGIS |
 | 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
 | 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
+| 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -2971,3 +2972,101 @@ leaves, in S18.6.
 
 > **Landed after the fixes it found.** Both failures recorded above were fixed before this stage merged: the island under the default distance band is [Stage 14](#stage-14), and `Beat` read as a date on pandas 3 is [Stage 15](#stage-15). Merged in that order on 2026-10-03, so the workflow's first run on `prototype` is against code that already contains both.
 
+---
+
+## Stage 19 — What runs in the agent's own process {#stage-19}
+
+Every tool a peer is offered runs inside `agent-api`, and `docker-compose.yml` runs that container
+as `user: root` with `/var/run/docker.sock` mounted: code executing there has root-equivalent
+control of the host's Docker daemon. The sandbox in `agent_runtime/code_execution.py` (a fresh
+container per run, `--network none`, read-only root filesystem, capabilities dropped) exists so
+that untrusted code never runs there. One tool went around it.
+
+### Stage S19.1 A tool that ran knowledge-base code with no sandbox
+
+`kb_run_geofunction` (`extractors/geo_handles.py`) loaded a block with `get_kb_block(doc_id)`, cut
+one function out of the block's stored source with `ast`, and `exec()`'d it in the agent process.
+Block source is notebook code submitted to the I-GUIDE platform: third-party code. It was bound to
+the analysis peer **unconditionally** — `default_analyze_fn` extended its tools with
+`make_geo_analysis_tools()` inside a bare `try/except`, with no flag and no upload gate.
+
+It was latent, not live. Verified 2026-10-01 in the deployed container, read-only: the model was
+offered the tool, but the deployed knowledge base is the `local` backend and empty
+(`agent_kb_search("flood inundation")` returned `count: 0`), so `get_kb_block` found nothing and
+the `exec` was never reached. What made it urgent is the next step on the extraction branch
+(`claude/extraction-integration`, "B1: one shared store"): pointing `get_kb_block` at the populated
+Postgres record would have armed this `exec()` with that record's 3,830 notebook cells (the
+extraction session's count) in the same commit. That branch held B1 until this landed.
+
+| analysis-peer configuration | tools offered before | after | tools reaching an in-process `exec` |
+|---|---|---|---|
+| nothing attached | 38 | 37 | 1 → 0 |
+| a file attached | 72 | 71 | 1 → 0 |
+| unified search+analyze peer | 50 | 49 | 1 → 0 |
+
+The search and code peers never had it; their lists (25 tools, and 35 or 65 for code) are
+unchanged. Why it was bound in the first place is **not recorded**: the function and its binding
+arrived in `af1ead0` ("Fix repeated search with no result"), whose message describes none of it.
+It is the same commit the known-gaps list names as holding the docker-out-of-docker work.
+
+### Stage S19.2 Dropped, not re-routed
+
+There were two fixes: re-route the call through the sandbox, or stop offering it. It was dropped.
+The extraction plan already reserves the sandbox as the execution path for generated tools, later
+and behind its `AGENT_EXTRACTION` flag (its B7), so re-routing now would build that twice. The
+route models are taught to use is `get_kb_block` + `execute_code`: `CODE_PEER_PROMPT` and the
+`chicago-crime-analysis` skill say so, and no prompt ever named `kb_run_geofunction`.
+
+What dropping it costs, stated now rather than discovered later:
+
+* **The default analysis peer can no longer run KB code at all.** It has no `get_kb_block` — only
+  the code peer and the unified peer do — so this tool was its one way to load a block. Reusing KB
+  code is now the code peer's job, which is where the prompt that teaches it lives;
+  `ANALYSIS_WORKFLOW_PROMPT` never mentioned KB code.
+* **A KB loader that fetches from a URL loses its only working route in the deployment.**
+  In-process code has the network and the sandbox does not, so such a loader could run through
+  this tool and cannot run in `execute_code`. `CODE_PEER_PROMPT` already covers the case: when the
+  data is not attached and no tool returns it as a file, the peer says so and asks for the file.
+
+What changed:
+
+* `make_geo_analysis_tools()` returns three tools — `kb_select_rows`, `heatmap_image`,
+  `choropleth_image` — none of which executes stored source. `supervisor/graph.py` and
+  `capabilities.py` are untouched, so the extraction branch's edits there do not collide.
+* The function stays, for the hand-run `extractors/examples/geo_mixed_chain_demo.py` and as a
+  starting point for B7, but it now **refuses** unless `AGENT_CODE_EXEC_BACKEND=local`, the switch
+  that already means "run untrusted code on this host, unsandboxed". The deployment pins `docker`,
+  so even a direct call fails closed before any block is read. It also left `__all__`.
+* The capability atlas (`docs/spatial-toolkit.html`) lists 57 tools, not 58. Its standfirst said
+  fifty-one while its footer said 58; the standfirst, strip and footer now all say 57.
+
+### Stage S19.3 The guard tests the class, not the name
+
+`rag_pipeline/tests/test_no_peer_execs_stored_code.py` captures the FINAL tool list each peer
+hands to `create_agent` — search, analyze and code; with and without a file attached; unified;
+and with MCP tools forced onto the local-import fallback — and walks each tool's code
+transitively (module globals, function-local imports, closures, `functools.wraps` chains, nested
+functions) for `exec`/`eval` or an importlib/runpy runner. A name check would only stop this
+function coming back; this also fails for the next tool built the same way. Positive controls pin
+what the walk sees, so an interpreter change that renamed an opcode cannot turn it into a silent
+pass. Against the original `geo_handles.py` it fails 13 of its 42 tests; on this branch all 42
+pass.
+
+Its blind spot is an attribute call on an object it cannot type statically (`obj.run(src)`).
+Running code in another process is out of scope on purpose: that is how `execute_code` reaches
+its sandbox.
+
+### Stage S19.4 What this stage did not fix
+
+The guard found a second path on its first run. With MCP tools on and no module list — the API's
+default for the search peer — and the MCP server unreachable when tools are built,
+`make_langchain_mcp_tools` falls back, with nothing but a log warning, to importing the MCP tool
+modules into `agent-api` (10 tools). `mcp_create_notebook_workflow_tool` is one of them: it
+registers a generated tool whose body `exec()`s notebook-derived source, and the next tool build
+binds that tool in-process.
+Normally the same code runs in the `mcp-server` container, which has no Docker socket. The test
+records it as a known gap that fails the moment the gap closes, rather than fixing it here: the
+notebook workflow builder is live work, and whether to unbind it is not this change's call.
+
+Still true: `agent-api` runs as root with the Docker socket. Every in-process tool inherits that
+blast radius. This stage removes one way in, not the exposure.
