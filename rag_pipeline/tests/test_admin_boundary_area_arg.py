@@ -155,7 +155,12 @@ def test_neither_given_says_what_to_pass(boundary):
 def _capture_stem(monkeypatch):
     written = {}
 
-    def fake_write(feats, stem):
+    # _write_layer takes the layer's content_key since layer identity moved to inputs
+    # (`key`, stage 20). The fake used to take two arguments, so the tool's own call raised
+    # TypeError inside it — and the old assertion accepted the resulting None ("None if the
+    # lookup failed first"), so it passed while proving nothing. Offline, the lookup cannot
+    # fail, the assertion is exact, and a stale fake shows up as the failure it is.
+    def fake_write(feats, stem, key=None):
         written["stem"] = stem
         return {"file_id": "f", "download_url": "u", "filename": f"{stem}.geojson"}
 
