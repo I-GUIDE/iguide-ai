@@ -25,6 +25,22 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_model_lists(monkeypatch):
+    """`list_available_models` asks AnvilGPT and Anthropic for their model lists whenever their
+    credentials are set, which several tests here do. Their `timeout=0.01` did not keep them
+    offline: the host was still resolved and a connection started, with whatever key the
+    process held in the request headers. No assertion depends on the live answer, so the
+    request fails here without leaving the machine and the tests see the fallback ids, as they
+    did whenever the 10 ms timeout won."""
+    import requests
+
+    def _offline(*args, **kwargs):
+        raise requests.ConnectionError("tests/test_claude_peer.py makes no network calls")
+
+    monkeypatch.setattr(requests, "get", _offline)
+
+
 # ---------------------------------------------------------------------------
 # Flag gating
 # ---------------------------------------------------------------------------

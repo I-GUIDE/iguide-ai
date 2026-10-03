@@ -52,8 +52,14 @@ panel. Node 18+ required.
 
 ## Tests
 
+**Neither suite loads a `.env` unless `RUN_LIVE_BACKEND_TESTS=1`.** A bare `load_dotenv()` walks
+up from its module's directory, so from a worktree under `.claude/worktrees/` it finds the main
+checkout's file, with the developer's real credentials. Both conftests make it a no-op unless
+the variable is set, and `tests/live/` is skipped without it.
+
 ```bash
 python3 -m pytest rag_pipeline/tests/ -q
+python3 -m pytest tests/ -q        # 135 passed, 32 skipped (all of tests/live/)
 ```
 
 Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
