@@ -13,10 +13,13 @@ tool at all. These five do:
 The hard part is that time arrives as *strings in whatever format the publisher liked* —
 Chicago crime ships ``07/26/2026 08:00:00 PM``, ISO feeds ship ``2026-07-26T20:00:00Z``,
 survey exports ship a bare ``2026`` or epoch milliseconds. ``parse_time_series`` tries a
-ladder of strategies (already-datetime, epoch, inferred single format, pandas ``format="mixed"``,
-then an explicit format list) and keeps whichever parsed the MOST rows, then every tool
-reports the parse rate and how many rows were dropped — a silent 40% NaT is the classic way
-a temporal answer ends up quietly wrong. Timestamps that carry a UTC offset are converted to
+ladder of strategies and keeps whichever parsed the MOST rows, then every tool reports the
+parse rate and how many rows were dropped — a silent 40% NaT is the classic way a temporal
+answer ends up quietly wrong. A column of NUMBERS (typed, or text holding only numbers, which
+is how every CSV field arrives) gets only numeric readings: a bare year, YYYYMMDD, epoch
+seconds or milliseconds. Text gets the text ladder: inferred single format, pandas
+``format="mixed"``, then an explicit format list. Either way an inferred time must fall in
+the years ``_YEAR_FLOOR``..``_YEAR_CEILING``. Timestamps that carry a UTC offset are converted to
 UTC and made tz-naive, so one dataset never mixes wall-clock and offset time; everything
 downstream (windows, periods, hour-of-day) is therefore in UTC for such inputs.
 
@@ -57,6 +60,22 @@ _DETECT_SAMPLE = int(os.getenv("AGENT_TIME_DETECT_SAMPLE", "4000"))
 _MIN_PARSE_RATE = float(os.getenv("AGENT_TIME_MIN_PARSE_RATE", "0.6"))
 # Above this many points, an "auto" temporal slice renders as density instead of marks.
 _AUTO_HEATMAP_ABOVE = int(os.getenv("AGENT_TIME_HEATMAP_ABOVE", "5000"))
+
+# The years an INFERRED time may fall in: the ones a nanosecond timestamp can hold. pandas 2
+# enforced this window without saying so, by turning anything outside it into NaT, and every
+# test and every development-machine run was made inside it. pandas 3 parses at microsecond
+# resolution and silently dropped it, so on the deployed image any four-digit code became a
+# year: a CSV's beat column ("1234", "1235", "1236") parsed as 1234-1236, and an incident_id
+# of 1001-1005 was auto-detected instead of the real date column. Stating the window here keeps
+# the verdict from moving with the pandas version. A column the source already typed as
+# datetime is not clamped.
+_YEAR_FLOOR, _YEAR_CEILING = 1678, 2262
+
+# A plain number as text (what pandas.read_csv would type as numeric), and the NA markers it
+# would turn into NaN. GDAL's CSV reader types EVERY field as text, so these decide whether a
+# CSV column is "numeric" at all.
+_PLAIN_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_NA_TEXT = ("na", "n/a", "nan", "-nan", "null", "none", "#n/a", "#n/a n/a", "#na", "<na>")
 
 # Column names that suggest time. Used only to BREAK TIES / to justify trying a numeric
 # column — the decision is made by how many values actually parse.
@@ -173,9 +192,56 @@ def _naive(series: Any) -> Any:
         return pd.Series(pd.NaT, index=getattr(series, "index", None), dtype="datetime64[ns]")
 
 
+def _clean_text(series: Any) -> Any:
+    """The column as stripped text with blanks as NA — the form the text ladder parses."""
+    return series.astype("string").str.strip().replace({"": None})
+
+
+def _as_numbers(series: Any, text: Any = None) -> Any:
+    """The column as numbers when that is all it holds, else ``None``.
+
+    Typed numeric columns qualify, and so does TEXT in which every value is a plain number:
+    GDAL's CSV reader types every field as a string, so a CSV's beat column arrives as
+    ``"1234"``, never ``1234``, and walked past every check that asked the dtype. Blank cells
+    and the NA markers ``pandas.read_csv`` would turn into NaN do not disqualify a column; at
+    least one real number is required. ``text`` is ``_clean_text(series)`` when the caller
+    already has it, so a big date column is not cleaned twice.
+    """
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(series):
+        return None
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        return None
+    # Back to the string dtype: the blank-to-NA replace in _clean_text yields object dtype
+    # whenever a blank was present, and object-dtype matching makes fillna warn on pandas 2.
+    text = (_clean_text(series) if text is None else text).astype("string")
+    present = text.dropna()
+    if present.empty:
+        return None
+    sniff = present.head(64)  # a column of dates fails here, before any full pass
+    if not bool((sniff.str.fullmatch(_PLAIN_NUMBER) | sniff.str.lower().isin(_NA_TEXT)).all()):
+        return None
+    is_number = text.str.fullmatch(_PLAIN_NUMBER).fillna(False).astype(bool)
+    rest = text[text.notna() & ~is_number]
+    if not bool(is_number.any()) or not bool(rest.str.lower().isin(_NA_TEXT).all()):
+        return None
+    return pd.to_numeric(text.where(is_number), errors="coerce").astype("float64")
+
+
+def _in_year_window(parsed: Any) -> Any:
+    """``parsed`` with every time outside ``_YEAR_FLOOR``..``_YEAR_CEILING`` set to NaT."""
+    if parsed is None:
+        return None
+    return parsed.where(parsed.dt.year.between(_YEAR_FLOOR, _YEAR_CEILING))
+
+
 def parse_time_series(values: Any) -> Tuple[Any, str]:
     """``(tz-naive datetime64 Series, method label)`` — the best of several strategies.
 
+    Numbers get only numeric readings; text gets the text ladder (see the module docstring).
     Never raises: a hopeless column comes back as all-NaT with method ``"unparsed"`` so the
     caller can report a 0% parse rate instead of blowing up.
     """
@@ -187,9 +253,14 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
     if len(series) == 0:
         return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]"), "unparsed"
 
+    typed_number = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+    text = None if typed_number else _clean_text(series)
+    numeric = _as_numbers(series, text)
     attempts: List[Tuple[str, Any]] = []
-    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-        numeric = pd.to_numeric(series, errors="coerce")
+    if numeric is not None:
+        # A number gets ONLY these readings. It used to fall through to the text ladder too,
+        # which is how pandas came to decide that a beat ("1834", and under pandas 3 "1011")
+        # is a year. A number that fits none of them is a code, and stays unparsed.
         finite = numeric.dropna()
         if len(finite):
             lo, hi = float(finite.min()), float(finite.abs().max())
@@ -197,19 +268,24 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
                 text_years = finite.astype("int64").astype("string").reindex(series.index)
                 attempts.append(("year number",
                                  lambda t=text_years: pd.to_datetime(t, format="%Y", errors="coerce")))
+            elif 19000101 <= lo and hi <= 21001231 and bool((finite % 1 == 0).all()):
+                # YYYYMMDD (20190315); an impossible month or day becomes NaT, not a guess
+                text_days = finite.astype("int64").astype("string").reindex(series.index)
+                attempts.append(("YYYYMMDD number",
+                                 lambda t=text_days: pd.to_datetime(t, format="%Y%m%d", errors="coerce")))
             elif 1e8 <= hi < 1e11:
                 attempts.append(("epoch seconds",
                                  lambda n=numeric: pd.to_datetime(n, unit="s", errors="coerce")))
             elif 1e11 <= hi < 1e14:
                 attempts.append(("epoch milliseconds",
                                  lambda n=numeric: pd.to_datetime(n, unit="ms", errors="coerce")))
-    text = series.astype("string").str.strip().replace({"": None})
-    attempts.append(("inferred single format", lambda: pd.to_datetime(text, errors="coerce")))
-    attempts.append(("mixed formats", lambda: pd.to_datetime(text, errors="coerce", format="mixed")))
-    attempts.extend(
-        (f"format {fmt}", lambda f=fmt: pd.to_datetime(text, format=f, errors="coerce"))
-        for fmt in _EXPLICIT_FORMATS
-    )
+    else:
+        attempts.append(("inferred single format", lambda: pd.to_datetime(text, errors="coerce")))
+        attempts.append(("mixed formats", lambda: pd.to_datetime(text, errors="coerce", format="mixed")))
+        attempts.extend(
+            (f"format {fmt}", lambda f=fmt: pd.to_datetime(text, format=f, errors="coerce"))
+            for fmt in _EXPLICIT_FORMATS
+        )
 
     best, best_label, best_n = None, "unparsed", -1
     target = int(series.notna().sum())
@@ -217,7 +293,7 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                parsed = _naive(attempt())
+                parsed = _in_year_window(_naive(attempt()))
         except Exception:  # noqa: BLE001 - a format that doesn't apply is not an error
             continue
         if parsed is None:
@@ -292,6 +368,8 @@ def _candidate_columns(frame: Any) -> List[str]:
 
     A numeric column without a time-ish name is skipped on purpose — "beat", "ward" and
     "population" all parse happily as epoch seconds and would outrank the real date.
+    "Numeric" means what the column HOLDS, not its dtype: every CSV field arrives as text
+    (GDAL's reader), and while this asked the dtype, a CSV's beat column was never skipped.
     """
     import pandas as pd
 
@@ -304,7 +382,7 @@ def _candidate_columns(frame: Any) -> List[str]:
             out.append(col)
         elif pd.api.types.is_bool_dtype(series):
             continue
-        elif pd.api.types.is_numeric_dtype(series):
+        elif _as_numbers(series) is not None:
             if _name_hint(col):
                 out.append(col)
         else:
