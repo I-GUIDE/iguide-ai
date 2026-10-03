@@ -1555,6 +1555,79 @@ boundary for user-supplied notebook paths, and the skill emitter's output direct
 real gap and is not fixed here: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
 and `examples/` is not in the image either.
 
+### Stage S12.10 The page `/agent/dashboard` serves
+
+The skill-roots fix (S12.8 in I-GUIDE/iguide-ai#31, open at the time of writing) ended by naming
+one more gap of its class: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
+which `api/server.py` reads relative to the repository root, and no revision of
+`rag_pipeline/Dockerfile` on any branch has copied `examples/`. The Dockerfile has built `/app`
+from an explicit list since it was created (`1c78e59`, 2025-12-14), and the route landed into it
+(`7f71a90`, 2026-05-07). Every image built in the 148 days since answers the route with a 500.
+
+| where | `GET /agent/dashboard`, 2026-10-02 |
+| --- | --- |
+| `https://agent.i-guide.io` (production) | 500, Flask's default 265-byte page; `/health` 200 at the same time |
+| `prototype` @ `5ae6d92`, built locally, under the image's own gunicorn `CMD` | 500; one ERROR traceback per request, `FileNotFoundError: ... '/app/examples/agent_chat_stream_demo.html'` |
+| the same commit with this change | 200, `text/html`, byte-identical to the checkout's file |
+
+**Revised during the work: the first decision was the opposite.** The task allowed either
+answer, copy the page in or make the route answer 404 cleanly, and `prototype` on its own
+pointed to the second. README.md, AGENTS.md and `docs/` never mention the route. Its docstring
+calls it "the local streaming agent dashboard". And `CORS(app)` lets the page reach the live
+agent from `file://` anyway: a preflight from `Origin: null` was allowed, `x-api-key` included.
+A 404 version was written and tested, and the suite passed with it (1647 passed). It was
+withdrawn because `backend_swap`, read afterwards, records the opposite intent:
+
+- `8fd97f58` (2026-08-12) closed two holes it described as "reachable from the open internet"
+  and kept `/agent/dashboard` open on purpose, as "static HTML with no data".
+- `66e71d54` (2026-08-12) fixed hardcoded tool checkboxes in the page that an earlier fix had
+  corrected only in the prototype: "fixing one shipped client had left the other broken".
+- M0.2b (2026-08-07 in that branch's `docs/DEVLOG.md`) updated it, with the prototype, to
+  describe the new auth contract.
+
+That branch also scopes CORS to `AGENT_CORS_ORIGINS`, falling back to `ALLOWED_DOMAIN_LIST`. A
+page opened from disk sends `Origin: null`, so unless `null` is on that list, being served by the
+agent is the only way the page works against a deployment.
+"Nobody noticed the 500 for 148 days" is no evidence either way: the skill roots went unnoticed
+for the same 148 days and were plainly meant to ship. `git log -S` on one branch found where the
+route came from. The reasons were in another branch's commit messages.
+
+**The change** is one `COPY`, of this file only, placed after `api/`:
+`COPY examples/agent_chat_stream_demo.html ./examples/`. Nothing else in the copied packages
+reads the root `examples/`, and its other page, `iguide_chat_prototype.html`, is only named in a
+docstring. `.dockerignore` does not exclude it: its patterns are anchored at the context root and
+none reaches `examples/`, and the image builds with it. The route's path moved into a module
+constant, `_DASHBOARD_PAGE`, unchanged in value, so a test reads the path from the code instead
+of restating it.
+
+**The guard** is `rag_pipeline/tests/test_image_dashboard_page.py`. It follows the page through
+the Dockerfile's own rules (`WORKDIR`, each `COPY` of the last stage, then `.dockerignore`) and
+checks that it lands beside wherever `api/` lands, which is where the route reads it. The
+readers are #31's, copied byte for byte with one addition. A directory named as a `COPY` source
+always has its contents land inside the destination. A single file lands *inside* a destination
+that ends in `/`, and *as* any other destination. Fourteen cases check the audit's verdicts, and
+all fourteen were also built for real. Every accepted Dockerfile served the page. Five of the six
+rejected ones built without an error and left a route that would answer 500. The sixth, an
+ignore pattern that drops a file a `COPY` names, failed the build. The subtlest is a missing
+trailing slash: `COPY … ./examples` builds cleanly and writes the page as a *file* named
+`/app/examples`. Removing the new line fails the guard with "no COPY in the Dockerfile carries
+it". Moving it to `./` fails with both paths named.
+
+Not fixed here:
+
+- **Production still answers 500** until the image is rebuilt with this change, and deploying
+  is a separate decision. Once it is deployed, the page is public at
+  `https://agent.i-guide.io/agent/dashboard`, as `backend_swap` decided it should be.
+- On `backend_swap`, `test_api_auth.py`'s docstring says `/agent/dashboard` is asserted to stay
+  open, but its `OPEN` list holds only `/health`. That assertion was never written, so nothing
+  there notices the route being closed or broken. Add it when that branch meets this one.
+- Once #31 merges, the Dockerfile and `.dockerignore` readers exist in two test files. They
+  belong in one module, and this file's `_lands_at` is the superset.
+
+S12.8's rule held: **anything the runtime reads relative to `REPO_ROOT` is a deployment input.**
+The one path that looked like an exception was not one. What showed that was another branch's
+commit messages, not this branch's code or docs.
+
 ---
 
 ## Stage 13 — Shapes nobody owned {#stage-13}
