@@ -233,6 +233,9 @@ def _weights_diagnostics(w: Any) -> Dict[str, Any]:
     return {
         "n": int(w.n),
         "islands": len(w.islands),
+        # Islands are not the only way a graph falls apart: a layer split by water or by sliver
+        # gaps can have none and still be several separate blocks. regionalize refuses that.
+        "components": int(w.n_components),
         "min_neighbors": int(min(cards)) if cards else 0,
         "max_neighbors": int(max(cards)) if cards else 0,
         "mean_neighbors": _fmt(w.mean_neighbors, 2),
@@ -249,6 +252,129 @@ def _island_note(w: Any, notes: List[str]) -> None:
             "spatial lag, so their local statistic is undefined and they pull the global "
             "statistic toward zero. Try weights='knn' (every feature then has exactly k "
             "neighbours) or a larger distance_band if this matters.")
+
+
+# --- connectedness: regionalization's precondition --------------------------------------
+
+# The most areas a refusal lists by id. One mainland plus a few islands or exclaves is the usual
+# split, and listing those few is what lets the next call select the mainland.
+_LISTED_AREAS = 50
+
+
+def _connected_parts(neighbours: List[Any]) -> List[List[int]]:
+    """The connected parts of a neighbour graph, largest first; an island is a part of one.
+
+    ``neighbours[i]`` holds the indices of area *i*'s neighbours, the shape pygeoda's
+    ``Weight.get_neighbors`` returns. Union-find rather than a walk, so an asymmetric list
+    still yields the weakly connected parts.
+    """
+    parent = list(range(len(neighbours)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, nbrs in enumerate(neighbours):
+        for j in nbrs:
+            a, b = root(i), root(int(j))
+            if a != b:
+                parent[a] = b
+    parts: Dict[int, List[int]] = {}
+    for i in range(len(neighbours)):
+        parts.setdefault(root(i), []).append(i)
+    # sort is stable, so equal-sized parts keep the order of their first area
+    return sorted(parts.values(), key=len, reverse=True)
+
+
+def _id_column(frame: Any, explicit: Optional[str], analysed: List[str]) -> Optional[str]:
+    """A column naming every area uniquely: what selecting a part by attribute needs.
+
+    The readable label column wins when it is unique (a tract NAME is within one county, and is
+    not across a state); otherwise the first text or integer column that is. Floats are skipped
+    because a value that does not survive a trip through text cannot be matched, and so are the
+    *analysed* columns: _prepare has coerced those to numbers, so "1,100" in the file is 1100
+    here and select_by_attribute, which reads the file, would match none of them.
+    """
+    import pandas as pd
+
+    types = pd.api.types
+    geom = _geom_name(frame)
+    for col in dict.fromkeys([_label_column(frame, explicit), *frame.columns]):
+        if col is None or col == geom or col in analysed:
+            continue
+        values = frame[col]
+        textual = types.is_string_dtype(values) or types.is_object_dtype(values)
+        if not (textual or types.is_integer_dtype(values)) or values.isna().any():
+            continue
+        if values.astype(str).is_unique:
+            return str(col)
+    return None
+
+
+def _disconnected(frame: Any, parts: List[List[int]], rule: str, queen_parts: Optional[int],
+                  label_column: Optional[str], analysed: List[str], notes: List[str]) -> str:
+    """The refusal for a contiguity graph in several parts: the parts, then the routes out."""
+    sizes = [len(p) for p in parts]
+    islands = sizes.count(1)
+    if islands == len(sizes):
+        shape = "every area is an island: no two of them share a border"
+    else:
+        shape = "sizes " + ", ".join(str(s) for s in sizes[:10]) + (", ..." if len(sizes) > 10
+                                                                    else "")
+        if islands:
+            shape += (f"; {islands} of them {'is an island' if islands == 1 else 'are islands'}, "
+                      "with no neighbour at all")
+    message = (f"the {rule} contiguity graph splits these {len(frame)} areas into {len(parts)} "
+               f"separate parts ({shape}). A region has to be one contiguous block, so no region "
+               "can take areas from two parts, and no method or n_regions gets around that")
+
+    routes: List[str] = []
+    if rule == "rook" and queen_parts == 1:
+        routes.append("weights='queen' joins this layer into one block (it also counts areas "
+                      "that meet only at a corner); rerun with that.")
+    elif rule == "rook" and queen_parts:
+        routes.append(f"weights='queen' does not join it either ({queen_parts} parts).")
+    extra: Dict[str, Any] = {}
+    others = parts[1:]
+    outside = [i for part in others for i in part]
+    col = _id_column(frame, label_column, analysed)
+    if col and len(outside) <= _LISTED_AREAS:
+        ids = frame[col].tolist()
+        extra = {"id_column": col, "outside_largest_part": [ids[i] for i in outside]}
+        # The rest is only one block when there is one other part; selecting several at once
+        # just hands back another split, so the route goes part by part.
+        usable = sum(1 for part in others if len(part) >= _MIN_OBS)
+        if not usable:
+            rest = (f"the other {len(outside)} area(s) form {len(others)} part(s) too small to "
+                    f"regionalize on their own (it takes {_MIN_OBS} areas), so keep them as "
+                    "blocks of their own or leave them out")
+        elif len(others) == 1:
+            rest = (f"op='in' with the same list selects the other part ({len(outside)} areas), "
+                    "which can be regionalized the same way")
+        else:
+            extra["smaller_parts"] = [[ids[i] for i in part] for part in others]
+            rest = ("op='in' with one list from smaller_parts selects that part alone, and the "
+                    f"{usable} with at least {_MIN_OBS} areas can be regionalized the same way")
+        routes.append(
+            f"To regionalize the largest part ({sizes[0]} areas) on its own, select it first: "
+            f"select_by_attribute on the same file_id with column='{col}', op='not_in', "
+            f"value=outside_largest_part, then regionalize that selection; {rest}.")
+    elif col:
+        routes.append(
+            f"To regionalize one part at a time, select it first with select_by_attribute: "
+            f"{len(outside)} areas lie outside the largest part, too many to list here, so "
+            "select on a column that separates the parts (an island, county or district name).")
+    else:
+        routes.append("To regionalize one part at a time, select it first with "
+                      "select_by_attribute; no column names every area uniquely, so the parts "
+                      "cannot be listed for it here.")
+    routes.append("If the parts are meant to touch (borders that miss by a sliver or a rounding "
+                  "error, not real water or open land), the boundaries need snapping before any "
+                  "contiguity rule counts them as neighbours.")
+    return _bad(message, hint=" ".join(routes), components=len(parts),
+                component_sizes=sizes[:20], islands=islands, **extra, notes=notes or None)
 
 
 def _prepare(gdf: Any, columns: List[str], notes: List[str]) -> Tuple[Any, Optional[str]]:
@@ -452,7 +578,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "interpretation": (
                     f"each feature has {diag['min_neighbors']}-{diag['max_neighbors']} neighbours "
                     f"(mean {diag['mean_neighbors']})"
-                    + (f"; {diag['islands']} have NONE" if diag["islands"] else "; no islands")),
+                    + (f"; {diag['islands']} have NONE" if diag["islands"] else "; no islands")
+                    + (f"; the graph falls into {diag['components']} separate parts"
+                       if diag["components"] > 1 else "")),
             }
             if rec:
                 payload.update({"file_id": rec["file_id"], "filename": rec.get("filename"),
@@ -1099,7 +1227,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
         the list of variables to be similar on; `n_regions` is how many you want. `method="maxp"`
         instead finds as many regions as possible subject to each holding at least `min_bound` of
         `bound_column` (e.g. 50,000 people per region) — there `n_regions` is ignored. Returns the
-        regions as a categorical map layer plus a per-region summary CSV.
+        regions as a categorical map layer plus a per-region summary CSV. A layer whose
+        contiguity graph falls into separate parts is refused before pygeoda sees it, with the
+        parts listed by `label_column` when that names each area uniquely.
         """
         notes: List[str] = []
         try:
@@ -1159,21 +1289,38 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 slim = slim.rename(columns={geom: "geometry"}).set_geometry("geometry")
 
             gd = pygeoda.open(slim)
-            w = getattr(pygeoda, f"{weights}_weights", pygeoda.queen_weights)(gd) \
-                if weights in {"queen", "rook"} else pygeoda.queen_weights(gd)
+            rule = weights if weights in {"queen", "rook"} else "queen"
+            w = getattr(pygeoda, f"{rule}_weights")(gd)
             if weights not in {"queen", "rook"}:
                 notes.append(f"weights={weights!r} is not a contiguity rule; regionalization "
                              "requires contiguity, so queen was used instead")
-            # pygeoda exposes these as METHODS, not properties: `getattr(w, "has_isolates")`
-            # returns the bound method, which is always truthy, so the un-called form put a false
-            # island warning on every single result.
-            try:
-                isolated = bool(w.has_isolates())
-            except Exception:
-                isolated = False
-            if isolated:
-                notes.append("some areas have NO contiguous neighbour (islands). They cannot join "
-                             "a connected region and the algorithm may place them alone or fail.")
+
+            # Count the parts BEFORE any algorithm runs. pygeoda does not refuse a contiguity
+            # graph that falls into more than one connected part. Measured on 0.1.3, on macOS
+            # and on Linux with the deployed versions alike: skater, redcap and schc SEGFAULT,
+            # which kills the agent's worker and every turn on it, and azp and max-p can spin
+            # on one core and never return. That held for every n_regions tried, including
+            # n_regions at or above the number of parts, so no region count is safe. An island
+            # is a part of one, so this also covers has_isolates(), which only added a note.
+            parts = _connected_parts([w.get_neighbors(i) for i in range(len(frame))])
+            if len(parts) > 1:
+                queen_parts = None
+                if rule == "rook":
+                    queen = pygeoda.queen_weights(gd)
+                    queen_parts = len(_connected_parts(
+                        [queen.get_neighbors(i) for i in range(len(frame))]))
+                return _disconnected(frame, parts, rule, queen_parts, label_column, needed, notes)
+            # max-p spins the same way on a CONNECTED layer when no region can reach the bound,
+            # and on one block that is exactly when the whole layer holds less than min_bound.
+            if meth == "maxp":
+                total = float(frame[str(bound_column)].sum())
+                if total < float(min_bound):
+                    return _bad(f"min_bound={_fmt(min_bound)} is more {bound_column} than the "
+                                f"whole layer holds ({_fmt(total)}), so not even one region can "
+                                "reach it",
+                                hint=f"lower min_bound to at most {_fmt(total)}, or pick another "
+                                     "method and give n_regions instead",
+                                bound_total=_fmt(total), notes=notes or None)
 
             data = [gd.GetRealCol(c) for c in cols]
             if meth == "skater":
@@ -1192,8 +1339,8 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             clusters = list(result["Clusters"] if isinstance(result, dict) else result)
             if not clusters or len(clusters) != len(frame):
                 return _bad(f"{meth} returned {len(clusters)} labels for {len(frame)} areas",
-                            hint="this usually means the layer's contiguity graph is "
-                                 "disconnected; run spatial_weights to inspect it")
+                            hint="the contiguity graph was checked as connected, so this is "
+                                 "unexpected; run spatial_weights to inspect it")
             found = sorted({int(c) for c in clusters})
             if len(found) < 2:
                 return _bad(f"{meth} could not form more than one region",
@@ -1337,7 +1484,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "on the map. `columns` is the LIST of variables to be similar on. method='maxp' "
                 "maximises the region count subject to bound_column/min_bound (e.g. 50000 people "
                 "each) and ignores n_regions. Returns a categorical region map with a legend and "
-                "a per-region summary CSV. Needs polygons. " + _SIB)),
+                "a per-region summary CSV. Needs polygons that form one connected block; a layer "
+                "that falls into separate parts (islands, water, sliver gaps) is refused with the "
+                "parts listed. " + _SIB)),
         StructuredTool.from_function(func=accept_null_defaults(spatial_weights), name="spatial_weights", metadata=meta,
             description=(
                 "Build and INSPECT the spatial weights matrix ('who is next to whom') that every "

@@ -40,6 +40,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 24 | [A laptop that writes nothing](#stage-24) | 2026-10-03 | `AGENT_MODE=local` makes a laptop run write to no shared store; an override list wrote seven conversations into prod |
 | 25 | [Starting a child without forking the agent](#stage-25) | 2026-10-01 | on macOS every child starts by `posix_spawn`; nothing in the agent process forks |
 | 26 | [Permutations run in the agent's own process](#stage-26) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
+| 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -4239,3 +4240,172 @@ default.
   this route was not reproduced in a realistic order.
 * `Moran`, `Geary` and `G` take no seed, so `global_spatial_autocorrelation`'s p-values still
   vary between runs. That is unchanged here.
+
+---
+
+## Stage 27 — A library that crashes instead of refusing {#stage-27}
+
+`regionalize` (`agent_runtime/analysis_spatial_stats_tools.py`) hands a contiguity graph to
+pygeoda, GeoDa's C++ core, inside the agent's own process. Given a graph that falls into more than
+one connected part, pygeoda does not raise. Three of the five methods segfault and the other two
+can spin without returning, and in production the process that goes down is the gunicorn worker
+serving the turn. The tool's only pre-flight check was `w.has_isolates()`, and a layer split into
+blocks of several areas each passes it.
+
+### Stage S27.1 What it did, measured
+
+The crash report's layer is a 5x5 lattice built as `box(-88.3 + c/100, 40.0 + r/100, -88.29 +
+c/100, 40.01 + r/100)`. A cell's right edge and its neighbour's left edge come from different
+expressions, and three of the four column joins miss by one ulp (`-88.29` against
+`-88.28999999999999`), as does one of the four row joins (`40.019999999999996` against `40.02`).
+That is **8 parts and no island**. The report said 5; libpysal and pygeoda both count 8. Built
+with exactly shared edges, the same lattice runs fine.
+
+Each call ran in its own process, on macOS (Python 3.13, pygeoda 0.1.3):
+
+| method | on a split graph |
+| --- | --- |
+| skater, redcap, schc | SIGSEGV every time: the report's lattice at n_regions 2, 3, 5 and 8; two separate 4x4 blocks at 2 and 4; an 8x8 lattice plus one detached cell at 2 and 4 |
+| azp | never returned (killed at 30 to 60 s) on the report's lattice at 2, 3, 5 and 8 and on the island layer at 2 and 4; finished on the two blocks at 2 and 4 |
+| max-p | never returned when some part could not reach `min_bound`: the report's lattice at 1500 and 4000 (its two-area parts hold less), the island layer at 3000; finished on the two blocks at 3000 |
+
+Whether azp and max-p return depends on the data and the split, so neither can be relied on. On a
+4-part variant of the lattice (right edges computed as `-88.3 + 0.01 + c/100`), azp finished at 8
+and max-p at 1500, with every part holding at least 2,113. The max-p rule held when the audit
+controlled for the data: with every area's value at 800, the report's lattice finished at 1600,
+which its two-area parts can just reach, and hung at 1700.
+
+A linux/amd64 replica of the deployed environment (Python 3.11.16, pygeoda 0.1.3, libpysal
+4.14.1, numpy 2.4.6) reproduced every case re-run there. On the 4-part variant at n_regions 3,
+skater, redcap and schc segfault and azp hangs. The tool itself segfaults on the Maui and San
+Francisco layers below, and the tests in S27.3 die with SIGSEGV on the report's lattice.
+
+A hang is not idle. azp spun at 4.9 s of CPU per 5 s of wall time and released the GIL: on macOS
+the main thread kept waking on schedule. Inferred rather than measured in gunicorn: one such turn
+holds one of the worker's four threads and one core for good, while the worker's heartbeat and
+its health check carry on. That is the S12.1 failure, four hung calls being the whole service,
+reached by another road, and nothing notices until the fourth.
+
+Real layers get here through the agent's own tools, `admin_boundary(subdivide="tracts")` and then
+`regionalize`, on the code before this stage:
+
+* **Maui County, HI**: 48 tracts in three parts, Maui, Molokai and Lanai (43, 3 and 2 tracts),
+  and no island. skater, redcap and schc segfault; azp was still running at 90 s.
+* **San Francisco County, CA**: 244 tracts, one of them the Farallon Islands (`06075980401`), an
+  island. skater segfaults all the same: the island earned a note (*"the algorithm may place them
+  alone or fail"*) and then the crash.
+* **Monroe County, FL** has the same shape (the Dry Tortugas tract) and segfaults the same way.
+  **Kitsap County, WA** is connected and regionalizes normally.
+
+### Stage S27.2 The guard
+
+Before any algorithm runs, the tool counts the connected parts of **the graph pygeoda will
+walk**, read back through its own `get_neighbors()` rather than rebuilt with libpysal. The two
+agreed on every layer above, but a guard that relies on two implementations agreeing is weaker
+than one that reads the input itself. Reading the neighbours and running a union-find over
+10,000 areas takes 16 to 37 ms on the dev Mac.
+
+More than one part is refused, for every method and every `n_regions`. Whether to refuse only
+when `n_regions` is below the number of parts was considered, since every part needs a region of
+its own. That is not where the crash starts: skater segfaulted with `n_regions` equal to the
+number of parts (8 on the lattice) and above it (4 on two blocks). So the error says that no
+method or `n_regions` gets around it, which also stops a retry with a larger count.
+
+An island is a part of one, so the same check covers it, and the `has_isolates()` note is gone.
+All it ever did was announce the crash that followed.
+
+**The same hang on a connected layer.** max-p also spins when no region can reach `min_bound`, and
+on a single block that is exactly when the layer's total of `bound_column` is below it. Measured
+on an 8x8 lattice totalling 33,212: a bound of 33,211 or 33,212 returns one region, and 33,213 or
+double the total never returns. *"Regions of at least 50,000 people"* in a county of 40,000 is
+that call, so it is now refused, with the total named.
+
+The refusal follows *errors name the alternatives*:
+
+* the number of parts, their sizes, and how many are islands;
+* when at most 50 areas lie outside the largest part, their ids as `outside_largest_part`, in
+  the column named by `id_column`. That is the readable label when it is unique, otherwise the
+  first text or integer column that is, and never one of the analysed columns: `_prepare` has
+  coerced those to numbers, so `"1,100"` in the file is `1100` there, and `select_by_attribute`
+  reads the file. A tract `NAME` is unique within a county but not across a state. The hint then
+  names the call that keeps the largest part, `select_by_attribute` with `op='not_in'`, and says
+  to regionalize that selection. Verified end to end on Maui: refused, then 43 tracts selected,
+  then 5 regions;
+* the other parts one at a time. One other part is selected with `op='in'` and the same list.
+  With several, `smaller_parts` lists each, and the hint says how many have the 8 areas
+  regionalization takes (`_MIN_OBS`). When none does, it says so and leaves them as blocks of
+  their own;
+* under `weights='rook'`, whether queen contiguity would join the layer. This is computed, not
+  guessed, because queen also counts areas that meet only at a corner;
+* for gaps that should not be there (slivers, rounding), that the boundaries need snapping first.
+
+The `connectivity` block (returned by `spatial_weights`, the global and local autocorrelation
+tools and the regression) now carries `components`, and `spatial_weights` says *"the graph falls
+into N separate parts"*. The old hint after a bad result already said *"run spatial_weights to
+inspect it"*, and on this lattice that would have shown `islands: 0` and nothing else. The
+regionalize tool description now states the precondition as well, since a tool description is
+part of the architecture.
+
+### Stage S27.3 A test that cannot take the suite with it
+
+Any test that could hit either failure runs the call in a child process (`sys.executable -c …`)
+and asserts on the exit code. Against the old module on the Mac, the four tests that give it a
+split graph die with *"died with exit -11 (SIGSEGV)"*, the max-p test hits its timeout, and the
+run completes. The Linux replica showed the same for the three such tests that existed before the
+audit. Two details would each have produced a false result:
+
+* **The fixture is a GeoPackage.** GeoJSON writes coordinates rounded, which turns
+  `-88.28999999999999` back into `-88.29`. Measured: the lattice comes back from a GeoJSON
+  round trip as **one** block, so every assertion on it would pass against the crashing code. The
+  GeoPackage keeps all 8 parts. The agent's own outputs round the same way: `select_by_attribute`
+  writes GeoJSON, and in the audit a selection from the split lattice came back joined.
+* **`close_fds=False` and no `cwd`**, which keep CPython on `posix_spawn` on macOS. A fork after
+  PROJ has run in the test process can kill the child before exec (the open
+  `claude/fork-safe-subprocess` work), and that -11 would read as the tool crashing.
+
+The calls that segfault run first and the ones that hang run last, under a 120 s timeout, so a
+regression fails fast where it can. Mac suite: 1653 passed, 4 skipped (1645 before; the eight new
+tests are the difference). On the Linux replica, the module's test file as it stood before the
+audit passed 38 of 39. The one failure was the distance-band island test, which is Linux-only and
+is fixed separately on `claude/distance-band-no-island`.
+
+### Stage S27.4 What an independent audit changed
+
+Before this landed, a separate agent re-derived every number above with its own scripts. It
+found four things wrong, all corrected here:
+
+* **The first matrix was run on the wrong lattice.** The harness built the right edges as
+  `-88.3 + 0.01 + c/100`, the 4-part variant, so the first version of the table said azp
+  finished at 8 and max-p at 1500 on the report's lattice. Re-run on the report's own recipe,
+  both hang.
+* **max-p's hang on a connected layer** (S27.2) was not guarded. The guard counted parts, but
+  the table's own max-p row gives an unreachable bound as the cause, and one block can have that
+  too.
+* **Ids were listed from an analysed column.** With a text column `"1,100"` to `"1,124"` passed in
+  `columns`, the refusal listed the coerced numbers, and `op='not_in'` kept all 25 areas instead of
+  6.
+* **The rest was offered as one `op='in'` selection.** For a mainland with two small islands, that
+  selection was refused again as two parts.
+
+It also measured the guard at 16 to 24 ms where one run here gave 37. The text now states a range.
+The Linux replica checks above were not re-run after these fixes: Docker Desktop on the dev Mac
+stopped responding after the disk filled.
+
+### Stage S27.5 What this stage did not fix
+
+* **Nothing inside regionalize joins a split that queen leaves.** The tool takes only queen and
+  rook. pygeoda's `precision_threshold`, which exists for exactly this, changed nothing on 0.1.3:
+  the lattice stayed in 8 parts at every value tried, from 1e-12 up to 0.02 degrees, under queen
+  and rook, whether opened from a frame or from a shapefile. Snapping the coordinates first does
+  work: `shapely.set_precision` on a 1e-9-degree grid joins the lattice into one block. A sliver in
+  real boundaries needs a tolerance in metres, though, so offering it needs the same metric
+  treatment distances get. Not done.
+* **This checks the preconditions that were found. It does not make pygeoda safe.** Any other
+  input that crashes or spins libgeoda still takes a worker or a thread. Containing every such
+  failure would mean running the native call out of process, as the test does, at the cost of a
+  process start per call.
+* **A dropped area is a gap too.** An area dropped for a missing value may have been the only
+  link between two parts. The refusal then lists the parts and the notes say rows were dropped,
+  but nothing ties the two together.
+* pygeoda's other variants (`azp_sa`, `azp_tabu`, `maxp_sa`, `maxp_tabu`) are not exposed and
+  were not tested. Any new pygeoda call should go through the same checks.
