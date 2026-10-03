@@ -3625,7 +3625,9 @@ reads the file then keys it by what it holds.
   missing from its working directory; that was not investigated. And the same `.env` pins
   `OPENSEARCH_NODE` to the production cluster, which wins over `PLATFORM_TIER=dev` (the boot log
   warns of it), so seven local test conversations wrote their chat memory there before it was
-  noticed. A local check needs `OPENSEARCH_NODE=` as well.
+  noticed. A local check needs `OPENSEARCH_NODE=` as well. **Wrong, as S24.1 records:** with
+  `OPENSEARCH_NODE` blank the writes go to the dev tier's cluster instead. Run a local check with
+  `AGENT_MODE=local` ([Stage 24](#stage-24)).
 
 ### Stage S20.11 What this stage still does not fix
 
