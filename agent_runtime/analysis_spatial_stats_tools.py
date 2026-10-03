@@ -186,8 +186,19 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
                 # one that is slightly too generous.
                 thresh = float(weights.min_threshold_distance(
                     [(geom.x, geom.y) for geom in frame.geometry]))
+                # min_threshold_distance returns EXACTLY the critical neighbour distance, and
+                # DistanceBand recomputes that distance on its own code path. Whether the two
+                # agree to the last bit is a property of the platform: on the 8x8 test lattice
+                # the margin is 0.0 m, giving 0 islands on macOS/arm64 and 1 on Linux/x86-64
+                # with the same libpysal, scipy and numpy versions. A relative pad of 1e-9
+                # (about 0.1 mm at 100 km) makes "no island" hold everywhere.
+                thresh *= 1.0 + 1e-9
                 notes.append(f"threshold_km not given; used the smallest distance that leaves no "
                              f"island ({thresh / 1000.0:.3f} km)")
+                # The note reports the padded distance, a hair above the strict minimum and far
+                # below its metre precision. Its wording stands because the unpadded value is not
+                # reliably island-free (docs/agent-architecture-changes.md: "A promise kept by
+                # rounding luck").
             else:
                 thresh = float(threshold_km) * 1000.0
                 if not (thresh > 0) or not math.isfinite(thresh):

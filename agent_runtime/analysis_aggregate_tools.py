@@ -1041,7 +1041,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
         """count / min / max / mean / median (+ std, sum) for a dataset's numeric columns.
 
         With no `column`, describes every numeric column. With `by`, groups by that column first
-        (`period` = day|week|month|quarter|year buckets a date column, e.g. incidents by month).
+        (`period` = day|week|month|quarter|year buckets a date column, e.g. incidents by month;
+        dates carrying a UTC offset are bucketed in UTC, as the temporal tools do).
         Returns a compact JSON summary, a CSV of the table, and a PNG chart.
         """
         notes: List[str] = []
@@ -1079,13 +1080,27 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                     if not freq:
                         return _bad(f"unsupported period {period!r}",
                                     hint=f"use one of {list(_PERIODS)}")
-                    parsed = pd.to_datetime(group_key, errors="coerce")
-                    if parsed.notna().sum() == 0:
+                    # The temporal tools' parser, so a dataset has one time in every tool: a UTC
+                    # offset converts to UTC, a number gets only numeric readings, and years stay
+                    # in 1678-2262. A plain pd.to_datetime here read a typed number as nanoseconds
+                    # (every year or code in 1970), failed a daylight-saving column on both pandas
+                    # versions, and bucketed one offset by local clock. Imported here, not at the
+                    # top, so this module still loads if the temporal one cannot.
+                    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+                    parsed, _ = parse_time_series(group_key)
+                    dated = parsed.notna()
+                    n_dated = int(dated.sum())
+                    if n_dated == 0:
                         return _bad(f"column {by!r} could not be read as dates, so period="
                                     f"{period!r} cannot be applied",
                                     hint="pass a date/datetime column as `by`, or drop `period`")
-                    group_key = parsed.dt.to_period(freq).astype(str)
+                    # where(): pandas 2 labels an undated row "NaT", pandas 3 leaves it missing.
+                    group_key = parsed.dt.to_period(freq).astype(str).where(dated)
                     notes.append(f"grouped {by!r} into {period} buckets")
+                    if n_dated < len(dated):
+                        notes.append(f"{len(dated) - n_dated} of {len(dated)} rows have no "
+                                     f"readable date in {by!r} and are grouped as '(missing)'")
                 group_key = group_key.fillna("(missing)").astype(str)
 
             targets = [column] if column else numeric_cols
@@ -1347,7 +1362,8 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 "Descriptive statistics for a dataset's attributes: count, min, max, mean, "
                 "median, std, sum — for every numeric column by default, for one `column` when "
                 "named, and per group when `by` is given (`period`=day|week|month|quarter|year "
-                "buckets a date column). Returns a compact JSON summary plus a downloadable CSV "
+                "buckets a date column, in UTC when the dates carry an offset). Returns a "
+                "compact JSON summary plus a downloadable CSV "
                 "and PNG chart. Use this for the numbers behind a map, not for mapping. " + _SIB)),
     ]
 

@@ -1,0 +1,89 @@
+name: verify
+
+# The test suite, run where the deployment runs: Linux x86-64, CPython 3.11 (rag_pipeline/
+# Dockerfile is python:3.11-slim) and, the part that matters most, the package versions the
+# deployed image actually has.
+#
+# Until this workflow the suite had never run in a clean Linux / Python 3.11 environment, only on
+# the development Mac, which hides platform failures: ~/.local there supplies packages a clean
+# install lacks, and arm64 rounds floating point differently from x86-64.
+#
+# No secrets, and none should be added. rag_pipeline/tests/conftest.py replaces dotenv's loader
+# with a no-op, and nothing here sets RUN_LIVE_BACKEND_TESTS, so the suite runs offline.
+#
+# The file is named like origin/backend_swap's on purpose. If that branch merges, the two
+# conflict and get reconciled into one, instead of two workflows both running the suite.
+
+on:
+  push:
+    branches: [prototype]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # A comparable install and a larger suite took under three minutes on a sibling branch. The
+    # cap is for a test that blocks on the network instead of failing; without one GitHub waits
+    # six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
+
+      - name: Install the deployed image's versions
+        # requirements.txt names packages, not versions. Installed bare, it tests
+        # latest-at-run-time: a stack that changes with every upstream release and is not the
+        # one deployed. constraints.txt is the deployed image's own `pip freeze`; its header
+        # says when it was taken and how to retake it. pip itself is upgraded because it is the
+        # installer, not part of what is deployed, and everything it installs is pinned.
+        run: |
+          python3 -c "import platform, sys; print(sys.version, platform.machine()); assert sys.version_info[:2] == (3, 11), sys.version"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt -c constraints.txt
+
+      - name: Report anything installed at a version the deployed image does not have
+        # A constraint only binds what requirements.txt asks for. A line printed here is a
+        # package at a version constraints.txt does not list, normally a requirement added since
+        # the freeze, which therefore floated to latest. A warning, not a failure: until the next
+        # deploy there is no deployed version to pin it to. Retake constraints.txt after it.
+        run: |
+          drift=$(python3 -m pip freeze | grep -vxFf constraints.txt || true)
+          if [ -n "$drift" ]; then
+            echo "$drift"
+            echo "::warning title=Not the deployed version::$(echo "$drift" | tr '\n' ' ')"
+          else
+            echo "all $(python3 -m pip freeze | wc -l) installed packages are at the deployed version"
+          fi
+
+      - name: Import what the tests importorskip, so a missing package fails instead of skipping
+        # Most spatial test modules open with pytest.importorskip("geopandas"), ("libpysal") and
+        # the like, which SKIPS when the module is absent. A package dropped from the install
+        # would turn those modules into skips and leave this job green with far fewer tests.
+        # (One present but unloadable, e.g. a wheel missing a system library, already errors at
+        # collection under pytest 9.) These are the importorskip targets in rag_pipeline/tests
+        # plus the version-sensitive core; their versions print too.
+        run: |
+          python3 - <<'PY'
+          import importlib
+          for name in ("numpy", "pandas", "scipy", "shapely", "pyproj", "pyogrio", "fiona",
+                       "rasterio", "geopandas", "libpysal", "esda", "spreg", "pygeoda",
+                       "matplotlib", "sklearn", "tiktoken", "langchain_core"):
+              module = importlib.import_module(name)
+              print(f"{name:15s} {getattr(module, '__version__', '?')}")
+          PY
+
+      - name: Run the test suite
+        # `python3 -m pytest` is the documented command (AGENTS.md). Unlike bare `pytest`, -m
+        # also puts the repo root on sys.path. -rfEs adds skip reasons to the summary, so a test
+        # that skips here for want of something the image has is visible as a skip.
+        run: python3 -m pytest rag_pipeline/tests/ -q -rfEs

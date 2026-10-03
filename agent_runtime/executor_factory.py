@@ -147,11 +147,13 @@ def normalize_openai_base_url(url: Optional[str]) -> Optional[str]:
     return normalized
 
 
-# Deliberately NO max_tokens. qwen3.6:27b is a reasoning model: it spends its first tokens on
-# `reasoning_content` and only then writes `content`, so a tight ceiling returns
+# Deliberately NO max_tokens. AnvilGPT's qwen3 line are reasoning models: they spend their
+# first tokens on `reasoning_content` and only then write `content`, so a tight ceiling returns
 # finish_reason="length" with content=None — an EMPTY answer that reads as a model failure
-# rather than a truncation. Measured: max_tokens=20 produced no content at all (all 20 spent
-# thinking); 800 answered in 41; unset completes normally at 57. Since the endpoint imposes no
+# rather than a truncation. Measured on qwen3.6:27b: max_tokens=20 produced no content at all
+# (all 20 spent thinking); 800 answered in 41; unset completes normally at 57. The successor
+# behaves the same way and more so — qwen3.8:27b spent 34 of 38 completion tokens on reasoning
+# just to answer "OK" (2026-10-01) — so the ceiling stays off. Since the endpoint imposes no
 # small default of its own, any ceiling invented here could only truncate a long answer.
 
 
@@ -176,9 +178,9 @@ def _anvilgpt_settings() -> Optional[Dict[str, Any]]:
     return {
         "api_key": key,
         "base_url": base_url,
-        # Open WebUI names models like "qwen3.6:27b" — NOT the HuggingFace "Qwen/Qwen3.6-27B"
+        # Open WebUI names models like "qwen3.8:27b" — NOT the HuggingFace "Qwen/Qwen3.8-27B"
         # form a vLLM server uses. Ask /api/models for the exact id; a wrong one 404s.
-        "model": os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
+        "model": os.getenv("ANVILGPT_MODEL") or "qwen3.8:27b",
     }
 
 
@@ -306,13 +308,16 @@ def build_default_llm() -> Any:
 # The UI can offer a model picker, so a turn needs to be able to say which model it wants
 # without changing process-wide env. Absent both, the DEFAULT IS OPENAI gpt-4o: it is what
 # the deployment has been validated against, and a reasoning model's latency profile is
-# quite different (see the qwen3.6:27b notes above).
+# quite different (see the qwen3.8:27b notes above).
 DEFAULT_PROVIDER = "openai"
 DEFAULT_OPENAI_MODEL = "gpt-4o-2024-11-20"
 
 # Offered in the picker. AnvilGPT's list is fetched live because it changes and a stale
-# hardcoded id 404s; these are the fallback if the fetch fails.
-_ANVIL_FALLBACK_MODELS = ("qwen3.6:27b", "qwen3:32b", "qwen3-coder:30b", "qwen3-vl:32b")
+# hardcoded id 404s; these are the fallback if the fetch fails. The roster really does move:
+# qwen3.6:27b sat here while it was listed, "Recommended", and serving nothing at all, and by
+# 2026-10-01 Purdue had removed it entirely and put qwen3.8:27b in its place. Probe
+# /api/models rather than trusting this tuple.
+_ANVIL_FALLBACK_MODELS = ("qwen3.8:27b", "qwen3:32b", "qwen3-coder:30b", "qwen3-vl:32b")
 
 # This agent ALWAYS binds function tools, and on /v1/chat/completions the legal
 # reasoning_effort values depend on the model — a prefix rule got it wrong in both
@@ -424,7 +429,7 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         return build_default_llm()
     if not prov:
         # A bare model name: infer the provider from the shape rather than guessing wrong.
-        # Open WebUI ids look like "qwen3.6:27b"; OpenAI's never contain a colon.
+        # Open WebUI ids look like "qwen3.8:27b"; OpenAI's never contain a colon.
         prov = ("anthropic" if str(model).startswith("claude-")
                 else "anvilgpt" if ":" in str(model) else DEFAULT_PROVIDER)
 
@@ -442,7 +447,7 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
             os.getenv("ANVILGPT_URL") or "https://anvilgpt.rcac.purdue.edu/api/chat/completions")
         # No max_tokens: qwen3.x reasons before it answers, so a ceiling truncates the thinking
         # and returns an EMPTY content rather than a short answer.
-        return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
+        return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.8:27b",
                           api_key=key, base_url=base_url, temperature=0.0)
     if prov == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY")
