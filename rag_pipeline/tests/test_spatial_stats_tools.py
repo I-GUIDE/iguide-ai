@@ -257,6 +257,25 @@ def test_getis_ord_non_star_variant(lattice):
     assert r["ok"] is True and r["statistic"] == "Gi"
 
 
+def test_permutation_inference_starts_no_process_pool(lattice, monkeypatch):
+    """esda.G_Local defaults to n_jobs=-1, a joblib/loky pool of one fresh interpreter per core,
+    each forked from the agent process. Every esda statistic here runs in this process instead;
+    Stage 19 in docs/agent-architecture-changes.md has why, and what that costs on large layers.
+    esda imports Parallel inside the call, so patching joblib itself is patching it where it is
+    used."""
+    joblib = pytest.importorskip("joblib")
+
+    def no_pool(*args, **kwargs):
+        raise AssertionError("esda started a joblib process pool")
+
+    monkeypatch.setattr(joblib, "Parallel", no_pool)
+    tools = _tools()
+    for tool, extra in (("local_getis_ord", {}), ("local_getis_ord", {"star": False}),
+                        ("local_moran_lisa", {}), ("global_spatial_autocorrelation", {})):
+        r = json.loads(tools[tool].invoke({"file_id": lattice, "column": "gradient", **extra}))
+        assert r["ok"] is True, (tool, extra, r.get("error"))
+
+
 # --- Moran scatterplot ----------------------------------------------------------------
 
 
@@ -466,6 +485,33 @@ def test_distance_band_without_a_threshold_leaves_no_island(lattice):
         {"file_id": lattice, "weights": "distance_band"}))
     assert r["ok"] is True and r["connectivity"]["islands"] == 0
     assert any("no island" in n for n in r["notes"])
+
+
+def test_default_distance_band_survives_a_rounding_disagreement(lattice, monkeypatch):
+    """The no-island promise must not rest on rounding luck.
+
+    min_threshold_distance returns the critical pair's distance as sqrt(d2), and DistanceBand
+    admits a pair when d2 <= threshold**2. Squaring the rounded root can come back one ulp
+    short. On Linux/x86-64 it does for this lattice and the band left an island, while
+    macOS/arm64 rounds the other way, so the test above passes on a Mac with or without the
+    pad. Shrinking the computed minimum by a relative 1e-12 (far more than one ulp, a thousandth
+    of the tool's pad) reproduces the failure on every platform, so dropping the pad fails here
+    on a Mac too.
+    """
+    from libpysal import weights
+
+    real = weights.min_threshold_distance
+    calls = []
+
+    def short_by_rounding(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs) * (1.0 - 1e-12)
+
+    monkeypatch.setattr(weights, "min_threshold_distance", short_by_rounding)
+    r = json.loads(_tools()["spatial_weights"].invoke(
+        {"file_id": lattice, "weights": "distance_band"}))
+    assert calls, "the default band no longer comes from min_threshold_distance; revisit this test"
+    assert r["ok"] is True and r["connectivity"]["islands"] == 0
 
 
 def test_kernel_weights_build(lattice):
