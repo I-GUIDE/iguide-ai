@@ -175,7 +175,7 @@ def _num(value: Any) -> Optional[float]:
 
 # ------------------------------------------------------------------- time parsing
 def _naive(series: Any) -> Any:
-    """Force a parse result to tz-naive ``datetime64[ns]`` (mixed offsets come back as object)."""
+    """Force a parse result to tz-naive ``datetime64``; a tz-aware one is converted to UTC first."""
     import pandas as pd
 
     if series is None:
@@ -284,8 +284,16 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
                 attempts.append(("epoch milliseconds",
                                  lambda n=numeric: pd.to_datetime(n, unit="ms", errors="coerce")))
     else:
-        attempts.append(("inferred single format", lambda: pd.to_datetime(text, errors="coerce")))
-        attempts.append(("mixed formats", lambda: pd.to_datetime(text, errors="coerce", format="mixed")))
+        # utc=True converts every offset to UTC inside pandas. Without it, a column whose offsets
+        # differ (Z beside +01:00, or -06:00 and -05:00 either side of a daylight-saving change)
+        # came back from pandas 2 as objects, which _naive converted, but pandas 3 raises "Mixed
+        # timezones detected", and the whole column read as unparsed. Text without an offset is
+        # read as UTC and made naive again, so its values do not change. The explicit formats
+        # below have no %z, so they never match a time that carries an offset.
+        attempts.append(("inferred single format",
+                         lambda: pd.to_datetime(text, errors="coerce", utc=True)))
+        attempts.append(("mixed formats",
+                         lambda: pd.to_datetime(text, errors="coerce", format="mixed", utc=True)))
         attempts.extend(
             (f"format {fmt}", lambda f=fmt: pd.to_datetime(text, format=f, errors="coerce"))
             for fmt in _EXPLICIT_FORMATS
