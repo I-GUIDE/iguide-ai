@@ -25,8 +25,11 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 13 | [Shapes nobody owned](#stage-13) | 2026-10-01 → 2026-10-03 | downloads named, qwen3.8, rs-embed off a personal credential, a restart that cut off live turns |
+| 14 | [A promise kept by rounding luck](#stage-14) | 2026-10-01 | the default distance band is island-free by construction, not by platform |
 | 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | the health check is acted on; evidence and logs outlive the container |
-| 13 | [What counts as a date is decided here, not by pandas](#stage-13) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
+| 15 | [What counts as a date is decided here, not by pandas](#stage-15) | 2026-10-01 | the temporal parser states its own rules; pandas 3 had moved them |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1440,7 +1443,220 @@ credential-selection fix in S12.6 first.
 
 ---
 
-## Stage 13 — What counts as a date is decided here, not by pandas {#stage-13}
+## Stage 13 — Shapes nobody owned {#stage-13}
+
+Four fixes from 2026-10-01 to 10-03 (#28, #29 and two operational changes) share one cause: an
+interface with no owner. One was a payload shape that the server emits and the client reads, with
+no code standing between them. One was a model id that only a remote catalogue decides. One was
+an initialisation path written twice. One was the moment a config change becomes an outage. Each
+broke silently, and in each the visible symptom pointed somewhere other than the cause.
+
+> **On numbering.** This is Stage 13 on `prototype` because it merged first. At the time of
+> writing, nine open PRs also call themselves Stage 13 (#32, #34, #36, #37, #38, #40, #44, #45,
+> #46), several with different content under the same `{#stage-13}` anchor, and #30 and #31 both
+> claim S12.8. Whoever lands them must renumber; merged order is the honest sequence.
+
+### Stage S13.1 The download panel is whatever the tools emit
+
+The Downloads panel showed `unnamed file (file_f2929f3dec7d)` three times. The files downloaded,
+so it read as cosmetic. It was not.
+
+Nothing server-side assembles that panel. `collectDownloads` (`map-ui-prototype/src/agentClient.ts`)
+walks the entire SSE payload and harvests any object holding a `download_url` and a `file_id` or
+`filename`, on the assumption that the three describe one file. The shape a tool emits is
+therefore the whole contract, and no code sits between the two ends to enforce it.
+
+`align_embedding_colors` broke it in both directions at once. Each region entry carried the
+embedding **package**'s `file_id` (an `.npz`) next to the re-coloured **image**'s `download_url`
+(a `.png`), and no filename. Each row was labelled from one file and linked to the other. It
+appeared to work only because the click still downloaded *something*. `embed_zones`'
+`pixel_image` had the milder half: its id and url agreed, but it had no name.
+
+The store had the names all along (`drawn_region_2018_gse_2018-06_2018-09_vectors.npz` and its
+siblings). That was established from evidence, not by reading code. `chat_traces` showed that
+turn calling `align_embedding_colors` on exactly those three ids, and the store's metadata held
+intact names for each. This was the first time the trace store answered a production question.
+
+Each file now travels as its own complete object. The second file **nests** instead of sitting
+under sibling `image_*` keys, because the flat shape is what allowed one file's id to be paired
+with another's url. `test_download_descriptors.py` mirrors the client's harvesting rule in
+Python, since a test checking any other rule would pass while the panel stayed wrong. It also
+includes the shape that shipped, to prove the check rejects it.
+
+### Stage S13.2 A model replaced under us, and a test that asserted a fact about the world
+
+Purdue withdrew `qwen3.6:27b` and put `qwen3.8:27b` in its place. Unlike its predecessor, which
+was listed and "Recommended" while returning zero bytes in 90 s, the replacement is usable as an
+agent model. Verified through `build_llm` rather than raw HTTP:
+
+- it answers in 0.7 s
+- it emits correct `tool_calls` with `finish_reason=tool_calls`
+- it keeps `reasoning_content` through `ReasoningPreservingChatOpenAI`
+- it completes a tool-result round trip in 2.2 s
+
+It reasons harder than 3.6, spending 34 of 38 completion tokens to say "OK", so the deliberate
+absence of `max_tokens` matters more with it, not less.
+
+Both hardcoded fallback defaults moved, along with `_ANVIL_FALLBACK_MODELS`. The second default,
+in the per-request path of `build_llm`, was nearly missed. Measured claims keep the model they
+were measured on: the `max_tokens` numbers still name qwen3.6, with 3.8's own measurement added
+beside them.
+
+The instructive part was a test. `test_the_model_defaults_to_the_verified_id` asserted that
+"qwen3.6:27b is the id AnvilGPT actually serves". No local test talks to Purdue, so that claim
+could not fail when it went stale, and it did go stale. A unit test can pin a **shape** (Open
+WebUI `name:tag`, never HuggingFace `Qwen/...`). It cannot pin a fact owned by a remote service.
+The test now pins the shape and states that the roster is probed. `/agent/models` fetches it
+live, so the picker corrected itself; the fallback tuple is consulted only when that fetch fails.
+
+qwen3.8 was the deployment default from 10-01 until 10-02, when the VM returned to OpenAI
+`gpt-5.6-luna`. It remains selectable per request.
+
+### Stage S13.3 rs-embed: three weeks of 500s behind a green health check
+
+rs-embed (a separate repository on the same host) returned 500 on every `/api/embed` from
+2026-09-08 until 10-01. Its Earth Engine credential was a person's `earthengine authenticate`
+token, and that token stopped being accepted. `/api/models` and `/api/health` kept answering 200
+throughout, the pattern already recorded for services that succeed at nothing.
+
+Two defects hid it, and both are worth recognising elsewhere.
+
+- **The error you saw was not the error that happened.** `ensure_ready()` caught
+  `ee.Initialize`'s exception into a variable it never used, tried a geemap fallback, and
+  propagated only the fallback's failure. The expired credential therefore surfaced as
+  `module 'geemap' has no attribute 'ee_initialize'` (geemap removed that function in 0.38),
+  which sent debugging after the wrong library. A fallback that can fail must chain the primary
+  error, not replace it.
+- **Initialisation was written twice, and the copies disagreed.** The library half reads
+  `EE_PROJECT`. The web app's `_ensure_ee` read `EARTHENGINE_PROJECT` and called `ee.Initialize()`
+  itself with no credentials. A fix applied only to the library changed nothing, because
+  `/api/embed` goes through the web app. The web app now defers to the library's helper.
+
+It now authenticates as a service account, and the unit sets `EE_PROJECT` explicitly. The unit
+previously set no environment at all, so it had been running with no project and inheriting
+whatever project the personal credential named. Verified from inside the agent container:
+`ok=True`, `backend=gee`, `nodata_fraction=0.0`, and a grid that is 100% finite. The status code
+alone was not enough: with no model named, the service returns `{"results":[]}` and still
+answers 200.
+
+Where the fix lives is uneven, and the next maintainer needs to know it. The library half is
+committed on the VM on a branch that has never been pushed. The web-app half cannot be committed
+at all, because rs-embed gitignores `examples/**`. It exists only on that host and in a backup.
+
+### Stage S13.4 A restart is an outage for whoever is mid-turn
+
+Switching the default model on 2026-10-02 at 14:33 UTC was an env-only change, and it cut off
+eight live turns: four 502s and four 200 streams truncated mid-answer, across the prod platform
+backend and real users. Nothing reported it. It surfaced only because a later, unrelated error
+report led to reading the nginx log.
+
+The Deployment section of AGENTS.md said never to *recover* with `--force-recreate`, to preserve
+evidence. It did not cover the other reason to recreate: a config change, which needs one and
+has a different cost. Two habits are now written down. Check for streams in flight before
+recreating. Use `--no-deps`, because without it the same command also recreated `mcp-server` and
+`embedding-server`, and agent-api then waited on their health checks.
+
+### Stage S13.5 What this stage did not fix
+
+- **An error a user saw at about 18:05 UTC on 10-02** ("Error getting response from I-GUIDE AI").
+  The agent ruled itself out with evidence: every turn it received from 17:00 to 19:00 finished
+  (11 started, 11 traces written, each ending `node_completed`, none with an error event inside
+  the stream). No chat request reached it between 17:42 and 18:35. The failure therefore
+  happened in the platform frontend or backend, whose logs this repository cannot see.
+- **Four emitters whose files never reach the panel**: `image_file_id` at three sites in
+  `rs_embed_tools.py` and `predictions_file_id` at one. These files are not unnamed; they are
+  absent. Making them appear changes what users see, so that is a decision rather than a fix.
+- **rs-embed's web-app half is untracked**, as above. A rebuilt host loses it.
+- **This file's numbering**, as noted at the top of the stage.
+## Stage 14 — A promise kept by rounding luck {#stage-14}
+
+`spatial_weights` with `weights='distance_band'` and no `threshold_km` tells the user it *"used
+the smallest distance that leaves no island"*. On the deployed Linux image that was false: the
+test lattice came back with one island. The test that checks the promise arrived with the tool
+(`7cb9f47`, 2026-08-19) and passes on a Mac, so nobody saw it fail until the suite ran on
+Linux: in `backend_swap`'s CI, which fixed it in `4e8d327`; in the deployed-version CI being
+added to `prototype` (`460cd25`, branch `claude/ci-deployed-constraints`); and inside the deployed
+`agent-api` container on 2026-10-01.
+
+This is stage 14 because that CI change opens stage 13, *Testing what is deployed*. Its first
+Linux run found this tie, recorded it, and left the test failing for a separate change. This is
+that change.
+
+### Stage S14.1 Where the island came from
+
+The automatic threshold is `libpysal.weights.min_threshold_distance`, which returns the critical
+pair's distance as a square root. `DistanceBand` then admits a pair when its **squared** distance
+is at most the threshold squared, because scipy's KD-tree compares in squared space. Squaring a
+rounded square root can come back one ulp short of where it started, and on the 8×8 test lattice
+(projected to UTM 31N) it does. Measured on both machines:
+
+* Both compute the same threshold to the last bit, 110,884.46616304158 m, and the distance the
+  KD-tree reports for the critical pair equals it exactly: the "margin of 0.0 m". The Linux band
+  still drops the pair, because its squared distance is one ulp above the squared threshold.
+  Dropping it leaves one cell with no neighbour at all.
+* The two machines project one easting of that pair **one ulp apart** (1.2e-10 m at about
+  999 km), with identical PROJ 9.5.1 and GEOS 3.13.1. Their KD-trees also disagree on the same
+  coordinates: on the Mac's, the Mac's KD-tree keeps the pair and the Linux one drops it.
+  Computed by hand, that sum of squares lands exactly on the squared threshold if `dy*dy` is
+  fused into the final addition, and one ulp above it with plain arithmetic.
+
+Swapping the pair's exact coordinates between the machines shows that either difference alone
+drops the pair:
+
+| pair's coordinates from | macOS/arm64 KD-tree | Linux/x86-64 KD-tree |
+|---|---|---|
+| macOS | kept | **dropped** |
+| Linux | **dropped** | **dropped** |
+
+The coincidence was the Mac passing, not Linux failing. The pair survived only where the Mac's
+coordinates met the Mac's arithmetic. These two machines also run different library versions
+(libpysal 4.15.0, scipy 1.15.3, numpy 2.1.3 on the Mac; 4.14.1, 1.17.1, 2.4.6 in the container),
+but the session working on the extraction branch pinned CI's exact versions on a Mac and still got
+no island, so the split follows the platform rather than a version.
+
+### Stage S14.2 The fix, and what it costs
+
+One line after `min_threshold_distance`: `thresh *= 1.0 + 1e-9`. That is about 0.1 mm at 100 km
+and 7.6 million ulps at this threshold, so it absorbs any last-bit disagreement while staying far
+below any distance an analysis could care about. It is the line `backend_swap` carries in
+`4e8d327`, after which that branch's Linux CI went green. This is the only place the code derives
+a band from `min_threshold_distance`.
+
+**Revised during the work:** the line and its comment are now copied from `4e8d327` verbatim.
+The first version reworded the comment, and the extraction-integration branch already carries
+`4e8d327`, so a test merge of `prototype` into it conflicted in this file. With identical lines
+the same test merge has no conflict at all. The note's caveat is a separate comment two lines
+further down, where it cannot collide.
+
+What it changes, measured on the lattice: nothing on the Mac (146 links before and after), and on
+Linux exactly the dropped pair (144 links and 1 island before, 146 and 0 after). Only two
+directed pairs lie within a relative 1e-9 of the threshold, and they are that pair. The note
+keeps its wording and prints the padded distance. That differs from the strict minimum far below
+the note's metre precision, and the unpadded value is not reliably island-free, so "the smallest
+distance that leaves no island" is now true on every platform instead of one.
+
+`test_default_distance_band_survives_a_rounding_disagreement` makes the failure reproducible
+anywhere. It shrinks the computed minimum by a relative 1e-12, far more than one ulp and a
+thousandth of the pad. Without the pad it fails on the Mac with one island, which the original
+test never could.
+
+Verification ran inside the deployed `agent-api` container (Python 3.11.16, x86-64). Before ran
+against the deployed module, byte-identical to `prototype`'s; after ran against a copy of
+`agent_runtime/` in `/tmp` with only this module replaced. Nothing was deployed.
+`test_spatial_stats_tools.py` went from 2 failed and 33 passed to 35 passed. The Mac's full suite
+went from 1645 passed and 4 skipped to 1646 and 4, the difference being the new test.
+
+### Stage S14.3 The reason worth keeping
+
+A correctness promise was being met by rounding luck, and only a Linux run could show it. The
+developer's machine was the one platform where the luck held, so the test that encoded the
+promise passed there from the day it was written while the deployed image broke it. A promise of
+the form "the smallest X such that…" over floating point needs a margin by construction, and a
+test that perturbs its input past the rounding instead of waiting for an unlucky platform.
+
+Not deployed: the running image still has the unpadded threshold, so a caller that omits
+`threshold_km` can still get an island until the next image rebuild.
+## Stage 15 — What counts as a date is decided here, not by pandas {#stage-15}
 
 *2026-10-01, `claude/temporal-numeric-code-columns`.*
 
@@ -1451,7 +1667,7 @@ versions could show it. `test_csv_with_coordinates_flows_through` failed inside 
 without a version, so the image takes whatever is current when it is built. `prototype` has no
 lock file and no CI; separate tasks cover both.
 
-### Stage S13.1 The mechanism, and why the obvious fix would have missed it
+### Stage S15.1 The mechanism, and why the obvious fix would have missed it
 
 The test's `Beat` column (1234, 1235, 1236) was offered as a time column beside `Date`. The
 diagnosis this work started from suspected the numeric path, numbers falling through to the
@@ -1472,7 +1688,7 @@ not format inference:
   and coerced it to NaT. The test had been passing on an accident of `datetime64[ns]`.
 
 Across 31 column shapes, every difference between the two versions but one is a year outside
-1678–2262; the exception is in S13.4. Measured on the two versions:
+1678–2262; the exception is in S15.4. Measured on the two versions:
 
 | input | pandas 2.2.3 | pandas 3.0.5, deployed |
 |---|---|---|
@@ -1484,7 +1700,7 @@ Across 31 column shapes, every difference between the two versions but one is a 
 The last row is pandas 2's own failure: the beats parse as years there too, and their 501-year
 span overflows its nanosecond `Timedelta`.
 
-### Stage S13.2 Three rules, each stated where pandas used to decide
+### Stage S15.2 Three rules, each stated where pandas used to decide
 
 1. **A column is numeric by what it holds, not by its dtype.** `_as_numbers` accepts typed
    numbers, and text in which every value is a plain number; blanks and the NA markers
@@ -1499,10 +1715,10 @@ span overflows its nanosecond `Timedelta`.
    from moving with the pandas version. It is the rule that stops the IUCR column, which `041A`
    keeps from counting as numeric. A column the source already typed as datetime is not clamped.
 
-After the change the 31 shapes give identical results on both versions, apart from S13.4, and
+After the change the 31 shapes give identical results on both versions, apart from S15.4, and
 every CSV in the table detects `Date` (or `Year`) alone.
 
-### Stage S13.3 Behaviour that changed on purpose
+### Stage S15.3 Behaviour that changed on purpose
 
 * A CSV column of epoch seconds now parses. It parsed as nothing on either version.
 * A CSV year column with a gap, which `to_csv` writes as `2019.0` and an empty cell, now reads as
@@ -1521,7 +1737,7 @@ column whose blank cells force the whole 22-strategy ladder, pays under a second
 43 s. A million beats held as text got cheaper, 0.74 s against 1.39 s, because the text ladder no
 longer runs on them; before the change pandas 2.2.3 read 125,531 of them as years.
 
-### Stage S13.4 Found here, not fixed
+### Stage S15.4 Found here, not fixed
 
 * **Mixed UTC offsets stopped parsing on pandas 3.** An ISO column mixing `Z` and `+01:00`, or a
   US daylight-saving pair such as `-06:00` and `-05:00`, parses 2 of 2 on pandas 2.2.3 and 0 of 2
@@ -1533,7 +1749,7 @@ longer runs on them; before the change pandas 2.2.3 read 125,531 of them as year
 * **A code column inside 1678–2262 with a time-ish name** still parses as years: a `Report Area`
   holding 1711–2212 would. Only the name tells it from a year column, and here the name says time.
 
-### Stage S13.5 Verified where the failure lives
+### Stage S15.5 Verified where the failure lives
 
 | | unfixed | fixed |
 |---|---|---|
