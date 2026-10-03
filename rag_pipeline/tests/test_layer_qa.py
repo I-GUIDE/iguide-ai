@@ -172,15 +172,15 @@ def test_inspect_artifacts_is_quiet_when_the_output_is_fine(tmp_path):
 
 def test_the_llm_trace_names_the_model_not_the_langchain_class():
     """AnvilGPT, vLLM and every other OpenAI-compatible endpoint arrive as ChatOpenAI, so the
-    trace said "ChatOpenAI started with 2 message(s)" while gpt-oss:120b or qwen3.6:27b was
+    trace said "ChatOpenAI started with 2 message(s)" while gpt-oss:120b or qwen3.8:27b was
     answering. The transport does not tell you who answered — the invocation params do."""
     from agent_runtime.streaming_trace import StreamingTraceCallbackHandler as H
 
     serialized = {"name": "ChatOpenAI"}
     assert H._model_label(serialized, {"invocation_params": {"model": "gpt-oss:120b"}}) \
         == "gpt-oss:120b"
-    assert H._model_label(serialized, {"invocation_params": {"model_name": "qwen3.6:27b"}}) \
-        == "qwen3.6:27b"
+    assert H._model_label(serialized, {"invocation_params": {"model_name": "qwen3.8:27b"}}) \
+        == "qwen3.8:27b"
     assert H._model_label(serialized, {"metadata": {"ls_model_name": "claude-sonnet-5"}}) \
         == "claude-sonnet-5"
     # No params at all: the class name is still better than nothing.

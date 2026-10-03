@@ -10,7 +10,7 @@ export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
   apiKey: string;
-  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.6:27b'. Empty = the agent's default. */
+  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.8:27b'. Empty = the agent's default. */
   model?: string;
   /** 'openai' | 'anvilgpt'. Empty lets the server infer it from the model id. */
   provider?: string;

@@ -755,11 +755,16 @@ def health():
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
 
 
+# Read relative to the repository root, which is /app in the agent-api image, so the page is a
+# deployment input: rag_pipeline/Dockerfile copies it there, and
+# rag_pipeline/tests/test_image_dashboard_page.py fails if that COPY is dropped or misplaced.
+_DASHBOARD_PAGE = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
+
+
 @app.route('/agent/dashboard', methods=['GET'])
 def agent_dashboard():
     """Serve the local streaming agent dashboard."""
-    dashboard_path = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
-    return send_file(dashboard_path)
+    return send_file(_DASHBOARD_PAGE)
 
 
 def _list_code_peers():
