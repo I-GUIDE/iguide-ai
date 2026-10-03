@@ -21,7 +21,9 @@ seconds or milliseconds. Text gets the text ladder: inferred single format, pand
 ``format="mixed"``, then an explicit format list. Either way an inferred time must fall in
 the years ``_YEAR_FLOOR``..``_YEAR_CEILING``. Timestamps that carry a UTC offset are converted to
 UTC and made tz-naive, so one dataset never mixes wall-clock and offset time; everything
-downstream (windows, periods, hour-of-day) is therefore in UTC for such inputs.
+downstream (windows, periods, hour-of-day) is therefore in UTC for such inputs, as it is for
+epoch numbers, which count from 1970 in UTC. Every report names its clock (``clock``: ``"UTC"``
+for those, ``"local"`` for times as written), and a chart in UTC says so on its axis.
 
 Conventions copied from ``langchain_geo_tools``: heavy imports deferred into tool bodies,
 every tool returns a JSON string and NEVER raises, metric work happens in a projected CRS
@@ -322,6 +324,41 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
     return best, best_label
 
 
+# The end of a time that carries a zone, as pandas reads one: an offset (-06:00, -0600, -06), Z,
+# UTC or GMT after a time of day. The year may still follow, as in Twitter's created_at
+# ("Mon Jan 05 09:00:00 -0600 2026"), and so may a comment, as in an email's "-0600 (CST)",
+# which pandas 3 reads. A date alone is not enough, or 2026-01-05 would end in "-05".
+_ZONE_SUFFIX = (r"(?:\d{1,2}:\d{2}(?::\d{2})?|\d[T ]\d{2}(?:\d{2}){0,2})(?:[.,]\d+)?"
+                r"(?:\s*[ap]\.?m\.?)?\s*(?:z|utc|gmt|(?:utc|gmt)?\s*[+-]\d{1,2}(?::?\d{2}){0,2})"
+                r"(?:\s+\d{4})?(?:\s*\([^()]*\))?$")
+# The pattern only ever asks for "a digit", so text with every digit made 0 matches exactly when
+# the text does, and a column of distinct times is tested once per layout instead of once per row.
+_DIGITS_TO_ZERO = str.maketrans("123456789", "000000000")
+
+
+def _clock(values: Any, parsed: Any, method: str) -> Optional[str]:
+    """``"UTC"`` when parse_time_series gave UTC times, ``"local"`` when it gave clock times as written.
+
+    A time that carries a UTC offset was converted to UTC: text ending in an offset, Z, UTC or
+    GMT, or a column whose type has a zone, as GDAL types a GeoJSON's ISO times. An epoch number
+    counts from 1970 in UTC. Any other time is the clock time it was written in, in a zone the
+    data does not name. Text without an offset beside text with one is read as UTC, so a single
+    offset makes the whole column UTC. ``None`` when nothing parsed.
+    """
+    import pandas as pd
+
+    if method == "unparsed":
+        return None
+    series = values if isinstance(values, pd.Series) else pd.Series(values)
+    if method.startswith("epoch") or isinstance(series.dtype, pd.DatetimeTZDtype):
+        return "UTC"
+    if method not in ("inferred single format", "mixed formats"):  # no explicit format has a %z
+        return "local"
+    text = _clean_text(series)[parsed.notna().to_numpy()]
+    layouts = pd.Series(text.str.translate(_DIGITS_TO_ZERO).unique(), dtype="string").dropna()
+    return "UTC" if bool(layouts.str.contains(_ZONE_SUFFIX, case=False, regex=True).any()) else "local"
+
+
 def _granularity(parsed: Any) -> Optional[str]:
     """The finest unit that is actually USED — a column of midnights is daily, not secondly."""
     valid = parsed.dropna()
@@ -355,13 +392,18 @@ def _span(parsed: Any) -> Dict[str, Any]:
     }
 
 
-def _profile(parsed: Any, column: str, method: str) -> Dict[str, Any]:
-    """The per-column report shared by detect_time_column and every other tool."""
+def _profile(parsed: Any, column: str, method: str, values: Any) -> Dict[str, Any]:
+    """The per-column report shared by detect_time_column and every other tool.
+
+    ``values`` is the column as it was read, which ``clock`` needs: the parsed times no longer
+    show whether they carried an offset.
+    """
     total = int(len(parsed))
     ok = int(parsed.notna().sum())
     return {
         "column": column,
         "parse_method": method,
+        "clock": _clock(values, parsed, method),
         "rows": total,
         "parsed_rows": ok,
         "failed_rows": total - ok,
@@ -410,7 +452,7 @@ def _rank_time_columns(frame: Any, limit: int = 6) -> List[Dict[str, Any]]:
     scored: List[Tuple[float, int, Dict[str, Any]]] = []
     for col in _candidate_columns(sample):
         parsed, method = parse_time_series(sample[col])
-        report = _profile(parsed, str(col), method)
+        report = _profile(parsed, str(col), method, sample[col])
         if report["parse_rate"] < _MIN_PARSE_RATE or report["parsed_rows"] == 0:
             continue
         report["name_suggests_time"] = _name_hint(col)
@@ -443,7 +485,7 @@ def _resolve_time_column(frame: Any, time_column: Optional[str]) -> Tuple[Any, D
                     columns=columns[:60],
                 )
         parsed, method = parse_time_series(frame[wanted])
-        report = _profile(parsed, wanted, method)
+        report = _profile(parsed, wanted, method, frame[wanted])
         if report["parsed_rows"] == 0:
             ranked = _rank_time_columns(frame)
             cands = [r["column"] for r in ranked]
@@ -466,7 +508,7 @@ def _resolve_time_column(frame: Any, time_column: Optional[str]) -> Tuple[Any, D
         )
     chosen = ranked[0]["column"]
     parsed, method = parse_time_series(frame[chosen])  # re-parse in FULL (ranking used a sample)
-    report = _profile(parsed, chosen, method)
+    report = _profile(parsed, chosen, method, frame[chosen])
     report["auto_detected"] = True
     report["other_candidates"] = [r["column"] for r in ranked[1:]]
     return parsed, report
@@ -772,7 +814,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 payload["note"] = (
                     f"{best['column']}: {best['parsed_rows']}/{best['rows']} rows parsed "
                     f"({best['parse_method']}), granularity {best['granularity']}, "
-                    f"{best['span']['start']} -> {best['span']['end']}")
+                    f"{best['span']['start']} -> {best['span']['end']}"
+                    + (" (UTC)" if best["clock"] == "UTC" else ""))
                 if best["failed_rows"]:
                     payload["warning"] = (
                         f"{best['failed_rows']} row(s) ({best['null_rate']:.1%}) have no usable "
@@ -901,7 +944,9 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """Count records per time period and return a CSV of the table plus a PNG chart.
         `freq`: hour|day|week|month|quarter|year, or a cyclical profile hour_of_day |
         day_of_week | month_of_year. `by` splits the series by a category column (top_n
-        categories kept). NON-SPATIAL: this returns a chart and a table, NOT a map layer. """
+        categories kept). NON-SPATIAL: this returns a chart and a table, NOT a map layer.
+        Times that carried a UTC offset, and epoch numbers, are counted in UTC, and the
+        chart's axis and ``parse.clock`` say so. """
         fig = None
         try:
             import matplotlib
@@ -934,27 +979,32 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if times.empty:
                 raise ValueError(f"no parseable timestamp in column {report['column']!r}")
 
+            # Times that carried an offset, and epoch numbers, are UTC ones by now, and the axis
+            # says so. It once read "local clock time" under UTC hours: 09:00 at -06:00 counted
+            # at hour 15, so a Chicago peak moved six hours under a label saying it had not.
+            in_utc = report["clock"] == "UTC"
+            clock = " (UTC)" if in_utc else ""
             if kind == "period":
                 period_start, labels = _period_labels(times, code)
                 order = pd.DataFrame({"period": labels, "_start": period_start})
                 order = order.drop_duplicates("period").sort_values("_start")
                 index_order = order["period"].tolist()
                 axis_label = {"h": "hour", "D": "day", "W": "week (starting)",
-                              "M": "month", "Q": "quarter", "Y": "year"}[code]
+                              "M": "month", "Q": "quarter", "Y": "year"}[code] + clock
                 chart_kind = "line"
                 keys = labels
             elif code == "hour_of_day":
                 keys = times.dt.hour.astype(int).map(lambda h: f"{h:02d}")
                 index_order = [f"{h:02d}" for h in range(24)]
-                axis_label, chart_kind = "hour of day (local clock time)", "bar"
+                axis_label, chart_kind = "hour of day" + (clock or " (local clock time)"), "bar"
             elif code == "day_of_week":
                 keys = times.dt.day_name()
                 index_order = list(_DOW_ORDER)
-                axis_label, chart_kind = "day of week", "bar"
+                axis_label, chart_kind = "day of week" + clock, "bar"
             else:  # month_of_year
                 keys = times.dt.month.map(lambda m: _MONTH_ORDER[int(m) - 1])
                 index_order = list(_MONTH_ORDER)
-                axis_label, chart_kind = "month of year", "bar"
+                axis_label, chart_kind = "month of year" + clock, "bar"
 
             work = pd.DataFrame({"period": list(keys)})
             note_by = None
@@ -1037,6 +1087,11 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             }
             if note_by:
                 payload["by_note"] = note_by
+            if in_utc:
+                payload["clock_note"] = (
+                    "these times carried a UTC offset or were epoch numbers, so they are counted "
+                    "in UTC: every hour, day and month here is a UTC one, not the local clock "
+                    "time the records were made in")
             if report["failed_rows"]:
                 payload["warning"] = (f"{report['failed_rows']} row(s) had no usable timestamp "
                                       "and are not counted anywhere in this series")
@@ -1371,7 +1426,9 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                          "'which months?'. freq: hour|day|week|month|quarter|year, or a cyclical "
                          "profile hour_of_day|day_of_week|month_of_year. `by` splits the series by a "
                          "category column. This output is NON-SPATIAL: it produces a chart and a "
-                         "table, not a map layer.")),
+                         "table, not a map layer. Times that carried a UTC offset, and epoch "
+                         "numbers, are counted in UTC, not local clock time; parse.clock says "
+                         "which.")),
         StructuredTool.from_function(func=accept_null_defaults(compare_periods), name="compare_periods", metadata=meta,
             description=("Compare two time windows per AREA: counts records inside each polygon of "
                          "an areas layer (tracts, neighborhoods, counties) in period_a and period_b "
