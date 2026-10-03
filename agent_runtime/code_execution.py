@@ -35,6 +35,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Children are started through fork_safe, never subprocess directly: on macOS a fork of this
+# process after its first reprojection kills the child before exec (see fork_safe).
+from agent_runtime import fork_safe
+
 def _num_env(name: str, default: float) -> float:
     """A numeric env var that tolerates being present but blank.
 
@@ -1056,13 +1060,13 @@ class DockerCodeExecutor(CodeExecutor):
             self.image, "python", "-c", _PROBE_SCRIPT, json.dumps(_IMPORT_TO_PIP),
         ]
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+            proc = fork_safe.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
         except subprocess.TimeoutExpired:
             # --name exists for exactly this: without the kill the container keeps running
             # after we stop waiting for it. The kill is best-effort — a probe that cannot
             # clean up still has to return "unknown" rather than raise into the caller's run.
             try:
-                subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
+                fork_safe.run(["docker", "kill", name], capture_output=True, timeout=30)
             except Exception:
                 pass
             return None
@@ -1164,11 +1168,11 @@ class DockerCodeExecutor(CodeExecutor):
                     constraints_name = None
             iname = f"agentexec_pip_{uuid.uuid4().hex[:12]}"
             try:
-                inst = subprocess.run(
+                inst = fork_safe.run(
                     self.build_install_argv(work, dependencies, iname, deps_cache, constraints_name),
                     capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT + 5)
             except subprocess.TimeoutExpired as exc:
-                subprocess.run(["docker", "kill", iname], capture_output=True)
+                fork_safe.run(["docker", "kill", iname], capture_output=True)
                 _evict_torn_cache(deps_cache)
                 return None, (exc.stdout or ""), (exc.stderr or ""), True, "dependency install timed out"
             except FileNotFoundError:
@@ -1179,11 +1183,11 @@ class DockerCodeExecutor(CodeExecutor):
         # Phase 2 (exec): NO network.
         name = f"agentexec_{uuid.uuid4().hex[:12]}"
         try:
-            proc = subprocess.run(self.build_argv(work, name, deps_cache, entrypoint),
-                                  capture_output=True, text=True, timeout=timeout + 5)
+            proc = fork_safe.run(self.build_argv(work, name, deps_cache, entrypoint),
+                                 capture_output=True, text=True, timeout=timeout + 5)
             return proc.returncode, proc.stdout, proc.stderr, False, None
         except subprocess.TimeoutExpired as exc:
-            subprocess.run(["docker", "kill", name], capture_output=True)
+            fork_safe.run(["docker", "kill", name], capture_output=True)
             return None, (exc.stdout or ""), (exc.stderr or ""), True, "execution timed out"
         except FileNotFoundError:
             return None, "", "", False, "docker executable not found"
@@ -1228,7 +1232,7 @@ class LocalSubprocessExecutor(CodeExecutor):
         deps_dir = deps_cache if deps_cache is not None else (work / DEPS_DIRNAME)
         if dependencies:
             try:
-                inst = subprocess.run(
+                inst = fork_safe.run(
                     [sys.executable or "python", "-m", "pip", "install", "--no-cache-dir",
                      "--upgrade", "--target", str(deps_dir), *dependencies],
                     capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT,
@@ -1242,7 +1246,7 @@ class LocalSubprocessExecutor(CodeExecutor):
         if dependencies or deps_cache is not None:
             env["PYTHONPATH"] = str(deps_dir)
         try:
-            proc = subprocess.run(
+            proc = fork_safe.run(
                 [sys.executable or "python", entrypoint or "script.py"],
                 cwd=str(work), env=env, capture_output=True, text=True, timeout=timeout,
             )

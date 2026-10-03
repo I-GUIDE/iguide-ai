@@ -371,6 +371,9 @@ export default function App() {
     memoryRef.current = rec.memoryId ?? null;
     sessionFileIds.current = [...(rec.fileIds || [])];
     pendingFileIds.current = [...(rec.fileIds || [])];
+    // As at upload time: each upload counts as drawn, so a later turn that lists it does not
+    // bring back a second copy of it through the artifact fallback.
+    for (const id of rec.fileIds || []) layerSourceFiles.current.add(id);
     setMessages(rec.messages || []);
     setLayers([]);
     autoRevealed.current = false;
@@ -780,13 +783,19 @@ export default function App() {
     }
     if (mode === 'live') {
       try {
-        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig());
+        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could
         // not survive a reload. Now that the same bytes live in the file store, record where
         // to re-fetch them so a restored session shows the upload too.
         for (const r of recs) {
+          // A GeoJSON upload is on the map already, as the preview above, so the artifact fallback
+          // must not draw it again. It did, after any turn whose results carried the upload's
+          // download record, and the agent's file listing carries it now that the upload names
+          // this conversation. By id rather than matched to the preview by name, because the
+          // server's secure_filename rewrites names: "My Data.geojson" is stored as "My_Data.geojson".
+          if (r.file_id) layerSourceFiles.current.add(r.file_id);
           const stem = (r.filename || '').replace(/\.(geo)?json$/i, '');
           if (stem && r.download_url) {
             setLayers((prev) => prev.map((l) => (

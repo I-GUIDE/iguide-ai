@@ -1,6 +1,6 @@
 # Live Integration Tests
 
-These scripts exercise real external services. They are **not** part of the automated pytest suite — run them manually when you need to verify a live integration.
+These scripts exercise real external services. `python3 -m pytest tests/` collects them but skips every one (see `conftest.py` here) — run them manually when you need to verify a live integration.
 
 Run all scripts from the **repo root**:
 
@@ -11,6 +11,14 @@ python tests/live/test_neo4j.py
 python tests/live/test_spatial.py
 python tests/live/test_opengeodata_live.py
 ```
+
+Or all of them under pytest, which runs them only when asked:
+
+```bash
+RUN_LIVE_BACKEND_TESTS=1 python3 -m pytest tests/live -q
+```
+
+From a worktree under `.claude/worktrees/`, either way reads the **main checkout's** `.env`: the modules they import call a bare `load_dotenv()`, which walks up out of the worktree. They then hit whatever that file points at, which can be production.
 
 ---
 

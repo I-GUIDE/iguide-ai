@@ -1,11 +1,15 @@
 FROM python:3.11-slim
 
-# System deps: build tools + GDAL for geopandas/fiona/rasterio
+# System deps: build tools + GDAL for geopandas/fiona/rasterio. libexpat1 is named on its own
+# account: the rasterio and fiona wheels bundle their own GDAL, which links the system's
+# libexpat.so.1, and python:3.11-slim does not ship it. The GDAL packages pull it in today;
+# naming it keeps both imports working if those are ever dropped (see rag_pipeline/Dockerfile).
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     gdal-bin \
     libgdal-dev \
+    libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,9 +22,12 @@ ENV MPLBACKEND=Agg \
     CPLUS_INCLUDE_PATH=/usr/include/gdal \
     C_INCLUDE_PATH=/usr/include/gdal
 
-# Copy requirements and install Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install Python deps through the lock, as rag_pipeline/Dockerfile does.
+# Both images install the same requirements.txt, and constraints.txt (the agent-api image's
+# `pip freeze`) holds them to the same versions. Unpinned, every rebuild resolved fresh, so
+# rebuilding one image alone (`up -d --build agent-api`) would leave the two on different stacks.
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy packages the tool modules import from
 COPY MCP_server/ ./MCP_server/
