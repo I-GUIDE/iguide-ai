@@ -179,7 +179,10 @@ python -m agent_runtime.graph_runtime \
 docker-compose up
 ```
 
-Starts three services: embedding-server (5000), metadata-extraction-server (5001), rag-pipeline (5002).
+Starts three services: embedding-server (5000), mcp-server (8000) and agent-api (3500 → 5002).
+Each is published on 127.0.0.1 only, so from another machine go through a reverse proxy or an
+SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <host>`, then the Swagger UI at
+http://localhost:8000/api/docs). `--profile ingestion` adds metadata-extraction-server (5001).
 
 ## API Endpoints
 
