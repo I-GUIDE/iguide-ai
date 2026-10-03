@@ -1,7 +1,8 @@
 """What the search peer binds from the MCP server, read off its real tool assembly.
 
 The search peer passed no MCP module list, and ``make_langchain_mcp_tools`` reads that as every
-tool the server registers. MCP is on for an API request by default, so the deployed search peer
+tool the server registers, less the two it unbinds by default (``search_external_resources``,
+``web_search_geo_links``). MCP is on for an API request by default, so the deployed search peer
 bound 39 tools and 14 of them were MCP tools: 2,248 of its 7,183 schema tokens (o200k), and about
 1,584 real input tokens on every search model call. The deployed journal holds 166 search calls,
 and none called an MCP tool. ``SEARCH_AGENT_PROMPT`` names one MCP tool, rule 8's
