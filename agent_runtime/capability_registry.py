@@ -14,14 +14,23 @@ names are arguments rather than datasets — because that is judgement, not inve
 generating it would lose the nuance that makes it useful.
 
 Keeping this honest is one test: ``rag_pipeline/tests/test_supervisor_knows_its_peers.py``
-asserts that the factories named here are exactly the factories the peer builders call. Bind a
-toolset without describing it and that test fails with its name.
+asserts, per peer, that the factories named here for a peer are exactly the factories that peer
+binds, wherever the binding is made: its own builder in ``graph.py``, or ``build_agent_executor``
+and ``collect_tools``, which the test reaches by running the peer's real assembly code. Bind a
+toolset without describing it and that test fails with its name and the place it is bound.
+
+The ``code`` capability is the one whose peer is swapped per request (``code_peer``, falling back
+to ``AGENT_CODE_PEER``), so its description is per BACKEND — ``describe_code_peer``. The LangChain
+peer binds ``CAPABILITIES["code"]``; a CLI peer binds none of it and is described as itself. The
+decider's ``code`` line stayed hand-written when the ``analyze`` line was generated, and it
+drifted both ways: a code-only entry here never reached it, and it promised every backend the
+LangChain toolkit, plus "saved workflows", which the code peer cannot run.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -31,10 +40,15 @@ class Toolset:
     factory: str
     #: A clause, not a sentence — these are joined into a list the model reads at speed.
     summary: str
+    #: The factory binds nothing unless skill discovery finds a skill (``make_skill_tools`` returns
+    #: ``[]`` for an empty registry), so the clause is true only then. The deployed image shipped
+    #: no skill roots at all while the decider was told the code peer had skills.
+    requires_skills: bool = False
 
 
-# Both peers bind nearly the same spatial toolkit; ``peers`` records which ones actually get it,
-# so a capability offered by only one is never described as if both had it.
+# Both peers bind nearly the same spatial toolkit; the split below records which ones actually get
+# it, so a capability offered by only one is never described as if both had it, and one both have
+# is never described as one peer's.
 _SHARED: Tuple[Toolset, ...] = (
     Toolset("make_langchain_geocode_tools",
             "geocoding a place name or address to coordinates"),
@@ -66,6 +80,23 @@ _SHARED: Tuple[Toolset, ...] = (
             "listing the files this conversation has produced"),
     Toolset("make_code_execution_tools",
             "running code in a sandbox"),
+    # Shared, not code-only: both peers bind the same two loaders over the same skill roots. The
+    # code peer calls make_skill_tools itself, and since 6ba1bd3 build_agent_executor adds it for
+    # every peer that hands over a preloaded tool list, analyze included. Described as the code
+    # peer's alone, it made matching a skill look like a reason to choose code, and with a CLI
+    # code peer, which loads none, the prompt mentioned skills nowhere. The clause promises
+    # loading, which both can do. Following a skill takes the tools it names, and the rest of
+    # each line says which ones that peer has.
+    #
+    # This clause used to read "packaged skills and saved workflows", and the decider repeated it
+    # as a capability. The code peer cannot run a saved workflow: a notebook workflow the
+    # extractor packages as a skill runs through an MCP tool (the server's
+    # ``run_notebook_workflow``), and MCP tools are bound in the analyze and search peers behind
+    # include_mcp_tools, never in the code peer. Running one is that MCP toolset's capability, not
+    # this one's.
+    Toolset("make_skill_tools",
+            "loading packaged skills: step-by-step instructions for particular analyses",
+            requires_skills=True),
 )
 
 _ANALYZE_ONLY: Tuple[Toolset, ...] = (
@@ -74,9 +105,9 @@ _ANALYZE_ONLY: Tuple[Toolset, ...] = (
     Toolset("make_langchain_mcp_tools", "external MCP tools, including a live QGIS instance"),
 )
 
-_CODE_ONLY: Tuple[Toolset, ...] = (
-    Toolset("make_skill_tools", "packaged skills and saved workflows"),
-)
+# Nothing is code-only today. A toolset only the LangChain code peer binds belongs here, and
+# reaches the decider through describe_code_peer.
+_CODE_ONLY: Tuple[Toolset, ...] = ()
 
 CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
     "analyze": _SHARED + _ANALYZE_ONLY,
@@ -85,16 +116,92 @@ CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
 
 
 def factories() -> set:
-    """Every factory this registry claims a peer binds. Compared against reality by a test."""
+    """Every factory this registry claims some peer binds. The drift test compares per peer."""
     return {t.factory for caps in CAPABILITIES.values() for t in caps}
 
 
-def describe(capability: str) -> str:
-    """The inventory clause list for a capability, deduplicated and in declared order."""
+def skills_available(skill_roots: Optional[Sequence[str]] = None) -> bool:
+    """Whether ``make_skill_tools`` would bind anything: the same discovery over the same roots.
+
+    Never raises. An unreadable root reads as "no skills", which under-describes the peer —
+    the cheaper error, since over-describing it sends work to tools that are not there.
+    """
+    try:
+        from agent_runtime.skills import SkillRegistry
+
+        return bool(SkillRegistry.discover(skill_roots))
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        return False
+
+
+def describe(capability: str, *, skill_roots: Optional[Sequence[str]] = None) -> str:
+    """The inventory clause list for a capability, deduplicated and in declared order.
+
+    ``skill_roots`` are the roots the peer's skill tools are built from. A ``requires_skills``
+    toolset is described only when discovery there finds at least one skill.
+    """
     seen, out = set(), []
+    skills: Optional[bool] = None  # discovered once, and only if a toolset needs the answer
     for tool in CAPABILITIES.get(capability, ()):  # declared order is the reading order
+        if tool.requires_skills:
+            if skills is None:
+                skills = skills_available(skill_roots)
+            if not skills:
+                continue
         if tool.summary in seen:
             continue
         seen.add(tool.summary)
         out.append(tool.summary)
     return "; ".join(out)
+
+
+# --- The code peer is swappable, so "what code can do" depends on which one runs ----------
+#
+# ``code_peer`` on the request, falling back to ``AGENT_CODE_PEER``, selects the LangChain peer
+# (which binds ``CAPABILITIES["code"]``) or an agentic CLI (``agent_runtime/claude_peer.py``,
+# ``agent_runtime/opencode_peer.py``) that binds NONE of it. Describing the toolkit while a CLI
+# runs tells the supervisor about tools that are not there.
+
+#: Which description row each backend reads, keyed by the backend name the code node resolves.
+#: ``code_peer`` and ``cli_peer`` are the names the per-consumer capability table on the
+#: extraction work gives these same two peers, so when that table lands its rows are read here
+#: by the same key instead of being kept in a parallel structure.
+CODE_PEER_CONSUMER: Dict[str, str] = {
+    "langchain": "code_peer",
+    "claude": "cli_peer",
+    "opencode": "cli_peer",
+}
+
+#: How the decider names each CLI backend.
+CLI_PEER_NAMES: Dict[str, str] = {"claude": "Claude Code", "opencode": "opencode"}
+
+#: What a CLI peer has INSTEAD of the toolkit. Each clause is a fact of the two CLI modules: a
+#: fresh container per run that keeps network access (``build_docker_argv``, held by a test),
+#: uploads staged into ``/work``, evidence and analysis inlined into the brief and capped
+#: (``_build_peer_prompt``; files an earlier step produced are NOT staged), and any GeoJSON it
+#: writes turned into a layer (``build_map_layers``).
+CLI_PEER: Tuple[str, ...] = (
+    "writing, running and debugging its own code, with network access to install packages and "
+    "fetch data",
+    "reading the conversation's uploaded files, staged into its working directory",
+    "working from the evidence and analysis results gathered before it starts, abridged into "
+    "its brief as text",
+    "putting any GeoJSON file it writes on the map",
+)
+
+
+def is_cli_code_peer(backend: str) -> bool:
+    """Whether ``backend`` is a CLI peer: none of the toolkit, and no ``request_capability``."""
+    return CODE_PEER_CONSUMER.get(backend) == "cli_peer"
+
+
+def describe_code_peer(backend: str, *, skill_roots: Optional[Sequence[str]] = None) -> str:
+    """The inventory clause list for the code peer ``backend`` names.
+
+    ``backend`` is what ``supervisor.graph._code_peer_backend`` resolved for this request:
+    ``langchain``, ``claude`` or ``opencode``. An unrecognised name reads as the LangChain peer,
+    because that is what the code node runs for it.
+    """
+    if is_cli_code_peer(backend):
+        return "; ".join(CLI_PEER)
+    return describe("code", skill_roots=skill_roots)

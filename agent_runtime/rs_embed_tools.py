@@ -1210,7 +1210,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """
         import numpy as np
 
-        from agent_runtime.file_store import create_output_file_from_path, resolve_file_id
+        from agent_runtime.file_store import (create_output_file_from_path,
+                                              get_file_record, resolve_file_id)
 
         ids = _as_list(file_ids) or []
         labels = _as_list(names) or []
@@ -1364,9 +1365,28 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 # or aligning the colours would cost the layer its data.
                 embedding={"file_id": str(entry["file_id"]), "model": model,
                            "recoloured_on_shared_basis": True}))
-            regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
-                            "grid": [h, w], "image_file_id": rec["file_id"],
-                            "download_url": rec.get("download_url")})
+            # TWO files are involved and they must not be conflated: the .npz package this
+            # region came FROM (entry["file_id"]) and the re-coloured .png just rendered
+            # (rec["file_id"]). This used to emit the package's id beside the IMAGE's
+            # download_url, with no filename at all — and the client harvests any object
+            # carrying {download_url, file_id} as one downloadable file. So the download panel
+            # listed three entries labelled "unnamed file (file_...)" whose ids named the
+            # packages while their links fetched the pictures.
+            #
+            # Each file now travels as its own object, complete: id, name and url that all
+            # refer to the same bytes. The image nests rather than sitting under sibling
+            # `image_*` keys, because a flat shape is exactly what let a harvester pair one
+            # file's id with another's url.
+            pkg = get_file_record(str(entry["file_id"])) or {}
+            regions.append({"file_id": entry["file_id"],
+                            "filename": pkg.get("filename"),
+                            "download_url": pkg.get("download_url"),
+                            "label": tag, "bbox": bbox, "grid": [h, w],
+                            "image": {"file_id": rec["file_id"],
+                                      "filename": rec.get("filename"),
+                                      "download_url": rec.get("download_url")},
+                            # Kept flat as well: callers already read this one.
+                            "image_file_id": rec["file_id"]})
 
         if not layers:
             return json.dumps({"ok": False,
@@ -2049,6 +2069,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                                        filename=Path(img["path"]).name)
         if rec_png:
             out["pixel_image"] = {"file_id": rec_png["file_id"],
+                                  # Without this the download panel lists it as
+                                  # "unnamed file (file_...)": the client harvests any
+                                  # {file_id, download_url} pair and substitutes a placeholder
+                                  # for the missing name. The record already knows it.
+                                  "filename": rec_png.get("filename"),
                                   "download_url": rec_png.get("download_url"),
                                   "size_bytes": rec_png.get("size_bytes"),
                                   "size_px": img.get("size_px"),
