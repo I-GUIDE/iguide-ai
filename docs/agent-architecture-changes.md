@@ -4278,16 +4278,16 @@ So this change is a no-op on the deployment, and no Linux CI run would ever have
 
 ## Stage 26 — Permutations run in the agent's own process {#stage-26}
 
-`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S16.6 (branch
+`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S25.6 (branch
 `claude/fork-safe-subprocess`) named this call as the one known fork of the agent process that
-`fork_safe` cannot cover, because a library makes it. S16.6 left it for a separate change,
+`fork_safe` cannot cover, because a library makes it. S25.6 left it for a separate change,
 because it changes how a statistics tool computes rather than how a child is started. This is
 that change. It is a trade, not a free win. At the sizes this tool usually sees, the worker pool
 costs more than it saves: about a quarter of a second per cold call on the image, and 20 to
 150 s on the Mac. On layers of tens of thousands of areas the pool is faster: at 85,000 cells on
-the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. Stages 13 to 18 are
-claimed by open, unpushed or uncommitted branches (17 three times and 18 twice when this was
-written); this takes the next free number.
+the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. It was written as
+Stage 19, while 13 to 18 were claimed by parallel branches, and landed as 26 in merge order
+(S29.1).
 
 ### Stage S26.1 Which calls start a pool
 
@@ -4311,11 +4311,11 @@ each must import esda before it can work. A cold call started 10 children on the
 and 16 on the Mac (14 cores). Traced on the Mac, those are the 14 workers, loky's resource
 tracker, and CPython's multiprocessing resource tracker.
 
-S16.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
+S25.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
 joblib 1.4.2 (loky 3.4.1), and it is where the 15 `os.fork` audit events in
 `test_getis_ord_finds_hot_and_cold_ends` come from: the 14 workers and loky's tracker. The
 image's joblib 1.6.0 (loky 3.6.0) calls `_posixsubprocess.fork_exec` instead, which raises no
-`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S16.5). On
+`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S25.5). On
 macOS it is a plain `fork()`, because CPython 3.13 defines `VFORK_USABLE` only under
 `__linux__`. Upgrading joblib on the Mac would therefore hide these forks from an `os.fork` audit
 hook without removing them.
@@ -4324,7 +4324,7 @@ hook without removing them.
 
 The measured call is `G_Local(y, w, permutations=999, star=True, seed=42)` exactly as the tool
 makes it, on queen weights. Inputs are the suite's `_lattice()` at 8×8 (the test's 64 cells) and
-12×12 (S16.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
+12×12 (S25.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
 85,000 cells. The tessellation is tract-like, about six neighbours a cell and at most 13; Illinois
 has 3,265 tracts, and 85,000 is roughly every US tract. "Cold" is a fresh process, with `-1` and
 `1` interleaved. CPU counts the process plus its reaped workers.
@@ -4434,7 +4434,7 @@ default.
   Mac and the start-up off small layers. It is not done here, for two reasons. It adds a
   platform branch to a statistics call. And every pool, once started, keeps eight interpreters
   in the agent container for 300 s.
-* The fork half is prevention by mechanism, not a fix for an observed crash. As S16.6 records,
+* The fork half is prevention by mechanism, not a fix for an observed crash. As S25.6 records,
   this route was not reproduced in a realistic order.
 * `Moran`, `Geary` and `G` take no seed, so `global_spatial_autocorrelation`'s p-values still
   vary between runs. That is unchanged here.
