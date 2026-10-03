@@ -10,7 +10,7 @@ export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
   apiKey: string;
-  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.6:27b'. Empty = the agent's default. */
+  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.8:27b'. Empty = the agent's default. */
   model?: string;
   /** 'openai' | 'anvilgpt'. Empty lets the server infer it from the model id. */
   provider?: string;
@@ -338,8 +338,12 @@ function parseMaybeJson(raw: any): any {
   try { return JSON.parse(candidate); } catch { return null; }
 }
 
-export async function uploadFiles(files: File[], cfg: AgentConfig): Promise<FileRecord[]> {
+/** `threadId` is the conversation the files belong to: pass the one its turns send. Without it
+ *  the server stores them with no conversation, which keeps them out of the agent's listing of
+ *  this conversation's files and, outside token mode, lets every conversation find them by name. */
+export async function uploadFiles(files: File[], cfg: AgentConfig, threadId?: string): Promise<FileRecord[]> {
   const fd = new FormData();
+  if (threadId) fd.append('thread_id', threadId);
   files.forEach((f) => fd.append('files', f, f.name));
   const res = await withTokenRetry(async () => {
     const r = await fetch(cfg.uploadEndpoint, {
