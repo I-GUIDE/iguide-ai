@@ -1362,7 +1362,110 @@ and the record still had no layer. The final code on port 5263 gave the same res
 with no layer, drawn at 63 s. Without the hold, the Savoy boundary's download took 15 ms, so
 this needs a download slower than everything after it in the turn. Waiting for it would keep the
 composer busy until the layer is drawn, as the fallback's await already does. That is a behaviour
-change of its own, so it was left for a separate decision.
+change of its own, so it was left for a separate decision. Fixed in S9.10.
+
+### Stage S9.10 The turn waits for its layers
+
+This fixes the defect S9.9 found and left open. `streamChat` calls `onMapLayer` without waiting for
+it, and the handler fetches the layer's GeoJSON from its url. A download slower than the rest of
+the turn was put after `finally` had ended the turn, so the snapshot was taken without it. The
+layer was on the map, the record had `layers: []`, and History reopened the conversation without
+the layer.
+
+**It does not take a slow link.** The deployed image runs gunicorn with four threads
+(`rag_pipeline/Dockerfile`) and one worker unless `WEB_CONCURRENCY` raises it
+(`docker-compose.yml`). An SSE stream holds its thread for the whole turn, so once every thread
+holds a stream, a download waits for one of them to end. This was measured on the unfixed code
+against gunicorn with one thread and no other traffic. *"Show me the city boundary of Urbana,
+Illinois"* delivered its `map_layer` 4.1 s into the turn. The download then waited 44.8 s, until
+9 ms after its own stream ended; the access log has both requests in the same second. The layer
+was drawn 15 ms after the commit that ended the turn, and the snapshot, taken from that commit,
+stored `layers: []`. With the downloads held in the page instead, as S9.9 measured, the Champaign
+boundary was saved at 50.9 s with no layer and drawn at 66.0 s. Reopened from History in a new
+tab, that conversation said *"0 layer(s) restored"*.
+
+**The turn now waits.** `runLive` keeps the promise of every layer download it starts. The
+`onMapLayer` handler goes through a small `tracked` wrapper, so its body is unchanged. The artifact
+fallback's `loadVectorArtifacts` joins the same list instead of being awaited inline. `finally`
+waits for the list, for at most `LAYER_WAIT_MS` (20 s), and only then clears `busy` and bumps
+`turnsEnded`. Every download carries the turn's `AbortSignal`, and `abortRef` is cleared only after
+the wait, so Stop works during it. In token mode the server copy is built from the same record, so
+it waits too; that is read from the code, since local mode identifies nobody.
+
+**Waiting, not a second save.** The other way was to bump the counter again when a late layer
+landed. That frees the composer at once, and the free composer is the problem: the next turn can
+start before the layer lands, and the second save then stores that turn mid-stream, the record
+S9.9 removed. It would need a turn generation to guard it. Waiting keeps one save per turn, and
+`busy` is what stops the next turn from starting before it. Usually there is nothing to wait for. A
+`map_layer` download starts when the event arrives, and in the Champaign turn the stream ran
+another 45.6 s after it, against a 19 ms download of 85 KB. Without a hold, `busy` cleared in the
+same commit that rendered the answer.
+
+**The wait needed a bound and a way out first.** The fallback had always awaited its downloads,
+with neither. Measured on the unfixed code with the fallback's download held 60 s, the answer
+appeared at 36.2 s, and Stop clicked at 43.1 s did nothing, because only the stream carried the
+abort signal. The composer stayed busy until the hold ended, 60.8 s after the answer. All that time
+a spinner row sat under the answer, because `ChatPanel` shows one whenever the app is busy and
+nothing is streaming. The wait now shows the same row.
+
+**The bound** is 20 s from the end of the stream. It covers the largest point layer
+`add_map_layer` serves at 7.5 Mbps with no head start, which is what a fallback download, or one
+queued behind other streams, gets. That layer is 150,000 points, about 18 MB without attributes,
+scaled from the 15.8 MB measured for 128,855 points in `langchain_geo_tools.py`. Measured with the
+download held 120 s: `busy` cleared 20.9 s after the stream ended (Chrome rounds a background tab's
+timers to the second). The turn was saved with `layers: []` and a trace line, *"map: a layer was
+still downloading 20 s after the reply; the turn was saved without it"*. The layer was drawn when
+the hold ended, at 123.0 s.
+
+**Past the bound the download keeps running.** A download queued behind other users' streams is
+slow, not dead, and aborting it would lose a layer the user would otherwise see. That one case keeps
+the old defect: the layer is drawn after the save and reaches the record only with the
+conversation's next snapshot.
+
+**Stop abandons a layer that is still downloading.** Measured on the fixed code with downloads held
+60 s:
+
+* Stop 1.6 s after the Urbana answer, during the wait: the download was aborted 3 ms later and
+  `busy` cleared. The saved turn kept its answer (383 characters of html) and `layers: []`, and
+  nothing was drawn afterwards.
+* The fallback case above: Stop 1.6 s after the answer aborted the held download within 1 ms. The
+  turn was saved with the layer already drawn, `live-geocode_places`.
+* Stop mid-stream, 2.8 s after the Champaign `map_layer` arrived: the download was aborted with the
+  stream, the turn was saved with the stopped message and `layers: []`, and nothing was drawn by
+  169 s. On the unfixed code the same gesture saved the same record, and the layer was drawn 58 s
+  after the Stop. The stopped message already says *"Anything already on the map stays"*, and a
+  layer still downloading is not on the map yet.
+
+**Measured with the fixed code.** The API ran locally in `AGENT_MODE=local` (Stage 24), once on
+Flask and once on gunicorn with one thread. The fixed UI ran on ports 5293 and 5294, and the unfixed
+UI on 5283 and 5284, served from a `git archive` of `a9cbb0f`. Each test had its own new tab.
+
+* Champaign, download held 60 s: the stream ended at 47.6 s with the answer on screen. The layer
+  was drawn at 63.0 s, `busy` cleared in the same commit, and the one save had the layer. Reopened
+  from History in a new tab, it said *"1 layer(s) restored"* and drew the boundary.
+* Urbana on the one-thread gunicorn, no hold: the download again waited 44.8 s and arrived 1 ms
+  after the stream ended. `busy` cleared 14 ms after it, and the save had the layer.
+* No hold: a `map_layer` turn and a fallback turn (three_towns) each saved once, with their layers.
+* Apart from the conversation-switch tests below, every tab recorded one IndexedDB put per turn,
+  and none for opening a conversation from History.
+
+The turns were sent by script (the textarea's native setter, an `input` event, a click on Send).
+Every tab stayed hidden (`document.visibilityState` read `hidden` with Chrome frontmost), and a
+hidden tab drops typed input.
+
+**Found here, not fixed: switching conversations while a turn runs.** History and *New
+conversation* stay clickable while `busy`. Whatever the turn does after the switch lands in the
+conversation now on screen: a late layer is put on its map, and the end-of-turn snapshot reads its
+refs. The fallback's wait already had this. On the unfixed code, *New conversation* was clicked 3 s
+after a fallback answer, with the download held. The layer was drawn on the new, empty conversation,
+and the tab made no save at all, so the turn's own conversation was never saved. S9.10 extends that
+window to `map_layer` downloads still pending at the answer, for at most 20 s. Measured on the
+fixed code, the Savoy conversation was opened from History 2.5 s after the Champaign answer, with
+its download held. The Champaign layer was drawn on Savoy's map. The end-of-turn save wrote Savoy's
+record, with that layer and the "Continuing…" line, and never wrote the Champaign conversation. A
+switch mid-stream does the same to the turn's messages: `patch` writes into the message at the
+turn's index in whatever list is on screen (read from the code). Closing it means holding the
+switch until the turn ends, or stopping the turn on a switch, which is a decision of its own.
 
 ---
 
