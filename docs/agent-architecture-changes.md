@@ -33,7 +33,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 17 | [The image installs a list, not a laptop](#stage-17) | 2026-10-01 | packages dev had and the image lacked, declared and tested |
 | 18 | [Testing what is deployed](#stage-18) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
 | 19 | [What runs in the agent's own process](#stage-19) | 2026-10-01 → 2026-10-02 | the tool that `exec()`'d knowledge-base code in-process is withdrawn; a test guards the class |
-| 20 | [A layer is what went into it](#stage-20) | `claude/layer-identity-by-inputs` | layer ids from the inputs that made them, not the files they wrote |
+| 20 | [A layer is what went into it](#stage-20) | `claude/layer-identity-by-inputs`, `claude/layer-identity-remaining-tools` | layer ids from the inputs that made them, not the files they wrote |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -3164,7 +3164,8 @@ Found, and not fixed here:
 
 ## Stage 20 — A layer is what went into it {#stage-20}
 
-*2026-10-01. Branch `claude/layer-identity-by-inputs`.*
+*2026-10-01. Branch `claude/layer-identity-by-inputs` (S20.1–S20.6), then
+`claude/layer-identity-remaining-tools` (S20.7–S20.11), cut from it.*
 
 S7.7 made the embedding layers' ids a digest of the inputs that decide what they show. Every
 other layer kept an id derived from its label or from the file it had just written, and one
@@ -3252,7 +3253,9 @@ subprocess it forked crashed in PROJ's fork handler before exec. macOS logged el
 between 19:11 and 19:15, and both QGIS and code execution failed until the server restarted. The
 verification restarted the server between turns. This stage does not fix it.
 
-### Stage S20.6 What this stage did not fix
+### Stage S20.6 What the first change did not fix
+
+Kept as written. S20.7–S20.10 close the first two items, and S20.11 says what remains.
 
 - The rest of the spatial toolkit still takes layer ids from labels: clip, dissolve, intersect,
   erase, simplify and geometry summary, the aggregate, spatial-statistics and temporal tools, and
@@ -3264,3 +3267,131 @@ verification restarted the server between turns. This stage does not fix it.
   with the same filename, from any session, and rewrites that record's session and owner.
 - In a restored session, a layer saved under an old id stacks once with its re-run under the new
   id.
+
+### Stage S20.7 The rest of the toolkit, measured before it was changed
+
+A probe ran each of the 18 remaining label-keyed tools on PR #38's head three times. First as
+asked. Then again on re-fetched copies of its inputs, under a name the model chose. Then as a
+genuinely different analysis of the same inputs (another place, distance, cell size, k or
+period). All 18 stacked the renamed re-ground. 13 also merged the different analysis into the
+first one's layer. The five that kept the two apart (intersect, dissolve, geometry summary,
+filter_by_time, compare_periods) did so by luck of wording: their default label happens to spell
+out the parameter that differed (`how`, `by`, the summary kind, the window, the two periods).
+
+Reading the rest found three gaps the S20.6 list does not name:
+
+- `terrain_derivative` and `inundation_at_level` keyed their layers on the raster's bbox alone,
+  never on the raster. Clipping a DEM to a shape keeps the grid and its bounds and only blanks
+  pixels, so the slope of a clipped DEM and of the unclipped DEM of the same box were one layer.
+  Measured in the live check (S20.10): identical bounds, 131,115 against 234,496 pixels with data,
+  and PR #38's formula gives both slopes `embed-slope-40_113__88_278-1d1ac13c72`. Two hillshades
+  under different suns were one layer too.
+- `dem_for_region` recorded WHETHER a DEM was clipped, not which shape cut it. A polygon and its
+  own bounding box from geometry_summary share a box and cut different pixels.
+- `embed_zones` digested its period as the caller wrote it, but the service is sent `_iso_date`'s
+  dates. "2025-03".."2025-05" and "2025-03-01".."2025-05-31" are one composite and were two layers.
+
+### Stage S20.8 What changed
+
+Every layer producer now takes its id from a `map_layers.content_key` of its inputs and records
+the same key on the file it writes, as `_finish` already did for `buffer_layer`. A later step that
+reads the file then keys it by what it holds.
+
+- Overlay. Each tool keys on its inputs as read (`source_content_key`, on the path `_load` keeps
+  staged) and on its parameters: `keep_geom_type`, `how`, `tolerance_m` and `keep_topology`, the
+  normalised summary kind and `per_feature`. `dissolve_layer` is the one overlay tool whose view is
+  a parameter, so its key holds the view as drawn. `_resolve_view` came out of `_finish` and runs
+  first, which makes `render='auto'` and `render='choropleth'` on polygons one layer.
+- Aggregate, spatial statistics, temporal. Their readers delete the staging directory before they
+  return, so `langchain_geo_tools.input_content_key` stages the input again with the same rules and
+  keys what that reads. A self-contained file costs a path lookup. Only a shapefile assembled from
+  its parts is copied twice. Each key is normalised to what the tool applied: a value column only
+  when the statistic reads it, m and km as one (they write the same columns), a selection by its
+  criterion, the regression model that ran rather than the one requested, a weights parameter only
+  when the scheme reads it, variable lists sorted, a time window and time column as resolved.
+  `classes`, label columns and `zone_id_field` change a CSV or the reported breaks, not the layer,
+  and stay out.
+- Code peers. `layers_for_artifacts` keys a written file on its content, through a new
+  `map_layers.drawn_layer_key` that `add_map_layer` now also uses with an unchanged formula. A file
+  a peer wrote and the same file redrawn by add_map_layer with the same view are one layer.
+- Embedding, prediction, terrain. File ids became content keys: the polygons in `embed_zones`, both
+  inputs of `fit_zone_model` and `zonal_stats_for_raster`, and the packages and the basis in
+  `align_embedding_colors`' fallback id. The readable hint went with them, because a file_id there
+  moved the id on every re-fetch whatever the digest said. `siblings` left the keys, since
+  `source_content_key` already digests every part read. `embed_zones` records keys on its vectors
+  CSV (without `clusters`, which the vectors do not depend on) and on its group GeoJSON.
+  `fit_zone_model`, `zonal_stats_for_raster`, `dem_for_region` and the two derived rasters record
+  theirs. Derived rasters key on the raster they read and, for a hillshade, the sun. A clipped DEM
+  keys on its shape, and an unclipped DEM keeps the id it always had.
+- `content_layer_id` itself is unchanged, so the seven golden embedding ids still hold.
+
+### Stage S20.9 Revised during the work
+
+- Two tool bodies already used the name `key`. `count_points_in_areas` reassigns it to the CSV's
+  label column, and `regionalize` loops `for key in result`. Both lines run between computing the
+  layer key and building the descriptor, so the first draft would have shipped `agent-area` and an
+  id named after a pygeoda result field. It was caught in review before any run. The local is now
+  `layer_key`, and every new test asserts its id's kind prefix.
+- An embedding package was assumed to carry its write time in its zip headers, which would have
+  made `file_content_key` useless on it. Measured: `np.savez` writes identical bytes for identical
+  arrays, so the byte digest survives a deterministic re-run.
+- The first spatial-statistics fixture built its lattice as `-88.3 + c/100` and `-88.29 + c/100`.
+  In floating point those edges do not meet (-88.28999999999999 against -88.29), so the columns
+  stopped touching, and `pygeoda.skater` segfaulted the test process (exit 139) on a graph of five
+  components with no island. `regionalize` guards only `has_isolates()`, so such a layer crashes a
+  server worker the same way. The fixture now builds each edge from one expression. The crash is
+  not fixed here and was raised as a task of its own.
+
+### Stage S20.10 Verification
+
+- `test_layer_identity_by_inputs.py` gains 31 tests, 56 in all. On PR #38's head 30 of the 31 fail,
+  each on a defect assertion: a re-ground stacked, a different analysis merged, an equal request
+  split, or a CSV recorded nothing. The one that passes pins a normalisation that PR #38's label
+  already happened to give (a month and its first-to-last dates are one window).
+- Four existing stubs of `create_output_file_from_path` took no `content_key` and were widened.
+- The full suite: 1701 passed, 4 skipped, against PR #38's 1670 and 4.
+- In Chrome, against a local server on this branch, one tab per test. Layer ids were read from the
+  client's saved session after each turn. Counts include the attached upload's own layer.
+
+| test | turns | layers after each turn |
+|---|---|---|
+| erase | county minus city, unnamed; the same on re-fetched files, named "county outside the city"; Urbana, unnamed | 4; 4, same id, relabelled; 6, new id |
+| hex grid | 2 km, unnamed; the same, named "incident density"; 5 km, unnamed, the 2 km grid's default label | 2; 2, same id, relabelled; 3 |
+| terrain | clipped DEM and its slope; the unclipped DEM and its slope | 4; 6, two slope ids |
+| code peer | one opencode script writing a file, an exact copy of it, and a different file | 3, the copy deduplicated |
+
+- The live check found what the tests could not. Two opencode runs that kept the same 25
+  incidents gave two ids. One wrote through geopandas, which rewrote "2026-06-01" as
+  "2026-06-01T00:00:00" and added `crs` and `name` members. For a producer whose inputs are
+  invisible, the file is the only identity there is, and two serialisations of one result read as
+  two results.
+- Met on the way, none caused by this change. The main checkout's `.env` sets `AGENT_MODE=token`,
+  which refuses an anonymous chat. The analysis families load only with an attached file, so in a
+  bare chat `request_capability` did not provide `erase_layer`. The two-month-old opencode image
+  sends `max_tokens`, which gpt-5.6-luna rejects, so the check pinned
+  `AGENT_OPENCODE_MODEL=gpt-4o-2024-11-20`. One follow-up opencode turn reported the attached file
+  missing from its working directory; that was not investigated. And the same `.env` pins
+  `OPENSEARCH_NODE` to the production cluster, which wins over `PLATFORM_TIER=dev` (the boot log
+  warns of it), so seven local test conversations wrote their chat memory there before it was
+  noticed. A local check needs `OPENSEARCH_NODE=` as well.
+
+### Stage S20.11 What this stage still does not fix
+
+- The client's artifact fallback, `artifact-<filename>` in `loadVectorArtifacts`, still keys on the
+  filename.
+- A code peer's layer is keyed on the bytes it wrote. Identical files share a layer, including two
+  different analyses that wrote identical files. The same result serialised differently does not
+  (S20.10).
+- `embed_zones`' replay memo still keys on the file_id and the name, so a re-ground re-runs the
+  whole sweep. Its layers now replace rather than stack.
+- A recorded key names the request. A re-fetch that returns different data for the same request (a
+  3DEP update, a sweep that lost tiles) replaces the old layer, which is the intended reading of a
+  re-run, but the steps downstream cannot tell that the content moved.
+- `qgis_metric_buffer` still writes with `overwrite=True` (S20.6).
+- In a restored session, every layer whose id moved here stacks once with its re-run: all the
+  analysis layers, the zonal, prediction and derived terrain layers, clipped DEMs and the shared-PCA
+  fallback. Unclipped DEMs, embed_region's rasters and segments, boundaries and buffers keep their
+  ids.
+- `build_map_layer` still derives an id from the label for any descriptor without one, and nothing
+  checks that a new tool sets one.
+- `regionalize` segfaults on a disconnected contiguity graph (S20.9).

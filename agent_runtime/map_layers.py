@@ -103,6 +103,18 @@ def content_layer_id(namespace: str, kind: str, hint: Any = None, /, **content: 
     return f"{_id_part(namespace)}-{content_key(kind, hint, **content)}"
 
 
+def drawn_layer_key(input_key: str, render: str, *, column: Any = None,
+                    sample: Any = None) -> str:
+    """The key of a layer that DRAWS one input as it is, without changing its features.
+
+    Such a layer is the input's content plus the view chosen for it, and nothing else.
+    add_map_layer builds its key here, and so does layers_for_artifacts for a file a code peer
+    wrote. The same file drawn the same way is therefore one layer, whichever route drew it.
+    """
+    return content_key("map", render, input=input_key, render=render, column=column,
+                       sample=sample)
+
+
 def boundary_layer_id(file_id: str) -> str:
     """The id of the map layer that SHOWS a polygon file, keyed on what the file HOLDS.
 
@@ -184,7 +196,17 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
     looks the same however it was produced. A file with no features is skipped rather than
     shipped: an empty layer draws nothing, and inspect_artifacts already tells the answer
     about it.
+
+    The id is keyed on what the file HOLDS. It used to fall back to a slug of the label, which
+    is the filename the peer chose, so a re-run that named its output differently stacked a
+    second copy, and two different results written under one name merged into one layer. A
+    peer's inputs are invisible from here, which leaves the file as the only record of what
+    the layer shows. Two runs that wrote byte-identical files therefore share a layer, and
+    their layers would draw identically anyway. The key is drawn_layer_key's, so a later
+    add_map_layer of the same file with the same view lands on the same layer too.
     """
+    from agent_runtime.file_store import file_content_key
+
     out: List[Dict[str, Any]] = []
     base = Path(str(directory))
     try:
@@ -211,6 +233,7 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
         render = ("heatmap" if (is_point and features > 2000)
                   else ("points" if is_point else "shapes"))
         out.append({
+            "id": f"agent-{drawn_layer_key(file_content_key(str(path)), render)}",
             "url": url,
             "label": Path(name).stem.replace("_", " ").strip() or name,
             "render": render,
