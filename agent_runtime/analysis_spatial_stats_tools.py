@@ -67,7 +67,8 @@ from agent_runtime.analysis_aggregate_tools import (  # reuse, do not reinvent
     _write_csv,
     _write_geojson,
 )
-from agent_runtime.langchain_geo_tools import _index_attached, artifact_name
+from agent_runtime.langchain_geo_tools import _index_attached, artifact_name, input_content_key
+from agent_runtime.map_layers import content_key
 from agent_runtime.tool_args import accept_null_defaults
 
 # --- weights ------------------------------------------------------------------------
@@ -185,8 +186,19 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
                 # one that is slightly too generous.
                 thresh = float(weights.min_threshold_distance(
                     [(geom.x, geom.y) for geom in frame.geometry]))
+                # min_threshold_distance returns EXACTLY the critical neighbour distance, and
+                # DistanceBand recomputes that distance on its own code path. Whether the two
+                # agree to the last bit is a property of the platform: on the 8x8 test lattice
+                # the margin is 0.0 m, giving 0 islands on macOS/arm64 and 1 on Linux/x86-64
+                # with the same libpysal, scipy and numpy versions. A relative pad of 1e-9
+                # (about 0.1 mm at 100 km) makes "no island" hold everywhere.
+                thresh *= 1.0 + 1e-9
                 notes.append(f"threshold_km not given; used the smallest distance that leaves no "
                              f"island ({thresh / 1000.0:.3f} km)")
+                # The note reports the padded distance, a hair above the strict minimum and far
+                # below its metre precision. Its wording stands because the unpadded value is not
+                # reliably island-free (docs/agent-architecture-changes.md: "A promise kept by
+                # rounding luck").
             else:
                 thresh = float(threshold_km) * 1000.0
                 if not (thresh > 0) or not math.isfinite(thresh):
@@ -202,6 +214,17 @@ def _weights_for(gdf: Any, kind: str, k: int, threshold_km: Optional[float],
         raise ValueError(f"unsupported transform {tr!r}; use one of {list(_TRANSFORMS)}")
     w.transform = tr
     yield w
+
+
+def _weights_key(weights: Any, k: Any, threshold_km: Any) -> Dict[str, Any]:
+    """The weights a tool built, as part of its layer key: the scheme, plus only the parameter
+    that scheme reads. k means nothing to queen contiguity, so a queen run that also passed
+    k=8 draws the same map as one that did not, and the two must be one layer."""
+    kind = str(weights or "queen").strip().lower()
+    return {"weights": kind,
+            "k": int(k) if kind in {"knn", "kernel"} else None,
+            "threshold_km": (float(threshold_km) if kind == "distance_band"
+                             and threshold_km is not None else None)}
 
 
 def _weights_diagnostics(w: Any) -> Dict[str, Any]:
@@ -296,14 +319,14 @@ def _legend(colors: Dict[str, List[int]], present: Any) -> List[Dict[str, Any]]:
 
 
 def _categorical_layer(rec: Dict[str, Any], label: str, style_by: str, count: int,
-                       legend: List[Dict[str, Any]]) -> Dict[str, Any]:
+                       legend: List[Dict[str, Any]], key: Optional[str] = None) -> Dict[str, Any]:
     """A ``map_layer`` whose classes are CATEGORIES, not a number to ramp.
 
     ``render="categories"`` matters: the client's choropleth ramp coerces the style column with
     Number(), so a categorical column like "High-High" becomes NaN for every feature and the
     layer renders in one flat colour — a map that looks fine and says nothing.
     """
-    out = _map_layer(rec, label, "categories", style_by, count)
+    out = _map_layer(rec, label, "categories", style_by, count, key=key)
     out["legend"] = legend
     return out
 
@@ -329,6 +352,10 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
     def _open(ref, siblings=None, layer=None):
         return _open_vector(ref, siblings, attached, layer)
+
+    def _input_key(ref, siblings=None):
+        """What an input IS, as _open reads it: its content, never its file_id."""
+        return input_content_key(ref, siblings, attached)
 
     def _load(file_id, siblings, columns, notes, layer=None):
         """Open, validate CRS, coerce the needed columns, drop unusable rows.
@@ -588,8 +615,13 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             for cls in classes:
                 counts[cls] = counts.get(cls, 0) + 1
 
+            # The permutation count and the significance level both move features between
+            # classes, so both are in the key. The seed is fixed above.
+            layer_key = content_key("lisa", column, input=_input_key(file_id, siblings),
+                                    column=column, **_weights_key(weights, k, threshold_km),
+                                    permutations=perms, significance=alpha)
             base = _stem(name, _source_stem(file_id), f"{column}_lisa")
-            rec = _write_geojson(out, base, _source_stem(file_id), "lisa")
+            rec = _write_geojson(out, base, _source_stem(file_id), "lisa", key=layer_key)
 
             label_col = _label_column(out, label_column)
             csv_cols = [c for c in ([label_col] if label_col else []) +
@@ -623,7 +655,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "csv": _asset(csv_rec),
                 "map_layer": _categorical_layer(rec, _label_for(name, rec) or f"{column} LISA",
                                                 "lisa_class", int(len(out)),
-                                                _legend(_LISA_COLORS, classes)),
+                                                _legend(_LISA_COLORS, classes), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -698,8 +730,12 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 counts[cls] = counts.get(cls, 0) + 1
 
             stat_name = "Gi*" if star else "Gi"
+            layer_key = content_key("gistar" if star else "gi", column,
+                                    input=_input_key(file_id, siblings), column=column,
+                                    **_weights_key(weights, k, threshold_km), star=bool(star),
+                                    permutations=perms)
             base = _stem(name, _source_stem(file_id), f"{column}_hotspots")
-            rec = _write_geojson(out, base, _source_stem(file_id), "hotspots")
+            rec = _write_geojson(out, base, _source_stem(file_id), "hotspots", key=layer_key)
 
             label_col = _label_column(out, label_column)
             csv_cols = [c for c in ([label_col] if label_col else []) +
@@ -724,7 +760,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "map_layer": _categorical_layer(rec,
                                                 _label_for(name, rec) or f"{column} {stat_name}",
                                                 "hotspot_class", int(len(out)),
-                                                _legend(_HOTSPOT_COLORS, classes)),
+                                                _legend(_HOTSPOT_COLORS, classes), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -997,8 +1033,14 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             out["residual"] = [_num(v) for v in resid]
             out["fitted"] = [_num(v) for v in
                              np.asarray(fitted.predy, dtype="float64").flatten()]
+            # The model that RAN, not the one requested: 'auto' that chose lag fits the same
+            # model as asking for lag. The explanatory columns are sorted, because the order the
+            # model lists them in changes no residual.
+            layer_key = content_key("regression", chosen, input=_input_key(file_id, siblings),
+                                    y_column=y_column, x_columns=sorted(xs), model=chosen,
+                                    **_weights_key(weights, k, threshold_km))
             base = _stem(name, _source_stem(file_id), f"{y_column}_{chosen}_residuals")
-            rec = _write_geojson(out, base, _source_stem(file_id), "residuals")
+            rec = _write_geojson(out, base, _source_stem(file_id), "residuals", key=layer_key)
             import pandas as pd
 
             csv_rec = _write_csv(pd.DataFrame(coefs), base, _source_stem(file_id), "coefficients")
@@ -1022,7 +1064,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "coefficients_csv": _asset(csv_rec),
                 "map_layer": _map_layer(rec, (_label_for(name, rec)
                                               or f"{y_column} {chosen} residuals"),
-                                        "choropleth", "residual", int(len(out))),
+                                        "choropleth", "residual", int(len(out)), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:
@@ -1181,8 +1223,18 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                         frame.loc[mask, str(bound_column)].to_numpy(dtype="float64").sum(), 2)
                 summary_rows.append(row)
 
+            # Only what this method reads: max-p derives the region count from its bound, and
+            # every other method takes n_regions and ignores the bound. The weights are the
+            # contiguity rule actually used, since anything but rook ran as queen above. The
+            # variables are sorted: the order they are listed in is wording.
+            layer_key = content_key("regions", meth, input=_input_key(file_id, siblings),
+                                    columns=sorted(cols), method=meth,
+                                    n_regions=None if meth == "maxp" else target,
+                                    bound_column=str(bound_column) if meth == "maxp" else None,
+                                    min_bound=float(min_bound) if meth == "maxp" else None,
+                                    weights=weights if weights in {"queen", "rook"} else "queen")
             base = _stem(name, _source_stem(file_id), f"{meth}_regions")
-            rec = _write_geojson(out, base, _source_stem(file_id), "regions")
+            rec = _write_geojson(out, base, _source_stem(file_id), "regions", key=layer_key)
             csv_rec = _write_csv(pd.DataFrame(summary_rows), base, _source_stem(file_id),
                                  "region_summary")
 
@@ -1217,7 +1269,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "summary_csv": _asset(csv_rec),
                 "map_layer": _categorical_layer(rec, _label_for(name, rec) or f"{meth} regions",
                                                 "region", int(len(out)),
-                                                _legend(palette, out["region"])),
+                                                _legend(palette, out["region"]), key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:

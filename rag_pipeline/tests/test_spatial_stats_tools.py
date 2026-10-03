@@ -484,6 +484,33 @@ def test_distance_band_without_a_threshold_leaves_no_island(lattice):
     assert any("no island" in n for n in r["notes"])
 
 
+def test_default_distance_band_survives_a_rounding_disagreement(lattice, monkeypatch):
+    """The no-island promise must not rest on rounding luck.
+
+    min_threshold_distance returns the critical pair's distance as sqrt(d2), and DistanceBand
+    admits a pair when d2 <= threshold**2. Squaring the rounded root can come back one ulp
+    short. On Linux/x86-64 it does for this lattice and the band left an island, while
+    macOS/arm64 rounds the other way, so the test above passes on a Mac with or without the
+    pad. Shrinking the computed minimum by a relative 1e-12 (far more than one ulp, a thousandth
+    of the tool's pad) reproduces the failure on every platform, so dropping the pad fails here
+    on a Mac too.
+    """
+    from libpysal import weights
+
+    real = weights.min_threshold_distance
+    calls = []
+
+    def short_by_rounding(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs) * (1.0 - 1e-12)
+
+    monkeypatch.setattr(weights, "min_threshold_distance", short_by_rounding)
+    r = json.loads(_tools()["spatial_weights"].invoke(
+        {"file_id": lattice, "weights": "distance_band"}))
+    assert calls, "the default band no longer comes from min_threshold_distance; revisit this test"
+    assert r["ok"] is True and r["connectivity"]["islands"] == 0
+
+
 def test_kernel_weights_build(lattice):
     r = json.loads(_tools()["spatial_weights"].invoke(
         {"file_id": lattice, "weights": "kernel", "k": 5}))

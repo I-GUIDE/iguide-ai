@@ -144,7 +144,7 @@
   <header>
     <div class="eyebrow">I-GUIDE agent · deployed capability inventory</div>
     <h1>What this agent can analyse, and what it hands back</h1>
-    <p class="standfirst">Fifty-one spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
+    <p class="standfirst">Fifty-seven spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
       <em>both</em> an interactive map layer and downloadable files where the operation produces geometry — the map is the
       deliverable, not a screenshot of one. Enumerated from the running container, not from documentation.</p>
   </header>
@@ -156,7 +156,7 @@
     <div class="count"><b>5</b><span>temporal</span></div>
     <div class="count"><b>13</b><span>embeddings</span></div>
     <div class="count"><b>8</b><span>vector + map</span></div>
-    <div class="count"><b>4</b><span>KB + renders</span></div>
+    <div class="count"><b>3</b><span>filter + renders</span></div>
     <div class="count"><b>5</b><span>QGIS</span></div>
     <div class="count"><b>3</b><span>workspace</span></div>
     <div class="count"><b>20</b><span>RS models</span></div>
@@ -299,16 +299,18 @@
 
   <section>
     <div class="fam-head">
-      <h2>Knowledge-base functions &amp; static renders</h2><span class="n">4 tools</span>
+      <h2>Row filter &amp; static renders</h2><span class="n">3 tools</span>
       <span class="src">geo_analysis_tools</span>
     </div>
-    <p class="fam-note">A second route into analysis: instead of a curated tool, run a spatial
-      function that was <em>extracted from a knowledge-base notebook</em>, chaining steps by
-      passing one step&rsquo;s <code>file_id</code> into the next. The two renderers here are
-      deliberate fallbacks &mdash; a robust plot for when an extracted notebook&rsquo;s own
-      plotting code fails on the installed matplotlib.</p>
+    <p class="fam-note">Steps that chain by passing one step&rsquo;s <code>file_id</code> into the
+      next. The two renderers are deliberate fallbacks &mdash; a robust plot for when a
+      notebook&rsquo;s own plotting code fails on the installed matplotlib. This family used to
+      run functions <em>extracted from knowledge-base notebooks</em> as well
+      (<code>kb_run_geofunction</code>). That was withdrawn on 2026-10-01 because it executed the
+      notebook&rsquo;s third-party code inside the agent&rsquo;s own process instead of the
+      sandbox. Knowledge-base code now runs only through <code>get_kb_block</code> and
+      <code>execute_code</code>.</p>
     <div class="tools">
-      <div class="tool"><code>kb_run_geofunction</code><p>Execute a named spatial function from a knowledge-base block by <code>doc_id</code> + <code>function_name</code>, passing (Geo)DataFrames as file ids. Returns a file id, so steps chain: load data &rarr; join and count &rarr; render.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>kb_select_rows</code><p>Filter a (Geo)DataFrame file to rows whose column matches a value set &mdash; violent crime types out of all crime types &mdash; returning a new file id for the next step.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>heatmap_image</code><p>A hexbin point-density PNG from a points file. This is the &ldquo;heat map&rdquo; render, distinct from a choropleth &mdash; and distinct from <code>add_map_layer</code>&rsquo;s live density surface, which is what you want if the result should be explorable.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>choropleth_image</code><p>A shaded-polygon PNG coloured by a column, with NaturalBreaks (Jenks) or Quantile classing. Static: for a document or a printout.</p><div class="out"><span class="chip file">File</span></div></div>
@@ -388,7 +390,8 @@
 
   <footer>
     <span>Enumerated from the running <code>agent-api</code> container, 2026-09-09</span>
+    <span>2026-10-01: <code>kb_run_geofunction</code> withdrawn, checked against the checkout, not the container</span>
     <span>Branch <code>prototype</code></span>
-    <span>58 tools in eight families, plus <code>execute_code</code> and five file tools</span>
+    <span>57 tools in eight families, plus <code>execute_code</code> and five file tools</span>
   </footer>
 </div>

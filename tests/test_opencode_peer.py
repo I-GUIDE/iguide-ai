@@ -169,7 +169,7 @@ def test_run_opencode_success(monkeypatch, tmp_path):
             return _FakeProc(0, "\x1b[1mAll done:\x1b[0m wrote result.csv\n", "")
         return _FakeProc(0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ocp.fork_safe, "run", fake_run)
     result = ocp.run_opencode("compute things")
     assert result["ok"] is True
     assert result["exit_code"] == 0
@@ -186,7 +186,7 @@ def test_run_opencode_failure_and_timeout(monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_API_KEY", "k")
     monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(7, "", "boom"))
+    monkeypatch.setattr(ocp.fork_safe, "run", lambda *a, **k: _FakeProc(7, "", "boom"))
     result = ocp.run_opencode("x")
     assert result["ok"] is False and result["exit_code"] == 7 and result["stderr"] == "boom"
 
@@ -198,7 +198,7 @@ def test_run_opencode_failure_and_timeout(monkeypatch, tmp_path):
             return _FakeProc(0)
         raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
 
-    monkeypatch.setattr(subprocess, "run", fake_timeout)
+    monkeypatch.setattr(ocp.fork_safe, "run", fake_timeout)
     result = ocp.run_opencode("x", timeout=30)
     assert result["timed_out"] is True and result["ok"] is False
     assert any(c[:2] == ["docker", "kill"] for c in calls)  # container reaped
