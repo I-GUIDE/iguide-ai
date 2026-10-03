@@ -41,6 +41,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 25 | [Starting a child without forking the agent](#stage-25) | 2026-10-01 | on macOS every child starts by `posix_spawn`; nothing in the agent process forks |
 | 26 | [Permutations run in the agent's own process](#stage-26) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
 | 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
+| 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope that matches nothing binds nothing |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -4605,3 +4606,142 @@ stopped responding after the disk filled.
   but nothing ties the two together.
 * pygeoda's other variants (`azp_sa`, `azp_tabu`, `maxp_sa`, `maxp_tabu`) are not exposed and
   were not tested. Any new pygeoda call should go through the same checks.
+
+---
+
+## Stage 28 — The retrieval peer binds what retrieval asks for {#stage-28}
+
+An API request turns MCP tools on unless it says otherwise, and the search peer passed no MCP
+module list, which `make_langchain_mcp_tools` reads as every tool the MCP server registers. So
+the deployed search peer bound the whole MCP surface. The decider's line for search, "retrieve
+evidence (datasets, publications, notebooks)", mentions none of it. The analyze peer has been
+scoped to `spatial_analysis_tools` since `6e48d65f` (2026-06-25). The same commit made the API
+default ON, and its comment says why: "so the analyze peer's MCP tools (spatial/data) are
+available by default". Search received the flag from the shared request config, and has passed it
+through since the supervisor's first commit, `7adf7d1c` (2026-06-09). Why search was given it:
+reason not recorded. That commit's message has no body.
+
+### Stage S28.1 What search bound, measured three ways
+
+**Enumerated in the deployed container.** The enumeration ran in `agent-api` (image
+`deeb331964f6`) against the live `mcp-server`. It went through `default_search_fn` itself, with
+`create_agent` replaced by a stop that keeps the tool list. Tokens are o200k_base counts of each
+tool's JSON schema, as `convert_to_openai_tool` renders it.
+
+| search peer, request flags | tools | MCP tools | schema tokens (o200k) | of which MCP |
+|---|---|---|---|---|
+| MCP on, no module list (the API default) | 39 | 14 | 7,183 | 2,248 (31.3%) |
+| MCP off | 25 | 0 | 4,935 | 0 |
+| MCP on, `mcpModules: ["search_tools"]` | 39 | 14 | 7,183 | 2,248 |
+| MCP on, no module list, this change | 26 | 1 | 5,138 | 203 |
+
+The first two toolsets have fingerprints `5465f2e44670` and `9a4a6cc1557b`. Those are the two
+fingerprints production's `turn_instrumentation_toolset` lines logged for `sup_search`, so live
+turns carried exactly these lists. The last row was produced by this commit's files, in a `/tmp`
+overlay in the same container, against the same server.
+
+**Counted by the provider.** The comparison uses the first search call of a turn (one message,
+system prompt constant at 977 estimated tokens) on gpt-5.6-luna, and subtracts the message
+estimate from the input tokens. Without MCP tools that leaves 4,232–4,237 (n=11). With them it
+leaves 5,815–5,822 (n=9). So the 14 MCP schemas cost about **1,584 real input tokens on every search
+model call**, and the ReAct loop sends them again with each call. Against that count, o200k over
+the JSON overstates them 1.42x and the chars/4 estimator 1.49x, in line with the 1.35x schema
+overcount measured on 2026-09-02.
+
+**Called.** The `agent-api` journal holds 166 search model calls in 35 sessions, from 2026-09-22
+to 10-02. 47 of them had the MCP tools bound and 119 did not, and search never called an MCP tool.
+Its calls went to `keyword_search` (87), `semantic_search` (73), `opengeodata_search` (39),
+`agent_kb_search` (39), `neo4j_search` (36), `web_fetch` (31), `spatial_search` (28),
+`web_search` (18) and the by-id graph tools. In the same period, the only MCP call by any peer was
+one `mcp_analyze_and_organize_results`, by analyze.
+
+### Stage S28.2 What the 14 were, and what the search prompt asks for
+
+| MCP module | bound | what its tools do |
+|---|---|---|
+| `element_tools` | 1 | `fetch_element_source`: a cited element's source file, by id, into the file store |
+| `data_tools` | 3 | Chicago crime and community-area loaders, crime statistics |
+| `spatial_analysis_tools` | 3 | crimes per community area, a crime map, organising results. Analyze binds these |
+| `image_tools` | 2 | describe an image or a map sent as base64 |
+| `notebook_workflow_tools` | 2 | build a tool from a notebook, list the built ones |
+| `generic_executor_tools` | 2 | run a stored workflow or code element. Both refuse unless `AGENT_ALLOW_WORKFLOW_EXEC` is set, and it is unset in both containers |
+| `ingest_tools` | 1 | ingest a GitHub repository |
+| `search_tools` | 0 | its one tool, `search_external_resources`, is unbound by default (`ea7af023`) |
+
+`SEARCH_AGENT_PROMPT` asks the search agent to gather evidence: the internal searches, the
+external catalogs, the open web, and in rule 8, the by-id lookups. Those are
+`neo4j_get_element_by_id`, `neo4j_explore_related_nodes` and an element's source file. The last is
+the only tool in `element_tools`, and it fits the decider's line for search ("datasets,
+publications, notebooks"). Neither the prompt nor that line asks search to compute, to describe
+images, to build or run workflows, or to ingest a repository.
+
+### Stage S28.3 The change
+
+- **`build_search_agent_executor` defaults `mcp_modules` to `SEARCH_MCP_MODULES = ("element_tools",)`.**
+  The default applies when a request names no modules, the way `default_analyze_fn` falls back to
+  `spatial_analysis_tools`. A request's `mcpModules` still replaces the default for both peers.
+  The reference client (`examples/iguide_chat_prototype.html`) sends `search_tools, data_tools,
+  spatial_analysis_tools`. It binds the same six MCP tools before and after: toolset
+  `0ab463ea4e45` both times, measured in the container. The dashboard sends the same list, but
+  behind an MCP checkbox that starts unchecked.
+- **`make_langchain_mcp_tools` now binds exactly the scoped tools, even when that is none.** It used
+  to keep the whole remote list whenever no remote tool matched the scope. That is why
+  `["search_tools"]` bound all 14: its only tool is unbound before scoping runs. A server
+  without `fetch_element_source` would likewise have handed search the other 13. An empty scope
+  now logs a warning.
+- **Rule 8 names `mcp_fetch_element_source`, the name the tool is bound under.** The four lines are
+  ported byte for byte from backend_swap `66e71d54` (2026-08-12). That commit's audit found that the
+  unprefixed name "exists under no path".
+- **The API notes said `mcpModules: null` means all MCP modules.** That was already wrong for
+  analyze. They now name each peer's default.
+- **`rag_pipeline/tests/test_search_peer_mcp_scope.py` (8 tests) reads the search peer's real
+  assembly.** The MCP listing is stubbed with every `@mcp_tool` under `MCP_server/tools`, which is
+  the same 16 names the deployed server listed. The file covers six behaviours:
+  - the default binds `mcp_fetch_element_source` and nothing else, remotely and through the local
+    fallback;
+  - MCP off binds no MCP tool;
+  - `mcpModules` still reaches search;
+  - a scope with no remote match binds nothing;
+  - analyze keeps its three tools;
+  - the MCP tools search binds are exactly the ones `SEARCH_AGENT_PROMPT` names.
+
+  Each code change was reverted in turn. Without the default, 4 tests fail; without the
+  empty-scope fix, 2; without the prompt fix, 1.
+
+Suite: 1688 passed and 4 skipped before, on `cd664cb`; 1696 passed and 4 skipped after.
+
+### Stage S28.4 Revised during the work
+
+- **The scope first proposed was `search_tools`.** The name suggests search, but its one tool is
+  unbound by default. Under the old empty-match rule, that scope reproduced the unscoped toolset
+  exactly, fingerprint `5465f2e44670`, in the deployed container.
+- **Binding no MCP tool at all was the other candidate.** It would have dropped the one tool rule 8
+  names, which backend_swap corrected precisely so the search peer could call it. It would also
+  have staled PR #41's `NOT_TOLD` entry for search's MCP binding, which that PR's
+  `test_no_untold_entry_outlives_its_binding` rejects. Search still calls the factory, so that
+  entry stays true, and its reason still holds.
+- **The first overlay run proved nothing.** It copied only `agent_runtime/` into `/tmp`, so
+  `_allowed_remote_tool_names` could not import `MCP_server/tools` from beside it and returned None.
+  Every scope then bound all 14 tools. With `MCP_server/` copied too, as in `/app`, the scope held.
+  The image copies `MCP_server/` on purpose (`rag_pipeline/Dockerfile`), so the deployed layout
+  resolves its modules. The failure mode itself is unchanged (S28.5).
+
+### Stage S28.5 What this stage did not fix
+
+- **With no module list, 10 of the 14 MCP tools now reach no peer.** These are the `data_tools`,
+  `image_tools`, notebook-builder, executor and ingest tools. Before this change only search had
+  them, the decider never sent tool work to search, and the journal shows none called. A request
+  that names their modules still binds them, in both peers.
+- **This takes the notebook builder off the default path.** PR #42 records that the maintainer
+  declined unbinding the remote notebook builder. This change does not unbind it, since
+  `mcpModules: ["notebook_workflow_tools"]` still binds it. But on the default path, only the search
+  peer had it.
+- **`collect_capability_inventory` still lists every MCP tool.** So "what can you do" can describe
+  those ten, which no peer binds by default.
+- **Remote scoping still fails open when a module cannot be imported.** In that case
+  `_allowed_remote_tool_names` returns None, and the caller keeps the full list. Its docstring says
+  this is deliberate. The overlay in S28.4 shows what it does to a scope.
+- **`image_tools` cannot scope the remote list.** The scoping reads `.name` from the plain functions
+  `_make_image_tools` returns, which have none. The server's names (`describe_image`) also differ
+  from the fallback's (`describe_image_b64`). Measured: `include_modules=["image_tools"]` binds all
+  14 remote tools.

@@ -2188,7 +2188,8 @@ def agent_chat_stream():
       this deployment's own service hosts, and every redirect hop are checked, so it cannot be
       steered into the internal network. Page text is returned to the model as untrusted evidence.
     - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
-    - `mcpModules`: null = all MCP modules (when MCP tools are on).
+    - `mcpModules`: null = each peer's own modules (when MCP tools are on): search binds
+      `element_tools`, analyze `spatial_analysis_tools`. A list replaces both.
     - `smartToolRouting`: `true`.
     - `codeExec`: server default `AGENT_CODE_EXEC` (ON = sandboxed `execute_code` tool); send
       `false` to disable.
