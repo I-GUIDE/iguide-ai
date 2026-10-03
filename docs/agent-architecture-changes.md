@@ -25,6 +25,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 9 | [Who the caller is](#stage-9) | `claude/jwt-identity` | identity, ownership, server-owned history |
 | 10 | [Removing the second path](#stage-10) | `claude/evidence-summary` | the agents-as-tools arm and `full_pipeline` deleted |
 | 11 | [Where state lives, and who decides](#stage-11) | 2026-09-18 → 2026-09-22 | tiers own the cluster; a silent write failure found |
+| 12 | [Staying up, and keeping the evidence](#stage-12) | 2026-09-22 | a watchdog acts on failing health; logs outlive the container |
+| 13 | [Testing what is deployed](#stage-13) | 2026-10-01 | a lock taken from the image; the suite runs on the deployed platform |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -1435,3 +1437,245 @@ the evidence of one afternoon is that they will not.
 Still true and not fixed by any of this: prod's OpenSearch host is deliberately absent from the
 table, so this deployment names its cluster in `OPENSEARCH_NODE`. Filling it in needs the
 credential-selection fix in S12.6 first.
+
+---
+
+## Stage 13 — Testing what is deployed {#stage-13}
+
+Until this stage the test suite ran in one place, the development Mac. It had never run in the
+environment the deployment runs, which is Linux x86-64 with CPython 3.11
+(`rag_pipeline/Dockerfile` is `python:3.11-slim`), and nothing recorded what that environment's
+packages were.
+
+### Stage S13.1 The deployed stack was an accident of build day
+
+`requirements.txt` names 42 packages and pins none of them exactly. 35 are bare names, among them
+geopandas, shapely, fiona, rasterio, libpysal and pandas; seven carry only a lower bound. numpy
+and scipy are not named at all, because they arrive transitively. So the image's
+`pip install -r requirements.txt` installed whatever was newest on the day it was built, and the
+result was written down nowhere. Until this stage, "the deployed stack" existed only inside the
+running container.
+
+How fast that accident drifts, measured: the running image was built on 2026-09-22. Resolving
+the same `requirements.txt` unpinned nine days later (2026-10-01, CPython 3.11.16, x86_64)
+already differs from it on 42 of the 175 packages both contain, geopandas 1.1.4 → 1.2.0 and
+pandas 3.0.5 → 3.0.6 among them, and adds a package the image does not have at all
+(`opentelemetry-api`). A CI job that installed `requirements.txt` bare would have been testing
+that stack, which nobody runs.
+
+`constraints.txt` is now that record: the running `agent-api` container's `pip freeze`, 177
+packages, taken 2026-10-01 from image `deeb331964f6` (built 2026-09-22; CPython 3.11.16,
+x86_64), committed verbatim under a header that says how to retake it. Before committing it was
+checked against the live container again, and the two freezes hash identically.
+
+**The lock comes from the image, never from a development machine.** A lock frozen on the Mac
+describes the Mac. `origin/backend_swap` has one, and it disagrees with the deployed image on 34
+of the 40 packages the two share: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6. Its
+rasterio 1.5.0 pin needs Python 3.12 or later, so it could not install on any 3.11 build, and
+nobody noticed until that branch's CI first ran (`51035b2`). The Mac also supplies pypdf,
+python-docx and xarray from `~/.local` (`backend_swap` `4e8d327`), so a suite that is green
+there says nothing about a build without them.
+
+### Stage S13.2 CI installs through the lock
+
+`.github/workflows/verify.yml` runs `python3 -m pytest rag_pipeline/tests/ -q` on
+`ubuntu-latest` with CPython 3.11, after `pip install -r requirements.txt -c constraints.txt`. It
+needs no secret, because `conftest.py` already replaces `load_dotenv` with a no-op (S9.7).
+
+A constraint binds only what is requested. A requirement added after the freeze therefore
+floats to latest-at-run-time while everything else stays pinned, and CI would test a mix that is
+neither deployed nor latest without saying so. A step after the install prints every installed
+`name==version` that the lock does not contain. It warns rather than fails, because until the
+next deploy there is no deployed version to pin the newcomer to.
+
+### Stage S13.3 What the first Linux run found
+
+The first run (`36943761445`, on `ubuntu-24.04` with CPython 3.11.16, the deployed interpreter
+exactly) installed all 175 packages at the deployed versions and reported:
+
+| | passed | failed | skipped |
+|---|---|---|---|
+| development Mac, its own versions | 1645 | 0 | 4 |
+| CI, the deployed versions | 1643 | 2 | 4 |
+
+The four skips are the same opt-in live-service tests in both. Before the push, the workflow's
+steps were run verbatim in a `python:3.11-slim` container on x86-64, which gave the same counts
+once it had the system library described below.
+
+**The Mac's baseline was measured on a stack that is not deployed.** Of ten version-sensitive
+packages, eight differ: pandas 2.2.3 against 3.0.5, numpy 2.1.3 against 2.4.6, scipy 1.15.3
+against 1.17.1, libpysal 4.15.0 against 4.14.1, and fiona is not installed there at all. One of
+the two failures comes from that difference rather than from the platform, and it is the one
+that matters in production:
+
+* **pandas 3 parses years before 1677, so four-digit codes became dates.**
+  `test_csv_with_coordinates_flows_through` expects `detect_time_column` to ignore `Beat`, a
+  column of police beat numbers; on the deployed versions it lists it as a time candidate. Two
+  things combine. GDAL reads a CSV's columns as text, so the guard in `_candidate_columns` that
+  skips numeric columns without a time-like name never sees a number. And
+  `pd.to_datetime(..., errors="coerce")` turns `"1234"` into NaT on pandas 2, whose nanosecond
+  timestamps cannot reach before 1677, but into 1234-01-01 on pandas 3, which infers microsecond
+  resolution. Ranking sorts by parse rate before the name hint, so the code column wins whenever
+  the real date has a gap. Measured on the deployed versions: with one blank date in four rows,
+  `detect_time_column` chooses `Beat` (parse rate 1.0) over `Date` (0.75); pandas 2.2.3 chooses
+  `Date`. The deployed agent does this today. The fix is a separate change.
+* **The distance band sits on a tie.** `test_distance_band_without_a_threshold_leaves_no_island`
+  passes on macOS/arm64 and leaves one island on Linux x86-64 with identical libpysal 4.14.1,
+  scipy 1.17.1 and numpy 2.4.6; it was reproduced inside the deployed container on 2026-10-01.
+  `analysis_spatial_stats_tools.py` passes `min_threshold_distance` to `DistanceBand` exactly,
+  and the margin on the test lattice is 0.0 m. The fix (pad the threshold by a relative 1e-9) is
+  a separate change, and the test is deliberately not skipped in the meantime.
+* **rasterio and fiona need a system library the slim base image lacks.** Their wheels bundle
+  GDAL but link the system's `libexpat.so.1`, and `python:3.11-slim` has none, so
+  `import rasterio` fails there. Under pytest 9 a module that is present but cannot load is a
+  collection error, not a skip, so that session stopped at `test_raster_routing.py` with no test
+  run. The deployed image has the library only as an automatic dependency of its GDAL and QGIS
+  apt layers (`libgdal36`, `libqgis-core3.40.6`, the distro `python3.13-minimal`, among others).
+  Dropping those layers looks safe, since the wheels bundle GDAL, and would leave rasterio and
+  fiona unimportable. GitHub's runner has the library (both import there), so CI on the runner
+  does not see this; a job built on the slim image would.
+* **The missing extraction readers are invisible to the suite.** pypdf, python-docx and xarray
+  are imported by `extractors/` and are absent from both `requirements.txt` and the image.
+  Nothing fails, because the readers catch the ImportError and degrade quietly (empty text for a
+  document, a "reader unavailable" note for a dataset), and no test in `rag_pipeline/tests` hands
+  them a PDF, a .docx or a NetCDF file. A green run does not mean the deployment can read those
+  formats. Declaring them is a separate change.
+
+The workflow also imports every module the suite `importorskip`s before running it. That call
+skips when a module is absent, so a package dropped from the install would turn whole spatial
+modules into skips and leave the job green with far fewer tests.
+
+### Stage S13.4 The images install through the lock
+
+The first version of this stage left the image installing unpinned, because installing through
+the lock changes what the next deploy installs. That decision is taken here.
+`rag_pipeline/Dockerfile` (agent-api), `MCP_server/Dockerfile` and
+`metadata-extraction-server/Dockerfile` now copy `constraints.txt` in beside `requirements.txt` and
+pass `-c constraints.txt` to every `pip install`. A rebuild therefore reproduces the versions the
+deployment runs. Before, each rebuild resolved that day's newest, and nine days after the
+2026-09-22 build 42 of 175 packages had already moved (S13.1).
+
+**What the next deploy installs changes in one direction: it stops upgrading.** On 2026-10-02 the
+deployed agent-api container still matched the lock line for line, so the rebuild that ships this
+change reinstalls the same 177 versions. Its pip layer reruns once, because the `COPY` above it
+changed. Without this change, the next deploy that touches `requirements.txt` re-resolves the
+whole stack. For PR #36's seven new packages that meant 42 moved packages; with it, the same
+deploy adds the new packages and moves nothing else. The cost is that upstream fixes no longer
+arrive by accident of build day. An upgrade is now a change to the lock, and CI tests it like any
+other change.
+
+**The spaCy model goes through the lock too.** `python -m spacy download en_core_web_sm` became
+`pip install -c constraints.txt en_core_web_sm`. `spacy download` fetches spaCy's compatibility
+table from GitHub at build time and installs whichever model version that table names for the
+installed spaCy, with no lock and no hash check. A bare name constrained by the lock's direct-URL
+line installs exactly that wheel instead, and pip checks the sha256 the URL carries. With one
+digit of the hash changed, the image's pip 24.0 refused: `Expected sha256 0000… Got 1932…`. Today
+both routes give the same wheel. The table lists only 3.8.0 for spaCy 3.8, and the wheel declares
+no dependencies of its own. So the switch changes nothing now; it stops a future model release
+from changing the image unannounced. py-spy likewise installs at its locked 0.4.2.
+
+**MCP_server follows the same rule, because it installs the same file.** Its running container
+was built in the same compose build as agent-api on 2026-09-22. Its `pip freeze` is the lock minus
+exactly `en_core_web_sm` and `py-spy`: 175 packages, each at the locked version. So locking it
+changes nothing it runs. It also keeps the two images on the same versions whenever either is
+rebuilt, including the usual `up -d --build agent-api`, which rebuilds only one.
+`metadata-extraction-server/Dockerfile` installs the same root `requirements.txt` and gets the
+same change. It is not deployed: the VM has only a stopped container from 2026-06-12, and the
+service sits outside compose's default profile.
+
+**libexpat1 is named in all three apt layers.** `python:3.11-slim` for amd64 does not have the
+package: not the tag cached here since 2026-09-19 (CPython 3.11.16, Debian 13.7), and not the one
+the build pulled on 2026-10-02 (3.11.17). With the locked wheels installed on the first,
+`import rasterio` and `import fiona` both fail with
+`libexpat.so.1: cannot open shared object file`. The two libraries that need it are the GDALs
+those wheels bundle,
+`rasterio.libs/libgdal-c8c9c467.so.36.3.10.3` and `fiona.libs/libgdal-fiona-e8f6bdb0.so.35.3.9.2`.
+`apt-get install libexpat1` alone fixes both. pyogrio 0.13.0 imports without it. The images keep
+their GDAL and QGIS packages, which pull it in anyway, so nothing they contain changes. In the
+deployed agent-api it was an automatic package that 16 others depend on, libgdal36,
+libqgis-core3.40.6, python3.13-minimal and the mesa libraries among them. Naming it puts the
+dependency where the next person to trim those layers will read it.
+
+**How a new requirement is handled: it floats until the lock is retaken.** A constraint binds only
+a name it lists. A package added to `requirements.txt` after the freeze resolves at build time to
+its newest version that fits the pins, and so does any new dependency it brings. Nothing already
+pinned moves to make room; if no version fits, the build fails with `ResolutionImpossible`. CI's
+drift step (S13.2) names each floating package in a warning. After the deploy that ships it, the
+lock is retaken from the running container with the command in its header. That pins the
+newcomer and clears the warning. Otherwise the retake is a check: it should change nothing below
+the marker, and any other difference means the image did not install what the lock says.
+
+The newcomer is not pinned in the lock at once because its lines would be a guess. The lock's
+lines come from an image's own `pip freeze`, and a newcomer usually brings dependencies of its
+own: IPython brought twelve in PR #36. Writing that closure by hand predicts a resolution the
+build performs anyway. Two things narrow the window instead:
+
+* Pin the newcomer itself in `requirements.txt` when the version CI tests must be the version
+  deployed, as PR #36 does. Then only its new dependencies float.
+* To move a package the lock already lists, edit that one line in the same change. CI installs
+  and tests it, and the retake after the deploy reproduces it.
+
+**A package a Dockerfile installs by name must be in the lock already.** CI installs only what
+`requirements.txt` asks for, so its drift step never sees py-spy or the model, and a floating one
+would never be flagged. `rag_pipeline/tests/test_image_installs_through_lock.py` fails in that
+case. It also fails for any `pip install` without `-c constraints.txt` or before the lock is
+copied in, for `spacy download`, and for an image without `libexpat1` in an apt layer. It reads
+the Dockerfiles as text and finds the images itself, so a new image is covered as soon as it
+copies `requirements.txt`. Run against prototype's three Dockerfiles, it reports the five unlocked
+installs (three in agent-api's) and the missing `libexpat1` in all three. Fourteen synthetic
+Dockerfiles, and five for the apt reader, check that it rejects each wrong answer and accepts
+each right one.
+
+### Stage S13.5 Verified on local builds, not by a deploy
+
+All three images were built from this change on the development Mac with
+`docker build --platform linux/amd64 --pull`, emulated, on 2026-10-02. The agent-api build took
+2,257 s, mcp-server 1,330 s and metadata-extraction-server 1,495 s, the three running at once.
+
+| image | `pip freeze` inside it | against the deployment |
+|---|---|---|
+| agent-api | the lock's 177 lines, byte for byte, including `torch==2.14.0+cpu` and the model's URL line with its sha256 | identical to the running agent-api; the lock, the running container and the build hash alike (sha256 `ea8da91e6ce73d84…`) |
+| mcp-server | 175 lines: the lock minus `en_core_web_sm` and `py-spy`, which it does not install | identical to the running mcp-server |
+| metadata-extraction-server | the same 175 lines | not deployed |
+
+Every line of each freeze is a line of the lock, so CI's drift step has nothing to report for
+any of them; run inside the mcp-server image, it printed nothing. The model layer resolved the
+bare name straight to the lock's URL. It read no compatibility table, installed 3.8.0 in 10 s,
+and `spacy.load("en_core_web_sm")` works. `apt-mark` lists `libexpat1` as manually installed in
+agent-api and metadata-extraction-server, and mcp-server names it on the same kind of install
+line. In agent-api the same 16 packages depend on it as in the deployed container, and both
+bundled GDALs resolve `libexpat.so.1` to `/lib/x86_64-linux-gnu/libexpat.so.1`.
+
+The test suite was started inside the built agent-api image and did not finish. Partway through,
+the Mac's disk filled and Docker Desktop stopped ("no space left on device"). The disk held
+several sessions' amd64 images, these three among them, at 4 to 7 GB each. No result from that
+run is recorded here. CI runs the suite on Linux under the same lock.
+
+**The interpreter moved while the packages did not.** The build pulled CPython 3.11.17; the
+deployed image runs 3.11.16, on Debian 13.6 rather than 13.7. The freeze is unaffected because
+every compiled wheel here is built for cp311, not for a patch release. It is the float this stage
+leaves, in S13.6.
+
+### Stage S13.6 What this stage did not fix
+
+* **The base image and the apt layers still float.** `FROM python:3.11-slim` is a moving tag, as
+  S13.5 measured, and GDAL, QGIS and `docker-ce-cli` install whatever their archives serve on
+  build day. None of that shows in `pip freeze`. Pinning the base by digest is a separate
+  decision, with its own cost: security updates to the base stop arriving by themselves.
+* **pip, setuptools and wheel come from the base image, not the lock.** `pip freeze` omits them,
+  so the lock cannot pin them. Today they agree: 24.0, 79.0.1 and 0.46.3 in the deployed image and
+  in both base tags above. torch requires `setuptools>=77.0.3`, which the base satisfies. A base
+  with an older setuptools would let pip upgrade it unpinned and unreported.
+* **The lock aligns versions, not the set of packages.** A requirement added later reaches only
+  the images that are rebuilt. `up -d --build agent-api` leaves mcp-server without it.
+* **Other images are outside this lock.** `embedding-server/` installs its own `requirements.txt`,
+  and `sandbox/Dockerfile`, `Dockerfile.claude` and `Dockerfile.opencode` install bare names. The
+  lock describes the root `requirements.txt` stack only.
+* **CI tests the packages, not the image.** The runner is Ubuntu, not the image's Debian. It has
+  no QGIS, no system GDAL, no spaCy model and no pre-downloaded embedding model, and its system
+  libraries come from Ubuntu's base packages rather than the image's apt layers, which is how
+  the libexpat dependency above stays hidden on it. The QGIS and Docker tests stub both out, so
+  neither runs for real anywhere in CI.
+* **The interpreter's patch version floats.** `setup-python` selects the newest 3.11.x it has.
+  On the first run that was 3.11.16, the deployed version, but nothing holds it there; the
+  install step prints which one it got.
