@@ -43,6 +43,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
 | 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope that matches nothing binds nothing |
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
+| 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -4851,3 +4852,156 @@ This file had defects of its own, now checked mechanically on every merge, and f
 
 Dependabot alert #1 (MapLibre attribution XSS) is fixed on `prototype` by #49: it declares
 `^6.11.2` against a vulnerable range of `<= 6.4.0`. The alert stays open until GitHub rescans.
+
+---
+
+## Stage 30 — A file_id and a path are checked against the file's owner {#stage-30}
+
+*2026-10-03. Branch `claude/scope-path-and-id-access`, off `447b961`.*
+
+Stage 21 scoped a bare filename and left the two other ways of naming a stored file open
+(S21.5). A file_id was checked against its owner only by the download endpoint, and a path into
+the store was not checked at all. This stage decides how each is scoped and closes both in
+`file_store`, which every tool's lookup already goes through.
+
+### Stage S30.1 What an id and a path reached
+
+Measured with a probe on `447b961`. Alice wrote `summary.md` in `conv-alice`. From `conv-bob`,
+bob reached it six ways: through `read_text_file` and through `execute_code(input_files=[...])`,
+each by its file_id, by `outputs/<id>__summary.md` (the `path` that `write_output_file` reports)
+and by its absolute path (the `path` that `read_text_file` reports). He also read her record,
+`metadata/<id>.json`, and `write_text_file(..., overwrite=True)` replaced her file's bytes.
+
+The id half was one missing check. Every lookup by id goes through `get_file_record`, and outside
+the store only `GET /agent/files/<id>/download` called `may_read`. So every tool that takes an
+id took another user's. That was measured for the geo and QGIS tools and for `resolve_file_ref`,
+rs-embed's route; for terrain it comes from reading the code. And
+`_augment_user_input_with_file_ids`, which lists a chat request's file_ids in the prompt, gave
+bob alice's filename.
+
+The path half came from `_allowed_roots()`. The storage root is one root. The default store,
+`agent_chat_files/`, also sits inside the repo root, which is another. And `.env.example` sets
+`UPLOAD_FOLDER` to the store's `uploads/`, which makes a third. A path that any of them admitted
+was read or written without a record ever being consulted. Two more readers had routes of their
+own:
+
+- `langchain_geo_tools._resolve` opened any path that existed.
+- QGIS assembles a shapefile from every file beside the named part whose name shares its stem,
+  because uploads are stored as `<file_id>__<name>` and the parts do not sit side by side. So
+  bob's `parcels.shp` was assembled with alice's `parcels.dbf`, which holds the attributes.
+
+### Stage S30.2 The policy, decided
+
+- **An id is honoured wherever the owner check passes, in any of the owner's conversations.** The
+  check is the one `find_files` makes: `may_read`, with unowned records allowed. The
+  conversation is not part of it, for three reasons. The conversation scope exists to tell files
+  with the same name apart, and an id names one file. The conversation id comes from the client,
+  so it could not be what protects an id. And the download link, the other place ids are used,
+  already works in every one of the owner's conversations. In dev and demo nobody is identified,
+  so an id reaches its file from any conversation, as the link does there.
+- **A path into `uploads/` or `outputs/` is the record it names, with that record's checks.** Every
+  record reports its file's path to the model, and the model passes paths back. Refusing paths
+  outright would break calls that work today and protect nothing the id check does not. The
+  on-disk name `<file_id>__<filename>` names the record, and the record must name the same file
+  back. A file that no record names has no owner to check, so it is refused, as its id would be.
+- **No path through these tools reaches `metadata/`, for reads or for writes.** A record says
+  whose its file is, and that is exactly what the checks read. No tool has a use for one, the
+  owner included.
+- **A write by path replaces only an output this conversation wrote for this caller.** This is the
+  rule `overwrite=True` follows (Stage 22), and it is now one function, `may_replace`, that both
+  use. With no conversation bound, nothing qualifies. Uploads are never replaced. A write by path
+  may not create a file in `uploads/`, `outputs/` or `metadata/` either, because nothing could
+  list it, link to it or read it back. `write_output_file` is how a file enters the store.
+- **The unowned legacy pool follows `find_files`' reuse policy.** It is readable by id and by path
+  from any conversation, by any caller, in strict token mode too. Only the browser download refuses
+  it once strict (S9.3), and that endpoint keeps its own rule. Nobody replaces it by path, because
+  every conversation reads it.
+- **A refusal reads exactly as a missing file does**, for an id and for a path. The download
+  endpoint's own refusal said "No file found for id" where an unknown id says "unknown file_id".
+  S9.3 had made both a 404, but the different words still confirmed the id. They now match.
+
+### Stage S30.3 What changed
+
+- `get_file_record` makes the owner check. `require_file_record`, `resolve_file_id` and
+  `resolve_file_ref` inherit it, and so does every tool that takes an id.
+- Only a single token of letters, digits, `_` and `-` is looked up as an id. The id becomes the
+  record's filename, `metadata/<id>.json`, so a path or a filename is never read as one. Every id
+  the store has minted is `file_` followed by twelve hex digits, and the test fixtures' `file_demo`
+  still resolves.
+- `managed_path_record(path, write=...)` is the rule for a path. It returns None for a path outside
+  `uploads/`, `outputs/` and `metadata/`, so the caller's own rules apply as before. Three callers
+  use it:
+  - The file tools' resolver, for every candidate path, whichever root admitted it. That resolver
+    serves `read_text_file`, `inspect_file_for_analysis`, `write_text_file`'s path branch and
+    `execute_code`'s `input_files`.
+  - The geo tools' path branch.
+  - QGIS, for each shapefile part it gathers. A part must also come from the named part's
+    conversation or from none, which is what a name looked up in that conversation finds
+    (Stage 21).
+- The directories are matched by device and inode, not by name. `Path.resolve()` does not
+  canonicalise case, so on a case-insensitive filesystem `OUTPUTS/x` is inside `outputs/` while
+  being a different string. Code execution's reserved directories were caught out the same way
+  (CLAUDE.md).
+- A read by path now reports the record it resolved: its `file_id` had been null and its
+  `download_url` absent. `execute_code` stages the file under its filename as well as its id.
+- Skill resources are never taken from the store's own directories, for listing or for loading.
+  A skill directory that contained the store would otherwise have offered its files with no
+  owner check.
+
+### Stage S30.4 Revised during the work
+
+The first version matched each of the store's directories by inode, but only those that already
+existed. In a fresh store whose `outputs/` had not been made yet, nothing matched, so
+`write_text_file("outputs/report.md")` created the directory and a file that no record names.
+`test_a_new_file_is_not_created_in_the_store_by_path` caught it. The directories are now made
+before matching, as every other use of them makes them.
+
+An independent audit re-derived every figure below, and all of them reproduced. It changed four
+things:
+
+- **The QGIS part rule first required the named part's own conversation.** That silently dropped
+  a user's own part uploaded with no thread id: the layer lost its attributes and nothing said
+  so. A part from no conversation now counts too, as it would for a name.
+- **Two statements were broader than the code.** "`metadata/` is never reachable by path" and
+  "every path into the store" held for the file, code and geo tools, not for every reader of the
+  store. They now name the tools. Skill resources were a further reader, and are now covered.
+- **The download endpoint's log line** for its own refusal said "does not belong to this
+  caller". Only an unowned file in strict mode reaches it now, so it says that. Another user's id
+  is refused earlier, in `require_file_record`, and is logged as an unknown id.
+- "Both had been null" was wrong: the `download_url` key had been absent, not null.
+
+### Stage S30.5 Verification, and what it costs
+
+- `test_path_and_id_scope.py` has 65 tests. On `447b961`, 48 fail and 17 pass. The 17 are what the
+  checks must not break:
+  - the owner's own file, by id and by both paths, through both read tools (6);
+  - the same from another of her conversations (3);
+  - the legacy pool (3);
+  - dev mode (3);
+  - the two lookups by id that already returned the record: a read reporting it, and staging
+    under the filename (2).
+
+  With the change, all 65 pass on the Mac. On a case-sensitive filesystem, such as the deployed
+  one, the case test skips itself, so it is 64 passed and 1 skipped there.
+- The skill and QGIS-part changes from the audit have no tests of their own. They rest on the
+  audit's checks and on the existing skill and QGIS tests, which pass unchanged.
+- Re-running the probe on the branch, each of bob's routes is refused and alice's bytes are
+  unchanged. Alice still reaches her file by id and by path from another of her conversations.
+- Full suite: 2113 passed, 4 skipped. On `447b961` it is 2048 passed, 4 skipped, so the
+  difference is exactly this file's 65 tests.
+- A read by id costs what it did, 0.15–0.16 ms. A read by path costs about 0.2 ms more:
+  0.19–0.20 → 0.40 ms by relative path, and 0.14–0.15 → 0.35–0.36 ms by absolute path. These are
+  medians of 30 warm reads on the Mac, three runs on a 1,400-record store and one on 5,000, with
+  the same figures at both sizes. A path looks up the one record it names (twice, as written),
+  where a lookup by name parses every record (S21.4).
+
+### Stage S30.6 What this stage did not fix
+
+- QGIS's own arguments are not checked here. A reference that is not a file_id, in any of the
+  four QGIS tools, is passed to QGIS as given, and so is a Processing output path. A check on
+  arguments cannot confine a general processing engine; that needs the kind of container
+  `execute_code` runs in.
+- QGIS job directories (`qgis_jobs/<conversation>/<job>`) and the store's other working
+  directories hold no records, so they are not checked here either.
+- Outside the store's own directories, every tool keeps the rules for a path that it already had.
+- A write by path changes a file without updating its record's `size_bytes`.

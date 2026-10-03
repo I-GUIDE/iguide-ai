@@ -247,13 +247,36 @@ def maybe_sweep_expired_files() -> None:
         logger.warning("Opportunistic file sweep failed: %s", exc)
 
 
+# An id names its record's file, metadata/<id>.json. Every id the store has minted is "file_" and
+# twelve hex digits (save_uploaded_file, create_output_file*, the MCP server's plots), and test
+# fixtures use shorter ones such as "file_demo". So a single token of these characters is looked
+# up as an id, and nothing else is: a path or a filename is never read as one.
+_FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def get_file_record(file_id: str) -> Optional[Dict[str, Any]]:
-    if not file_id:
+    """The record for ``file_id``, or None when there is none THIS caller may read.
+
+    Every lookup by id comes through here: require_file_record, resolve_file_id and
+    resolve_file_ref, and through them the file, code, geo, QGIS, terrain and rs-embed tools and
+    the download endpoint. So the owner check is made here, once. Before, only the download
+    endpoint made it, and every tool read another user's file by its id.
+
+    The check is find_files' (``may_read``, the unowned legacy pool allowed), and the conversation
+    is not part of it. A name can mean several files, and the conversation tells them apart. An
+    id means one file, and its download link already works in every one of its owner's
+    conversations. Another user's record is None, exactly like an id that was never minted.
+    """
+    text = str(file_id or "").strip()
+    if not _FILE_ID.fullmatch(text):
         return None
-    meta_path = _metadata_path(str(file_id).strip())
+    meta_path = _metadata_path(text)
     if not meta_path.exists():
         return None
-    return _with_public_url(json.loads(meta_path.read_text(encoding="utf-8")))
+    record = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict) or not may_read(record, allow_unowned=True):
+        return None
+    return _with_public_url(record)
 
 
 def require_file_record(file_id: str) -> Dict[str, Any]:
@@ -343,6 +366,93 @@ def may_read(record: Dict[str, Any], *, allow_unowned: bool = True) -> bool:
     if owner is None:
         return allow_unowned
     return owner == caller
+
+
+def may_replace(record: Dict[str, Any]) -> bool:
+    """Whether the CURRENT caller may write over this record's file in place: an output THIS
+    conversation wrote for THIS caller.
+
+    ``overwrite=True`` (Stage 22) and a write by path follow this one rule. A replacement changes
+    what every earlier link to the file serves, and those links are in the conversation that made
+    it. An upload is the user's original and is never replaced. The unowned legacy pool is read by
+    every conversation, so none may replace it, and with no conversation bound nothing qualifies.
+    The owner must match exactly, so a borrowed conversation id does not reach another user's
+    file. In dev and demo nobody is identified and the owner is None on both sides.
+    """
+    session = current_session()
+    return (bool(session) and (record or {}).get("kind") == "output"
+            and record.get("session") == session and record_owner(record) == current_owner())
+
+
+# ---------------------------------------------------------------------------
+# A PATH into the store, as distinct from an id or a name
+# ---------------------------------------------------------------------------
+# The file tools resolve a path under their allowed roots, and the store is under one of them:
+# the storage root is a root itself, the default store sits inside the repo root, and
+# .env.example points UPLOAD_FOLDER at its uploads/. So a path reached a stored file with neither
+# check above, and could write one. Every record already reports its file's path to the model,
+# which hands it back, so a path is honoured as the record it names, with that record's checks.
+
+_MANAGED_DIRS = ("uploads", "outputs", "metadata")
+
+
+def managed_dir(path: Path) -> Optional[str]:
+    """Which of the store's own directories ``path`` lies under, or None.
+
+    Matched by device and inode, not by name: Path.resolve() does not canonicalise case, so on a
+    case-insensitive filesystem (macOS, a Windows bind mount) 'OUTPUTS/x' is in outputs/ without
+    starting with that string. The directories are made first, as every other use of them makes
+    them: one that did not exist yet matched nothing, and a write by path then created it.
+    """
+    dirs: Dict[Tuple[int, int], str] = {}
+    for name, make in zip(_MANAGED_DIRS, (_uploads_dir, _outputs_dir, _metadata_dir)):
+        try:
+            st = make().stat()
+        except OSError:
+            continue
+        dirs[(st.st_dev, st.st_ino)] = name
+    for ancestor in path.parents:
+        try:
+            st = ancestor.stat()
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) in dirs:
+            return dirs[(st.st_dev, st.st_ino)]
+    return None
+
+
+def managed_path_record(path: Any, *, write: bool = False) -> Optional[Dict[str, Any]]:
+    """The record a path into the store's own directories names, checked as its id would be.
+
+    * None: the path is not in uploads/, outputs/ or metadata/, and the caller's own rules for a
+      path apply, as before.
+    * A record: the path is that record's file. Its on-disk name ``<file_id>__<filename>`` names
+      the record, the record names the same file back, and get_file_record lets this caller read
+      it. With ``write``, may_replace must hold too.
+    * ValueError for anything else in those directories, with one message whatever the reason, so
+      a refusal does not say whether the file exists. metadata/ is never reachable by path,
+      because a record says whose its file is and the checks read that. A file no record names
+      has no owner to check, and a write may not create one: nothing could list it, link to it
+      or read it back.
+    """
+    resolved = Path(path).expanduser().resolve()
+    where = managed_dir(resolved)
+    if where is None:
+        return None
+    record = None
+    if where != "metadata" and "__" in resolved.name:
+        record = get_file_record(resolved.name.split("__", 1)[0])
+        try:
+            if record is not None and not os.path.samefile(_record_path(record), resolved):
+                record = None
+        except (OSError, ValueError):
+            record = None
+    if record is None or (write and not may_replace(record)):
+        raise ValueError(
+            f"{path} is in the file store's {where}/ directory. A stored file is read by its "
+            "file_id or filename, a new file is saved with write_output_file, and a path there is "
+            "written only to replace an output this conversation made.")
+    return record
 
 
 def find_files(name: Optional[str] = None, *, suffix: Optional[str] = None,
@@ -504,23 +614,18 @@ def _output_to_replace(safe_name: str) -> Optional[Dict[str, Any]]:
     the conversation that made it. find_files was scoped to the conversation and the owner; this
     scan never was.
 
-    Nothing is reused when no conversation is bound, because the records that would match are
-    the unstamped legacy pool that every conversation reads. The owner must match exactly, so a
-    borrowed conversation id does not reach another user's file. In dev and demo nobody is
-    identified and the owner is None on both sides.
+    Which records qualify is may_replace's rule, which a write by path follows too.
     """
     session = current_session()
     if not session:
         return None
-    owner = current_owner()
     candidates: List[Tuple[float, str, Dict[str, Any]]] = []
     for meta_path in _metadata_dir().glob("*.json"):
         try:
             record = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 - a half-written record must not break a write
             continue
-        if (record.get("kind") != "output" or record.get("filename") != safe_name
-                or record.get("session") != session or record_owner(record) != owner):
+        if record.get("filename") != safe_name or not may_replace(record):
             continue
         try:
             mtime = _record_path(record).stat().st_mtime
@@ -691,6 +796,8 @@ __all__ = [
     "find_files",
     "resolve_file_ref",
     "get_file_record",
+    "managed_dir",
+    "managed_path_record",
     "maybe_sweep_expired_files",
     "require_file_record",
     "resolve_file_id",
