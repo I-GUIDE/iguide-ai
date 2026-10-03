@@ -1796,13 +1796,112 @@ longer runs on them; before the change pandas 2.2.3 read 125,531 of them as year
   US daylight-saving pair such as `-06:00` and `-05:00`, parses 2 of 2 on pandas 2.2.3 and 0 of 2
   on 3.0.5. pandas 3 raises `Mixed timezones detected` unless given `utc=True`, every strategy
   fails, and the column reads as having no time at all. It is the same upgrade moving the line
-  the other way, so dates that should parse no longer do. It is open.
+  the other way, so dates that should parse no longer do. Fixed in S15.5.
 * **`_span` overflows on pandas 2** when parsed times span more than about 292 years, and the
   whole `detect_time_column` call then fails. This affects the development machine only.
 * **A code column inside 1678–2262 with a time-ish name** still parses as years: a `Report Area`
   holding 1711–2212 would. Only the name tells it from a year column, and here the name says time.
 
-### Stage S15.5 Verified where the failure lives
+### Stage S15.5 Offsets are converted to UTC by pandas, on every version
+
+*2026-10-02, `claude/temporal-mixed-utc-offsets`, stacked on `claude/temporal-numeric-code-columns`.*
+
+This fixes the first item in S15.4. The module docstring promises that a time carrying a UTC
+offset is converted to UTC and made naive. On pandas 2 that promise rested on a deprecated path:
+`pd.to_datetime` returned a column whose offsets differ as objects, and `_naive` converted the
+objects. Its `FutureWarning` named both the change and the fix: such a column *"will raise an
+error unless `utc=True`"*. pandas 3 made it the error, `ValueError: Mixed timezones detected`,
+and `errors="coerce"` does not suppress it. The
+strategy loop's `except Exception: continue` swallowed it in the inferred and the mixed strategy
+alike, and no explicit format has a `%z`, so none can match a time with an offset. On the deployed
+image a CSV of a US feed's local times, `-06:00` in winter and `-05:00` in summer, got
+`found: false` from `detect_time_column`, and `filter_by_time`, `time_series` and
+`temporal_hotspots` each answered "no time/date column could be detected in this dataset".
+
+**The rule:** the inferred and mixed strategies pass `utc=True`, so pandas converts every offset
+itself and `_naive` only drops the zone. Checked on both versions, on the raw `pd.to_datetime`
+calls and then through `parse_time_series`:
+
+* With `utc=True` the two strategies give the same instants on 2.2.3 and 3.0.5 for all 13 offset
+  shapes tried inside pandas 2's nanosecond range: `Z` beside `+01:00`; `-06:00` beside `-05:00`
+  with a `T` or a space, without the colon, with fractional seconds, or in RFC 2822; with garbage,
+  blanks and nulls among them; the two `01:30` of a fall-back night; single offsets; and text
+  with an offset beside text without.
+* Text without an offset is read as UTC and made naive again, so its values do not move: ISO,
+  Chicago, date-only, day-first, month names, `YYYY-MM`.
+* The explicit formats are left as they were. None of the 20 matches any of those offset strings
+  on either version, with `utc=True` or without it, because none has a `%z`.
+
+Then `parse_time_series` itself, on 49 column shapes:
+
+| shapes | pandas 2.2.3 (development) | pandas 3.0.5 (deployed) |
+|---|---|---|
+| 12 whose offsets differ | parsed; unchanged | **0% unfixed**; fixed, the same instants as 2.2.3 |
+| 4 mixing text with an offset and text without | 2 of 2; unchanged | **1 of 2 unfixed**, only the rows that fit the first value's layout; fixed, 2 of 2 |
+| 3 of offset times outside or at the edges of 1678–2262 | unchanged but one, below | 0 unfixed; fixed, as on 2.2.3 but one, below |
+| the other 30 | unchanged | unchanged |
+
+Fixed, the deployed version returns what pandas 2.2.3 always returned on 48 of the 49 shapes. The
+49th is an offset time that lands on 2262-04-12 UTC: the year window of S15.2 admits it and pandas
+3 keeps it, but it is past pandas 2's nanosecond ceiling of 2262-04-11 23:47. On 2.2.3 the fix
+moves one shape, the wrong way; it is the first item under *Found here, not fixed* below.
+
+**Behaviour that changed on purpose:**
+
+* A column whose offsets differ parses again on pandas 3, in UTC, as the docstring says.
+* In a column mixing times that carry an offset with times that do not, the ones without are read
+  as UTC. pandas 2 did this all along, through `_naive`'s own `utc=True`. Unfixed, pandas 3 kept
+  only the rows that fit the first value's layout.
+
+**Found here, not fixed:**
+
+* **pandas 2.2.3 wraps around instead of failing** when `utc=True` pushes an offset time past its
+  nanosecond range, in the inferred strategy only. `2262-04-11T23:00:00-05:00` becomes
+  1677-09-21, which the year window drops. `1677-09-21T00:30:00+01:00` becomes 2262-04-11 23:04,
+  which the window keeps: a wrong time where the unfixed code gave NaT. Only a clock time on
+  1677-09-21 with a positive offset can reach it, and only on pandas 2, so only on the
+  development machine. pandas 3 does not wrap.
+* **`summary_statistics(by=<date column>, period=...)`** in `analysis_aggregate_tools.py` parses
+  the column with its own `pd.to_datetime`. A daylight-saving column fails there on both versions,
+  with `Can only use .dt accessor with datetimelike values` on 2.2.3 and `Mixed timezones
+  detected` on 3.0.5. A single offset is bucketed by local clock time: `2026-01-31T20:00:00-06:00`
+  counts in January there and in February in `time_series`, which works in UTC. Routing it
+  through `parse_time_series` is the likely fix, and a separate change.
+* **Abbreviated zone names** (`CST`, `CDT`) parse on neither version, fixed or not.
+
+**Cost**, as the best of interleaved rounds in one process, with every value distinct so that
+`to_datetime`'s cache never helps:
+
+| 100,000 values, deployed container (3.0.5) | unfixed | fixed |
+|---|---|---|
+| Chicago format | 5.34 s | 5.24 s |
+| ISO with no offset; with one offset | 0.04 s; 0.42 s | 0.04 s; 0.42 s |
+| ISO with `-06:00` and `-05:00` | 2.78 s, nothing parsed | 0.42 s |
+
+On the deployed version the rule costs nothing measurable, and a daylight-saving column, which
+used to run all 22 strategies to fail, now parses at the first. The development machine was not
+timed, because other work held its load average at 63, so pandas 2.2.3's cost is not measured.
+
+**Verified where the failure lives:**
+
+| | unfixed (`claude/temporal-numeric-code-columns`) | fixed |
+|---|---|---|
+| deployed container (pandas 3.0.5), the 38 temporal tests | the 2 new mixed-offset tests fail | all pass |
+| development machine (pandas 2.2.3), the 38 temporal tests | all pass | all pass |
+
+The live module in the same container, `prototype`'s, fails 9 of the 38: the 7 of S15.6 and the
+same 2. On the development machine the full suite gives 1654 passed and 4 skipped: S15.6's 1651
+and the three new tests.
+
+Three tests are new. Two fail unfixed on pandas 3: offsets that differ (the daylight-saving pair,
+`Z` beside `+01:00`, and text with and without an offset), and a CSV of daylight-saving local
+times through `detect_time_column` and `filter_by_time`, whose window is checked in UTC. The third
+is a guard that passes either way: one offset is still converted, and text without one keeps its
+clock time. The development machine passes all three unfixed, so it cannot show this failure. As
+in S15.6, each version of `agent_runtime/` was imported from `/tmp` ahead of `/app` in the
+deployed container; nothing was deployed.
+
+### Stage S15.6 Verified where the failure lives
 
 | | unfixed | fixed |
 |---|---|---|

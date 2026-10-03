@@ -195,6 +195,37 @@ def test_parse_time_series_year_window_does_not_move_with_pandas():
     assert pd.isna(text.iloc[0]) and text.iloc[1] == pd.Timestamp("1700-01-26")
 
 
+def test_parse_time_series_converts_mixed_offsets_to_utc():
+    """Offsets that differ within one column, as a US feed's do either side of daylight saving.
+
+    The deployed failure: pandas 3 raises "Mixed timezones detected" where pandas 2 returned
+    objects, so every text strategy failed and the column read as 0% parsed.
+    """
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    dst, method = parse_time_series(pd.Series(["2026-01-05T09:00:00-06:00", "2026-07-26T20:00:00-05:00"]))
+    assert method == "inferred single format"
+    assert list(dst) == [pd.Timestamp("2026-01-05 15:00"), pd.Timestamp("2026-07-27 01:00")]
+    mixed, _ = parse_time_series(pd.Series(["2026-07-26T20:00:00Z", "2026-01-05T09:00:00+01:00"]))
+    assert list(mixed) == [pd.Timestamp("2026-07-26 20:00"), pd.Timestamp("2026-01-05 08:00")]
+    assert dst.dt.tz is None and mixed.dt.tz is None
+    # Text with no offset beside text with one is read as UTC, as pandas 2 always did; pandas 3
+    # raised here too, and the unfixed parser kept only the rows the first format fitted.
+    both, _ = parse_time_series(pd.Series(["2026-01-05 09:00:00", "2026-07-26T20:00:00-05:00"]))
+    assert list(both) == [pd.Timestamp("2026-01-05 09:00"), pd.Timestamp("2026-07-27 01:00")]
+
+
+def test_parse_time_series_utc_leaves_other_columns_as_they_were():
+    """One offset is still converted to UTC, and text without an offset keeps its clock time."""
+    from agent_runtime.analysis_temporal_tools import parse_time_series
+
+    single, _ = parse_time_series(pd.Series(["2026-01-05T09:00:00-06:00", "2026-02-05T09:00:00-06:00"]))
+    assert list(single) == [pd.Timestamp("2026-01-05 15:00"), pd.Timestamp("2026-02-05 15:00")]
+    naive, method = parse_time_series(pd.Series(["2026-01-05T09:00:00", "2026-07-26T20:00:00"]))
+    assert method == "inferred single format"
+    assert list(naive) == [pd.Timestamp("2026-01-05 09:00"), pd.Timestamp("2026-07-26 20:00")]
+
+
 # ----------------------------------------------------------------- detect_time_column
 def test_detect_time_column(incidents):
     res = _call(_tools()["detect_time_column"], file_id=incidents)
@@ -520,6 +551,31 @@ def test_csv_year_column_is_still_a_time_column(store):
     best = res["candidates"][0]
     assert best["parse_method"] == "year number" and best["granularity"] == "year"
     assert best["span"]["start"].startswith("2019-01-01") and best["span"]["end"].startswith("2021-01-01")
+
+
+def test_csv_with_daylight_saving_offsets_is_a_time_column(store):
+    """A US feed's local times: -06:00 in winter, -05:00 in summer, read as text like every CSV field.
+
+    On the deployed image (pandas 3) the unfixed tool reported that no time column existed.
+    """
+    path = store / "dst.csv"
+    pd.DataFrame({
+        "reported_at": ["2026-01-05T09:00:00-06:00", "2026-03-10T23:30:00-05:00",
+                        "2026-07-26T20:00:00-05:00", "2026-11-02T08:00:00-06:00"],
+        "Latitude": [41.90, 41.91, 41.92, 41.93],
+        "Longitude": [-87.66, -87.67, -87.68, -87.69],
+    }).to_csv(path, index=False)
+    file_id = _upload(path)
+    tools = _tools()
+
+    detected = _call(tools["detect_time_column"], file_id=file_id)
+    assert detected["ok"] is True and detected["time_column"] == "reported_at"
+    best = detected["candidates"][0]
+    assert best["parsed_rows"] == 4 and best["failed_rows"] == 0
+    assert best["span"]["start"].startswith("2026-01-05T15:00")     # in UTC
+    # Windows apply in UTC too: 23:30 at -05:00 on March 10 is 04:30 UTC on March 11.
+    sliced = _call(tools["filter_by_time"], file_id=file_id, start="2026-03-11", end="2026-03-11")
+    assert sliced["ok"] is True and sliced["matched"] == 1
 
 
 def test_unknown_file_id_fails_cleanly():
