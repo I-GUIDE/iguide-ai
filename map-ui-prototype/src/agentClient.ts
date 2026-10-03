@@ -61,10 +61,14 @@ export interface ModelCatalogue {
 }
 
 export interface UiConfig {
-  /** What this deployment is for. Absent on a server built before modes existed. */
-  mode?: 'dev' | 'demo' | 'token';
+  /** What this deployment is for. Absent on a server built before modes existed. `local` is a
+   *  developer's own machine: dev access, and nothing written to a shared store. Not to be
+   *  confused with this app's own MOCK mode, which App.tsx also calls "local" (`runLocal`). */
+  mode?: 'dev' | 'demo' | 'token' | 'local';
   demo_mode: boolean;
   api_key_required: boolean;
+  /** False when the server keeps no conversations (local mode). Absent on older servers. */
+  persistent_memory?: boolean;
   /** Token mode only: where the BROWSER refreshes an aged-out access cookie, and where it
    *  sends someone who is not signed in. Reported by the server rather than compiled in, so
    *  one bundle runs against either tier — dev and production are different backends. */

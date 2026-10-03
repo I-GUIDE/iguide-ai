@@ -37,6 +37,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 21 | [A filename names this conversation's file](#stage-21) | 2026-10-02 | a bare filename resolves through `find_files`: this conversation, this caller, the exact name |
 | 22 | [A file_id names one write](#stage-22) | 2026-10-01 | an overwrite reaches only this conversation's own file; QGIS results never overwrite |
 | 23 | [An upload names its conversation](#stage-23) | 2026-10-02 | the upload route binds the thread id as well as the caller; the map UI sends it |
+| 24 | [A laptop that writes nothing](#stage-24) | 2026-10-03 | `AGENT_MODE=local` makes a laptop run write to no shared store; an override list wrote seven conversations into prod |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -3825,3 +3826,81 @@ leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` r
   conversation's outputs can draw one of them a second time. And an upload whose name
   `secure_filename` rewrites never gets its `sourceUrl`, so one too large to keep inline cannot be
   restored.
+
+---
+
+## Stage 24 — A laptop that writes nothing {#stage-24}
+
+### Stage S24.1 The recipe failed twice, so it became a mode
+
+Running the agent locally meant inheriting the main checkout's `.env`, which points at shared
+infrastructure: the PRODUCTION OpenSearch cluster, a remote embedding server, the production
+agent's public URL, dev object storage, the VM's rs-embed, and `AGENT_MODE=token`. Every
+`load_dotenv` in the code walks up from a worktree and finds that file.
+
+The safe way to run locally was therefore a list of overrides, and the list failed twice. On
+2026-10-01 a local verification run wrote seven conversations into prod; nothing errored, because
+a write that should not happen does not fail — it succeeds. The recipe recorded afterwards
+(`PLATFORM_TIER=dev` with `OPENSEARCH_NODE` blank) still wrote, to the DEV cluster: with the
+explicit host empty, `platform_endpoints.opensearch_url()` falls back to the tier's. It was caught
+only by reading the code while planning a local model test.
+
+A guarantee that depends on remembering eight variables is not a guarantee. `AGENT_MODE=local`
+is a fourth mode beside `dev`, `demo` and `token`.
+
+### Stage S24.2 What it guarantees, and where each guarantee lives
+
+**Persistent memory is off, checked in three places.** The failure it prevents is silent, so no
+single check is trusted alone:
+
+* **The request flag**, in `_normalize_agent_chat_request` and at the second call site. The map
+  UI hard-codes `use_persistent_memory: true`, so a flag the client controls cannot be the switch;
+  local mode overrides it.
+* **The conversation endpoints.** The map UI saves snapshots by `PUT /agent/conversations/<id>`
+  DIRECTLY, outside the per-request flag. In local mode a PUT is declined in the body
+  (`{"stored": false}`, HTTP 200 — the client keeps its own copy, and a store that is deliberately
+  off is not an error for it to report); GET and traces answer 404. These checks run BEFORE
+  `assert_memory_owner`, which reads the store.
+* **The store's own client.** `memory_module._get_opensearch_client()` raises
+  `PersistentMemoryDisabled` before it builds anything — and before it consults the cache, since
+  a guard behind the cache is bypassed by any client built earlier. Every read and write of the
+  conversation store comes through here, which is what makes the mode a guarantee rather than a
+  convention.
+
+**Knowledge-base search keeps reading.** Memory and search shared `OPENSEARCH_NODE`, so "no memory
+writes" used to imply "no search", and a model tested without search is being tested on a crippled
+agent. The five search modules build their own clients, so closing the memory store leaves them
+untouched.
+
+**Download links stay on the machine.** `AGENT_PUBLIC_BASE_URL` is ignored; the `.env` sets it to
+the production agent, which made every local link a 404 against a host that never had the file.
+
+**Access is `dev`'s.** No identity, settings shown, model chosen per request. Every existing call
+site tests `is_token()` or demo — none compares `== DEV` — so `local` inherited dev behaviour at
+each of them without a change.
+
+### Stage S24.3 The banner is the part that prevents a repeat
+
+The 2026-10-01 writes went unnoticed because nothing ever said *this process will write to
+149.165.155.195*. In local mode the server logs, at boot, every endpoint it can still reach,
+tagged `[local ]` or `[REMOTE]`, with credentials in URLs masked and `AGENT_PUBLIC_BASE_URL` listed
+as `[ignored]` rather than silently dropped.
+
+### Stage S24.4 How it was tested
+
+`test_local_mode.py` targets the two real failing configurations by name and asserts the store is
+never OPENED — a constructor that raises if called — rather than that a write fails, since "it
+raised" and "it did not touch the cluster" are different claims. Both load-bearing guards were
+mutation-tested: removing the store guard fails the four store tests; removing the request
+override fails the one that covers it.
+
+`/agent/ui-config` gained `persistent_memory`. The endpoint is unauthenticated, and
+`test_demo_mode.py` pins its whole body so that any new field is a deliberate edit; that pin was
+extended rather than loosened.
+
+### Stage S24.5 What it does not do
+
+It does not make a local run OFFLINE. The LLM, the remote embedding server and knowledge-base
+reads are still real network calls; the banner names them. It does not change any deployed mode:
+`token` on the VM is untouched. And the map UI's own word "local" — its mock mode, `runLocal` —
+is a different thing from this server mode; a comment in both places says so.

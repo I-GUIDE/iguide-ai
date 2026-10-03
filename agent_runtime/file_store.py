@@ -87,6 +87,15 @@ def _public_base_url() -> str:
     origin they call — robust across port mappings and proxies. Set ``AGENT_PUBLIC_BASE_URL``
     when clients can't do that resolution and need ready-to-use absolute URLs.
     """
+    # Local mode ignores it. The main checkout's .env sets it to the PRODUCTION agent, so a laptop
+    # inheriting it hands out links to agent.i-guide.io for files that exist only on the laptop —
+    # each one a 404 ("unknown file_id") that reads like a lost file rather than a wrong host.
+    try:
+        from agent_runtime import deployment_mode
+        if deployment_mode.is_local():
+            return ""
+    except ValueError:
+        pass  # an invalid AGENT_MODE is reported where it is read; it does not decide URLs
     base = (os.getenv("AGENT_PUBLIC_BASE_URL") or "").strip().rstrip("/")
     return base if base.lower().startswith(("http://", "https://")) else ""
 
