@@ -633,6 +633,121 @@ def test_csv_with_daylight_saving_offsets_is_a_time_column(store):
     assert sliced["ok"] is True and sliced["matched"] == 1
 
 
+# ------------------------------------------------------------------ which clock a result is in
+def _chart_labels(monkeypatch) -> list:
+    """The x-axis label of every chart time_series publishes, read off the figure itself."""
+    import agent_runtime.analysis_temporal_tools as temporal
+
+    labels = []
+    publish = temporal._publish_figure
+
+    def spy(fig, filename):
+        labels.append(fig.axes[0].get_xlabel())
+        return publish(fig, filename)
+
+    monkeypatch.setattr(temporal, "_publish_figure", spy)
+    return labels
+
+
+def test_time_series_counted_in_utc_says_so(store, monkeypatch):
+    """A US feed's local times with their offset are counted in UTC, and the chart now says so.
+
+    The axis read "hour of day (local clock time)" while 09:00 at -06:00 counted at hour 15, so a
+    Chicago feed's peak moved six hours in winter and five in summer under a label saying it had
+    not. Days move with it: 20:00 on a Monday at -06:00 is 02:00 on Tuesday in UTC.
+    """
+    labels = _chart_labels(monkeypatch)
+    path = store / "offsets.csv"
+    pd.DataFrame({
+        "reported_at": ["2026-01-05T09:00:00-06:00", "2026-01-06T09:00:00-06:00",   # Mon, Tue
+                        "2026-01-05T20:00:00-06:00"],                                 # Mon evening
+        "Latitude": [41.90, 41.91, 41.92],
+        "Longitude": [-87.66, -87.67, -87.68],
+    }).to_csv(path, index=False)
+    file_id = _upload(path)
+    tools = _tools()
+
+    hod = _call(tools["time_series"], file_id=file_id, freq="hour_of_day")
+    dow = _call(tools["time_series"], file_id=file_id, freq="day_of_week")
+    daily = _call(tools["time_series"], file_id=file_id, freq="day")
+    _call(tools["time_series"], file_id=file_id, freq="month_of_year")
+    _call(tools["time_series"], file_id=file_id, freq="week")
+    assert {r["period"]: r["count"] for r in hod["series"] if r["count"]} == {"02": 1, "15": 2}
+    assert {r["period"]: r["count"] for r in dow["series"] if r["count"]} == {"Monday": 1, "Tuesday": 2}
+    assert {r["period"]: r["count"] for r in daily["series"]} == {"2026-01-05": 1, "2026-01-06": 2}
+    assert labels == ["hour of day (UTC)", "day of week (UTC)", "day (UTC)", "month of year (UTC)",
+                      "week (starting) (UTC)"]
+    assert hod["parse"]["clock"] == "UTC" and "UTC" in hod["clock_note"]
+    # The other tools carry the clock in their parse block too; their windows are UTC ones.
+    sliced = _call(tools["filter_by_time"], file_id=file_id, start="2026-01-06", end="2026-01-06")
+    assert sliced["matched"] == 2 and sliced["parse"]["clock"] == "UTC"
+
+
+def test_time_series_as_written_keeps_its_label(store, monkeypatch):
+    """Text without an offset is the clock time it was written in, and nothing about it moved."""
+    labels = _chart_labels(monkeypatch)
+    path = store / "wall_clock.csv"
+    pd.DataFrame({
+        "reported_at": ["2026-01-05T09:00:00", "2026-01-05T20:00:00"],
+        "Latitude": [41.90, 41.91],
+        "Longitude": [-87.66, -87.67],
+    }).to_csv(path, index=False)
+    res = _call(_tools()["time_series"], file_id=_upload(path), freq="hour_of_day")
+    assert {r["period"]: r["count"] for r in res["series"] if r["count"]} == {"09": 1, "20": 1}
+    assert labels == ["hour of day (local clock time)"]
+    assert res["parse"]["clock"] == "local" and "clock_note" not in res
+
+
+@pytest.mark.parametrize("values, clock", [
+    pytest.param(["2026-01-05T09:00:00-06:00", "2026-01-06T09:00:00-06:00"], "UTC", id="iso-offset"),
+    pytest.param(["2026-01-05T17:00:00Z", "2026-01-06T17:00:00Z"], "UTC", id="iso-Z"),
+    pytest.param(["Mon, 05 Jan 2026 09:00:00 -0600", "Tue, 06 Jan 2026 09:00:00 -0600"], "UTC",
+                 id="rfc-2822"),
+    pytest.param(["2026-01-05T17:00:00-06:00", "2026-07-06T17:00:00-05:00"], "UTC",
+                 id="daylight-saving"),
+    pytest.param(["2026-01-05T17:00:00", "2026-07-06T17:00:00-05:00"], "UTC",
+                 id="with-and-without"),                     # read as UTC throughout
+    pytest.param(["1767625200", "1767711600"], "UTC", id="epoch-seconds"),
+    pytest.param(["Mon Jan 05 09:00:00 -0600 2026", "Tue Jan 06 09:00:00 -0600 2026"], "UTC",
+                 id="twitter-created-at"),                   # the year follows the offset
+    pytest.param(["2026-01-05T17:00:00", "2026-01-06T17:00:00"], "local", id="iso-as-written"),
+    pytest.param(["Mon Jan 05 09:00:00 2026", "Tue Jan 06 09:00:00 2026"], "local",
+                 id="asctime-no-zone"),                      # a year, but no offset before it
+    pytest.param(["2026-01-05", "2026-01-31"], "local", id="date-ending-in-a-dash"),  # no offset
+    pytest.param(["01/05/2026 09:00:00 PM", "01/06/2026 09:00:00 AM"], "local", id="chicago"),
+    pytest.param(["2019", "2020"], "local", id="years"),
+])
+def test_every_report_names_its_clock(store, values, clock):
+    """UTC for a time that carried an offset or an epoch number, local for a time as written."""
+    path = store / "clock.csv"
+    pd.DataFrame({"when": values, "Latitude": [41.90, 41.91],
+                  "Longitude": [-87.66, -87.67]}).to_csv(path, index=False)
+    res = _call(_tools()["detect_time_column"], file_id=_upload(path), time_column="when")
+    assert res["ok"] is True and res["candidates"][0]["clock"] == clock
+    assert res["note"].endswith("(UTC)") is (clock == "UTC")
+
+
+def test_a_typed_zone_is_utc_too(store):
+    """GDAL types a GeoJSON's ISO times itself, so its offsets arrive as a zone on the column.
+
+    One offset arrives as that offset, offsets that differ arrive already converted to UTC, and
+    a time without one arrives with no zone.
+    """
+    path = store / "typed.geojson"
+    gpd.GeoDataFrame({
+        "one_offset": ["2026-01-05T09:00:00-06:00", "2026-01-06T09:00:00-06:00"],
+        "daylight_saving": ["2026-01-05T17:00:00-06:00", "2026-07-06T17:00:00-05:00"],
+        "as_written": ["2026-01-05T17:00:00", "2026-01-06T17:00:00"],
+    }, geometry=[Point(*_WEST), Point(*_EAST)], crs="EPSG:4326").to_file(path, driver="GeoJSON")
+    file_id = _upload(path)
+    clocks = {}
+    for column in ("one_offset", "daylight_saving", "as_written"):
+        res = _call(_tools()["detect_time_column"], file_id=file_id, time_column=column)
+        assert res["candidates"][0]["parse_method"] == "already datetime"
+        clocks[column] = res["candidates"][0]["clock"]
+    assert clocks == {"one_offset": "UTC", "daylight_saving": "UTC", "as_written": "local"}
+
+
 def test_unknown_file_id_fails_cleanly():
     for name, kwargs in (
         ("detect_time_column", {"file_id": "file_nope"}),

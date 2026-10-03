@@ -2499,6 +2499,147 @@ left is `test_distance_band_without_a_threshold_leaves_no_island`, the platform-
 `test_csv_with_coordinates_flows_through`. The development machine (pandas 2.2.3) passes the 39
 temporal tests as well. Nothing was deployed.
 
+### Stage S15.9 A count in UTC says so
+
+*2026-10-03, `claude/temporal-utc-clock-label`.*
+
+This fixes the first item in S15.6's *Found here, not fixed*. `time_series(freq="hour_of_day")`
+labelled its axis *"hour of day (local clock time)"*, but S15.5 converts every time that carries a
+UTC offset to UTC before any tool counts it, so for such a column the profile was a UTC one.
+Through the tool, on 12 input shapes and 4 frequencies, the development machine (pandas 2.2.3) and
+the deployed container (pandas 3.0.5) gave the same answers. In that container the module deployed
+today, from before S15.1, gives the same counts under the same label on the 9 shapes it reads in
+full.
+
+* **Hours moved under a label that said they had not.** `09:00:00-06:00` on two days counted at
+  hour 15. A 17:00 peak, written `-06:00` in winter and `-05:00` in summer, split into the UTC
+  hours 23 and 22.
+* **Days and months moved too**, under labels that named no clock: 20:00 and 21:00 on a Monday at
+  `-06:00` counted as Tuesday, 20:00 on January 31 at `-06:00` counted in February, and the
+  Monday evening fell in the day bucket 2026-01-06.
+* **Every input that reaches the UTC clock did the same:** `Z`, RFC 2822's `-0600`, epoch seconds,
+  which count from 1970 in UTC, and a GeoJSON's ISO times, which GDAL types itself. One offset
+  arrives as `datetime64[ms, UTC-06:00]`. Offsets that differ arrive already converted to
+  `datetime64[ms, UTC]`, by pyogrio's default `mixed_offsets_as_utc=True` (0.12.1 and 0.13.0).
+* **Nothing told the model.** The label existed only in the PNG, and the JSON the model reads
+  never said which clock its periods were in.
+
+**Kept in UTC, and said so.** The alternative, weighed and turned down on 2026-10-03, was to
+count the profiles by each row's own wall clock. It could not reach every input. The offset
+survives in a CSV's text and in a one-offset GeoJSON's type. An epoch number never had one, and a
+GeoJSON whose offsets differ loses them in `read_vector`, which every geo tool shares, before this
+module sees the frame. Those would have stayed UTC and needed this label anyway. It would also
+have split the clock: hour of day local, while `freq=day`, `filter_by_time`'s windows,
+`compare_periods`, `temporal_hotspots` and S15.6's `summary_statistics` stayed UTC. The
+Monday-evening row would have been Monday in one chart and 2026-01-06 in the next. UTC costs what
+the list above shows: a year of a daylight-saving feed still splits a local peak across two UTC
+hours, and whoever reads the chart has to shift it.
+
+**The change:**
+
+* `_clock` names the clock of a parsed column. It returns `"UTC"` for an epoch number, a type
+  with a zone, or text with a zone after its time of day, and `"local"` for any other time,
+  which is the clock time it was written in. It returns nothing when nothing parsed. One value with an offset makes
+  the column UTC, because S15.5 reads the values without one as UTC too.
+* `_profile` reports it as `clock`, so it appears in the `parse` block of every temporal tool and
+  in each `detect_time_column` candidate. `detect_time_column`'s note ends in "(UTC)".
+* `time_series` adds "(UTC)" to every axis whose times are UTC ones, both the periods and the
+  three profiles, and keeps "hour of day (local clock time)" for times as written. It also adds a
+  `clock_note`. Its tool description, which the model reads, says that times with an offset and
+  epoch numbers are counted in UTC.
+* No count changed on any of the 12 shapes, on either version.
+
+**How a zone is found.** Once `utc=True` has converted the values, pandas no longer shows which of
+them carried a zone, so `_clock` reads the text (`_ZONE_SUFFIX`). It looks for a time of day
+followed by an offset, `Z`, `UTC` or `GMT`, at the end of the text or before only a year, as in
+Twitter's `created_at` (`Mon Jan 05 09:00:00 -0600 2026`), or a comment, as in an email's
+`-0600 (CST)`, which pandas 3 reads and pandas 2.2.3 does not. A date alone does not count, or
+`2026-01-05` would end in an offset of `-05`. The check was run against pandas' own reading of
+6,104 generated strings: ten date layouts with eleven times of day after a space or a `T`, and the
+same dates alone, each with one of 23 zone forms or none; Twitter's and the email's layouts with
+the same zone forms; and eight written by hand. Of the strings pandas reads with a zone, 3,671 on
+2.2.3 and 3,815 on 3.0.5, `_clock` calls none local. It calls 471 strings UTC on 2.2.3, and 391 on
+3.0.5, where pandas reads no zone. All but 2 of those carry a zero offset that pandas ignores,
+such as `GMT` or a lowercase `z`, so their clock as written is UTC anyway. The other 2 are a date
+with no time, `January 5 2026 -06:00` and its `-0600` form, in which pandas reads the offset as
+the time of day: both become 06:00 with no zone.
+
+**Revised during the work**, twice:
+
+* **Every row was tested.** The first version ran the pattern on every row. It took 0.29 s for
+  100,000 ISO times with no offset, seven times the 0.04 s that parsing them takes and a third of a
+  whole `time_series` call on them (0.91 s below), and 0.48 s for Chicago's format. The pattern
+  only ever asks for "a digit", so it now runs once per layout, on the text with every digit set
+  to 0. A column of distinct ISO times has one layout and Chicago's format has two. The layouts
+  give the same answer as the text for every string of the corpus above, as they must, since the
+  pattern names no particular digit.
+* **The zone had to end the text.** An independent audit of this entry found that Twitter's
+  `created_at` was converted to UTC and still called local, which is the defect this section
+  fixes, in another layout. Anchored at the end, the pattern missed 169 strings of the corpus that
+  pandas 2.2.3 reads with a zone, and 313 on 3.0.5, which also reads the email layout. It now lets
+  a year or a comment follow the zone and misses none. The timing below was taken with the
+  end-anchored pattern; the widened one runs on the same few layouts.
+
+**Cost**, interleaved in one process in the deployed container, as the median of five rounds,
+with 100,000 distinct values read from a CSV upload through GDAL:
+
+| 100,000 values | resolve the column, before | after | `time_series`, before | after |
+|---|---|---|---|---|
+| ISO, no offset | 0.05 s | 0.13 s | 0.91 s | 1.00 s |
+| ISO, one offset | 0.44 s | 0.53 s | 1.31 s | 1.39 s |
+| Chicago format | 5.35 s | 5.42 s | 6.22 s | 6.28 s |
+| ISO date only | 0.05 s | 0.12 s | 0.89 s | 0.95 s |
+| half with an offset, half without | 0.36 s | 0.45 s | 1.26 s | 1.33 s |
+
+The clock costs 0.07–0.09 s per 100,000 rows, which is 1–10% of the call. Setting the digits to 0
+takes 0.05 s of that, and numpy's `char.translate` was no faster, at 0.08 s. The load average stayed
+under 1.1 on 8 cores.
+
+**Verified where the failure lives:**
+
+| | before (`prototype`) | end-anchored pattern | after |
+|---|---|---|---|
+| deployed container (pandas 3.0.5), the 57 temporal tests | the 15 new tests fail | 1 fails | all pass |
+| development machine (pandas 2.2.3), the 57 temporal tests | the 15 new tests fail | 1 fails | all pass |
+| development machine, full suite | 1915 passed, 4 skipped | | 1930 passed, 4 skipped |
+
+Fifteen tests are new, and all 15 fail before on both versions. The hour-of-day test fails at
+its label: *"hour of day (local clock time)"* where *"hour of day (UTC)"* is expected. Its counts
+pass, because they did not change. The other 14 fail at the `clock` field they read. The one the
+end-anchored pattern fails is Twitter's `created_at`. Together the 15 tests cover:
+
+* three offset times through `time_series`, counted in UTC, with the hour, weekday, day,
+  month-of-year and week axes all saying so, and `filter_by_time`'s report naming the same clock;
+* text without an offset, which keeps its label;
+* the `clock` of twelve CSV shapes, among them a date ending in `-05`, epoch seconds as text,
+  Twitter's `created_at`, and asctime's layout, which has a year but no offset;
+* a GeoJSON's typed zones.
+
+In the deployed container, each version was `prototype`'s whole `agent_runtime/` with that
+version's module, imported from `/tmp` ahead of `/app`, because the module now imports layer-key
+helpers (Stage 20) that the deployed `/app` does not have yet. `diff -rq` between the versions
+named only that file, and it was the same container, by its creation time, from the first run to
+the last. The development machine ran copies of the test file outside the repository, so each
+version imported only its own module. Nothing was deployed.
+
+**Found here, not fixed:**
+
+* **pandas reads an offset after a date with no time as the time of day**, on both versions:
+  `2026-01-05 -06:00` and `January 5 2026 -06:00` both become 06:00 with no zone. `_clock` calls
+  the first local and the second UTC, because `5 2026` looks like a time to it. Neither text has
+  a time to label, and the parse itself is the defect.
+* **`detect_time_column` auto-detects on the first 4,000 rows**, as it always has for the span
+  and the parse rate. Its `clock` misses an offset that first appears after them, where every
+  other tool reads the whole column.
+* A time written without an offset but meant as UTC, as from a feed that drops the `Z`, is called
+  local, because nothing in the data says otherwise. The same holds for a typed column with no
+  zone.
+* `summary_statistics(by=, period=)` buckets the same UTC times (S15.6), and its description says
+  so for an offset. Its result does not name the clock of the column at hand, and epoch numbers
+  are UTC there too.
+* `compare_periods` and `temporal_hotspots` name their periods (`2026-07`) without a clock, so
+  `parse.clock` is the only place theirs shows.
+
 ---
 
 ## Stage 16 — Six tests only the Mac passed {#stage-16}
