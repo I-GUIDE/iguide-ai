@@ -12,15 +12,15 @@
     "check:hooks": "node scripts/check-hook-deps.mjs"
   },
   "dependencies": {
-    "@deck.gl/aggregation-layers": "^9.0.33",
-    "@deck.gl/core": "^9.0.33",
-    "@deck.gl/layers": "^9.0.33",
-    "@deck.gl/mapbox": "^9.0.33",
+    "@deck.gl/aggregation-layers": "^9.4.0",
+    "@deck.gl/core": "^9.4.0",
+    "@deck.gl/layers": "^9.4.0",
+    "@deck.gl/maplibre": "^9.4.0",
     "@turf/turf": "^7.1.0",
-    "maplibre-gl": "^4.7.1",
+    "maplibre-gl": "^6.11.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-map-gl": "^7.1.7"
+    "react-map-gl": "^8.1.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
