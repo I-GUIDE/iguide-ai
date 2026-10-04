@@ -520,6 +520,90 @@ architectures could only be compared by restarting the deployment between arms."
 went straight to `done`. **Shaping the menu alone did nothing; a veto in `supervisor_node` was
 required.**
 
+### Stage S6.9 The fit's label is the polygons' column, whatever it is called
+
+*2026-10-03, `claude/fit-zone-model-label-collision`. Revises the fitter added in S6.6,
+Remote-sensing embeddings.*
+
+`b44a202`'s fitter joined the zone vectors to the polygons by merging the **whole** vectors CSV onto
+the polygon layer. Besides the features, that CSV carries `zone_id`, `pixels` and `area_km2`: the
+key, and the support `embed_zones` writes beside each vector. pandas does not refuse a column name
+both frames carry. It renames the two copies `<name>_x` and `<name>_y`, and the bare name stops
+existing, so a label called `area_km2` or `pixels` raised `KeyError`. Seen live in a local-mode
+demo: asked to predict census-tract area from GSE embeddings for Arlington County, VA (71 tracts),
+the agent added `area_km2` to the tracts, `fit_zone_model` failed with `KeyError: 'area_km2'` in
+0.04 s, and the model wrote its own ridge regression in `execute_code`. The blocked-CV score the
+tool exists to report never reached the user.
+
+The same collision had a quiet form. The zone-groups layer that `embed_zones` puts on the map
+carries `zone_id`, `pixels` and `area_km2` too. Passed as the polygons with a numeric label of any
+other name, the fit went through, but the prediction layer lost all three columns and
+`support_pixels` came back null: measured on 30 zones, `observed`, `predicted` and `residual` were
+the only properties left. With the groups layer's own `area_km2` or `pixels` as the label, it raised
+`KeyError` as above. So did a polygon layer that already carried a copy of the vectors' `e000…`
+columns, on the features themselves.
+
+**Each side now brings only what it owns to the join.** The polygons contribute their geometry, the
+key and the label, and the label travels under an internal name. The CSV contributes the features
+and their support. The prediction layer's `zone_id` is rebuilt from the key, which is the value the
+CSV row was matched on. Nothing else crosses the join, so no name can collide, the polygon layer's
+own `zone_id` included. The alternative, merging with explicit suffixes and resolving them
+afterwards, would have left every later reader of the merged frame to know which suffix held whose
+column.
+
+**Behaviour that changed on purpose:** the label is always the polygons' column, and the support
+(`pixels` and `area_km2` on the prediction layer, and `support_pixels`) is always the CSV's. A CSV
+without support columns, which `embed_zones` never writes, used to borrow the polygons' columns of
+those names, and now gets none: a polygon column says nothing about how many pixels a vector
+averaged. Apart from that, nothing moves where the two sides share no name. The old and new fitter
+gave identical results and byte-identical prediction files on five such layers: support columns
+present and absent, extra polygon columns, numeric GEOIDs, zones missing from the CSV, and
+unlabelled zones. An independent audit's 28 further cases agreed, among them shuffled row orders,
+mixed id types, a projected GeoPackage, a shapefile and multipolygons. That held on the development
+machine (pandas 2.2.3) and in the linux/amd64 replica of the deployed versions (CPython 3.11.16,
+pandas 3.0.5 with its string dtype on, geopandas 1.1.4, GDAL 3.12.4).
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_column_collisions.py`, which runs offline:
+
+- a label named `area_km2` and one named `pixels`, each beside a twin column holding the same values
+  under a name nothing else uses, which must give the same fit;
+- a polygon layer cluttered with a stale copy of the vectors, a `zone_id` that is not the key, and
+  its own `pixels` and `area_km2`, which must fit exactly as the clean layer does and map the key
+  and the CSV's support;
+- a CSV without support columns, which must leave the prediction map without support;
+- `embed_zones` → `fit_zone_model` on the tool's own two outputs, with the service stubbed and the
+  real file store, labelled by the groups layer's `area_km2` and by a column added to that layer.
+
+On `prototype` all six fail: four on a `KeyError` (on `area_km2` twice, on `pixels`, and on the
+`e000…` features), one on the borrowed support, and one on *"the prediction map lost ['area_km2',
+'pixels', 'zone_id']"*. With the change all six pass, on both stacks. The full `rag_pipeline`
+suite gives 2143 passed and 4 skipped on the Mac. In the replica, with `--network none`, it gives
+9 failed, 2131 passed and 7 skipped with the change, against 15 failed and 2125 passed on
+`prototype` with the new file added: the six new tests are the whole difference. The nine that
+fail on both need packages the deployed image lacks, such as pyarrow and xarray.
+
+**Found here, not fixed:**
+
+- **A zone id with a leading zero does not join.** When every id is digits, `read_csv` infers the
+  CSV's `zone_id` as an integer, so `06037100000` comes back as `6037100000`, while polygons whose
+  GEOID is text, as TIGER's are, keep the zero. Every such zone drops out of the fit without a
+  word. A layer of California tracts, or of any state from 01 Alabama to 09 Connecticut, finds
+  *"only 0 zones have both a vector and a label"*. A layer of 15 California and 15 Illinois tracts
+  fits the 15 Illinois ones and reports success. Both were measured through the two tools.
+  The fix is to read the column as text, which is a separate change.
+- **The groups layer keyed by row number pairs zones with the wrong vectors.** Without
+  `zone_id_field`, both tools key zones by row number. The groups layer holds only the zones that
+  got pixels, so every zone after a missing one is paired with another zone's vector. With 30
+  zones, the gap at row 3 and a label the vectors determine exactly, 25 of the 28 zones fitted were
+  mispaired and the fit reported no skill (blocked r2 below zero on both stacks). Keyed by
+  `zone_id_field="zone_id"`, the same data joins all 29 correctly and scores 1.0. The fitted
+  numbers of such a join are the same before and after this change, but its prediction map now
+  carries the CSV row's `zone_id`, `pixels` and `area_km2`, so it looks complete where it used to
+  lack all three. Which key to use when none is named is a policy decision, so it is recorded
+  rather than changed.
+
+Nothing was deployed.
+
 ---
 
 ## Stage 7 — The action ledger {#stage-7}
