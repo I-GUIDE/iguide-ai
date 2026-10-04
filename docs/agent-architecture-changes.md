@@ -3744,8 +3744,8 @@ reads the file then keys it by what it holds.
 *2026-10-02. Branch `claude/read-by-name-scoping`.*
 
 S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
-used that lookup for a bare filename. They kept a directory scan of their own. Stage 22 on
-`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S22.6).
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 22 lists
+it as the read-side twin it did not fix (its S22.6).
 
 ### Stage S21.1 What a read by name did
 
@@ -3855,8 +3855,8 @@ Two scoping gaps sit upstream of the lookup:
 *2026-10-01. Branch `claude/output-overwrite-scope`.*
 
 S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
-the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
-`claude/layer-identity-by-inputs` (its S20.6) lists it among what it did not fix.
+the store's original shape, a single flat namespace: `overwrite=True`. Stage 20, the layer-identity
+stage, lists it among what it did not fix (its S20.6).
 
 ### Stage S22.1 What overwrite did
 
@@ -3878,7 +3878,7 @@ answered 404: the download endpoint's `may_read` check found a record that named
 
 Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
 (`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
-re-grounding pass (the S20.1 table on that branch). That pass repeated the same buffer. A re-run
+re-grounding pass (the S20.1 table). That pass repeated the same buffer. A re-run
 with a corrected distance would have changed what the first answer's link served, with nothing in
 the transcript to show it.
 
@@ -3960,8 +3960,8 @@ call to `create_output_file_from_path`. The resolution keeps `content_key=key` a
 
 S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
 upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
-the thread, and the map UI's `uploadFiles` posted only the files. Stage 21 on
-`claude/read-by-name-scoping` lists that gap in its S21.5, and its S21.3 was shaped by it.
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 21
+lists that gap in its S21.5, and its S21.3 was shaped by it.
 
 ### Stage S23.1 What an unstamped upload did
 
