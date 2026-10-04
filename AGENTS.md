@@ -36,7 +36,8 @@ The rest still matters, and each failure is silent or misleading:
   a script puts only `api/` on `sys.path`)
 - `AGENT_CHAT_API_KEY` set → `/agent/chat*` answers 403 (`_get_agent_chat_api_key`); empty
   disables the gate
-- `PORT` defaults to 5002; the compose deployment maps host 3500 → container 5002
+- `PORT` defaults to 5002; `docker-compose.yml` maps host `127.0.0.1:3500` → container 5002
+  (loopback only, like every port of the agent stack)
 - outside local mode, an inherited `AGENT_PUBLIC_BASE_URL` makes every `download_url` absolute
   against the *remote* host, so local downloads 404 with `unknown file_id`
 

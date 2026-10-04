@@ -72,7 +72,7 @@ def describe_image(
     tool_description=(
         "Describe a map image with focus on area, problem, and provided information.\n\n"
         "Example usage:\n"
-        'curl -X POST "http://149.165.147.219:8000/tool/describe_map" '
+        'curl -X POST "http://localhost:8000/api/tool/describe_map" '
         '-F "file=@tgis_a_2343063_f0007_c.jpg"'
     )
 )

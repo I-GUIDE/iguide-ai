@@ -2226,7 +2226,7 @@ def agent_chat_stream():
     `download_url` is a HOST-RELATIVE path: `/agent/files/<file_id>/download`. Clients must
     resolve it against the API origin they call (e.g. `new URL(download_url, apiOrigin)`); the
     download endpoint is a plain unauthenticated GET. Alternatively, set the server env
-    `AGENT_PUBLIC_BASE_URL` (e.g. `http://149.165.147.219:3500`) and every emitted
+    `AGENT_PUBLIC_BASE_URL` (e.g. `https://agent.example.org`) and every emitted
     `download_url` — including the image URLs embedded in the answer markdown — is already an
     absolute URL, so clients need no resolution step. File records can appear at several places
     in the stream — `file` events, tool results inside `search`/`analysis` detail payloads, and

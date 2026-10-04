@@ -44,6 +44,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope with no tool on the server binds nothing |
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
 | 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
+| 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -5135,3 +5136,120 @@ things:
   directories hold no records, so they are not checked here either.
 - Outside the store's own directories, every tool keeps the rules for a path that it already had.
 - A write by path changes a file without updating its record's `size_bytes`.
+
+---
+
+## Stage 31 — Published to the host, not the network {#stage-31}
+
+*2026-10-03. Branch `claude/bind-ports-to-loopback`.*
+
+`docker-compose.yml` published embedding-server (5000), mcp-server (8000) and agent-api (3500)
+with no host address. Docker binds such an entry on `0.0.0.0` and `[::]`, so each service was
+exactly as reachable as the host. For mcp-server, that reach covers a REST transport that runs any
+registered tool with no authentication (`POST /api/tool/<name>`, `_register_rest_endpoint` in
+`MCP_server/server.py`). One of S19.5's findings is the same surface: it closed the in-process
+path for `agent-api` only, and `mcp-server` still runs those tools, loads `.env` and mounts the
+shared file volume. This stage does not change what that server runs. It changes who can reach it:
+the host, and the containers on the compose network.
+
+### Stage S31.1 What used the published ports, measured
+
+Nothing in the stack itself. agent-api reaches the other two by service name:
+`MCP_SERVER_URL=http://mcp-server:8000/mcp/` and `FLASK_EMBEDDING_URL=http://embedding-server:5000`,
+both set in compose's `environment`, which `.env` cannot override. Inside agent-api those names
+resolve to the containers' own addresses on `iguide-network`, so its traffic never passes through
+the host's port mapping. A health check always runs inside its own container. Here is the stack's
+own traffic in mcp-server's access log from 2026-09-22 16:55 to 2026-10-03 17:00 UTC. The last row
+counts every source.
+
+| source | requests |
+|---|---|
+| agent-api, from its compose-network address, all to `/mcp/` | 231 |
+| inside the container, all `GET /api/health` | 31,576 |
+| the host side (the bridge gateway, which is where a host process arrives through a published port) | 0 |
+| `POST /api/tool/*`, from anyone | 0 |
+
+The gateway row is not hypothetical. The host's reverse proxy forwards to `127.0.0.1:3500` only,
+and agent-api's own log over the same window shows its traffic arriving from that gateway address:
+
+- 1,024 of the 1,025 `/agent/` requests (the other one came from inside the container);
+- 9,623 `GET /health` polls from Node clients. The proxy's own log records them arriving from
+  two other hosts, so they are proxied, not local.
+
+embedding-server's gunicorn keeps no access log, so its callers cannot be counted. Every caller in
+the repo takes its address from `FLASK_EMBEDDING_URL`, which compose sets to the service name for
+agent-api. The callers that have a default (`agent_kb.py`, the OpenSearch emitter, and the two
+scripts in `embedding-server/`) default to `127.0.0.1:5000`.
+
+### Stage S31.2 The change
+
+The three are published on loopback: `"127.0.0.1:5000:5000"`, `"127.0.0.1:8000:8000"`,
+`"127.0.0.1:3500:5002"`. The host keeps the reverse proxy, which carried all of the traffic
+above, and curl or an SSH tunnel on `127.0.0.1`, for example for the Swagger UI
+(`ssh -L 8000:127.0.0.1:8000 <host>`, then `http://localhost:8000/api/docs`). Nothing else
+reaches them. A process on the host that dialled the host's public address instead of loopback
+would lose access. None is known to: the proxy dials loopback, and the only other host-side
+requests were seven `curl` health checks, four of them within 25 s of a container start. Which
+address those dialled is not recorded.
+
+Loopback was chosen over dropping the publication. On Linux, an unpublished port is reachable from
+the host only at the container's address, which can change whenever the container is recreated.
+On Docker Desktop it is not reachable at all. Loopback keeps the tunnel and local development's
+`localhost` URLs at a stable address. The maintainer
+chose it after confirming that nothing outside the host uses 8000. The same question about 5000,
+whose callers cannot be counted, got the same answer.
+
+The MCP transport's own check does not do this job. FastMCP answers 421 to a request whose `Host`
+header is not on `MCP_ALLOWED_HOSTS`. That defends a browser against DNS rebinding. A client that
+is not a browser sends whatever `Host` it likes. The REST transport has no such check at all.
+
+metadata-extraction-server (5001, `--profile ingestion` only) stays on every interface. Its
+callers are the platform's form, which posts submissions to `/ingest`, and MinIO, whose legacy
+bucket events go to `/webhook`. Both post from wherever they run. It needs its own decision, and
+the guard names it as the one exception, with that reason.
+
+Also scrubbed: three places named the deployment's address.
+
+- The compose comment's example origin.
+- The same example in the `/agent/chat/stream` docstring, which the API docs publish. On port 3500
+  it would no longer be reachable from outside, so both now use the public origin in front of the
+  API.
+- The `describe_map` tool description, which is what `/api/tools` and the LLM read. Its curl
+  example also posted to `/tool/describe_map`, a path that does not exist, because the REST app is
+  mounted under `/api`. It now posts to `localhost`.
+
+The address stays in the git history.
+
+### Stage S31.3 The guard, and how it was verified
+
+`rag_pipeline/tests/test_compose_ports_loopback.py` reads the compose file. It fails when:
+
+- a published port is not on a loopback address;
+- a service uses the host network;
+- agent-api's `MCP_SERVER_URL` or `FLASK_EMBEDDING_URL` names anything but its service on a shared
+  network;
+- a URL in a health check names anything but the container's own loopback.
+
+Its reader returns the same host address as `docker compose config` (Compose 5.5.1) for all 19
+forms it is tested with. Run against `prototype`'s compose file, it fails and names exactly the
+three entries this stage changes. Suite: 2048 passed and 4 skipped on `447b961`; 2072 passed and
+4 skipped with this stage, the 24 new tests.
+
+A throwaway compose project on the Mac ran the image built through the deployed lock (`mcp`
+1.30.0) with this branch's code mounted, the ports published on loopback:
+
+- **Health:** both services went healthy.
+- **MCP:** the agent's own `_make_remote_mcp_tools` bound 14 tools over
+  `http://mcp-server:8000/mcp/` (16 registered, two unbound by default, Stage 28).
+- **Embedding:** `semantic._fetch_embedding_from_service` got a 384-dimension vector from
+  `http://embedding-server:5000`.
+- **Binding:** the host's listeners for the loopback ports were on `127.0.0.1` only, against `*`
+  for a control published without an address.
+
+A probe of the Mac's own LAN address could not tell the two apart, because the macOS firewall
+refused both, so it counts for nothing. The listener table is the evidence.
+
+A port mapping belongs to the container, so this takes effect only when the three are recreated
+from this file. That needs no rebuild (`--no-build`), and recreating agent-api cuts off turns in
+flight (Stage 13). The `describe_map` text lives in the mcp-server image, so it changes on that
+image's next rebuild.
