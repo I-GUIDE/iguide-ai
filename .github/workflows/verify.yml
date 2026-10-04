@@ -82,6 +82,12 @@ jobs:
               print(f"{name:15s} {getattr(module, '__version__', '?')}")
           PY
 
+      - name: Fetch the tiktoken encoding the estimator test reads
+        # The suite downloads nothing: test_context_budget.py reads o200k_base from tiktoken's
+        # cache and skips when it is not there. A fresh runner has no cache, so without this step
+        # that test would skip on every run. A failed fetch fails here instead of becoming a skip.
+        run: python3 -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+
       - name: Run the test suite
         # `python3 -m pytest` is the documented command (AGENTS.md). Unlike bare `pytest`, -m
         # also puts the repo root on sys.path. -rfEs adds skip reasons to the summary, so a test
