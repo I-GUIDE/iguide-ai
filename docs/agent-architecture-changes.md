@@ -45,6 +45,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
 | 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
 | 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
+| 33 | [The picker offers only models that can call tools](#stage-33) | 2026-10-04 | AnvilGPT models are asked for one tool call and left out of `/agent/models` if they refuse; an outage hides nothing; a saved choice no longer offered resets to the default |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -5356,3 +5357,86 @@ A port mapping belongs to the container, so this takes effect only when the thre
 from this file. That needs no rebuild (`--no-build`), and recreating agent-api cuts off turns in
 flight (Stage 13). The `describe_map` text lives in the mcp-server image, so it changes on that
 image's next rebuild.
+
+
+---
+
+## Stage 33 — The picker offers only models that can call tools {#stage-33}
+
+*2026-10-04. Branch `claude/hide-non-tool-models`.*
+
+The agent binds function tools on every step. `/agent/models` fetched AnvilGPT's roster live and
+offered all of it, but Purdue configures tool calling per model. Measured 2026-10-04, with one
+tool and `tool_choice` left to the server, as the agent sends it: qwen3:4b and qwen2.5:7b answer
+HTTP 400 in 0.2 s, "\"auto\" tool choice requires --enable-auto-tool-choice and
+--tool-call-parser to be set". No request parameter gets past that. `"required"` and a named
+function are refused for the same missing flag, and Open WebUI's `params.function_calling`
+changes nothing. Only `"none"` answers, with the call written into the text as `<tool_call>`. So
+choosing qwen3:4b failed the first step of every turn.
+
+A second defect made it worse. The choice is saved in localStorage, and a `<select>` whose value
+matches no option shows its first enabled one, "Agent default", while every turn still sends the
+saved id. A model that left the list, as qwen3.6:27b did on 2026-10-01, kept failing behind a
+picker that looked right.
+
+### Stage S33.1 What hides a model
+
+Every model on the roster was asked for one call, at the same time:
+
+| outcome | models | time |
+| --- | --- | --- |
+| structured tool call | gpt-oss:120b, llama4:latest, qwen3-coder:30b, qwen3.8:27b | 0.3–1.1 s |
+| refusal naming tool calling | qwen2.5:7b, qwen3:4b | 0.2 s |
+| HTTP 400, `litellm.APIConnectionError: OllamaException - Cannot connect to host` | codegemma, deepseek-r1:70b, llama3.2, llama3.3:70b, mistral, qwen3-vl:32b, qwen3:32b | 14–73 s |
+| timeout at 75 s | devstral-small-2, gemma4:26b-a4b, gemma | — |
+
+Purdue's Ollama backend was down, and LiteLLM reports that as a 400 too. Hiding on the status
+alone would have taken ten models out of the picker for the length of an outage. So only an
+answer about tool calling is a verdict: a structured call (offered), a refusal that names tool
+calling (hidden), or a plain-text answer twice in a row (hidden). A timeout, a 5xx, a 429, an
+auth error, or a 400 that does not mention tools is no verdict, and the model stays listed. The
+Anthropic list already draws this line for availability, which flaps by the minute.
+
+### Stage S33.2 How the question is asked
+
+`agent_runtime/anvil_tool_probe.py` sends one request per model, with no `max_tokens` (a reasoning
+model must not be cut off before its call) and a 45 s timeout. A verdict is kept for six hours.
+A failed probe is retried after ten minutes, and the last verdict stands meanwhile. Three
+measurements on the live roster, and one concern about shutdown, shaped the rest:
+
+- With eight probes at a time, the hung Ollama probes held every slot and the 0.2 s refusals
+  queued behind them, so the first catalogue hid nothing. The bound is now 32, which covers the
+  whole roster.
+- Asked all at once, a refusal took 2.7 s rather than 0.2 s, past a 2.5 s wait. `/agent/models`
+  now waits up to 5 s for models it has never asked. The first catalogue after a restart took
+  5.5 s and hid both, and the next took 0.5 s.
+- A re-probe does not wait. Otherwise an outage would make one page load in every ten minutes
+  sit out the full wait.
+- Probes run on daemon threads, not an executor, whose threads are joined at exit: one in flight
+  against a dead backend would hold a container stop for up to its timeout.
+
+### Stage S33.3 What the UI does with it
+
+The AnvilGPT group label says how many were hidden ("— 2 hidden: no tool calls"), and
+`/agent/models` lists them under `hidden` with the reason. A saved model that the catalogue no
+longer offers resets to the agent default, and a notice gives the reason. When there is no
+catalogue, the list could not be fetched, or the provider is not configured, the app cannot tell
+whether the model is still offered, so the choice stays. A demo resets the choice without a
+notice, because it pins its model server-side and hides the picker.
+
+Checked in Chrome against a local API (`AGENT_MODE=local`). The picker held 14 AnvilGPT models,
+without qwen3:4b or qwen2.5:7b. A tab with qwen3:4b saved reset on load with "qwen3:4b is no
+longer offered: AnvilGPT refuses tool calls for it (its server runs without a tool-call parser).
+Turns now use the agent default (gpt-5.6-luna).", and its next turn answered on the default.
+
+### Stage S33.4 What this stage does not do
+
+- An API request that names a hidden model still reaches AnvilGPT and fails on its first step,
+  with the server's 400. Only the picker and the saved choice changed.
+- A model that can make one structured call is offered, whether or not it can carry a turn with
+  forty tools bound.
+- qwen3:32b and qwen3-vl:32b were unreachable in this sweep. On 2026-10-02 both answered
+  without a structured call, so the probe will hide them once their backend answers, if they
+  still do. Both were taken out of `_ANVIL_FALLBACK_MODELS`, which offers only models measured
+  calling tools.
+- Verdicts live in the process, so each restart asks again.

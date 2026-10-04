@@ -46,7 +46,11 @@ export interface ModelCatalogue {
                 *  A global list offered 'high' on models that refuse any real level. */
                effort_options?: Record<string, string[]>;
                /** Models that REFUSE tools unless this exact value is sent (gpt-5.6-*). */
-               effort_required?: Record<string, string> }[];
+               effort_required?: Record<string, string>;
+               /** Models the provider serves but this agent cannot use, with why: each one
+                *  answered a tool-call probe with a refusal or with no structured call, and
+                *  the agent binds tools on every step. Not in `models`. */
+               hidden?: Record<string, string> }[];
   /** The code-peer backends a request may select. A second axis, reported under its
    *  own key so nothing conflates "which model answers" with "which agent codes". */
   code_peers?: {

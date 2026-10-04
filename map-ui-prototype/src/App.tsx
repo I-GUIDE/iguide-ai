@@ -20,6 +20,7 @@ import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
@@ -229,6 +230,19 @@ export default function App() {
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
 
   const pushMsg = useCallback((m: ChatMessage) => setMessages((prev) => [...prev, m]), []);
+  // A saved model the catalogue no longer offers goes back to the agent default, and says so.
+  // Left alone, the picker would SHOW "Agent default" (a <select> whose value matches no option
+  // shows its first one) while every turn still sent the saved id: qwen3:4b, now hidden because
+  // AnvilGPT refuses it tool calls, would fail every turn behind a picker that looks fine.
+  useEffect(() => {
+    const why = unavailableChoice(cfg.model, cfg.provider, models);
+    if (!why || !models) return;
+    setCfg((c) => ({ ...c, model: '', provider: '', reasoningEffort: '' }));
+    // A demo pins its model server-side and hides the picker, so there is nothing to explain.
+    if (!demoMode) {
+      pushMsg({ role: 'agent', text: `${why} Turns now use the agent default (${models.default.model}).` });
+    }
+  }, [models, cfg.model, cfg.provider, demoMode, pushMsg]);
   const putLayer = useCallback((a: LayerArtifact) => {
     setLayers((prev) => { const i = prev.findIndex((l) => l.id === a.id); if (i === -1) return [...prev, a]; const n = prev.slice(); n[i] = a; return n; });
   }, []);

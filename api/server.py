@@ -1162,7 +1162,9 @@ def agent_models():
           Selectable models. `default` is what a request with no `model`/`provider` uses —
           OpenAI gpt-4o in this deployment. AnvilGPT's list is fetched live from its own
           /api/models, so an id it no longer serves is never offered; `stale: true` on a
-          provider means that fetch failed and known ids are being shown instead.
+          provider means that fetch failed and known ids are being shown instead. AnvilGPT
+          models that cannot make a structured tool call are left out of `models` and listed
+          under `hidden`, each with the reason, because the agent binds tools on every step.
         schema:
           type: object
           properties:
