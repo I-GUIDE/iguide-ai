@@ -4374,9 +4374,9 @@ because it changes how a statistics tool computes rather than how a child is sta
 that change. It is a trade, not a free win. At the sizes this tool usually sees, the worker pool
 costs more than it saves: about a quarter of a second per cold call on the image, and 20 to
 150 s on the Mac. On layers of tens of thousands of areas the pool is faster: at 85,000 cells on
-the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. Stages 13 to 18 are
-claimed by open, unpushed or uncommitted branches (17 three times and 18 twice when this was
-written); this takes the next free number.
+the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. It was written as
+Stage 19, while 13 to 18 were claimed by parallel branches, and landed as 26 in merge order
+(S29.1).
 
 ### Stage S26.1 Which calls start a pool
 

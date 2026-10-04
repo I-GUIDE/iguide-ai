@@ -829,7 +829,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                     # a joblib/loky pool of one fresh interpreter per core, each forked from the
                     # agent process. Below about 10,000 areas that pool saves a fraction of a
                     # second at best, and the seeded result is identical either way. The cost on
-                    # larger layers: docs/agent-architecture-changes.md, Stage 19.
+                    # larger layers: docs/agent-architecture-changes.md, Stage 26.
                     g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42,
                                      n_jobs=1)
 
