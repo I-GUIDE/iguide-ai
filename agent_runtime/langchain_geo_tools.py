@@ -50,7 +50,7 @@ _SHAPE_PARTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx", 
 
 def _resolve(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     """Resolve an uploaded file_id (preferred) or an on-disk path to (Path, record)."""
-    from agent_runtime.file_store import get_file_record, resolve_file_id
+    from agent_runtime.file_store import get_file_record, managed_path_record, resolve_file_id
 
     ref = str(ref or "").strip()
     if not ref:
@@ -59,6 +59,14 @@ def _resolve(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     if record:
         return resolve_file_id(ref), record
     p = Path(ref).expanduser()
+    # A path into the store's own directories is the record it names, with that record's checks.
+    # Refused, it is reported exactly as a path that does not exist.
+    try:
+        record = managed_path_record(p)
+    except ValueError:
+        raise ValueError(f"unknown file_id or path: {ref}") from None
+    if record:
+        return resolve_file_id(str(record["file_id"])), record
     if p.is_file():
         return p.resolve(), None
     raise ValueError(f"unknown file_id or path: {ref}")

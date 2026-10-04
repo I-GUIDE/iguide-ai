@@ -14,7 +14,8 @@ from uuid import uuid4
 
 from agent_runtime import fork_safe
 
-from .agent_file_store import create_output_file_from_path, get_file_record, resolve_file_id, storage_root
+from .agent_file_store import (create_output_file_from_path, get_file_record, managed_path_record,
+                               resolve_file_id, storage_root)
 
 
 DEFAULT_QGIS_PROCESS_BIN = "qgis_process"
@@ -207,6 +208,22 @@ def _orig_name(path: Path, record: Optional[Mapping[str, Any]]) -> str:
     return name.split("__", 1)[1] if "__" in name else name
 
 
+def _a_part_of(sibling: Path, record: Optional[Mapping[str, Any]]) -> bool:
+    """Whether ``sibling`` may be read as another part of ``record``'s shapefile.
+
+    Parts are found by NAME, and the scan below covers the whole directory, so it read every
+    upload in the store: bob's parcels.shp was opened with alice's parcels.dbf. A part must be a
+    stored file this caller may read, checked through its path as its id would be. It must also
+    come from the named part's conversation or from none, which is what a name looked up in that
+    conversation finds (Stage 21): a part uploaded with no thread id is still the user's part.
+    """
+    try:
+        part = managed_path_record(sibling)
+    except ValueError:
+        return False
+    return part is not None and part.get("session") in (None, (record or {}).get("session"))
+
+
 def _stage_shapefile_siblings(part_path: Path, record: Optional[Mapping[str, Any]]) -> str:
     """Co-locate an uploaded shapefile's parts so OGR/QGIS can open it.
 
@@ -225,7 +242,7 @@ def _stage_shapefile_siblings(part_path: Path, record: Optional[Mapping[str, Any
                 continue
             on = sibling.name.split("__", 1)[1] if "__" in sibling.name else sibling.name
             ext = Path(on).suffix.lower()
-            if Path(on).stem == stem and ext in _SHAPE_PARTS:
+            if Path(on).stem == stem and ext in _SHAPE_PARTS and _a_part_of(sibling, record):
                 members.setdefault(ext, sibling)
     except OSError:
         pass
