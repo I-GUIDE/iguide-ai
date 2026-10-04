@@ -477,7 +477,12 @@ def fit(req: dict) -> dict:
     import numpy as np
     import pandas as pd
 
-    df = pd.read_csv(req["vectors_csv"])
+    # zone_id as the text embed_zones wrote, which is how the polygons hold it. Left to type
+    # inference, a file whose ids are all digits read zone_id as int64, and astype(str) below
+    # gave California's '06037100000' back as '6037100000', which no GEOID equals: a state
+    # with FIPS 01-09 fitted no zone at all, and a layer mixing California and Illinois tracts
+    # fitted only Illinois and still said ok.
+    df = pd.read_csv(req["vectors_csv"], dtype={"zone_id": str})
     gdf = gpd.read_file(req["polygons_path"])
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326")

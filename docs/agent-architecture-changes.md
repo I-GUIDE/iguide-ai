@@ -590,7 +590,7 @@ fail on both need packages the deployed image lacks, such as pyarrow and xarray.
   word. A layer of California tracts, or of any state from 01 Alabama to 09 Connecticut, finds
   *"only 0 zones have both a vector and a label"*. A layer of 15 California and 15 Illinois tracts
   fits the 15 Illinois ones and reports success. Both were measured through the two tools.
-  The fix is to read the column as text, which is a separate change.
+  Fixed by reading the column as text: S6.10, *The vectors' zone_id is read as text*.
 - **The groups layer keyed by row number pairs zones with the wrong vectors.** Without
   `zone_id_field`, both tools key zones by row number. The groups layer holds only the zones that
   got pixels, so every zone after a missing one is paired with another zone's vector. With 30
@@ -601,6 +601,103 @@ fail on both need packages the deployed image lacks, such as pyarrow and xarray.
   carries the CSV row's `zone_id`, `pixels` and `area_km2`, so it looks complete where it used to
   lack all three. Which key to use when none is named is a policy decision, so it is recorded
   rather than changed.
+
+Nothing was deployed.
+
+### Stage S6.10 The vectors' zone_id is read as text
+
+*2026-10-04, `claude/zone-id-leading-zero`, stacked on `claude/fit-zone-model-label-collision`.
+Fixes the first defect S6.9 found and left.*
+
+`embed_zones` writes each zone's id into the vectors CSV as the polygons hold it, and a TIGER GEOID
+is text, so California's tract `06037100000` keeps its leading zero in the file. The fitter read
+that file with a bare `pd.read_csv`. When every id in a file is digits, pandas types `zone_id` as
+int64, and the `astype(str)` that follows turned `06037100000` into `6037100000`, which no GEOID in
+the polygons equals. Measured through `embed_zones` (service stubbed) → `fit_zone_model` on pandas
+2.2.3 and 3.0.5: 30 California tracts gave *"only 0 zones have both a vector and a label"*, and 15
+California with 15 Illinois tracts fitted the 15 Illinois ones, reported ok, and left every
+California tract off the prediction map. Any state from 01 Alabama to 09 Connecticut fails the same
+way, and so does any zero-padded code when every id in the file is digits, such as TRACTCE
+(`010110`) or a HUC of regions 01–09. So did the zone-groups layer of the California tracts, passed
+as the polygons with `zone_id_field="zone_id"`.
+
+**`fit()` now reads `zone_id` with `dtype=str`**, so pandas no longer decides what an id is:
+`06037100000` comes back as `embed_zones` wrote it, as does every id except those listed at the end.
+Nothing else about the read changed: the features and the support are still typed by inference. The
+same change ends the other rewrites inference made to a column of ids that all look like one kind of
+number: tract NAMEs (`101.10` came back `101.1`), `TRUE` (came back `True`), space-padded numbers
+(`" 42"` came back `42`) and exponents (`1e5` came back `100000.0`). Each was measured at the read
+on both stacks, and tract NAMEs also through the two tools.
+
+Two other failures of the same read went with it, on both stacks:
+
+- one empty or `NA` id in a layer of digits made pandas type the whole column float64, so every
+  other id came back with `.0` on the end (`17031100001.0`) and nothing joined. Now the other 29 of
+  30 zones fit;
+- a layer holding both `01` and `1`, distinct zones, read both as `1`. With `1`–`15` and
+  `01`–`015`, the fit said ok with 30 zones, but its map held 15 ids twice, one copy of each
+  carrying another zone's vector, and no zone keyed `01`–`015` (blocked r2 −0.10). Now all 30 zones
+  fit, each with its own vector (0.88).
+
+**Nothing else reads this CSV by key.** `read_vector` tries GDAL first, and GDAL's CSV reader types
+every field as text, as Stage 15 found. `inspect_file_for_analysis` previews it with `csv.reader`.
+The one other `read_csv` that can open it, `_read_plain_table` behind `time_series` and
+`detect_time_column`, does type by inference, but it serves time tools, and nothing in this file is
+a time. Code the model writes in `execute_code` can of course still read it with pandas.
+
+**Where inference rewrote no id, nothing moved.** The old and new `fit()` gave identical replies and
+byte-identical prediction files on seven layers: Illinois GEOIDs, row numbers, a CSV without
+support columns, ids with letters in them, Illinois polygons whose GEOID is stored as a number, a
+CSV with no `zone_id` column (the same `KeyError`), and two-letter codes that include `NA` (see
+below). Both stacks.
+
+**Pairings that worked by accident now fail.** Vectors embedded from ids held as text, then fitted
+against a *different* polygon layer that stores the same ids as numbers, met only because inference
+rewrote the CSV's ids the way that layer's type had already rewritten its own. For GEOIDs of a
+state from 01 to 09, stored as a number (`6037100000`, the zero already gone), 30 California
+tracts went from 30 fitted to *"only 0 zones…"*, and 15 California with 15 Illinois tracts from 30
+to 15, with no warning. TRACTCE stored as an integer and tract NAMEs stored as floats (`8300.1`)
+went from 30 to *"only 0 zones…"*. All on both stacks. Matching ids by their value rather than their
+text would make `01` and `1` one zone, the mispairing above, so that is a policy decision, recorded
+here rather than made.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
+`embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
+
+- 30 California tracts, 15 California with 15 Illinois tracts, and 30 tract NAMEs such as
+  `8300.10`: every zone must fit, under its own id, carrying its own vector's pixel count (no two
+  zones share one) and its own polygon's label. Re-keying each CSV row with the next row's id, a
+  mispairing, fails all three at the pixel count;
+- 30 Illinois tracts must give the same reply and a byte-identical prediction file under the old
+  read and the new one. The old read is emulated by calling `read_csv` with the path alone, as the
+  old code did, and the emulation must still give *"only 0 zones…"* on the California tracts, so
+  the comparison cannot pass by comparing the new read with itself. Because the emulation drops
+  whatever the new call adds, the same fix written with `converters=` passes all four too.
+
+On S6.9's head the three in the first item fail (*"only 0 zones…"* twice, 15 of 30 once) and the
+comparison passes; with the change all four pass, on both stacks. The full `rag_pipeline` suite
+gives 2147 passed and 4 skipped on the Mac. In the replica, with `--network none`, it gives 9
+failed, 2135 passed and 7 skipped with the change, against 12 failed and 2132 passed on S6.9's head
+with the new file added: the three tests above are the whole difference. The nine that fail on both
+need packages the deployed image lacks, as in S6.9. An independent read-only audit re-derived these
+numbers and the ones above on both stacks before the first commit; its corrections are in.
+
+**Found here, not fixed:**
+
+- **An id pandas reads as missing still drops out.** `dtype=str` does not stop pandas' NA parsing,
+  so an id of `NA` (North America's continent code, Namibia's ISO code), `None`, `null`, `nan`,
+  `N/A` or nothing at all comes back missing, on both stacks. In a layer of two-letter codes, the
+  zone keyed `NA` left the fit without a word: 29 of 30 fitted and the reply said ok, before this
+  change and after it. The one exception is an id that is literally `nan` on pandas 2.2.3, where
+  the `astype(str)` after the read turns the missing value back into the text `nan`, so that zone
+  joins (30 of 30); on 3.0.5 it drops too. Keeping such ids takes `keep_default_na=False` with the
+  default list restored for every other column.
+- **An id containing a comma, or starting with a double quote, breaks the CSV.** `embed_zones`
+  joins each row with `,` and quotes nothing. `Census Tract 1001, Cook County, Illinois` becomes
+  three fields: 30 such tracts gave *"only 0 zones…"*, which names the wrong cause, and a layer
+  where every other name had a comma gave that when the first row had one and a `ParserError` when
+  it did not. An id written as `"Main 0" district` is read back as `Main 0 district`, and 30 of
+  them gave *"only 0 zones…"*. Same before and after, on both stacks.
 
 Nothing was deployed.
 
