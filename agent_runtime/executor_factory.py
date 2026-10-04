@@ -1659,14 +1659,15 @@ def build_agent_executor(
 
 
 # The MCP tool modules the search peer binds when a request names none. This used to be None,
-# which make_langchain_mcp_tools reads as every tool the MCP server registers: 14 tools, 2,248 of
-# the peer's 7,183 schema tokens (o200k) and about 1,584 real input tokens on every search model
-# call, for crime-data loaders, image description, the notebook builder and its executors. The
-# deployed journal holds 166 search calls (09-22 to 10-02) and none called one, and the decider's
-# search line ("retrieve evidence") never mentioned them. What SEARCH_AGENT_PROMPT does name is
-# rule 8's `mcp_fetch_element_source`, a cited element's source file by id, which is the only
-# tool in element_tools. The analyze peer is scoped the same way, to spatial_analysis_tools, and
-# a request's own mcpModules still replaces this. See docs/agent-architecture-changes.md.
+# which make_langchain_mcp_tools reads as every tool the MCP server registers, less the two it
+# unbinds by default: 14 of 16 tools, 2,248 of the peer's 7,183 schema tokens (o200k) and about
+# 1,584 real input tokens on every search model call, for crime-data loaders and analysis, image
+# description, the notebook builder, its executors and a repository ingester. The deployed
+# journal holds 166 search calls (09-22 to 10-02) and none called one, and the decider's search
+# line ("retrieve evidence") never mentioned them. What SEARCH_AGENT_PROMPT does name is rule 8's
+# `mcp_fetch_element_source`, a cited element's source file by id, which is the only tool in
+# element_tools. The analyze peer is scoped the same way, to spatial_analysis_tools, and a
+# request's own mcpModules still replaces this. See docs/agent-architecture-changes.md.
 SEARCH_MCP_MODULES: Tuple[str, ...] = ("element_tools",)
 
 

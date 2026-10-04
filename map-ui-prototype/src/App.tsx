@@ -261,6 +261,10 @@ export default function App() {
   // --- local chat history: snapshot, restore, continue ------------------------------
   // Saved after each turn rather than on every keystroke: a turn is the unit a user would
   // expect to come back to, and it keeps writes off the streaming path.
+  //
+  // These two refs are assigned DURING RENDER, so they hold what React last rendered, not what
+  // was last set. snapshotSession reads them, which is why it runs from an effect after the
+  // commit (below), never straight from runLive.
   const layersRef2 = useRef(layers); layersRef2.current = layers;
   const messagesRef = useRef(messages); messagesRef.current = messages;
   /** Where the history list comes from.
@@ -339,6 +343,34 @@ export default function App() {
       return undefined;
     }).then(() => refreshSessions());
   }, [drawnRegion, cfg.model, cfg.provider, tokenMode, asAgentConfig, refreshSessions]);
+
+  // One snapshot per finished turn, taken after React commits the turn's last update.
+  //
+  // runLive's `finally` used to call snapshotSession itself. The turn's final patch (the
+  // answer's html, `streaming: false`) and any layer the artifact fallback adds are state
+  // updates, and with createRoot React renders them on a later task, so the snapshot read the
+  // refs above as they were BEFORE that render. S9.8 measured 5 of 6 turns storing their answer
+  // as `streaming: true` with no html, which reopened as an open "thinking…" trace with no
+  // answer. The sixth kept its answer only because the fallback awaited a fetch, and lost the
+  // layer the fallback drew. `finally` now bumps this counter instead. Every update queued
+  // before the bump is rendered no later than the bump, and this effect runs after that commit.
+  const [turnsEnded, setTurnsEnded] = useState(0);
+  // Through a ref, not as a dependency: as a dependency, every change to snapshotSession's own
+  // inputs (a drawn region, a model switch, tokenMode once ui-config answers) would save again
+  // with no turn behind it. The ref still hands over the callback from the latest render, so
+  // the save sees this commit's tokenMode, not the one the turn started with.
+  const snapshotRef = useRef(snapshotSession); snapshotRef.current = snapshotSession;
+  // Once per value of the counter, not once per run of the effect. The counter is 0 on mount,
+  // so StrictMode's double mount saves nothing. Fast Refresh re-runs every effect on an edit,
+  // whatever its deps, and a plain `if (turnsEnded)` saved again each time: one comment edit
+  // re-saved all four conversations open in dev tabs, one of them held by three tabs at
+  // different turns, where the last tab to save wins.
+  const savedTurns = useRef(0);
+  useEffect(() => {
+    if (turnsEnded === savedTurns.current) return;
+    savedTurns.current = turnsEnded;
+    snapshotRef.current();
+  }, [turnsEnded]);
 
   const restoreSession = useCallback(async (id: string) => {
     // Local first — it is a cache, and a hit avoids a round trip. In token mode fall back to
@@ -657,9 +689,10 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
-      // Only when the agent did NOT place a layer itself. AWAITED, not fire-and-forget: the
-      // snapshot in `finally` used to run first, so a turn whose layers came from the artifact
-      // fallback was saved with an empty layer list and restored as a bare transcript.
+      // Only when the agent did NOT place a layer itself. AWAITED, not fire-and-forget, so the
+      // fallback's layers are put before `finally` marks the turn ended. The await on its own did
+      // not save them, though this comment once said it had: the snapshot then ran straight after
+      // putLayer, before the render that copies the new layers into layersRef2.
       if (!mapLayerDelivered.current) await loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
@@ -681,8 +714,9 @@ export default function App() {
       patch(isAuth
         ? { html: renderMarkdown(text, resolveUrl), streaming: false }
         : { text, streaming: false });
-    } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
-    // `snapshotSession` MUST be in these deps. It was not, and that single omission is the
+    } finally { setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1); }
+    // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
+    // `snapshotSession` was first missing from these deps, and that single omission was the
     // whole of "after I ask a question the wrong history shows up" — plus two things that
     // looked unrelated.
     //
@@ -699,11 +733,12 @@ export default function App() {
     // is where the orphan `conversation-sess-...` documents came from.
     //
     // Third instance of this exact class in this file (`refreshSessions`/`viewer`,
-    // `restoreSession`/`tokenMode`, now this). The neighbouring long-lived reads use refs for
+    // `restoreSession`/`tokenMode`, then this). The neighbouring long-lived reads use refs for
     // the same reason; anything read inside a callback that outlives a render either goes in
-    // the deps or goes in a ref.
-  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts,
-      snapshotSession]);
+    // the deps or goes in a ref. Declaring it fixed every turn that STARTED after ui-config
+    // answered; the effect that now takes the snapshot reads the callback of the render that
+    // ends the turn, which also covers a turn already running when it answered.
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;

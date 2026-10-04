@@ -41,8 +41,9 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 25 | [Starting a child without forking the agent](#stage-25) | 2026-10-01 | on macOS every child starts by `posix_spawn`; nothing in the agent process forks |
 | 26 | [Permutations run in the agent's own process](#stage-26) | 2026-10-02 | Gi* no longer starts a loky worker pool, the last known fork of the agent process |
 | 27 | [A library that crashes instead of refusing](#stage-27) | 2026-10-02 | regionalize checks the graph before pygeoda sees it; a split layer is refused, with its parts |
-| 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope that matches nothing binds nothing |
+| 28 | [The retrieval peer binds what retrieval asks for](#stage-28) | 2026-10-03 | search binds one MCP tool, not all 14; a scope with no tool on the server binds nothing |
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
+| 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
 | 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -1276,7 +1277,94 @@ on screen, 1 stored. The comment above that awaited call says the await fixed th
 snapshot after `putLayer`, but not after the render that copies the new layers into
 `layersRef2`. In token mode the copy PUT to the server is built from the same record (read from
 the code; these tests ran in dev mode). Fixing the first gap removes that accidental fetch from a
-reopened list turn, so that turn's answer is now lost the same way the others are.
+reopened list turn, so that turn's answer is now lost the same way the others are. Fixed in S9.9.
+
+### Stage S9.9 The snapshot waits for the render
+
+This fixes the defect S9.8 found and left open. `runLive`'s `finally` no longer calls
+`snapshotSession`. It bumps a counter, `turnsEnded`, and an effect keyed on that counter takes
+the snapshot. Every update queued before the bump (the final patch, the `agent-results` layer,
+each layer the artifact fallback put) is rendered no later than the bump itself, and effects run
+only after that render commits. By then `messagesRef` and `layersRef2`, which are assigned during
+render, hold the turn as it ended.
+
+Measured in Chrome before and after with the same three requests. The API ran locally in
+`AGENT_MODE=local` (Stage 24), and the map UI ran on two fresh ports, 5243 unfixed and 5253 fixed,
+with one new tab per test.
+
+* *"Show me the city boundary of Savoy, Illinois"* (one `map_layer`). Before: the answer was
+  stored as `streaming: true` with no html, and the conversation reopened in a new tab as an open
+  "thinking…" trace with no answer. After: it was stored as `streaming: false` with its 353
+  characters of html, and it reopened with the answer, its download box and the trace folded to 14
+  steps.
+* *"Use Python to write a GeoJSON file named three_towns.geojson with one point each for
+  Champaign, Urbana and Savoy in Illinois, and give me the download link."* `execute_code` wrote
+  the file and delivered no `map_layer`, so the artifact fallback drew it. Before: 2 layers on
+  screen and 1 stored (`live-geocode_places`). The fallback's `artifact-three_towns` was missing,
+  and the answer survived only because the fallback awaited a fetch. After: both were stored, the
+  fallback's with its `sourceUrl`, and the conversation reopened as *"2 layer(s) restored"*.
+* *"Show me the city boundary of Urbana, Illinois"*, stopped about 4 s in. Before: the screen said
+  *"⏹ Stopped. …"* and the record kept `streaming: true` with no text. After: the record had the
+  stopped message and `streaming: false`. The `catch` path patches the message the same way the
+  success path does, and only `finally` marks the turn ended.
+
+**One save per turn.** A wrapper that counted `IDBObjectStore.put` calls in each tab recorded
+exactly one save per turn, in dev under `React.StrictMode`, and none for opening a conversation
+from History. The effect saves once per value of the counter, which starts at 0, so StrictMode's
+double mount saves nothing.
+
+**Revised during the work:** the first version saved whenever the counter was non-zero, and Fast
+Refresh exposed it. An edit re-runs every effect whatever its deps, so one comment edit to
+`App.tsx` re-saved all four conversations open in the dev tabs. One of them was open in three
+tabs at different turns, and the last tab to save wins, so a tab still showing an earlier turn
+could roll the record back. The effect now remembers which counter value it saved (`savedTurns`).
+This was checked on a third port, 5263. After one turn, three hot updates left one save, and a
+`console.log` probe added by the second showed the effect re-running after it. The turns on that
+port were sent by script, because a screen saver had hidden the tabs and real typing was dropped.
+
+**A ref, not a dependency.** The effect reads `snapshotSession` through `snapshotRef`, which is
+assigned during render like the two refs the snapshot reads. As a dependency, `snapshotSession`
+would also re-run the effect whenever its own inputs changed (a drawn region, a model switch,
+`tokenMode` once `/agent/ui-config` answers), and each change would save again with no turn
+behind it. The ref still hands over the callback from the render that ended the turn, and that
+closes one more case of the S9.6 class. Declaring `snapshotSession` in `runLive`'s deps fixed every
+turn that *started* after `/agent/ui-config` answered. A turn already running when it answered
+still ended with the pre-identity callback and skipped the server PUT. That case is read from the
+code: local mode identifies nobody, so it could not be run here.
+
+**`flushSync` was the other option.** Wrapping the final `patch` in it would commit the patch
+before `finally` runs. But the tail of a turn makes several updates, so each would need wrapping,
+and the next update anyone added after the patch would be saved stale again with nothing to show
+it. A counter bumped in `finally` covers every update queued before it, wherever that update was
+made.
+
+**The await stays, for a different reason.** `await loadVectorArtifacts(...)` is still needed:
+the fallback's `putLayer` calls must be queued before `finally` bumps the counter. Its comment said
+the await had fixed the saved layer list. As S9.8 measured, it had not, and the comment now says
+what the await does.
+
+**With S9.8's first fix, a stored fallback layer is not drawn twice on reopen.** S9.8 made a
+restored layer count as drawn, and that matters more now that fallback layers are stored at all.
+The API was restarted first, so the agent could not answer from memory. The three_towns
+conversation was then reopened in a new tab and asked *"Which files does this conversation
+have?"*. It called `list_conversation_files`, and the turn carried `three_towns.geojson` as
+`file_28f8215826c1`, the restored layer's own file. The tab fetched that file once, for the
+restore, so the fallback skipped it: 2 layers on screen, 2 stored, and the answer saved.
+
+In token mode the record PUT to the server is the same `rec`, built in the same call, so the fix
+covers it unchanged. That is from reading the code, for the same reason as above.
+
+**Found here, not fixed: a layer still downloading when the stream ends.** `onMapLayer` fetches
+its geometry from a url, and `streamChat` does not wait for the handler. A download that outlasts
+the rest of the turn is therefore put after the snapshot. Measured by holding every file download
+for 60 s, with a wrapper injected into the page's `fetch`. The `map_layer` for *"Show me the city
+boundary of Champaign, Illinois"* arrived 3.1 s into the turn, and the turn ended and was saved at
+48 s. The save had the answer and `layers: []`. The layer drew at 64 s, when the hold released it,
+and the record still had no layer. The final code on port 5263 gave the same result: saved at 47 s
+with no layer, drawn at 63 s. Without the hold, the Savoy boundary's download took 15 ms, so
+this needs a download slower than everything after it in the turn. Waiting for it would keep the
+composer busy until the layer is drawn, as the fallback's await already does. That is a behaviour
+change of its own, so it was left for a separate decision.
 
 ---
 
@@ -1825,7 +1913,7 @@ and `examples/` is not in the image either.
 
 ### Stage S12.10 The page `/agent/dashboard` serves
 
-The skill-roots fix (S12.8 in I-GUIDE/iguide-ai#31, open at the time of writing) ended by naming
+The skill-roots fix (S12.9 in I-GUIDE/iguide-ai#31, open at the time of writing) ended by naming
 one more gap of its class: `/agent/dashboard` serves `examples/agent_chat_stream_demo.html`,
 which `api/server.py` reads relative to the repository root, and no revision of
 `rag_pipeline/Dockerfile` on any branch has copied `examples/`. The Dockerfile has built `/app`
@@ -1892,7 +1980,7 @@ Not fixed here:
 - Once #31 merges, the Dockerfile and `.dockerignore` readers exist in two test files. They
   belong in one module, and this file's `_lands_at` is the superset.
 
-S12.8's rule held: **anything the runtime reads relative to `REPO_ROOT` is a deployment input.**
+S12.9's rule held: **anything the runtime reads relative to `REPO_ROOT` is a deployment input.**
 The one path that looked like an exception was not one. What showed that was another branch's
 commit messages, not this branch's code or docs.
 
@@ -3626,7 +3714,9 @@ reads the file then keys it by what it holds.
   missing from its working directory; that was not investigated. And the same `.env` pins
   `OPENSEARCH_NODE` to the production cluster, which wins over `PLATFORM_TIER=dev` (the boot log
   warns of it), so seven local test conversations wrote their chat memory there before it was
-  noticed. A local check needs `OPENSEARCH_NODE=` as well.
+  noticed. A local check needs `OPENSEARCH_NODE=` as well. **Wrong, as S24.1 records:** with
+  `OPENSEARCH_NODE` blank the writes go to the dev tier's cluster instead. Run a local check with
+  `AGENT_MODE=local` ([Stage 24](#stage-24)).
 
 ### Stage S20.11 What this stage still does not fix
 
@@ -3656,8 +3746,8 @@ reads the file then keys it by what it holds.
 *2026-10-02. Branch `claude/read-by-name-scoping`.*
 
 S7.9 scoped the file store's lookup to the conversation and S9.3 to the owner. The file tools never
-used that lookup for a bare filename. They kept a directory scan of their own. Stage 15 on
-`claude/output-overwrite-scope` lists it as the read-side twin it did not fix (its S15.6).
+used that lookup for a bare filename. They kept a directory scan of their own. Stage 22 lists
+it as the read-side twin it did not fix (its S22.6).
 
 ### Stage S21.1 What a read by name did
 
@@ -3767,8 +3857,8 @@ Two scoping gaps sit upstream of the lookup:
 *2026-10-01. Branch `claude/output-overwrite-scope`.*
 
 S7.9 scoped the file store's reads to the conversation and S9.3 to the owner. One write path kept
-the store's original shape, a single flat namespace: `overwrite=True`. The layer-identity stage on
-`claude/layer-identity-by-inputs` (its S13.6) lists it among what it did not fix.
+the store's original shape, a single flat namespace: `overwrite=True`. Stage 20, the layer-identity
+stage, lists it among what it did not fix (its S20.6).
 
 ### Stage S22.1 What overwrite did
 
@@ -3790,7 +3880,7 @@ answered 404: the download endpoint's `may_read` check found a record that named
 
 Observed 2026-10-01, inside one conversation: `file_7e8178fd7165`
 (`Champaign_city_2km_buffer.geojson`) was written at 15:36:02 and rewritten at 15:38:36 by a
-re-grounding pass (the S13.1 table on that branch). That pass repeated the same buffer. A re-run
+re-grounding pass (the S20.1 table). That pass repeated the same buffer. A re-run
 with a corrected distance would have changed what the first answer's link served, with nothing in
 the transcript to show it.
 
@@ -3872,8 +3962,8 @@ call to `create_output_file_from_path`. The resolution keeps `content_key=key` a
 
 S7.9 stamped every record with the conversation that wrote it, and S9.3 added the owner. The
 upload route got only the owner: `c180490` bound the caller around `save_uploaded_file` and never
-the thread, and the map UI's `uploadFiles` posted only the files. Stage 17 on
-`claude/read-by-name-scoping` lists that gap in its S17.5, and its S17.3 was shaped by it.
+the thread, and the map UI's `uploadFiles` posted only the files. Stage 21
+lists that gap in its S21.5, and its S21.3 was shaped by it.
 
 ### Stage S23.1 What an unstamped upload did
 
@@ -3888,8 +3978,8 @@ Three consequences:
 - Nobody is identified in dev and demo mode, so the owner check passes everyone. Any conversation
   could find another's upload through `find_files` and open it through `resolve_file_ref`. In
   token mode the owner check still confined it to its user.
-- Stage 17 ranks a read by bare name by recency rather than "this conversation's own files first",
-  because an upload could not be told apart from a legacy record (its S17.3).
+- Stage 21 ranks a read by bare name by recency rather than "this conversation's own files first",
+  because an upload could not be told apart from a legacy record (its S21.3).
 
 ### Stage S23.2 What changed
 
@@ -3923,7 +4013,7 @@ outside this repo. All but the last are known to send a thread id with their tur
 - **Minting a session for it** would keep the upload out of other conversations, and out of the one
   that uses it too. Those clients send their thread id on turns, so a minted id would never match:
   the upload would drop out of that conversation's listing and its lookups by name, though it stays
-  reachable by file id. Once Stage 17 routes the file tools' bare-name read through `find_files`,
+  reachable by file id. Once Stage 21 routes the file tools' bare-name read through `find_files`,
   the model could not open its own upload by name.
 - **Adopting it into the first conversation that attaches it** by `fileIds` was not taken either.
   The chat route would start writing the records it reads, and a record has one `session`, so an
@@ -3980,12 +4070,12 @@ leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` r
   | | stored `session` | listed in `sess-a` | `find_files` / `resolve_file_ref` | `read_text_file` / `inspect_file_for_analysis` |
   | --- | --- | --- | --- | --- |
   | prototype `5ae6d92` | null | no | finds it | reads it |
-  | Stage 17 alone | null | no | finds it | reads it |
+  | Stage 21 alone | null | no | finds it | reads it |
   | this stage alone | `sess-a` | yes | nothing | reads it |
   | both | `sess-a` | yes | nothing | refused |
 
   Neither change closes that read on its own. On prototype the file tools' bare-name read is the
-  directory scan S17.1 describes, which never opens a record, so no stamp can scope it. Stage 17's
+  directory scan S21.1 describes, which never opens a record, so no stamp can scope it. Stage 21's
   route through `find_files` honours the stamp, but on its own it finds an unstamped upload in the
   pool. The two merge cleanly in code. Merged, eight file-store test modules (107 tests) pass, and so
   does the full suite: 1686 passed, 4 skipped, which is 1645 + 26 + 15.
@@ -4016,13 +4106,13 @@ leaves alone (S23.6). A fallback layer is redrawn in place, because `putLayer` r
   the reference client mints a thread id per page load, so it needs a one-line change. The
   dashboard page defaults every visitor to `demo-thread-1`, so stamping its uploads with that would
   move them from the pool into one conversation that everyone shares.
-- Until Stage 17 lands, `read_text_file` and `inspect_file_for_analysis` still read another
+- Until Stage 21 lands, `read_text_file` and `inspect_file_for_analysis` still read another
   conversation's upload by bare name (S23.5).
-- S17.3's choice of recency over "own conversation first" is not revisited here. Its premise no
+- S21.3's choice of recency over "own conversation first" is not revisited here. Its premise no
   longer holds for an upload from a client that sends its thread id, but a legacy record and a
   thread-less upload still cannot be told apart.
 - A request with no `thread_id` binds no conversation, and raw-path and file-id access are
-  unscoped. Both are as S17.5 describes.
+  unscoped. Both are as S21.5 describes.
 - Two older gaps in the same client code, found by reading it and not measured. A reopened
   conversation does not register the layers a `map_layer` event drew, so a later turn that lists the
   conversation's outputs can draw one of them a second time. And an upload whose name
@@ -4279,16 +4369,16 @@ So this change is a no-op on the deployment, and no Linux CI run would ever have
 
 ## Stage 26 — Permutations run in the agent's own process {#stage-26}
 
-`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S16.6 (branch
+`local_getis_ord` now passes `n_jobs=1` to `esda.G_Local`. Stage S25.6 (branch
 `claude/fork-safe-subprocess`) named this call as the one known fork of the agent process that
-`fork_safe` cannot cover, because a library makes it. S16.6 left it for a separate change,
+`fork_safe` cannot cover, because a library makes it. S25.6 left it for a separate change,
 because it changes how a statistics tool computes rather than how a child is started. This is
 that change. It is a trade, not a free win. At the sizes this tool usually sees, the worker pool
 costs more than it saves: about a quarter of a second per cold call on the image, and 20 to
 150 s on the Mac. On layers of tens of thousands of areas the pool is faster: at 85,000 cells on
-the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. Stages 13 to 18 are
-claimed by open, unpushed or uncommitted branches (17 three times and 18 twice when this was
-written); this takes the next free number.
+the image, by 3.9 s on median for the statistic and by 4.7–5.8 s end to end. It was written as
+Stage 19, while 13 to 18 were claimed by parallel branches, and landed as 26 in merge order
+(S29.1).
 
 ### Stage S26.1 Which calls start a pool
 
@@ -4312,11 +4402,11 @@ each must import esda before it can work. A cold call started 10 children on the
 and 16 on the Mac (14 cores). Traced on the Mac, those are the 14 workers, loky's resource
 tracker, and CPython's multiprocessing resource tracker.
 
-S16.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
+S25.6 says loky starts each worker with `os.fork()` and then `exec`. That is true of the Mac's
 joblib 1.4.2 (loky 3.4.1), and it is where the 15 `os.fork` audit events in
 `test_getis_ord_finds_hot_and_cold_ends` come from: the 14 workers and loky's tracker. The
 image's joblib 1.6.0 (loky 3.6.0) calls `_posixsubprocess.fork_exec` instead, which raises no
-`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S16.5). On
+`os.fork` audit event. On Linux that call is a `vfork`, which runs no fork handlers (S25.5). On
 macOS it is a plain `fork()`, because CPython 3.13 defines `VFORK_USABLE` only under
 `__linux__`. Upgrading joblib on the Mac would therefore hide these forks from an `os.fork` audit
 hook without removing them.
@@ -4325,7 +4415,7 @@ hook without removing them.
 
 The measured call is `G_Local(y, w, permutations=999, star=True, seed=42)` exactly as the tool
 makes it, on queen weights. Inputs are the suite's `_lattice()` at 8×8 (the test's 64 cells) and
-12×12 (S16.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
+12×12 (S25.6's 144), and a seeded Voronoi tessellation with a north-south gradient at 3,000 to
 85,000 cells. The tessellation is tract-like, about six neighbours a cell and at most 13; Illinois
 has 3,265 tracts, and 85,000 is roughly every US tract. "Cold" is a fresh process, with `-1` and
 `1` interleaved. CPU counts the process plus its reaped workers.
@@ -4435,7 +4525,7 @@ default.
   Mac and the start-up off small layers. It is not done here, for two reasons. It adds a
   platform branch to a statistics call. And every pool, once started, keeps eight interpreters
   in the agent container for 300 s.
-* The fork half is prevention by mechanism, not a fix for an observed crash. As S16.6 records,
+* The fork half is prevention by mechanism, not a fix for an observed crash. As S25.6 records,
   this route was not reproduced in a realistic order.
 * `Moran`, `Geary` and `G` take no seed, so `global_spatial_autocorrelation`'s p-values still
   vary between runs. That is unchanged here.
@@ -4614,14 +4704,15 @@ stopped responding after the disk filled.
 ## Stage 28 — The retrieval peer binds what retrieval asks for {#stage-28}
 
 An API request turns MCP tools on unless it says otherwise, and the search peer passed no MCP
-module list, which `make_langchain_mcp_tools` reads as every tool the MCP server registers. So
-the deployed search peer bound the whole MCP surface. The decider's line for search, "retrieve
-evidence (datasets, publications, notebooks)", mentions none of it. The analyze peer has been
-scoped to `spatial_analysis_tools` since `6e48d65f` (2026-06-25). The same commit made the API
-default ON, and its comment says why: "so the analyze peer's MCP tools (spatial/data) are
-available by default". Search received the flag from the shared request config, and has passed it
-through since the supervisor's first commit, `7adf7d1c` (2026-06-09). Why search was given it:
-reason not recorded. That commit's message has no body.
+module list, which `make_langchain_mcp_tools` reads as every tool the MCP server registers, less
+the two the agent unbinds by default: 14 of 16. So the deployed search peer bound the whole MCP
+surface. The decider's line for search, "retrieve evidence (datasets, publications, notebooks)",
+mentions none of it. The analyze peer has asked for `spatial_analysis_tools` since `fb8bdfaf`
+(2026-06-09), and the remote list has honoured that since `6e48d65f` (2026-06-25). That commit
+also made the API default ON, and its comment says why: "so the analyze peer's MCP tools
+(spatial/data) are available by default". Search received the flag from the shared request
+config, and has passed it through since the supervisor's first commit, `7adf7d1c` (2026-06-09).
+Why search was given it: reason not recorded. That commit's message has no body.
 
 ### Stage S28.1 What search bound, measured three ways
 
@@ -4642,20 +4733,23 @@ fingerprints production's `turn_instrumentation_toolset` lines logged for `sup_s
 turns carried exactly these lists. The last row was produced by this commit's files, in a `/tmp`
 overlay in the same container, against the same server.
 
-**Counted by the provider.** The comparison uses the first search call of a turn (one message,
-system prompt constant at 977 estimated tokens) on gpt-5.6-luna, and subtracts the message
-estimate from the input tokens. Without MCP tools that leaves 4,232–4,237 (n=11). With them it
-leaves 5,815–5,822 (n=9). So the 14 MCP schemas cost about **1,584 real input tokens on every search
-model call**, and the ReAct loop sends them again with each call. Against that count, o200k over
-the JSON overstates them 1.42x and the chars/4 estimator 1.49x, in line with the 1.35x schema
-overcount measured on 2026-09-02.
+**Counted by the provider.** The comparison uses the first search call of a conversation: one
+message, since the search thread keeps its messages across turns. The system prompt is constant at
+977 estimated tokens, the model is gpt-5.6-luna, and the message estimate is subtracted from the
+input tokens. Without MCP tools that leaves 4,232–4,237 (n=11). With them it leaves 5,815–5,822
+(n=9). So the 14 MCP schemas cost about **1,584 real input tokens on every search model call**,
+and the ReAct loop sends them again with each call. Against that count, o200k over the JSON
+overstates them 1.42x and the chars/4 estimator 1.49x. That is the same direction as the ~1.35x
+measured on 2026-09-02, and somewhat larger; that figure was chars/4 over the system prompt and
+schemas together.
 
 **Called.** The `agent-api` journal holds 166 search model calls in 35 sessions, from 2026-09-22
 to 10-02. 47 of them had the MCP tools bound and 119 did not, and search never called an MCP tool.
 Its calls went to `keyword_search` (87), `semantic_search` (73), `opengeodata_search` (39),
 `agent_kb_search` (39), `neo4j_search` (36), `web_fetch` (31), `spatial_search` (28),
-`web_search` (18) and the by-id graph tools. In the same period, the only MCP call by any peer was
-one `mcp_analyze_and_organize_results`, by analyze.
+`web_search` (18), `neo4j_get_element_by_id` (9), `neo4j_explore_related_nodes` (8) and
+`get_kb_block` (2). In the same period, the only MCP call by any peer was one
+`mcp_analyze_and_organize_results`, by analyze.
 
 ### Stage S28.2 What the 14 were, and what the search prompt asks for
 
@@ -4664,7 +4758,7 @@ one `mcp_analyze_and_organize_results`, by analyze.
 | `element_tools` | 1 | `fetch_element_source`: a cited element's source file, by id, into the file store |
 | `data_tools` | 3 | Chicago crime and community-area loaders, crime statistics |
 | `spatial_analysis_tools` | 3 | crimes per community area, a crime map, organising results. Analyze binds these |
-| `image_tools` | 2 | describe an image or a map sent as base64 |
+| `image_tools` | 2 | describe an uploaded image or map file (`file`). Only the local fallback's `_b64` versions take base64 |
 | `notebook_workflow_tools` | 2 | build a tool from a notebook, list the built ones |
 | `generic_executor_tools` | 2 | run a stored workflow or code element. Both refuse unless `AGENT_ALLOW_WORKFLOW_EXEC` is set, and it is unset in both containers |
 | `ingest_tools` | 1 | ingest a GitHub repository |
@@ -4692,8 +4786,10 @@ images, to build or run workflows, or to ingest a repository.
   without `fetch_element_source` would likewise have handed search the other 13. An empty scope
   now logs a warning.
 - **Rule 8 names `mcp_fetch_element_source`, the name the tool is bound under.** The four lines are
-  ported byte for byte from backend_swap `66e71d54` (2026-08-12). That commit's audit found that the
-  unprefixed name "exists under no path".
+  byte-identical to rule 8 on `origin/backend_swap`. That wording came from the merge `7794bc15`
+  (2026-08-27), which applied `66e71d54`'s `mcp_` prefix (2026-08-12) to the rule-8 text that
+  `839a855b` had restated. `66e71d54`'s audit found that the unprefixed name "exists under no
+  path".
 - **The API notes said `mcpModules: null` means all MCP modules.** That was already wrong for
   analyze. They now name each peer's default.
 - **`rag_pipeline/tests/test_search_peer_mcp_scope.py` (8 tests) reads the search peer's real
@@ -4718,7 +4814,7 @@ Suite: 1688 passed and 4 skipped before, on `cd664cb`; 1696 passed and 4 skipped
   unbound by default. Under the old empty-match rule, that scope reproduced the unscoped toolset
   exactly, fingerprint `5465f2e44670`, in the deployed container.
 - **Binding no MCP tool at all was the other candidate.** It would have dropped the one tool rule 8
-  names, which backend_swap corrected precisely so the search peer could call it. It would also
+  names, which backend_swap's `66e71d54` renamed so the search peer could call it. It would also
   have staled PR #41's `NOT_TOLD` entry for search's MCP binding, which that PR's
   `test_no_untold_entry_outlives_its_binding` rejects. Search still calls the factory, so that
   entry stays true, and its reason still holds.
@@ -4732,21 +4828,56 @@ Suite: 1688 passed and 4 skipped before, on `cd664cb`; 1696 passed and 4 skipped
 
 - **With no module list, 10 of the 14 MCP tools now reach no peer.** These are the `data_tools`,
   `image_tools`, notebook-builder, executor and ingest tools. Before this change only search had
-  them, the decider never sent tool work to search, and the journal shows none called. A request
-  that names their modules still binds them, in both peers.
+  them, the decider's line for search describes only retrieval, and the journal shows none called.
+  A request that names their modules still binds them, in both peers, except `image_tools`, which
+  cannot scope (below).
 - **This takes the notebook builder off the default path.** PR #42 records that the maintainer
   declined unbinding the remote notebook builder. This change does not unbind it, since
   `mcpModules: ["notebook_workflow_tools"]` still binds it. But on the default path, only the search
   peer had it.
 - **`collect_capability_inventory` still lists every MCP tool.** So "what can you do" can describe
   those ten, which no peer binds by default.
-- **Remote scoping still fails open when a module cannot be imported.** In that case
-  `_allowed_remote_tool_names` returns None, and the caller keeps the full list. Its docstring says
-  this is deliberate. The overlay in S28.4 shows what it does to a scope.
+- **Remote scoping still fails open when none of the named modules yields a tool name.** That
+  happens for a module that cannot be imported, for `image_tools`, and for
+  `generated_notebook_tools` with nothing generated. `_allowed_remote_tool_names` then returns
+  None, and the caller keeps the full list; its docstring says this is deliberate. The overlay in
+  S28.4 shows what it does to a scope. Named beside a module that does resolve, such a module's
+  tools are silently dropped instead: `["image_tools", "data_tools"]` binds the three data tools.
 - **`image_tools` cannot scope the remote list.** The scoping reads `.name` from the plain functions
   `_make_image_tools` returns, which have none. The server's names (`describe_image`) also differ
   from the fallback's (`describe_image_b64`). Measured: `include_modules=["image_tools"]` binds all
   14 remote tools.
+
+### Stage S28.6 Corrected after an independent audit
+
+An auditor re-derived the entry's 53 claims, plus the code comment and the commit message, with
+its own scripts over the same journal and probe output. It reproduced every count, token figure,
+fingerprint, range, ratio, mutation count and suite total. Two claims were wrong, and both are
+corrected above:
+
+- **Rule 8's provenance.** Its four lines were said to be ported byte for byte from backend_swap
+  `66e71d54`. They match rule 8 on `origin/backend_swap`, which took that wording in the merge
+  `7794bc15`; `66e71d54`'s own rule 8 is worded differently.
+- **The image tools' input.** They were said to take base64. The bound remote tools take an
+  uploaded `file`.
+
+Nine were imprecise and are reworded in place:
+
+- the 14-of-16 count;
+- the first call of a conversation, not of a turn;
+- the full list of search's calls;
+- the comparison with the 1.35x;
+- the stage-table row;
+- `image_tools` under `mcpModules`;
+- what makes scoping fail open;
+- the date of the analyze scope;
+- the purpose list in the `executor_factory` comment.
+
+One inference the logs cannot show, that the decider never sent tool work to search, now says
+what the decider's line for search describes instead.
+
+The audit reported after #63 had merged, so the squash commit `c7706e3` still says "ported byte
+for byte from backend_swap 66e71d54", "first call of a turn" and "Recorded as Stage 23".
 
 ---
 
@@ -4852,6 +4983,159 @@ This file had defects of its own, now checked mechanically on every merge, and f
 
 Dependabot alert #1 (MapLibre attribution XSS) is fixed on `prototype` by #49: it declares
 `^6.11.2` against a vulnerable range of `<= 6.4.0`. The alert stays open until GitHub rescans.
+
+---
+
+## Stage 30 — A file_id and a path are checked against the file's owner {#stage-30}
+
+*2026-10-03. Branch `claude/scope-path-and-id-access`, off `447b961`.*
+
+Stage 21 scoped a bare filename and left the two other ways of naming a stored file open
+(S21.5). A file_id was checked against its owner only by the download endpoint, and a path into
+the store was not checked at all. This stage decides how each is scoped and closes both in
+`file_store`, which every tool's lookup already goes through.
+
+### Stage S30.1 What an id and a path reached
+
+Measured with a probe on `447b961`. Alice wrote `summary.md` in `conv-alice`. From `conv-bob`,
+bob reached it six ways: through `read_text_file` and through `execute_code(input_files=[...])`,
+each by its file_id, by `outputs/<id>__summary.md` (the `path` that `write_output_file` reports)
+and by its absolute path (the `path` that `read_text_file` reports). He also read her record,
+`metadata/<id>.json`, and `write_text_file(..., overwrite=True)` replaced her file's bytes.
+
+The id half was one missing check. Every lookup by id goes through `get_file_record`, and outside
+the store only `GET /agent/files/<id>/download` called `may_read`. So every tool that takes an
+id took another user's. That was measured for the geo and QGIS tools and for `resolve_file_ref`,
+rs-embed's route; for terrain it comes from reading the code. And
+`_augment_user_input_with_file_ids`, which lists a chat request's file_ids in the prompt, gave
+bob alice's filename.
+
+The path half came from `_allowed_roots()`. The storage root is one root. The default store,
+`agent_chat_files/`, also sits inside the repo root, which is another. And `.env.example` sets
+`UPLOAD_FOLDER` to the store's `uploads/`, which makes a third. A path that any of them admitted
+was read or written without a record ever being consulted. Two more readers had routes of their
+own:
+
+- `langchain_geo_tools._resolve` opened any path that existed.
+- QGIS assembles a shapefile from every file beside the named part whose name shares its stem,
+  because uploads are stored as `<file_id>__<name>` and the parts do not sit side by side. So
+  bob's `parcels.shp` was assembled with alice's `parcels.dbf`, which holds the attributes.
+
+### Stage S30.2 The policy, decided
+
+- **An id is honoured wherever the owner check passes, in any of the owner's conversations.** The
+  check is the one `find_files` makes: `may_read`, with unowned records allowed. The
+  conversation is not part of it, for three reasons. The conversation scope exists to tell files
+  with the same name apart, and an id names one file. The conversation id comes from the client,
+  so it could not be what protects an id. And the download link, the other place ids are used,
+  already works in every one of the owner's conversations. In dev and demo nobody is identified,
+  so an id reaches its file from any conversation, as the link does there.
+- **A path into `uploads/` or `outputs/` is the record it names, with that record's checks.** Every
+  record reports its file's path to the model, and the model passes paths back. Refusing paths
+  outright would break calls that work today and protect nothing the id check does not. The
+  on-disk name `<file_id>__<filename>` names the record, and the record must name the same file
+  back. A file that no record names has no owner to check, so it is refused, as its id would be.
+- **No path through these tools reaches `metadata/`, for reads or for writes.** A record says
+  whose its file is, and that is exactly what the checks read. No tool has a use for one, the
+  owner included.
+- **A write by path replaces only an output this conversation wrote for this caller.** This is the
+  rule `overwrite=True` follows (Stage 22), and it is now one function, `may_replace`, that both
+  use. With no conversation bound, nothing qualifies. Uploads are never replaced. A write by path
+  may not create a file in `uploads/`, `outputs/` or `metadata/` either, because nothing could
+  list it, link to it or read it back. `write_output_file` is how a file enters the store.
+- **The unowned legacy pool follows `find_files`' reuse policy.** It is readable by id and by path
+  from any conversation, by any caller, in strict token mode too. Only the browser download refuses
+  it once strict (S9.3), and that endpoint keeps its own rule. Nobody replaces it by path, because
+  every conversation reads it.
+- **A refusal reads exactly as a missing file does**, for an id and for a path. The download
+  endpoint's own refusal said "No file found for id" where an unknown id says "unknown file_id".
+  S9.3 had made both a 404, but the different words still confirmed the id. They now match.
+
+### Stage S30.3 What changed
+
+- `get_file_record` makes the owner check. `require_file_record`, `resolve_file_id` and
+  `resolve_file_ref` inherit it, and so does every tool that takes an id.
+- Only a single token of letters, digits, `_` and `-` is looked up as an id. The id becomes the
+  record's filename, `metadata/<id>.json`, so a path or a filename is never read as one. Every id
+  the store has minted is `file_` followed by twelve hex digits, and the test fixtures' `file_demo`
+  still resolves.
+- `managed_path_record(path, write=...)` is the rule for a path. It returns None for a path outside
+  `uploads/`, `outputs/` and `metadata/`, so the caller's own rules apply as before. Three callers
+  use it:
+  - The file tools' resolver, for every candidate path, whichever root admitted it. That resolver
+    serves `read_text_file`, `inspect_file_for_analysis`, `write_text_file`'s path branch and
+    `execute_code`'s `input_files`.
+  - The geo tools' path branch.
+  - QGIS, for each shapefile part it gathers. A part must also come from the named part's
+    conversation or from none, which is what a name looked up in that conversation finds
+    (Stage 21).
+- The directories are matched by device and inode, not by name. `Path.resolve()` does not
+  canonicalise case, so on a case-insensitive filesystem `OUTPUTS/x` is inside `outputs/` while
+  being a different string. Code execution's reserved directories were caught out the same way
+  (CLAUDE.md).
+- A read by path now reports the record it resolved: its `file_id` had been null and its
+  `download_url` absent. `execute_code` stages the file under its filename as well as its id.
+- Skill resources are never taken from the store's own directories, for listing or for loading.
+  A skill directory that contained the store would otherwise have offered its files with no
+  owner check.
+
+### Stage S30.4 Revised during the work
+
+The first version matched each of the store's directories by inode, but only those that already
+existed. In a fresh store whose `outputs/` had not been made yet, nothing matched, so
+`write_text_file("outputs/report.md")` created the directory and a file that no record names.
+`test_a_new_file_is_not_created_in_the_store_by_path` caught it. The directories are now made
+before matching, as every other use of them makes them.
+
+An independent audit re-derived every figure below, and all of them reproduced. It changed four
+things:
+
+- **The QGIS part rule first required the named part's own conversation.** That silently dropped
+  a user's own part uploaded with no thread id: the layer lost its attributes and nothing said
+  so. A part from no conversation now counts too, as it would for a name.
+- **Two statements were broader than the code.** "`metadata/` is never reachable by path" and
+  "every path into the store" held for the file, code and geo tools, not for every reader of the
+  store. They now name the tools. Skill resources were a further reader, and are now covered.
+- **The download endpoint's log line** for its own refusal said "does not belong to this
+  caller". Only an unowned file in strict mode reaches it now, so it says that. Another user's id
+  is refused earlier, in `require_file_record`, and is logged as an unknown id.
+- "Both had been null" was wrong: the `download_url` key had been absent, not null.
+
+### Stage S30.5 Verification, and what it costs
+
+- `test_path_and_id_scope.py` has 65 tests. On `447b961`, 48 fail and 17 pass. The 17 are what the
+  checks must not break:
+  - the owner's own file, by id and by both paths, through both read tools (6);
+  - the same from another of her conversations (3);
+  - the legacy pool (3);
+  - dev mode (3);
+  - the two lookups by id that already returned the record: a read reporting it, and staging
+    under the filename (2).
+
+  With the change, all 65 pass on the Mac. On a case-sensitive filesystem, such as the deployed
+  one, the case test skips itself, so it is 64 passed and 1 skipped there.
+- The skill and QGIS-part changes from the audit have no tests of their own. They rest on the
+  audit's checks and on the existing skill and QGIS tests, which pass unchanged.
+- Re-running the probe on the branch, each of bob's routes is refused and alice's bytes are
+  unchanged. Alice still reaches her file by id and by path from another of her conversations.
+- Full suite: 2113 passed, 4 skipped. On `447b961` it is 2048 passed, 4 skipped, so the
+  difference is exactly this file's 65 tests.
+- A read by id costs what it did, 0.15–0.16 ms. A read by path costs about 0.2 ms more:
+  0.19–0.20 → 0.40 ms by relative path, and 0.14–0.15 → 0.35–0.36 ms by absolute path. These are
+  medians of 30 warm reads on the Mac, three runs on a 1,400-record store and one on 5,000, with
+  the same figures at both sizes. A path looks up the one record it names (twice, as written),
+  where a lookup by name parses every record (S21.4).
+
+### Stage S30.6 What this stage did not fix
+
+- QGIS's own arguments are not checked here. A reference that is not a file_id, in any of the
+  four QGIS tools, is passed to QGIS as given, and so is a Processing output path. A check on
+  arguments cannot confine a general processing engine; that needs the kind of container
+  `execute_code` runs in.
+- QGIS job directories (`qgis_jobs/<conversation>/<job>`) and the store's other working
+  directories hold no records, so they are not checked here either.
+- Outside the store's own directories, every tool keeps the rules for a path that it already had.
+- A write by path changes a file without updating its record's `size_bytes`.
 
 ---
 

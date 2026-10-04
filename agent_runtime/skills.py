@@ -243,6 +243,20 @@ def _safe_relative_resource_path(resource_path: str) -> Path:
     return path
 
 
+def _in_the_file_store(path: Path) -> bool:
+    """Whether ``path`` is in the file store's own directories: uploads/, outputs/, metadata/.
+
+    They hold every user's files and the records saying whose each one is. A skill whose directory
+    happens to contain the store would list and read them all, with no owner check. They are
+    reached by file_id or filename, with that check, and are never a skill's resources.
+    """
+    try:
+        from agent_runtime.file_store import managed_dir
+        return managed_dir(path.resolve()) is not None
+    except (OSError, RuntimeError):  # no store can be made here, so nothing is in it
+        return False
+
+
 def _read_text_resource(path: Path) -> str:
     limit = _resource_size_limit()
     size = path.stat().st_size
@@ -308,7 +322,7 @@ class SkillRegistry:
         for path in sorted(skill.skill_path.rglob("*"), key=lambda item: item.as_posix()):
             if len(resources) >= MAX_RESOURCE_LIST_ITEMS:
                 break
-            if not path.is_file() or path.resolve() == skill.skill_file:
+            if not path.is_file() or path.resolve() == skill.skill_file or _in_the_file_store(path):
                 continue
             rel = path.relative_to(skill.skill_path).as_posix()
             if any(part.startswith(".") for part in Path(rel).parts):
@@ -353,7 +367,7 @@ class SkillRegistry:
         resource = (skill.skill_path / rel_path).resolve()
         if skill.skill_path.resolve() not in resource.parents:
             raise SkillError("resource_path escapes the skill directory")
-        if not resource.exists() or not resource.is_file():
+        if not resource.exists() or not resource.is_file() or _in_the_file_store(resource):
             raise SkillError(f"resource does not exist: {resource_path}")
         text = _read_text_resource(resource)
         return {
