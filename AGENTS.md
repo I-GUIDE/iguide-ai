@@ -63,7 +63,8 @@ python3 -m pytest rag_pipeline/tests/ -q
 python3 -m pytest tests/ -q        # 135 passed, 32 skipped (all of tests/live/)
 ```
 
-Baseline is **2036 passed, 4 skipped, 0 failed** (3 Oct 2026). If something fails, it is yours.
+Baseline is **2137 passed, 4 skipped, 0 failed** (3 Oct 2026, on the development Mac; CI's Linux
+run reports 2135 passed and 6 skipped). If something fails, it is yours.
 
 **A passing run says nothing about whether the suite stayed offline.** Until 2026-10-02 every
 run reached eight search engines (the supervisor's web fallback, through `ddgs`), the Census

@@ -251,9 +251,13 @@ agent_kb/
 generated_notebook_workflows/
 ```
 
-Every record carries `owner_id`, stamped at creation. `may_read(record, allow_unowned=True)`
-enforces it on `GET /agent/files/<id>/download`; a mismatch answers **404, not 403**, because a
-403 would confirm the id exists and make the endpoint an enumeration oracle.
+Every record carries `owner_id`, stamped at creation, and `may_read(record, allow_unowned=True)`
+enforces it. Until 2026-10-03 only the download endpoint, `GET /agent/files/<id>/download`, made
+that check. Since [Stage 30](agent-architecture-changes.md#stage-30), `get_file_record` makes it,
+so every lookup by id does, from any tool. Another user's file answers like an id that was never
+minted: **404, not 403**, because a 403 would confirm the id exists and make the endpoint an
+enumeration oracle. A path into the store's `uploads/` or `outputs/` is checked as the record it
+names, and `metadata/` cannot be reached by path at all.
 
 A record also carries `session`, the conversation that made it. Outputs have been stamped since
 2026-09-09. Uploads were not until 2026-10-03: the upload route bound the caller but never the
@@ -268,7 +272,8 @@ thread, so every upload landed in the unstamped pool. Two rules read the stamp:
   `qgis_metric_buffer` overwrote under the default name `buffer.geojson`, so one person's buffer
   took over another's file id, and the first person's link served the second person's bytes.
   The QGIS buffer and map render no longer overwrite at all. Each run is a new file, because an
-  earlier answer still links to the old one.
+  earlier answer still links to the old one. A write by path follows the same rule
+  (`may_replace`, Stage 30).
 
 An output may also carry `content_key`, a digest of the inputs that produced it (2026-10-03).
 Map layers are keyed on that rather than on the file id, so a repeated step replaces its layer
