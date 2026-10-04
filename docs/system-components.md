@@ -2,9 +2,14 @@
 
 Two halves, deliberately kept in one file because the second only makes sense given the first.
 
-**Part 1 is what exists**, verified against the tree rather than remembered.
+**Part 1 is what exists**, measured against the tree rather than remembered — last against
+`prototype` at `b25595d` (2026-10-03), after the thirty-five-branch integration recorded in
+Stage 29 of [agent-architecture-changes.md](agent-architecture-changes.md#stage-29). The tree is
+ahead of the deployment: on that date the VM still ran `5ae6d92` (2026-09-22), so what Stage 29
+landed is not live until the next deploy.
 **Part 2 is a proposal** for a middleware between the frontend and the agent. It has not been
-built. Nothing below Part 1 describes current behaviour.
+built. Nothing below Part 1 describes current behaviour, though every fact Part 2 cites about
+the code was re-checked on the same date.
 
 ---
 
@@ -12,14 +17,16 @@ built. Nothing below Part 1 describes current behaviour.
 
 | Layer | What it is |
 | --- | --- |
-| **Frontend** | `map-ui-prototype/` — React, MapLibre + deck.gl. SSE consumer, IndexedDB session cache, auth client. Analyses arrive as map layers, not as text to interpret. |
-| **HTTP surface** | `api/server.py` — **2,846 lines, 14 routes**. Identity, API-key gate, deployment modes, request normalisation, upload/download, conversation CRUD, trace retrieval, model catalogue, UI config, SSE framing. |
-| **Agent runtime** | `agent_runtime/` — the supervisor graph (a single 238 KB `supervisor/graph.py`), search/analyze/code peers, `executor_factory` (LLM clients), `streaming_trace`, `skills`, `session_memory`. |
-| **Tool families** | geo, terrain, rs-embed, spatial-stats / aggregate / temporal / overlay, admin-boundary, file, code execution, MCP and QGIS-MCP. |
-| **Sandbox** | Docker-out-of-Docker. Per-conversation `/work` bind mount, 72-hour TTL, per-conversation dependency cache. |
-| **Storage** | OpenSearch (`chat_memory`, `chat_traces`, the KB index), the file-store volume, code workspaces, browser IndexedDB. See [persistent-state.md](persistent-state.md). |
-| **External services** | LLM providers (AnvilGPT / OpenAI), rs-embed, the platform backend (token introspection), the platform Neo4j, OSM/Overpass, 3DEP. |
-| **Configuration** | `platform_endpoints` (`PLATFORM_TIER`, `SEARCH_TIER`), `deployment_mode` (`dev`/`demo`/`token`), `identity`. |
+| **Frontend** | `map-ui-prototype/` — React 18; MapLibre 6.11 with deck.gl 9.4 drawn *interleaved* through `@deck.gl/maplibre`; react-map-gl 8. SSE consumer, IndexedDB session cache, auth client. Analyses arrive as map layers, not as text to interpret. The Downloads panel is assembled **client-side** from whatever the stream carries (`collectDownloads`), so a tool's result shape is its contract with that panel. |
+| **HTTP surface** | `api/server.py` — **2,947 lines, 14 routes**. Identity, API-key gate, deployment modes, request normalisation, upload/download (an upload is stamped with the conversation that made it), conversation CRUD, trace retrieval, model catalogue, UI config, SSE framing. |
+| **Agent runtime** | `agent_runtime/` — the supervisor graph (a single 242 KB `supervisor/graph.py`), search/analyze/code peers, `capability_registry` (what each peer can do; the supervisor's description of its peers is generated from it, and a test holds it against the peer builders), `executor_factory` (LLM clients), `streaming_trace`, `skills`, `session_memory`, `fork_safe` (starts child processes without forking the agent). |
+| **Tool families** | Fifteen toolsets both the analyze and code peers bind — geocode, admin-boundary, terrain, overlay, aggregate, temporal, spatial-stats, geo, QGIS, rs-embed, rs-embed zonal, granular, conversation files, code execution, skills — and three only analyze binds: geo-analysis (knowledge-base renders), file, and MCP. `capability_registry.py` is the list; read it rather than trusting a count here. |
+| **Sandbox** | Docker-out-of-Docker. Per-conversation `/work` bind mount, 72-hour TTL (`AGENT_CODE_EXEC_WS_TTL_HOURS`), per-conversation dependency cache. Children start through `fork_safe`: on macOS a long-lived agent cannot `fork()` once PROJ has read its database, and every child it started died of SIGSEGV before `exec`. |
+| **Storage** | OpenSearch (`chat_memory`, `chat_traces`, the KB index), the file-store volume, code workspaces, browser IndexedDB — and, for operations, the host journal and the watchdog's incident bundles. See [persistent-state.md](persistent-state.md). |
+| **External services** | LLM providers (OpenAI, AnvilGPT, Anthropic), rs-embed (Earth Engine through a service account), the platform backend (token introspection), the platform Neo4j, Census TIGERweb (named boundaries), Nominatim (geocoding), OSM/Overpass, USGS 3DEP, and a web-search fallback. |
+| **Configuration** | `deployment_mode` — `dev`, `demo`, `token`, `local`. `local` adds one guarantee to `dev`: the process writes **nothing** to a shared store. It is unrelated to the map UI's *mock* mode, which also calls itself "local". `platform_endpoints` — `PLATFORM_TIER` owns every per-tier value in `_TIERS` (hosts, cluster, redirect id); `SEARCH_TIER` picks the knowledge base separately. `identity` — the JWT, verified by the platform backend. |
+| **Build and CI** | Every image installs through `constraints.txt`, the deployed image's own `pip freeze` (177 pins), so a rebuild reproduces what runs rather than that day's newest. `.github/workflows/verify.yml` runs the suite on Linux / Python 3.11 under those versions on every push and pull request. |
+| **Operations** | Containers log through compose's `journald` driver to the host journal, so a recreate no longer deletes the logs. `deploy/agent-watchdog.sh`, a systemd timer, restarts a container that has been unhealthy for ten minutes — after capturing an incident bundle, because the restart destroys the state that explains the failure. Health checks assert the status code. |
 
 ### The observation this plan rests on
 
@@ -40,7 +47,9 @@ auth and passes a resolved principal.
 The strongest argument is not tidiness. The agent process today holds OpenSearch
 `admin`/`all_access` **because it does its own persistence** — on a host that runs
 LLM-generated code and mounts the Docker socket. Move persistence out and the agent needs no
-datastore credential at all.
+datastore credential at all. Part of that is already demonstrated: `AGENT_MODE=local` runs a
+whole turn with the memory store refusing to open a client, so an agent without a datastore
+credential is a configuration the code already supports, not a hypothesis.
 
 **2. Conversation and file persistence.** The agent needs chat *history* for context; it does not
 need to own the record. `session_snapshot` — layers, `fileIds`, the drawn region — is a UI
@@ -50,7 +59,9 @@ retention, quotas and download serving are all policy.
 **3. Trace capture.** The middleware already relays the SSE stream, so it can tee and persist it.
 That removes `chat_traces` from the agent's concerns too.
 
-**4. Deadlines, budgets, rate limits.** None of this exists today, which is why a stalled model
+**4. Deadlines, budgets, rate limits.** None of this exists today (re-checked 2026-10-03: the LLM
+client is built with no request timeout, no turn deadline exists, and the only timeouts in
+`executor_factory` bound the model-catalogue fetch), which is why a stalled model
 once cost 2 h 23 m in a benchmark run: the socket stays healthy and keepalives keep flowing, so
 nothing can tell a hang from progress. A middleware with a clock is the right home for a turn
 deadline — better placed than the LLM client, because it bounds the whole turn rather than one
