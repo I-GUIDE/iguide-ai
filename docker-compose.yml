@@ -25,6 +25,17 @@ x-logging: &journald-logging
   options:
     tag: "{{.Name}}"
 
+# The agent stack publishes its ports on 127.0.0.1 only. An entry without a host address
+# ("8000:8000") binds 0.0.0.0 and [::], which makes the service exactly as reachable as the host,
+# and mcp-server's REST routes (POST /api/tool/<name>) run any registered tool with no
+# authentication. (Its MCP transport checks the Host header, which defends browsers against DNS
+# rebinding; it is not authentication.) None of the stack's own traffic uses a published port:
+# agent-api reaches embedding-server and mcp-server by service name over iguide-network, and every
+# health check runs inside its own container. What does use one runs on the host itself (a reverse
+# proxy in front of agent-api, a developer's curl, or an SSH tunnel such as
+# `ssh -L 8000:127.0.0.1:8000 <host>` for the Swagger UI at /api/docs), and 127.0.0.1 keeps all of
+# those. rag_pipeline/tests/test_compose_ports_loopback.py fails on an entry without it.
+
 services:
   embedding-server:
     build:
@@ -33,7 +44,7 @@ services:
     container_name: embedding-server
     logging: *journald-logging
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"   # agent-api uses http://embedding-server:5000, not this
     env_file:
       - .env
     restart: unless-stopped
@@ -53,7 +64,7 @@ services:
     container_name: mcp-server
     logging: *journald-logging
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # agent-api uses http://mcp-server:8000/mcp/, not this
     environment:
       - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
       - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
@@ -80,7 +91,7 @@ services:
     container_name: agent-api
     logging: *journald-logging
     ports:
-      - "3500:5002"   # host:container — agent reachable on http://localhost:3500
+      - "127.0.0.1:3500:5002"   # host:container — agent reachable on http://localhost:3500 from the host
     # Secrets + backend config (OPENSEARCH_*, NEO4J_*, ANVILGPT_*, VLLM_*/OPENAI_*) are
     # injected literally from .env below. Only fixed/defaulted values live here:
     environment:
@@ -89,7 +100,8 @@ services:
       - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       - PORT=5002
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
-      # Optional absolute origin for file download_urls (e.g. http://149.165.147.219:3500).
+      # Optional absolute origin for file download_urls: the public origin the reverse proxy
+      # serves (e.g. https://agent.example.org), since 3500 is published on 127.0.0.1 only.
       # Unset = host-relative /agent/files/<id>/download; clients resolve against the API origin.
       - AGENT_PUBLIC_BASE_URL=${AGENT_PUBLIC_BASE_URL:-}
       # QGIS / PROJ / GDAL data paths for THIS image. Pinned here (compose environment overrides
@@ -172,6 +184,9 @@ services:
     container_name: metadata-extraction-server
     logging: *journald-logging
     ports:
+      # Still on every interface, unlike the agent stack above. The platform's form posts
+      # submissions to /ingest, and MinIO its legacy bucket events to /webhook, from wherever
+      # they run, which need not be this host. Decide that before binding it to 127.0.0.1.
       - "5001:5001"
     env_file:
       - .env

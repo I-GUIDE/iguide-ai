@@ -1360,9 +1360,11 @@ def download_agent_file(file_id):
             # (AGENT_TOKEN_STRICT=0). Once strict, a file nobody owns is a file nobody reads.
             if not file_store_may_read(record, allow_unowned=not _token_strict()):
                 # 404 rather than 403: a 403 would confirm that this id exists, turning the
-                # endpoint into an oracle for enumerating other people's files.
-                logger.info("Download refused: %s does not belong to this caller", file_id)
-                return jsonify({"error": f"No file found for id {file_id}"}), 404
+                # endpoint into an oracle for enumerating other people's files. The words are an
+                # unknown id's too, from require_file_record: different words confirmed it as well.
+                # Another user's file never gets here; require_file_record has already refused it.
+                logger.info("Download refused: %s has no owner, and this deployment is strict", file_id)
+                return jsonify({"error": f"unknown file_id: {file_id}"}), 404
             path = resolve_file_id(file_id)
         finally:
             identity.reset_user(_download_token)
@@ -2224,7 +2226,7 @@ def agent_chat_stream():
     `download_url` is a HOST-RELATIVE path: `/agent/files/<file_id>/download`. Clients must
     resolve it against the API origin they call (e.g. `new URL(download_url, apiOrigin)`); the
     download endpoint is a plain unauthenticated GET. Alternatively, set the server env
-    `AGENT_PUBLIC_BASE_URL` (e.g. `http://149.165.147.219:3500`) and every emitted
+    `AGENT_PUBLIC_BASE_URL` (e.g. `https://agent.example.org`) and every emitted
     `download_url` — including the image URLs embedded in the answer markdown — is already an
     absolute URL, so clients need no resolution step. File records can appear at several places
     in the stream — `file` events, tool results inside `search`/`analysis` detail payloads, and

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .file_store import (create_output_file, current_session, find_files, get_file_record,
-                         resolve_file_id, storage_root)
+                         managed_path_record, resolve_file_id, storage_root)
 from agent_runtime.tool_args import accept_null_defaults
 
 DEFAULT_MAX_CHARS = 12000
@@ -53,7 +53,8 @@ def _find_managed_record_by_name(filename: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
+def _resolve_local_allowed_path(path: str, *, must_exist: bool = True, for_write: bool = False
+                                ) -> Tuple[Path, Optional[Dict[str, Any]]]:
     ref = str(path or "").strip()
     raw_candidate = Path(ref).expanduser()
     if raw_candidate.is_absolute():
@@ -66,11 +67,22 @@ def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
 
     allowed = _allowed_roots()
     for candidate in candidates:
+        # A path into the store's own directories is the record it names, with that record's
+        # checks, whichever allowed root it came in under. A refused read is skipped exactly as a
+        # missing file is; a refused write says why, and never falls through to another root.
+        try:
+            record = managed_path_record(candidate, write=for_write)
+        except ValueError:
+            if for_write:
+                raise
+            continue
+        if record is not None:
+            return resolve_file_id(str(record["file_id"])), record
         if not any(candidate == root or root in candidate.parents for root in allowed):
             continue
         if must_exist and not candidate.exists():
             continue
-        return candidate
+        return candidate, None
 
     allowed_list = ", ".join(str(root) for root in allowed)
     if must_exist:
@@ -79,10 +91,16 @@ def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
     raise ValueError(f"path must be inside an allowed root: {allowed_list}")
 
 
-def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, Optional[Dict[str, Any]]]:
+def _resolve_allowed_path(path: str, *, must_exist: bool = True, for_write: bool = False
+                          ) -> Tuple[Path, Optional[Dict[str, Any]]]:
     ref = str(path or "").strip()
     if not ref:
         raise ValueError("path is required")
+
+    # A write names a path. write_text_file sends anything that could be an id or a stored
+    # filename to create_output_file, so only a path reaches here to be written.
+    if for_write:
+        return _resolve_local_allowed_path(ref, must_exist=must_exist, for_write=True)
 
     record = get_file_record(ref)
     if record:
@@ -92,7 +110,7 @@ def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, 
     if record:
         return resolve_file_id(str(record["file_id"])), record
 
-    return _resolve_local_allowed_path(ref, must_exist=must_exist), None
+    return _resolve_local_allowed_path(ref, must_exist=must_exist)
 
 
 def _read_text(path: Path) -> str:
@@ -204,7 +222,7 @@ def write_text_file_tool(path: str, content: str, overwrite: bool = False) -> st
         }
         return json.dumps(payload, ensure_ascii=True, default=str)
 
-    resolved, record = _resolve_allowed_path(path, must_exist=False)
+    resolved, record = _resolve_allowed_path(path, must_exist=False, for_write=True)
     existed_before = resolved.exists()
     if existed_before and not overwrite:
         raise ValueError(f"file already exists: {resolved}")

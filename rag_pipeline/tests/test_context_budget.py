@@ -85,15 +85,37 @@ def _fat_thread(pairs=40, chars=4000, realistic=True):
     return msgs
 
 
-def test_the_estimator_undercounts_the_payloads_this_agent_actually_moves():
+def _cached_encoding(tiktoken, name, monkeypatch):
+    """tiktoken's *name* encoding from its local cache, or a skip. Never a download.
+
+    `get_encoding` fetches a missing BPE file from openaipublic.blob.core.windows.net and keeps it
+    in $TIKTOKEN_CACHE_DIR (default <tmp>/data-gym-cache), so a machine that has fetched it once
+    never asks again. That is how the fetch went unseen. Measured 2026-10-03, it was the one
+    network call left in rag_pipeline/tests: made on every CI run and wherever the cache is
+    empty, and in the deployed-replica image under `--network none` it failed this test instead
+    of skipping it. The cache lookup stays; `tiktoken.load.read_file` is what it calls on a miss,
+    so only the download goes. CI fetches the file before the suite runs (verify.yml).
+    """
+    def _no_download(blobpath):
+        raise ConnectionError(f"rag_pipeline/tests does not download {blobpath}")
+
+    monkeypatch.setattr("tiktoken.load.read_file", _no_download)
+    try:
+        return tiktoken.get_encoding(name)
+    except ConnectionError:
+        pytest.skip(f"tiktoken's {name} is not cached, and fetching it is a network call. Fetch "
+                    f"it once with: python3 -c \"import tiktoken; tiktoken.get_encoding('{name}')\"")
+
+
+def test_the_estimator_undercounts_the_payloads_this_agent_actually_moves(monkeypatch):
     """Pins the mechanism, so the budget's headroom is never mistaken for real headroom.
 
     Not a hypothesis: geospatial tool results tokenize far worse than chars/4 predicts, and the
-    budget middleware is built on that estimator. Skipped where tiktoken is unavailable, since
-    the point is the comparison against a real tokenizer.
+    budget middleware is built on that estimator. Skipped where tiktoken, or its o200k_base file,
+    is unavailable, since the point is the comparison against a real tokenizer.
     """
     tiktoken = pytest.importorskip("tiktoken")
-    enc = tiktoken.get_encoding("o200k_base")
+    enc = _cached_encoding(tiktoken, "o200k_base", monkeypatch)
 
     blob = _geojson_blob(30)
     approx = count_tokens_approximately([("user", blob)])
