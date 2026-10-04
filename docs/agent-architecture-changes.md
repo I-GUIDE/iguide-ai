@@ -414,6 +414,16 @@ The mandate is replaced by a **structural check**: the peer node looks for an `e
 record in its own tool calls and re-invokes **once** with the observation. The same shape then
 recurs four more times (`7e3c356` map delivery, `8489d94` repeated failures, `a19df4b` layer QA).
 
+*Revised 2026-10-04: `8489d94` also fired on a dead end that had already been passed.* The check
+counted every `ok=false` a tool returned in the turn, including those before an `ok=true`. On
+agent.i-guide.io, `regionalize` refused a layer split into three parts twice, and named the
+selection that would work. The peer made the selection, and `regionalize` returned five regions.
+The two refusals still made it a dead end. The peer was sent to redo the regions in
+`execute_code`, which took two more runs, one of them failed, and left duplicate downloads, and
+synthesis was told the tool had failed. `_repeatedly_failed_tools` now counts only the failures
+since a tool's last success. A refusal that names the way out is the error message doing its job,
+and the check could not tell that from a broken tool.
+
 `839a855` and `f8a2803` apply the principle to the search and decide prompts: *"each duplicated a
 deterministic mechanism in supervisor/graph.py… so the prose could not change behaviour when the
 detector fired and was unreliable when it did not."* `f8a2803` adds `_available_actions(state)`
