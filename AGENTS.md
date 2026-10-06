@@ -164,6 +164,14 @@ Two providers are wired:
   and a benchmark run once sat 2h23m on exactly that confusion. Measured 2026-10-01, qwen3.8:27b
   answers in 0.7s, emits correct `tool_calls` (`finish_reason: tool_calls`), and completes a
   tool-result round trip in 2.2s — so unlike its predecessor it is usable as an agent model.
+- **NCSA Lumen** (`https://lumen.ncsa.illinois.edu/v1`, OpenAI-compatible) — **dev and local
+  mode only**, `provider="lumen"` with `LUMEN_API_KEY`. Every call spends the Lumen coins of
+  whoever created the key, so a token-mode deployment neither lists it nor builds it
+  (`lumen_offered()`; `build_llm` refuses the request). The picker lists Lumen's text models
+  live, skipping its speech model. Unlike the others, Lumen publishes each model's window
+  (`max_model_len`), and `_MODEL_WINDOWS` carries them: gemma-4-31b-it's 46,790 is below the
+  65,536 floor an unlisted model gets. On 2026-10-06 all four text models drove the full code
+  peer correctly; Stage 35 of `docs/agent-architecture-changes.md` has the measurements.
 
 **Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
 spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
