@@ -337,12 +337,18 @@ _LUMEN_FALLBACK_MODELS = ("deepseek-v4-flash", "gemma-4-31b-it", "nemotron-3-sup
 
 
 def lumen_offered() -> bool:
-    """Whether this deployment offers NCSA Lumen: dev and local mode only."""
+    """Whether this deployment offers NCSA Lumen: dev and local mode only.
+
+    The modes are compared by name, not through module constants. A tree older than local mode
+    has no ``deployment_mode.LOCAL``, and reading it raised AttributeError inside the catalogue,
+    which took the whole model picker down. Tested against the deployed tree, not just this one.
+    Any failure here means "not offered": this is a gate, and it must never break the picker.
+    """
     try:
         from agent_runtime import deployment_mode
 
-        return deployment_mode.current_mode() in (deployment_mode.DEV, deployment_mode.LOCAL)
-    except ValueError:         # an unknown AGENT_MODE is reported where it is read
+        return deployment_mode.current_mode() in ("dev", "local")
+    except Exception:  # noqa: BLE001 - an unknown AGENT_MODE is reported where it is read
         return False
 
 

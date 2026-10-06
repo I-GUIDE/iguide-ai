@@ -131,3 +131,25 @@ def test_each_lumen_model_gets_the_window_lumen_reports(monkeypatch, model, wind
     turn on it would overrun the window."""
     monkeypatch.delenv("AGENT_MODEL_CONTEXT_WINDOW", raising=False)
     assert ef._model_context_window(SimpleNamespace(model_name=model)) == window
+
+
+def test_the_gate_never_breaks_the_catalogue(monkeypatch):
+    """Applied to a tree older than local mode, the gate read deployment_mode.LOCAL, which did
+    not exist. The AttributeError took the whole model picker down, OpenAI included."""
+    from agent_runtime import deployment_mode
+
+    monkeypatch.setenv("AGENT_MODE", "dev")
+    monkeypatch.delattr(deployment_mode, "LOCAL", raising=False)
+    lumen, _ = _catalogue(monkeypatch)
+    assert lumen is not None and lumen["models"]
+
+    def boom():
+        raise RuntimeError("mode table broken")
+
+    monkeypatch.setattr(deployment_mode, "current_mode", boom)
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(
+        requests.ConnectionError("offline")))
+    cat = ef.list_available_models(timeout=0.01)
+    assert [p["provider"] for p in cat["providers"]][:2] == ["openai", "anvilgpt"]
+    assert all(p["provider"] != "lumen" for p in cat["providers"])
