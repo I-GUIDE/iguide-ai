@@ -172,6 +172,9 @@ Two providers are wired:
   (`max_model_len`), and `_MODEL_WINDOWS` carries them: gemma-4-31b-it's 46,790 is below the
   65,536 floor an unlisted model gets. On 2026-10-06 all four text models drove the full code
   peer correctly; Stage 35 of `docs/agent-architecture-changes.md` has the measurements.
+  `AGENT_LLM_PROVIDER=lumen` with `LUMEN_MODEL` makes it the process default in any mode
+  (`_lumen_settings`). That is the operator's choice. The gate covers only picking it per
+  request.
 
 **Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
 spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns

@@ -5410,3 +5410,14 @@ because none of them published a window. Lumen does, as `max_model_len` on `/v1/
 those values are now in the table. One of them mattered. gemma-4-31b-it's window is 46,790
 tokens, below the 65,536 floor an unlisted model gets, so without its row every long turn on it
 would have overrun.
+
+### Stage S35.4 The deployment's default
+
+The operator can also make Lumen the default, the model every request uses when it names none,
+with `AGENT_LLM_PROVIDER=lumen` and `LUMEN_MODEL`. `_lumen_settings()` sits beside
+`_anvilgpt_settings()`. That choice holds in any mode, because the operator makes it for the
+whole deployment, while `lumen_offered()` decides who may pick a Lumen model per request. On a
+token-mode deployment the picker therefore shows "Agent default (deepseek-v4-flash)" but no
+Lumen group, and a hand-built request for another Lumen model is still refused. On 2026-10-06
+the maintainer set the deployment's default to `deepseek-v4-flash`, which had answered all three
+measured questions correctly at 22 to 33 s a turn.

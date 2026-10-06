@@ -153,3 +153,39 @@ def test_the_gate_never_breaks_the_catalogue(monkeypatch):
     cat = ef.list_available_models(timeout=0.01)
     assert [p["provider"] for p in cat["providers"]][:2] == ["openai", "anvilgpt"]
     assert all(p["provider"] != "lumen" for p in cat["providers"])
+
+
+@pytest.mark.parametrize("mode", ["token", "dev"])
+def test_the_operator_can_make_lumen_the_default_in_any_mode(monkeypatch, mode):
+    """AGENT_LLM_PROVIDER=lumen is the deployment's own choice for requests that name no model,
+    so it holds in token mode too. Picking Lumen per request is still dev and local only."""
+    monkeypatch.setenv("AGENT_MODE", mode)
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "lumen")
+    monkeypatch.setenv("LUMEN_MODEL", "deepseek-v4-flash")
+    llm = ef.build_default_llm()
+    assert llm.model_name == "deepseek-v4-flash"
+    assert str(llm.openai_api_base).rstrip("/") == "https://lumen.ncsa.illinois.edu/v1"
+    assert type(llm).__name__ == "ReasoningPreservingChatOpenAI"
+    active = ef.active_llm_description()
+    assert active["provider"] == "lumen" and active["model"] == "deepseek-v4-flash"
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(
+        requests.ConnectionError("offline")))
+    assert ef.list_available_models(timeout=0.01)["default"] == {
+        "provider": "lumen", "model": "deepseek-v4-flash"}
+    if mode == "token":
+        with pytest.raises(ValueError, match="dev and local mode only"):
+            ef.build_llm(provider="lumen", model="nemotron-3-super-120b-a12b")
+
+
+def test_the_default_without_a_key_names_it(monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "lumen")
+    monkeypatch.delenv("LUMEN_API_KEY")
+    with pytest.raises(RuntimeError, match="LUMEN_API_KEY"):
+        ef.build_default_llm()
+
+
+def test_setting_the_key_alone_does_not_move_the_default(monkeypatch):
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-5.6-luna")
+    assert ef.active_llm_description()["provider"] == "openai"

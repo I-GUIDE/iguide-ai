@@ -263,7 +263,7 @@ def _reasoning_preserving_chat_openai() -> Any:
 def build_default_llm() -> Any:
     """Build a ``ChatOpenAI`` instance from environment variables.
 
-    Priority: AGENT_LLM_PROVIDER=anvilgpt → VLLM_* → OPENAI_* → defaults.
+    Priority: AGENT_LLM_PROVIDER=anvilgpt or lumen → VLLM_* → OPENAI_* → defaults.
     """
     try:
         ChatOpenAI = _reasoning_preserving_chat_openai()
@@ -275,6 +275,9 @@ def build_default_llm() -> Any:
     anvil = _anvilgpt_settings()
     if anvil:
         return ChatOpenAI(temperature=0.0, **anvil)
+    lumen = _lumen_settings()
+    if lumen:
+        return ChatOpenAI(temperature=0.0, **lumen)     # no max_tokens: see build_llm's branch
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -354,6 +357,26 @@ def lumen_offered() -> bool:
 
 def _lumen_base_url() -> str:
     return normalize_openai_base_url(os.getenv("LUMEN_URL") or LUMEN_DEFAULT_URL)
+
+
+def _lumen_settings() -> Optional[Dict[str, Any]]:
+    """NCSA Lumen as the PROCESS default, or None. Selected by AGENT_LLM_PROVIDER=lumen.
+
+    This is the operator's choice of what every request answers with when it names no model, so
+    it applies in any mode. lumen_offered() governs something else: who may PICK a Lumen model
+    per request. A token-mode deployment can therefore default to Lumen while its users still
+    cannot choose other Lumen models from the picker. Setting the variables alone never moves the
+    default, as with AnvilGPT.
+    """
+    if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "lumen":
+        return None
+    key = os.getenv("LUMEN_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "AGENT_LLM_PROVIDER=lumen but LUMEN_API_KEY is unset. Create a key on your Lumen "
+            "profile page (https://lumen.ncsa.illinois.edu/profile) and click Save Key.")
+    return {"api_key": key, "base_url": _lumen_base_url(),
+            "model": os.getenv("LUMEN_MODEL") or _LUMEN_DEFAULT_MODEL}
 
 
 def _lumen_chat_model(entry: Dict[str, Any]) -> bool:
@@ -751,6 +774,10 @@ def active_llm_description() -> Dict[str, Any]:
     if anvil:
         return {"provider": "anvilgpt", "model": anvil["model"],
                 "base_url": anvil["base_url"], "max_tokens": "unset (server default)"}
+    lumen = _lumen_settings()
+    if lumen:
+        return {"provider": "lumen", "model": lumen["model"],
+                "base_url": lumen["base_url"], "max_tokens": "unset (server default)"}
     if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
         return {"provider": "vllm",
                 "model": os.getenv("VLLM_MODEL"),
