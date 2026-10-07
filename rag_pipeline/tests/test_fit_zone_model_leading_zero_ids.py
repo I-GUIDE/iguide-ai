@@ -178,3 +178,69 @@ def test_ids_without_a_leading_zero_fit_exactly_as_before(store, tmp_path, monke
     assert after["zones_fitted"] == N
     assert _prediction_bytes(after) == _prediction_bytes(before)
     assert _answer(after) == _answer(before)
+
+
+# --- the join report (decided 2026-10-07): a vector that found no polygon is said out loud ---
+
+def _numeric_geoid_layer(tmp_path, ids, truth, name):
+    """The same tracts in a layer that stores GEOID as a NUMBER, as a CSV-derived layer often
+    does: California's '06037100000' is 6037100000 there."""
+    layer = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": _square(i),
+         "properties": {"GEOID": int(z), "truth": truth[z]}} for i, z in enumerate(ids)]}
+    return _store_file(tmp_path, name, json.dumps(layer))
+
+
+def test_a_vector_that_found_no_polygon_is_reported_not_dropped_silently(store, tmp_path,
+                                                                         monkeypatch):
+    """The pairing S6.10 changed: text-id vectors fitted against a numeric-GEOID layer. The 15
+    California vectors meet no polygon; the fit still runs on Illinois, and now says so."""
+    ids = CALIFORNIA[:15] + ILLINOIS[:15]
+    vectors_id, _, truth, _ = _embedded(tmp_path, monkeypatch, ids, "tracts.geojson")
+    numeric = _numeric_geoid_layer(tmp_path, ids, truth, "numeric.geojson")
+
+    out = _fit(vectors_id, numeric)
+    assert out.get("ok") is True and out["zones_fitted"] == 15, out
+    join = out["join"]
+    assert (join["vectors"], join["matched"], join["vectors_without_a_polygon"]) == (30, 15, 15)
+    assert join["example_unmatched_vector_ids"][0].startswith("06"), "the id as the vectors hold it"
+    assert join["example_polygon_ids"][0].startswith("6037"), "and as the polygons hold it"
+    assert out["warning"].startswith("15 of 30 vectors found no polygon"), out.get("warning")
+
+
+def test_a_failed_join_says_which_ids_missed(store, tmp_path, monkeypatch):
+    vectors_id, _, truth, _ = _embedded(tmp_path, monkeypatch, CALIFORNIA, "tracts.geojson")
+    numeric = _numeric_geoid_layer(tmp_path, CALIFORNIA, truth, "numeric.geojson")
+
+    out = _fit(vectors_id, numeric)
+    assert out["error"] == "only 0 zones have both a vector and a label"
+    assert out["join"]["vectors_without_a_polygon"] == N and out["join"]["matched"] == 0
+    assert "'06037100000'" in out["warning"] and "'6037100000'" in out["warning"]
+
+
+def test_a_clean_join_reports_everything_matched_and_warns_nothing(store, tmp_path, monkeypatch):
+    vectors_id, tracts_id, *_ = _embedded(tmp_path, monkeypatch, ILLINOIS, "tracts.geojson")
+
+    out = _fit(vectors_id, tracts_id)
+    assert out.get("ok") is True
+    assert out["join"] == {"vectors": N, "polygons": N, "matched": N,
+                           "vectors_without_a_polygon": 0, "polygons_without_a_vector": 0}
+    assert "warning" not in out
+
+
+def test_polygons_without_vectors_are_counted_but_not_warned_about(store, tmp_path, monkeypatch):
+    """Embedding a subset, or a zone with no pixels, leaves polygons without a vector. That is
+    ordinary, so it is reported and nothing more."""
+    vectors_id, _, truth, _ = _embedded(tmp_path, monkeypatch, ILLINOIS[:20], "subset.geojson")
+    rng = np.random.default_rng(11)
+    truth.update({z: float(rng.normal()) for z in ILLINOIS[20:]})
+    layer = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": _square(i), "properties": {"GEOID": z, "truth": truth[z]}}
+        for i, z in enumerate(ILLINOIS)]}
+    all_tracts = _store_file(tmp_path, "all.geojson", json.dumps(layer))
+
+    out = _fit(vectors_id, all_tracts)
+    assert out.get("ok") is True and out["zones_fitted"] == 20
+    assert out["join"]["polygons_without_a_vector"] == 10
+    assert out["join"]["vectors_without_a_polygon"] == 0
+    assert "warning" not in out

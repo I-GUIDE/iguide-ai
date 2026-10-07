@@ -661,6 +661,18 @@ went from 30 to *"only 0 zones…"*. All on both stacks. Matching ids by their v
 text would make `01` and `1` one zone, the mispairing above, so that is a policy decision, recorded
 here rather than made.
 
+**Decided on 2026-10-07: report the unmatched side, and do not match by value.** The fit's reply now
+carries a `join` report: how many vectors and polygons there were, how many matched, how many
+vectors found no polygon and how many polygons had no vector. It also gives up to three example
+ids from each unmatched side. A vector without a polygon adds a `warning` that names an id from
+each side (`'06037100000'` against `'6037100000'`) and the two ways to fix it. The report and the
+warning come back with *"only 0 zones…"* too, so the failure says why. A vector meets no polygon
+only when the two sides key the zones differently, so that is the case that warns. A polygon
+without a vector is ordinary, because a subset was embedded or a zone had no pixels, so it is only
+counted. The mixed California and Illinois pairing still fits its 15 Illinois tracts, and now
+says that 15 of 30 vectors found no polygon. `_join_report` in `rs_embed_zonal_worker.py`; four
+tests in the same file cover the warning, a failed join, a clean join and a subset.
+
 **Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
 `embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
 
