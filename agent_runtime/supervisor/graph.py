@@ -3442,6 +3442,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         if unified_peer_enabled(state):
             # One agent, one tool list: fold in the retrieval set the search peer used to own.
             try:
@@ -3938,6 +3947,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,

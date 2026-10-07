@@ -73,6 +73,7 @@ REQUIRED_TERMS = {
     "make_code_execution_tools": ("code", "execut"),
     "make_skill_tools": ("skill",),
     "make_langchain_mcp_tools": ("mcp", "external tool", "qgis"),
+    "make_public_data_tools": ("download", "public data"),
 }
 
 ALL_ACTIONS = {"available_actions": ["search", "analyze", "code", "done"]}
@@ -111,7 +112,8 @@ def _no_inherited_peer_or_skill_settings(monkeypatch):
     """The decider's code line depends on AGENT_CODE_PEER and on skill discovery; a developer
     shell that sets either must not decide what these tests see."""
     for var in ("AGENT_CODE_PEER", "AGENT_SKILLS_ENABLED", "AGENT_SKILL_PATHS",
-                "AGENT_SKILLS_PATHS", "AGENT_CLAUDE_NETWORK", "AGENT_OPENCODE_NETWORK"):
+                "AGENT_SKILLS_PATHS", "AGENT_CLAUDE_NETWORK", "AGENT_OPENCODE_NETWORK",
+                "AGENT_PUBLIC_FETCH"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -418,7 +420,7 @@ def test_a_code_only_entry_reaches_the_decider(monkeypatch):
 
 
 @pytest.mark.parametrize("factory", sorted(REQUIRED_TERMS))
-def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill, bound):
+def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill, bound, monkeypatch):
     """The words, in the toolset's OWN clause, and that clause in the prompt. Checking for the
     words anywhere in the prompt let framing prose satisfy them: "run a workflow" in the analyze
     line answered for a skills clause that was never there."""
@@ -426,6 +428,11 @@ def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill, bou
         pytest.skip(f"{factory} is not bound to analyze or code in this build")
     terms = REQUIRED_TERMS[factory]
     clauses = _clauses_for(factory)
+    from agent_runtime.capability_registry import CAPABILITIES
+
+    for flag in {t.requires_flag for caps in CAPABILITIES.values() for t in caps
+                 if t.factory == factory and t.requires_flag}:
+        monkeypatch.setenv(flag, "1")   # a gated toolset is described when its switch is on
     assert clauses, f"{factory} has no clause in capability_registry"
     for clause in clauses:
         assert any(term in clause.lower() for term in terms), (
@@ -435,6 +442,18 @@ def test_the_supervisor_can_describe_what_its_peers_bind(factory, one_skill, bou
     prompt = _decider_prompt(skill_roots=one_skill)
     unseen = [clause for clause in clauses if clause not in prompt]
     assert not unseen, f"{factory} is described in the registry but not to the decider: {unseen}"
+
+
+def test_a_gated_toolset_is_described_only_when_its_switch_is_on(monkeypatch):
+    """fetch_public_data binds nothing unless AGENT_PUBLIC_FETCH is on. Described while off, it
+    would send a request for public data to the code peer, which would then have no way to get it."""
+    clause = "downloading public data"
+    monkeypatch.delenv("AGENT_PUBLIC_FETCH", raising=False)
+    off = _decider_prompt()
+    assert clause not in _line(off, "code") and clause not in _line(off, "analyze")
+    monkeypatch.setenv("AGENT_PUBLIC_FETCH", "1")
+    on = _decider_prompt()
+    assert clause in _line(on, "code") and clause in _line(on, "analyze")
 
 
 def test_the_inventory_actually_reaches_the_prompt(one_skill):

@@ -47,6 +47,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
 | 32 | [The fallback reads past ASCII and stops at a sentence end](#stage-32) | 2026-10-03 → 2026-10-05 | Rondônia and São Paulo become candidates; a period that ends a sentence ends the run, unless it closes an abbreviation |
 | 33 | [The picker offers only models that can call tools](#stage-33) | 2026-10-04 | AnvilGPT models are asked for one tool call and left out of `/agent/models` if they refuse; an outage hides nothing; a saved choice no longer offered resets to the default |
+| 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -5870,3 +5871,93 @@ Turns now use the agent default (gpt-5.6-luna).", and its next turn answered on 
   still do. Both were taken out of `_ANVIL_FALLBACK_MODELS`, which offers only models measured
   calling tools.
 - Verdicts live in the process, so each restart asks again.
+
+---
+
+## Stage 34 — Public data through a gate, not a network {#stage-34}
+
+*2026-10-04. Branch `claude/public-data-fetch`.*
+
+The code peer's sandbox runs `--network none`, so code on its own cannot reach public data. This
+was measured on 2026-10-04 in local mode, over 35 runs, with the code peer's own prompt, model
+(gpt-5.6-luna) and sandbox, and only `execute_code` bound:
+
+- **Data it was given:** code alone matched the dedicated tools, at two to four times the time.
+  DBSCAN at 300 m gave the same three clusters (605, 410 and 306 points). Gi* found the planted
+  block. A 1 km grid found the densest cell.
+- **Public data:** it had no way in. It asked for an upload in 12 of 12 runs, for a county
+  boundary, a buffered city and a DEM. Asked how many census tracts Champaign County has, it
+  answered "approximately 100" from memory in 5 of 6 runs, where TIGERweb says 48. The prompt's
+  ask-for-the-file rule covers loaders, not facts.
+
+### Stage S34.1 Why not give the sandbox a network
+
+Giving the sandbox network is one argument in `build_argv`, and with it the code fetched a
+correct county boundary from TIGER. It was not done, for two reasons. A container with network
+reaches whatever its host can: the services beside it and the cloud provider's internal
+endpoints, not just the public internet. And the code that would run there is written by a
+model that reads web pages, documents and uploads, any of which can carry instructions. So data
+comes in through the agent instead, one request at a time.
+
+### Stage S34.2 The gate
+
+`fetch_public_data(url, filename=None)` (`agent_runtime/public_data_tools.py`) saves one
+download as a conversation file. `execute_code` then reads it through `input_files`, and the
+other tools read it by its id. A request is refused unless:
+
+- It is HTTPS GET to a host on the allowlist. The defaults are Census TIGERweb, Census files and
+  the Census data API; USGS 3DEP, The National Map, earthquakes and water; Overpass; and Chicago
+  open data. `AGENT_PUBLIC_FETCH_HOSTS` replaces the list.
+- The URL carries no credentials, no other port and no IP literal.
+- Every address the host resolves to is public (`ipaddress.is_global`).
+- Each redirect passes the same checks, with at most five.
+- The body stays within 50 MB, read in a stream, and the turn within 10 fetches.
+
+The session takes no proxy settings, `.netrc` or cookies from the environment. TIGERweb answers
+a bad query with HTTP 200 and an error object, so that is reported, not saved as data. The
+result gives the data's shape (keys, feature count, geometry types, property names) and never
+its contents. It also carries `file_id`, `filename` and `download_url`, so the file appears in
+the Downloads panel.
+
+It is off unless `AGENT_PUBLIC_FETCH=1`, and is bound to both the analyze and code peers. The
+registry gained `requires_flag`, so the decider is told the capability exists only while it is
+on. `test_supervisor_knows_its_peers.py` checks that too.
+
+The connection is not pinned to the address that was checked, so a DNS answer could change
+between the check and the connect. Only a host on the list could exploit that, and the defaults
+are government and open-data services.
+
+### Stage S34.3 What it did
+
+Same harness, code only plus this tool:
+
+| question | code only | code + `fetch_public_data` | truth |
+| --- | --- | --- | --- |
+| census tracts in Champaign County | "approximately 100" (5 of 6) | 48 | 48 |
+| county area | asked for a file | 2,586.01 km² (2 of 2) | 2,586.0 km² |
+| 2 km buffer of Champaign city | asked for a file | 165.04 km² (2 of 2) | 165.0 km² |
+| Urbana elevation, min / max / mean | asked for a file | 205 / 259 / 223 m over a bounding box | 208 / 237 / 222 m inside the city (`dem_for_region`) |
+| M4.5+ earthquakes, past week | not asked | 135, largest M5.9 | 135, M5.9 |
+
+The first description gave URL shapes only. With it, the county run fetched the state outline,
+and the buffer run spent 11 fetches guessing TIGERweb layers. Naming the three common layers,
+and how to list a service's layers, fixed both.
+
+Without the tool, the full agent answered the earthquake question through `web_search` and
+`web_fetch`. It got the count right and the largest event wrong (M5.5): `web_fetch` returns
+passages, not data.
+
+The same question was then asked in the app, in Chrome against a local API: "How many
+earthquakes of magnitude 4.5 or greater has USGS recorded in the past 7 days? Show them on the
+map." The analyze peer fetched the USGS weekly feed (95 KB) and called `add_map_layer` on that
+file. 135 points reached the map, both files showed in the Downloads panel, and the turn took
+about 50 s. While bound, the tool's schema costs 475 tokens per model call.
+
+### Stage S34.4 What this stage does not do
+
+- The GSE embedding still needs the rs-embed service and its Earth Engine credentials. No public
+  endpoint replaces that.
+- A DEM covers the requested box. Clipping to a city needs its boundary, fetched as well.
+- It makes one GET per call. An API that needs POST, or that pages, spends one fetch per page
+  against the per-turn cap.
+- It is off by default. Turning it on is a deployment decision.

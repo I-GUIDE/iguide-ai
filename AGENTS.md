@@ -541,6 +541,18 @@ the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
 
+**Public data reaches the code through the agent, and the sandbox stays offline.**
+`fetch_public_data` (`agent_runtime/public_data_tools.py`) downloads one URL into a
+conversation file, which `execute_code` reads through `input_files`. The URL must be HTTPS GET
+to a host on an allowlist: Census, USGS, OpenStreetMap Overpass and Chicago open data by
+default, replaced by `AGENT_PUBLIC_FETCH_HOSTS`. Every address the host resolves to must be
+public, redirects are re-checked hop by hop, and size and fetches per turn are capped. It is
+off unless `AGENT_PUBLIC_FETCH=1`, and while off the decider is not told it exists
+(`requires_flag` in `capability_registry`). Do not give the sandbox a network instead. A
+container with network reaches whatever its host can, not just the internet, and the code it
+runs is written by a model reading untrusted text. Stage 34 of
+`docs/agent-architecture-changes.md` has the measurements.
+
 **Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
 once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
 fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close
