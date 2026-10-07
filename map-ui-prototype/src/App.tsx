@@ -14,12 +14,14 @@ import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, laye
 import { bboxToFC } from './mapFit';
 import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  fetchAgentFile,
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
@@ -229,6 +231,19 @@ export default function App() {
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
 
   const pushMsg = useCallback((m: ChatMessage) => setMessages((prev) => [...prev, m]), []);
+  // A saved model the catalogue no longer offers goes back to the agent default, and says so.
+  // Left alone, the picker would SHOW "Agent default" (a <select> whose value matches no option
+  // shows its first one) while every turn still sent the saved id: qwen3:4b, now hidden because
+  // AnvilGPT refuses it tool calls, would fail every turn behind a picker that looks fine.
+  useEffect(() => {
+    const why = unavailableChoice(cfg.model, cfg.provider, models);
+    if (!why || !models) return;
+    setCfg((c) => ({ ...c, model: '', provider: '', reasoningEffort: '' }));
+    // A demo pins its model server-side and hides the picker, so there is nothing to explain.
+    if (!demoMode) {
+      pushMsg({ role: 'agent', text: `${why} Turns now use the agent default (${models.default.model}).` });
+    }
+  }, [models, cfg.model, cfg.provider, demoMode, pushMsg]);
   const putLayer = useCallback((a: LayerArtifact) => {
     setLayers((prev) => { const i = prev.findIndex((l) => l.id === a.id); if (i === -1) return [...prev, a]; const n = prev.slice(); n[i] = a; return n; });
   }, []);
@@ -436,7 +451,7 @@ export default function App() {
         continue;
       }
       try {
-        const res = await fetch(resolveUrl(url));
+        const res = await fetchAgentFile(resolveUrl(url), asAgentConfig());
         if (!res.ok) continue;
         const fc = await res.json();
         if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
@@ -538,7 +553,7 @@ export default function App() {
           layerSourceFiles.current.has(fileKey(f.download_url))) continue;
       loadedArtifacts.current.add(key);
       try {
-        const res = await fetch(resolveUrl(f.download_url), { signal });
+        const res = await fetchAgentFile(resolveUrl(f.download_url), asAgentConfig(), { signal });
         if (!res.ok) continue;
         const j = await res.json();
         const fc: FeatureCollection =
@@ -571,7 +586,7 @@ export default function App() {
         fitView(fc);
       } catch { /* not loadable as GeoJSON — leave it as a download */ }
     }
-  }, [spatial, resolveUrl, putLayer, fitView]);
+  }, [spatial, resolveUrl, putLayer, fitView, asAgentConfig]);
 
   const onFeatureClick = useCallback((feature: any, layerId: string) => {
     const props = (feature && feature.properties) || {};
@@ -662,8 +677,16 @@ export default function App() {
           let fc = layer.geojson;
           if (!fc && layer.url) {
             try {
-              const res = await fetch(resolveUrl(layer.url), { signal: ctl.signal });
+              const res = await fetchAgentFile(resolveUrl(layer.url), asAgentConfig(),
+                                               { signal: ctl.signal });
               if (res.ok) fc = await res.json();
+              else {
+                // Say so. A refused download used to vanish here without a word, beside an
+                // answer saying the layer was on the map.
+                const why = await res.json().then((j) => j?.reason || '').catch(() => '');
+                addTrace({ text: `map: ${layer.label} could not be loaded (HTTP ${res.status}`
+                  + `${why ? `, ${why}` : ''}), so it is not on the map`, kind: 'warn' });
+              }
             } catch { /* leave it undelivered rather than guess */ }
           }
           if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;

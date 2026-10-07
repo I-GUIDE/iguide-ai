@@ -165,6 +165,18 @@ Two providers are wired:
   answers in 0.7s, emits correct `tool_calls` (`finish_reason: tool_calls`), and completes a
   tool-result round trip in 2.2s — so unlike its predecessor it is usable as an agent model.
 
+  **The picker leaves out AnvilGPT models that cannot make a tool call.** Purdue configures
+  tool calling per model, and the agent binds tools on every step. On 2026-10-04 qwen3:4b and
+  qwen2.5:7b refused any request carrying tools (HTTP 400, their vLLM has no
+  `--tool-call-parser`), and no `tool_choice` value gets past that.
+  `agent_runtime/anvil_tool_probe.py` asks each model for one tool call and caches the answer
+  for six hours. `/agent/models` drops the models that refused, reports them under `hidden`
+  with the reason, and the UI resets a saved choice that is no longer offered. Only an answer
+  about tool calling hides a model. A timeout, a 5xx, or a 400 that does not mention tools is an
+  outage, and the model stays listed: during the same sweep Purdue's Ollama backend was down,
+  and LiteLLM reported each of its seven models as HTTP 400. Stage 33 of
+  `docs/agent-architecture-changes.md` has the measurements.
+
 **Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
 spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
 `finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads

@@ -316,8 +316,10 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-2024-11-20"
 # hardcoded id 404s; these are the fallback if the fetch fails. The roster really does move:
 # qwen3.6:27b sat here while it was listed, "Recommended", and serving nothing at all, and by
 # 2026-10-01 Purdue had removed it entirely and put qwen3.8:27b in its place. Probe
-# /api/models rather than trusting this tuple.
-_ANVIL_FALLBACK_MODELS = ("qwen3.8:27b", "qwen3:32b", "qwen3-coder:30b", "qwen3-vl:32b")
+# /api/models rather than trusting this tuple. Only models measured making a structured tool
+# call belong here (2026-10-04). qwen3:32b and qwen3-vl:32b were dropped: on 2026-10-02 both took
+# the tools and answered without a call, and this agent cannot run a turn on such a model.
+_ANVIL_FALLBACK_MODELS = ("qwen3.8:27b", "qwen3-coder:30b")
 
 # This agent ALWAYS binds function tools, and on /v1/chat/completions the legal
 # reasoning_effort values depend on the model — a prefix rule got it wrong in both
@@ -548,11 +550,14 @@ _ANTHROPIC_FALLBACK_MODELS = (
 _ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5"
 
 
-def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
+def list_available_models(*, timeout: float = 6.0, probe_wait: float = 5.0) -> Dict[str, Any]:
     """Models offerable in a picker, per provider, with the default marked.
 
     AnvilGPT is queried live: its catalogue changes, and offering an id it no longer serves
-    produces a 404 at request time instead of an honest "unavailable" in the UI.
+    produces a 404 at request time instead of an honest "unavailable" in the UI. Its models that
+    cannot make a structured tool call are left out and reported under ``hidden``, with the
+    reason (anvil_tool_probe). ``probe_wait`` bounds how long this call waits for the probes it
+    starts.
     """
     # The default the PICKER shows must be the default the agent would actually use, and this
     # dict used to hardcode OpenAI. With AGENT_LLM_PROVIDER=anvilgpt — a supported setting —
@@ -606,6 +611,24 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
             logger.info("AnvilGPT model list unavailable (%s); offering known ids", exc)
             anvil["models"] = list(_ANVIL_FALLBACK_MODELS)
             anvil["stale"] = True
+        # The agent binds tools on every step, so a model that cannot return a structured tool
+        # call fails the first one: qwen3:4b answered HTTP 400 for a missing server flag. Hide
+        # what has definitively said so, and say why. An unprobed or unreachable model stays
+        # offered: an outage is not an answer about tools. When the roster itself could not be
+        # fetched, the host is down too, so only answers already known are applied.
+        try:
+            from agent_runtime import anvil_tool_probe
+
+            verdicts = anvil_tool_probe.tool_support(
+                anvil["models"], base_url=base, api_key=os.getenv("ANVILGPT_KEY") or "",
+                wait=probe_wait, schedule=not anvil.get("stale"))
+        except Exception as exc:  # noqa: BLE001 - hiding refines the list; never lose it
+            logger.warning("AnvilGPT tool probe unavailable (%s); offering every model", exc)
+            verdicts = {}
+        hidden = {m: v.reason for m, v in verdicts.items() if v.tools is False}
+        if hidden:
+            anvil["models"] = [m for m in anvil["models"] if m not in hidden]
+            anvil["hidden"] = hidden
     out["providers"].append(anvil)
 
     # Anthropic, queried live for the same reason AnvilGPT is: a hardcoded id that has been

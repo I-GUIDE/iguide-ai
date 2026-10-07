@@ -1847,6 +1847,74 @@ def test_analyze_peer_routes_around_a_dead_end_tool(monkeypatch):
     assert "execute_code" in out["summary"]
 
 
+# --- ...but a tool that failed and then worked is not one -------------------------------------
+# Observed live on 2026-10-04: regionalize refused a layer whose contiguity graph splits into three
+# parts, twice, and named the selection that would work; the peer made it and regionalize then
+# returned its regions. The two refusals still counted as a dead end, so the peer was told to redo
+# the work in execute_code (two more runs, duplicate downloads) and synthesis was told it failed.
+
+_REFUSED = {"ok": False, "error": "ValueError: the queen contiguity graph splits these 48 areas "
+                                  "into 3 separate parts (sizes 43, 3, 2)."}
+
+
+def _results(*steps):
+    """``{"tool_results": [...]}`` in call order, from (tool, payload) pairs."""
+    return {"tool_results": [{"name": tool, "content": payload if isinstance(payload, str)
+                              else json.dumps(payload)} for tool, payload in steps]}
+
+
+def test_a_tool_that_worked_after_failing_is_not_a_dead_end():
+    from agent_runtime.supervisor.graph import _repeatedly_failed_tools
+
+    passed = _results(("regionalize", _REFUSED), ("regionalize", _REFUSED),
+                      ("select_by_attribute", {"ok": True}), ("regionalize", {"ok": True}))
+    assert _repeatedly_failed_tools(passed) == {}
+
+
+def test_only_failures_since_the_last_success_count():
+    from agent_runtime.supervisor.graph import _repeatedly_failed_tools
+
+    # Worked once, then failed twice: failing now, so still a dead end.
+    again = _results(("regionalize", _REFUSED), ("regionalize", {"ok": True}),
+                     ("regionalize", {"ok": False, "error": "first"}),
+                     ("regionalize", {"ok": False, "error": "second"}))
+    found = _repeatedly_failed_tools(again)
+    assert set(found) == {"regionalize"}
+    # The note counts only the run since the success: two failures, two errors, latest first.
+    assert found["regionalize"].startswith("second")
+    assert "failed 2 times with 2 different errors" in found["regionalize"]
+
+    # One tool's success does not clear another tool's failures.
+    other = _results(("regionalize", _REFUSED), ("regionalize", _REFUSED),
+                     ("select_by_attribute", {"ok": True}))
+    assert set(_repeatedly_failed_tools(other)) == {"regionalize"}
+
+    # A result with no ok flag says nothing either way.
+    neutral = _results(("regionalize", _REFUSED), ("regionalize", "plain text, ok"),
+                       ("regionalize", _REFUSED))
+    assert set(_repeatedly_failed_tools(neutral)) == {"regionalize"}
+
+
+def test_analyze_peer_leaves_a_recovered_tool_alone(monkeypatch):
+    """The live sequence end to end: no second run, and nothing reported as failed."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    steps = [("regionalize", _REFUSED), ("regionalize", _REFUSED),
+             ("select_by_attribute", {"ok": True, "feature_count": 43}),
+             ("regionalize", {**_DELIVERED, "regions_found": 5})]
+    msgs = []
+    for i, (tool, payload) in enumerate(steps):
+        msgs.append(AIMessage(content="", tool_calls=[{"name": tool, "args": {}, "id": f"c{i}"}]))
+        msgs.append(ToolMessage(content=json.dumps(payload), name=tool, tool_call_id=f"c{i}"))
+    msgs.append(AIMessage(content="The tracts fall into three parts, so I grouped the 43 "
+                                  "connected ones into five regions."))
+    out, seen = _stub_analyze_peer(monkeypatch, [{"messages": msgs}],
+                                   query="group these tracts into 5 contiguous regions")
+
+    assert len(seen) == 1, "a tool that recovered must not trigger the dead-end run"
+    assert "tool_failures" not in out
+
+
 # --- the audit as a gate, not an annotation -------------------------------------------------
 #
 # Reproduced on the deployed agent with "Which counties border Champaign County, Illinois?":
