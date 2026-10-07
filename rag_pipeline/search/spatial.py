@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
@@ -254,6 +256,29 @@ def _only_non_places(text: str) -> bool:
     return all(word.lower() in _NOT_PLACES for word in text.split())
 
 
+# Python's re has no \p{Lu}, so the uppercase letters are spelled out. With [A-Z] no non-ASCII place
+# could be a candidate: "Rondônia" never matched, and "São Paulo" became "Paulo". The Basic
+# Multilingual Plane holds Latin, Greek, Cyrillic, Armenian and Georgian and is cheap to scan once;
+# the few cased scripts beyond it, such as Deseret, are left out.
+_UPPER = "[" + "".join(c for c in map(chr, range(0x10000)) if c.isupper() or c.istitle()) + "]"
+# An uppercase letter, then letters of any script, ".", "-", "'", the typographic apostrophe
+# ("Xi’an") and U+2018, which stands in for the okina ("Hawai‘i").
+_CAPITALIZED_WORD = _UPPER + r"(?:[^\W\d_]|[.'\u2018\u2019-])*"
+# Words keep their "." for "U.S." and "St. Louis", so a run used to continue past the end of a
+# sentence: "Illinois. Then county" was offered and the bare "Illinois" never was, and "Python. The"
+# kept its period, which slipped it past _NOT_PLACES. A period, or a period and a closing quote
+# ("Ohio.’ Then"), now ends the run unless it closes an initial ("N. Dakota"), an initialism
+# ("U.S.") or an abbreviation that opens a place name.
+_NAME_ABBREVIATIONS = ("St", "Ste", "Mt", "Ft", "Pt")
+_RUN_GAP = (
+    r"(?:(?<!\.)(?<!\.['\u2018\u2019])"
+    + rf"|(?<=\b{_UPPER}\.)|(?<=\.[^\W\d_]\.)"
+    + "".join(rf"|(?<=\b{a}\.)|(?<=\b{a.upper()}\.)" for a in _NAME_ABBREVIATIONS)
+    + r")\s+"
+)
+_CAPITALIZED_RUN = re.compile(rf"\b({_CAPITALIZED_WORD}(?:{_RUN_GAP}{_CAPITALIZED_WORD}){{0,2}})\b")
+
+
 def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
     """Fallback place candidates from capitalization, for when NER finds nothing.
 
@@ -262,10 +287,10 @@ def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
     string while extracting both places from the original sentence. Candidates here are deliberately
     liberal because the geocoder is the arbiter: a non-place simply fails to resolve.
     """
-    import re
-
+    # A combining mark is not a word character, so decomposed text would cut "Rondônia" to "Rondo".
+    user_query = unicodedata.normalize("NFC", user_query)
     runs: List[str] = []
-    for match in re.finditer(r"\b([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2})\b", user_query):
+    for match in _CAPITALIZED_RUN.finditer(user_query):
         phrase = match.group(1).strip()
         words = [w for w in phrase.split() if w.lower() not in _NOT_PLACES]
         if not words:

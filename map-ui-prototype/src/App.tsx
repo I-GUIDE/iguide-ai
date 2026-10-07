@@ -14,6 +14,7 @@ import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, laye
 import { bboxToFC } from './mapFit';
 import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  fetchAgentFile,
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
@@ -450,7 +451,7 @@ export default function App() {
         continue;
       }
       try {
-        const res = await fetch(resolveUrl(url));
+        const res = await fetchAgentFile(resolveUrl(url), asAgentConfig());
         if (!res.ok) continue;
         const fc = await res.json();
         if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
@@ -552,7 +553,7 @@ export default function App() {
           layerSourceFiles.current.has(fileKey(f.download_url))) continue;
       loadedArtifacts.current.add(key);
       try {
-        const res = await fetch(resolveUrl(f.download_url), { signal });
+        const res = await fetchAgentFile(resolveUrl(f.download_url), asAgentConfig(), { signal });
         if (!res.ok) continue;
         const j = await res.json();
         const fc: FeatureCollection =
@@ -585,7 +586,7 @@ export default function App() {
         fitView(fc);
       } catch { /* not loadable as GeoJSON — leave it as a download */ }
     }
-  }, [spatial, resolveUrl, putLayer, fitView]);
+  }, [spatial, resolveUrl, putLayer, fitView, asAgentConfig]);
 
   const onFeatureClick = useCallback((feature: any, layerId: string) => {
     const props = (feature && feature.properties) || {};
@@ -676,8 +677,16 @@ export default function App() {
           let fc = layer.geojson;
           if (!fc && layer.url) {
             try {
-              const res = await fetch(resolveUrl(layer.url), { signal: ctl.signal });
+              const res = await fetchAgentFile(resolveUrl(layer.url), asAgentConfig(),
+                                               { signal: ctl.signal });
               if (res.ok) fc = await res.json();
+              else {
+                // Say so. A refused download used to vanish here without a word, beside an
+                // answer saying the layer was on the map.
+                const why = await res.json().then((j) => j?.reason || '').catch(() => '');
+                addTrace({ text: `map: ${layer.label} could not be loaded (HTTP ${res.status}`
+                  + `${why ? `, ${why}` : ''}), so it is not on the map`, kind: 'warn' });
+              }
             } catch { /* leave it undelivered rather than guess */ }
           }
           if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;

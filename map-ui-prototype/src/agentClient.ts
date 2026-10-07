@@ -313,6 +313,25 @@ function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
   return h;
 }
 
+/** Fetch a file the agent serves (a layer's GeoJSON, a download) with the credentials the chat
+ *  call itself carried, and only from the agent's own origin.
+ *
+ *  These fetches went out bare. In token mode `/agent/files/<id>/download` refuses a request
+ *  that has neither a sign-in cookie nor the service key (403, `not_signed_in`), so a browser
+ *  chatting on the key alone, which chat and upload both send, drew none of the layers its own
+ *  turn produced while the answer said they were on the map. Measured on agent.i-guide.io: four
+ *  layer downloads in one turn, all 403. Cross-origin (`npm run dev` against the deployed API)
+ *  the bare fetch also left the cookie behind, so a signed-in developer lost them the same way.
+ *
+ *  A layer's url can point anywhere, and the key must not travel with it: a credential sent to
+ *  someone else's host is a leaked credential. */
+export function fetchAgentFile(url: string, cfg: AgentConfig, init: RequestInit = {}): Promise<Response> {
+  let own = false;
+  try { own = new URL(url).origin === new URL(apiBase(cfg)).origin; } catch { /* not a url */ }
+  if (!own) return fetch(url, init);
+  return fetch(url, { ...init, headers: authHeaders(cfg, false), credentials: CREDENTIALS });
+}
+
 export function newThreadId(): string {
   try { if (crypto?.randomUUID) return 'sess-' + crypto.randomUUID(); } catch { /* */ }
   return 'sess-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);

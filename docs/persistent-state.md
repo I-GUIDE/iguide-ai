@@ -224,9 +224,25 @@ Any setting can be tiered by adding `_DEV` / `_PROD` to its name — `tiered_env
 rule, and every search read goes through it. In practice that is the index names:
 
 ```
-OPENSEARCH_INDEX          new-opensearch-index              (untiered fallback)
+OPENSEARCH_INDEX          iguide-feb12                      (untiered fallback)
+OPENSEARCH_INDEX_PROD     iguide-feb12                      (prod's knowledge base)
 OPENSEARCH_INDEX_DEV      iguide-platform-embeddings-dev    (dev's knowledge base)
 ```
+
+**The prod knowledge base is `iguide-feb12` since 2026-10-07**, the index the platform's own
+search reads. Before that the deployment searched `new-opensearch-index`, an index created
+2025-10-27 that has fallen behind. It had 619 elements against feb12's 763, so the 148
+elements the platform added since could not be found. A user saw it as a dataset the platform's search
+listed by its exact title while the agent said no such data existed. The two indices have the
+same mapping, and the 615 elements in both carry identical vectors, so the agent's embedding
+service still matches. Two gaps remain in feb12 itself:
+
+- 108 of its 763 elements have no `contents-embedding`, mostly ones added after the copy.
+  Semantic search cannot return them. Keyword and spatial search can, and so can Neo4j
+  search, since the graph is current.
+- Keyword search matches `contents` only. An element whose description does not repeat its
+  title's words, such as "Chicago Crime data 2026", is found only by words from its
+  description.
 
 An **empty** tiered value counts as unset, so a half-written `FOO_PROD=` cannot blank out a
 working `FOO`. An **unrecognised** tier raises rather than falling back, in both switches: a

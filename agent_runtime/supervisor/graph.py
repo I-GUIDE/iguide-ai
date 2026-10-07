@@ -3077,7 +3077,9 @@ _TOOL_FAIL_REPEATS = 2
 
 
 def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
-    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
+    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times
+    since they last returned ok=true: a tool that is failing now, not one that failed and then
+    worked."""
     counts: Dict[str, int] = {}
     seen: Dict[str, List[str]] = {}
     for item in artifacts.get("tool_results") or []:
@@ -3094,6 +3096,14 @@ def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(parsed, dict) and parsed.get("ok") is False:
             counts[name] = counts.get(name, 0) + 1
             seen.setdefault(name, []).append(str(parsed.get("error") or "")[:300])
+        elif isinstance(parsed, dict) and parsed.get("ok") is True:
+            # A success after failures means the way out was found, not that there was none.
+            # Observed: regionalize refused a layer split into three parts, twice, naming the
+            # selection that would work; the peer made it and got its regions. Counting the two
+            # refusals anyway sent the peer to redo the work in execute_code and told synthesis
+            # the tool had failed.
+            counts.pop(name, None)
+            seen.pop(name, None)
 
     # The LATEST error, and a note when the failures were not the same one.
     #
