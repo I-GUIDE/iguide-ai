@@ -1672,6 +1672,42 @@ switch mid-stream does the same to the turn's messages: `patch` writes into the 
 turn's index in whatever list is on screen (read from the code). Closing it means holding the
 switch until the turn ends, or stopping the turn on a switch, which is a decision of its own.
 
+### Stage S9.11 A layer download that left its credentials behind
+
+The agent delivered its layers, and the map dropped them. On agent.i-guide.io on 2026-10-04, a
+Chrome tab chatting on the service key and not signed in uploaded Maui County's tracts and asked
+for regions. The trace showed `regionalize` reporting *"1 layer on the map"* and an `add_map_layer`
+call, and the answer said *"The resulting regions are visible on the interactive map"*. The map
+held one layer, the upload. The access log had the reason: the page fetched four layer files
+during the turn, `GET /agent/files/<id>/download`, and all four got 403 `not_signed_in`.
+
+**Every agent call carried the caller's credentials except the ones that fetch its files.**
+`agentClient.ts` sends `X-API-KEY` and `credentials: 'include'` on chat, upload, the model list
+and saving a conversation. `App.tsx` fetched a file the agent wrote in three places (a `map_layer`'s
+GeoJSON, the artifact fallback, and a restored conversation's layers), each with a bare `fetch`.
+In token mode the download route accepts a sign-in cookie or the key (`_require_user`), and a bare
+same-origin fetch sends the cookie but never the header. So a browser running on the key alone,
+as this one was, lost every layer, and the turn still counted as map-delivered. Cross-origin, where `npm run dev` runs against the deployed API, the bare fetch
+also left the cookie behind. A signed-in user on agent.i-guide.io keeps the cookie and should be
+unaffected. That is read from the code, not measured signed in.
+
+**`fetchAgentFile` (`agentClient.ts`) is the one way the page fetches an agent file.** It attaches
+the key and the cookie only when the url's origin is the API's own, because a layer url can point
+anywhere and a key sent to another host is a leaked key. A refused `map_layer` download now leaves
+a warning line in the turn's trace (*"map: … could not be loaded (HTTP 403, not_signed_in), so it
+is not on the map"*) instead of nothing.
+
+`npm run check:files` pins both halves: the agent's origin gets the key and the cookie, another
+host gets neither, the dev case sends the cookie, and Stop's signal survives. It also checks the
+class, not the instance: `App.tsx` must contain no `fetch(resolveUrl(`. The build passes. Run
+against the previous `App.tsx`, that guard finds all three bare fetches.
+
+**Not done here.** The answer's *"visible on the interactive map"* comes from the server, which
+cannot see a download fail in the browser. A restored conversation still counts a refused layer
+as *"no longer available"*, and a refused artifact-fallback download is still silent. The fix has
+not been seen in a browser yet. The only browser that reproduces the failure is the deployed site,
+whose UI is still the 2026-09-22 build (MapLibre 4.7.1).
+
 ---
 
 *Still open:* one conversation produced **two** memory documents — the agent's own
