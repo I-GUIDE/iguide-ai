@@ -686,7 +686,9 @@ only when the two sides key the zones differently, so that is the case that warn
 without a vector is ordinary, because a subset was embedded or a zone had no pixels, so it is only
 counted. The mixed California and Illinois pairing still fits its 15 Illinois tracts, and now
 says that 15 of 30 vectors found no polygon. `_join_report` in `rs_embed_zonal_worker.py`; four
-tests in the same file cover the warning, a failed join, a clean join and a subset.
+tests in the same file cover the warning, a failed join, a clean join and a subset. S6.12, *The
+join report's examples line up, and a join that meets nothing points at the key*, orders and
+bounds the examples and changes the hint of a fit that met too few zones.
 
 **Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
 `embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
@@ -752,14 +754,14 @@ said zone 4 and showed zone 4's pixel count.
 
 The same mechanism had a second form, measured while reproducing the first. Districts numbered 1 to
 30, embedded with `zone_id_field="district"` and fitted without it, met 28 vectors by row number,
-and each was the vector of the district before (blocked r2 -0.41 on the Mac). Embedded by GEOID,
+and each was the vector of the district before (blocked r2 -0.41 on both stacks). Embedded by GEOID,
 the groups layer failed loudly instead, but the message, *"only 0 zones have both a vector and a
 label"*, did not say why. Naming `GEOID` failed too, because the groups layer calls that column
 `zone_id`.
 
-**S6.10's join report saw both and named the wrong cause.** Re-measured on `prototype` after S6.10
-(Mac): the gap layer still fitted ok with 28 zones, 25 of them mispaired, at r2 -0.35, and the
-districts 28 of 28 at r2 -0.41. The `join` report counted one vector without a polygon, the last
+**S6.10's join report saw both and named the wrong cause.** Re-measured on `prototype` after S6.10:
+the gap layer still fitted ok with 28 zones, 25 of them mispaired, at r2 -0.35 on the Mac and -0.69
+in the replica, and the districts 28 of 28 at r2 -0.41 on both. The `join` report counted one vector without a polygon, the last
 zone, which now ran past the end of the layer, and the `warning` blamed a key written two ways,
 such as a dropped leading zero. Neither said that most of the zones that *did* meet had met the
 wrong vector, because a row-number join meets by the number alone.
@@ -811,10 +813,59 @@ through both tools, with the service stubbed and the real file store:
 On `prototype` (after S6.10) 6 of the 11 fail, and the 5 that pass are the cases that must not
 change. With the change all 11 pass. The full `rag_pipeline` suite gives 2276 passed and 4 skipped
 on the Mac, against 6 failed and 2270 passed on `prototype` with the new file added: the six are the
-whole difference. When this was written on S6.9's code, the replica (`--network none`) gave 9
-failed, 2142 passed and 7 skipped with the change, against 15 failed and 2136 passed without, the
-nine that fail either way needing packages the deployed image lacks; the replica was not re-run on
-`prototype`. Nothing was deployed.
+whole difference. In the replica, the same 6 fail on `prototype` and all 11 pass with the change;
+its full-suite numbers, taken with S6.12, are in S6.12. Nothing was deployed.
+
+### Stage S6.12 The join report's examples line up, and a join that meets nothing points at the key
+
+*2026-10-07, `claude/fit-zone-leftovers`, after S6.11. Revises the `join` report S6.10, The
+vectors' zone_id is read as text, shipped. Ported from a fuller report (`unmatched_zones`) written
+on 2026-10-04 beside S6.10 and never committed; only what the merged report lacked was taken, and
+the reply's `join` and `warning` keys are unchanged.*
+
+The merged report's counts were right; its examples were not always readable, and the hint of a
+failed fit sent the model the wrong way. Each was measured offline through `embed_zones` (service
+stubbed) → `fit_zone_model`, identically on the Mac (pandas 2.2.3) and in the replica (3.0.5):
+
+- **The examples were the first few in file order, so the two sides did not line up.** 15
+  California and 15 Illinois tracts, embedded from text GEOIDs and fitted against a copy that
+  stores GEOID as a number and lists the tracts in reverse, showed the vectors' `06037100000`,
+  `…001`, `…002` beside the polygons' `6037100014`, `…013`, `…012`: the leading zero was visible,
+  but on unrelated zones. The same with TRACTCE gave `000100`, `000200`, `000300` beside `1500`,
+  `1400`, `1300`. Both sides are now ordered by value where an id reads as a number, else as text,
+  so they show `6037100000`… and `100`, `200`, `300`: the same zones, written two ways. Sorting as
+  text would not do: `100` would face `1000` and `1100`, and the TRACTCE test fails that way.
+- **An id pandas read as missing showed as the text `nan`.** A zone keyed `NA` (Namibia's code)
+  comes back from the CSV missing, as S6.10 found, and the report named it `'nan'`, as if a zone
+  were called that. It is now `null`, and the warning says *"an id read as missing"*. The counts
+  still follow the merge: on pandas 2.2.3 the `astype(str)` makes a missing id the text `nan`,
+  which would meet a polygon keyed `nan`, and is counted that way.
+- **Ids were not bounded.** 110-character tract descriptions, fitted against a copy in capitals,
+  put six 110-character examples into the reply and two into the warning (599 characters). Each
+  is now cut to 80 (warning 539).
+- **A fit that met nothing was told to embed more zones.** 30 California tracts fitted against
+  numeric GEOIDs gave *"only 0 zones…"* with *"Embed more zones before fitting"*, which buys tiles
+  for vectors that already exist. When leftovers on both sides could have made up the shortfall
+  (fewer than 12 met, and 12 or more would have met had the smaller side's leftovers paired), the
+  hint now says *"Only 0 zones met: 30 of the 30 vectors and 30 of the 30 polygons found no
+  partner with the same zone id. Check zone_id_field…"*. With leftovers on one side only (10 of 30
+  tracts embedded), or too few to matter (10 met, one zone keyed two ways), the old hint stands.
+
+**Not ported from the fuller report:** a second report key (`unmatched_zones`) beside `join`, five
+examples a side instead of three, polygon examples when only polygons went without vectors (S6.10
+counts those and nothing more, on purpose), and a note telling the answer to say how many zones
+were left out, which is the warning's job.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_unmatched_zones.py`, offline, with every
+reply parsed as strict JSON: the reversed GEOID and TRACTCE layers, the `NA` zone, the long ids,
+the join that met nothing, and two guards for the cases where the old hint must stand. On S6.11's
+commit the first five fail and the two guards pass, on both stacks; with the change all seven
+pass. S6.10's four join tests pass unchanged. The full `rag_pipeline` suite gives 2283 passed
+and 4 skipped on the Mac. In the replica, with `--network none`, `prototype` with both new test
+files gives 20 failed, 2260 passed and 7 skipped, and S6.11 with S6.12 gives 9 failed, 2271 passed
+and 7 skipped: the eleven tests S6.11 and S6.12 add that fail on `prototype` are the whole
+difference, and the nine that fail either way need packages the image lacks, such as xarray and
+pyarrow. Nothing was deployed.
 
 ---
 
