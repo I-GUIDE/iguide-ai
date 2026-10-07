@@ -477,7 +477,12 @@ def fit(req: dict) -> dict:
     import numpy as np
     import pandas as pd
 
-    df = pd.read_csv(req["vectors_csv"])
+    # zone_id as the text embed_zones wrote, which is how the polygons hold it. Left to type
+    # inference, a file whose ids are all digits read zone_id as int64, and astype(str) below
+    # gave California's '06037100000' back as '6037100000', which no GEOID equals: a state
+    # with FIPS 01-09 fitted no zone at all, and a layer mixing California and Illinois tracts
+    # fitted only Illinois and still said ok.
+    df = pd.read_csv(req["vectors_csv"], dtype={"zone_id": str})
     gdf = gpd.read_file(req["polygons_path"])
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326")
@@ -506,13 +511,15 @@ def fit(req: dict) -> dict:
     zones = gdf[[gdf.geometry.name]].assign(
         zone_id=ids, _label=pd.to_numeric(gdf[label], errors="coerce"))
     support = [c for c in ("pixels", "area_km2") if c in df.columns]
+    join, warning = _join_report(list(df["zone_id"]), ids)
     m = zones.merge(df[["zone_id"] + support + feat], on="zone_id", how="inner")
     m = m.dropna(subset=["_label"] + feat)
     n = len(m)
     if n < 12:
         return {"ok": False, "error": f"only {n} zones have both a vector and a label",
                 "hint": "Embed more zones before fitting; spatial-block CV holds out whole "
-                        "blocks, so it needs enough zones to leave any for training."}
+                        "blocks, so it needs enough zones to leave any for training.",
+                "join": join, **({"warning": warning} if warning else {})}
 
     X = m[feat].to_numpy(dtype=np.float64)
     y = m["_label"].to_numpy(dtype=np.float64)
@@ -557,7 +564,44 @@ def fit(req: dict) -> dict:
         "observed_range": [round(float(y.min()), 4), round(float(y.max()), 4)],
         "support_pixels": ({"min": int(m["pixels"].min()), "median": int(m["pixels"].median()),
                             "max": int(m["pixels"].max())} if "pixels" in m else None),
+        "join": join, **({"warning": warning} if warning else {}),
     }
+
+
+def _join_report(vector_ids, polygon_ids):
+    """Who found a partner in the vectors-to-polygons join, and a warning when a vector did not.
+
+    The join is inner, and the fit reported only what matched, so a join that lost half its
+    vectors read as a smaller success. Vectors embedded from tracts keyed as text, fitted
+    against a layer storing the same ids as numbers, met only by accident while pandas typed
+    the CSV's ids too. With the ids read as text (S6.10), 15 California and 15 Illinois tracts
+    fitted the 15 Illinois ones and said ok. Decided 2026-10-07: report the unmatched side
+    loudly rather than match all-digit ids by value, which would make 01 and 1 one zone.
+
+    A vector without a polygon never happens when both sides key the same zones the same way,
+    so it warns. A polygon without a vector is ordinary (a subset embedded, a zone with no
+    pixels), so it is counted and nothing more.
+    """
+    vectors = list(dict.fromkeys(str(v) for v in vector_ids))
+    polygons = list(dict.fromkeys(str(p) for p in polygon_ids))
+    vector_set, polygon_set = set(vectors), set(polygons)
+    lonely_vectors = [v for v in vectors if v not in polygon_set]
+    lonely_polygons = [p for p in polygons if p not in vector_set]
+    join = {"vectors": len(vectors), "polygons": len(polygons),
+            "matched": len(vector_set & polygon_set),
+            "vectors_without_a_polygon": len(lonely_vectors),
+            "polygons_without_a_vector": len(lonely_polygons)}
+    if not lonely_vectors:
+        return join, None
+    join["example_unmatched_vector_ids"] = lonely_vectors[:3]
+    join["example_polygon_ids"] = (lonely_polygons or polygons)[:3]
+    warning = (f"{len(lonely_vectors)} of {len(vectors)} vectors found no polygon with the same "
+               f"zone id (for example {lonely_vectors[0]!r}, where the polygons have ids like "
+               f"{(lonely_polygons or polygons)[0]!r}), so the fit left them out. If they are the "
+               "same zones keyed differently, such as a leading zero dropped or a number stored "
+               "as text, fit against the layer the vectors were embedded from, or pass "
+               "zone_id_field naming a column that holds the ids exactly as the vectors do.")
+    return join, warning
 
 
 def _box(x0, y0, x1, y1):
