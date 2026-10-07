@@ -45,6 +45,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
 | 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
 | 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
+| 32 | [The fallback reads past ASCII and stops at a sentence end](#stage-32) | 2026-10-03 → 2026-10-05 | Rondônia and São Paulo become candidates; a period that ends a sentence ends the run, unless it closes an abbreviation |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -5595,3 +5596,194 @@ A port mapping belongs to the container, so this takes effect only when the thre
 from this file. That needs no rebuild (`--no-build`), and recreating agent-api cuts off turns in
 flight (Stage 13). The `describe_map` text lives in the mcp-server image, so it changes on that
 image's next rebuild.
+
+---
+
+## Stage 32 — The fallback reads past ASCII and stops at a sentence end {#stage-32}
+
+*2026-10-03 to 2026-10-05. Branch `claude/place-fallback-recall`.*
+
+`extract_locations_from_query` (`rag_pipeline/search/spatial.py`) asks spaCy for GPE, LOC and FAC
+entities first. When it finds none, or the model is missing (the Mac, CI), the capitalization
+fallback `_capitalized_candidates` builds the candidates that `resolve_query_bbox` sends, in
+order, to Google's paid Geocoding API. In production the fallback is no corner case. The deployed
+model finds no place entity in 30 of GeoAnalystBench's 44 distinct task titles, 28 of its 50
+instructions and 7 of the 10 geopathfinder prompts. Two recall defects in the fallback were
+measured on 2026-10-03 by importing the deployed module inside `agent-api`. Both came from one
+regex, `\b([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2})\b`.
+
+### Stage S32.1 A word had to be ASCII
+
+Python's `\b` is Unicode-aware, so "ô" counts as a word character. In "Rondônia" the class stops
+at the "ô", the closing `\b` then fails between "d" and "ô", and no candidate can start at the "R"
+at all. "São Paulo" became "Paulo". This mattered in production because NER misses exactly such
+names. en_core_web_sm 3.8.0 tags "Rondônia" as ORG in all three GeoAnalystBench texts that name it
+(task 9's title, and instructions 9 and 10). So production fell back, and the fallback offered
+"Find" for "Find the deforestation rate for Rondônia", never the state.
+
+Sixteen constructed sentences, one per non-ASCII place, show the same pattern. NER misses 8 of
+the 16: Rondônia, Curaçao, Île-de-France, Malmö and Martha’s Vineyard as ORG, Bogotá and Kraków as
+PERSON, and Xi’an as nothing. (A 17th repeats Rondônia in decomposed form, and NER tags it GPE.)
+The old fallback offered the right place for none of the eight. For two it offered fragments:
+"France region" and "France" for Île-de-France, and "Vineyard" and "Martha". Real queries carry
+such names. The agent-api container started on 2026-10-02 at 14:33 UTC had logged 8 distinct
+candidates when its log was read on 2026-10-03, and one of them is "México". NER returned it and
+it resolved, but the fallback could not have produced it.
+
+The change:
+
+1. A word starts with an uppercase letter of any cased script in the Basic Multilingual Plane.
+   Python's `re` has no `\p{Lu}`, so the letters are spelled out as one class: the plane's 1,200
+   uppercase and titlecase characters. 1,158 are letters, among them Latin, Greek, Cyrillic,
+   Armenian, Georgian, Coptic, Cherokee and Glagolitic, and 42 are Roman numerals and circled
+   letters. Cased scripts beyond the plane, such as Deseret, are left out. Building the class takes
+   about 5 ms at import in agent-api, and compiling the pattern about 3 ms more.
+2. The rest of a word is letters of any script, ".", "-", "'", the typographic apostrophe U+2019
+   ("Xi’an", "Martha’s Vineyard") and U+2018, which stands in for the okina ("Hawai‘i"). The
+   letter class is `[^\W\d_]`, which also admits a few numeric signs such as "²" and "½".
+   "Chicago’s" is now one word, as "Chicago's" always was.
+3. The query is NFC-normalized first. A combining mark is not a word character, so decomposed
+   text ("o" followed by U+0302) would cut the word to "Rondo". A mark with no precomposed letter
+   (an "M" with a macron, say) still cuts it.
+
+The CSV this was measured on spells the state "Rond么nia". Its UTF-8 bytes were once decoded as
+GBK, and the copy kept the result. NER tags that spelling ORG as well. The mojibake is reversible
+in 4 of the 100 GeoAnalystBench texts. The counts below are the same on the raw and the repaired
+text, and the candidates quoted are from the repaired one.
+
+### Stage S32.2 A run crossed a sentence end
+
+Words keep their "." for "U.S." and "St. Louis", and any whitespace could separate two words of a
+run, so a run went on past the end of a sentence. On the fallback path, 14 candidates in 13 of
+the 50 instructions crossed a period or kept one. Five carry a place: "Catalina Island. Update",
+"Tasmania.", "USA. You", "Georgia." and "Wyoming. You'll". Nine carry a technical term: "Arcpy.
+First" (4), "Python." (3), "L-function. First" and "GeoDataFrame. You". A bare "Tasmania." is the
+run "Tasmania. The" after `_NOT_PLACES` removed "The". The same happened to "Python. The", and
+"Python." with its period no longer matched `_NOT_PLACES`'s "python". So the fallback offered, in
+three instructions, a term the vocabulary exists to stop.
+
+NER returns all five of those places as GPE or LOC, so in production none of them reached the
+fallback. The defect shows where NER misses. For "flood depth Illinois. Then county summary" the
+model returns "flood depth Illinois" as a PERSON, and the fallback offered "Illinois. Then
+county" and "Illinois. Then", never "Illinois". Google resolves that joined string to Illinois
+anyway, as a partial match (S32.5). For the other joined strings its answer was not measured.
+
+The change: a period, or a period and a closing quote, ends the run unless it closes an initial
+("N. Dakota"), an initialism ("U.S.", "D.C.") or an abbreviation that opens a place name. Those
+are St, Ste, Mt, Ft and Pt, in capitals too ("ST. LOUIS"). "Mts" was left out, because it ends
+names ("Rocky Mts.") more often than it opens them. Each rule is a fixed-width lookbehind on the
+gap between two words. The rest of the pattern, and every rule applied after it, is unchanged.
+
+*Revised during the work.* The first version looked only at the character before the gap. An
+independent audit of this entry found what that missed. S32.1 had made U+2018 and U+2019 word
+characters, so "Ohio.’ Then" became one run where the old code had split it, the very defect this
+stage fixes, brought back by the other half of the change. A period followed by a closing quote
+now ends the run as well. That also splits the ASCII "Ohio.' Then", which both versions had
+joined.
+
+### Stage S32.3 Measured on the deployed stack
+
+Both versions of `spatial.py` ran in memory inside agent-api, from a script piped to `docker exec
+-i agent-api python -`. The container was created 2026-10-02 14:33 UTC from image
+`deeb331964f6` and runs Python 3.11.16, spaCy 3.8.16 and en_core_web_sm 3.8.0. The script wrote
+nothing to it. agent-api was recreated on 2026-10-04 at 05:01 UTC from image `21d65b66a1c9`,
+with the same versions and the same `spatial.py`, and every number below was measured again
+there, on the final code. "Before" is `prototype` at `5570d63`, whose extractor is Stage 16's.
+The running container predates Stage 16.
+
+| corpus | texts | fallback alone: changed | production path: changed |
+|---|---|---|---|
+| GeoAnalystBench task titles | 44 distinct | 1 | 1 |
+| GeoAnalystBench instructions | 50 | 15 | 7 |
+| geopathfinder prompts | 10 | 0 | 0 |
+| constructed probes | 40 | 25 | 11 |
+
+The fallback alone is what the Mac and CI run. Its output is identical under the Mac's Python
+3.13.5 and agent-api's 3.11.16 for every text measured here: 154, counting duplicate title rows
+and the 4 repaired copies. On the production path, 8 corpus texts change.
+The three that name Rondônia now offer it: first in the title, second in instruction 9 and third
+in instruction 10. The other five split "Arcpy. First" (4) or "L-function. First" (1), and the
+three-candidate cut then keeps a different set of non-place words. In instruction 25 those are
+"Finally", "COVID-" and "Second". No candidate crosses a period any more. 14 did on the fallback
+path, 5 of them on the production path. On 200,000 random ASCII strings, every output that
+differs between the versions comes from a text with a period, or a period and an apostrophe,
+before whitespace. Over the texts measured here the fallback costs 16.1 µs a text in agent-api,
+against 12.2 µs before.
+
+`test_spatial_locations.py` has 27 new cases. Against the old code, 17 fail on the Mac and the
+same 17 fail in agent-api. The other 10 pass on both, and they guard what must keep working: St.
+Louis, ST. LOUIS, U.S. Virgin Islands, Washington D.C. Metro, N. Dakota, Ft. Collins, Mt. Rainier,
+Sault Ste. Marie, Champaign Illinois, and "Ohio.’ Then", the audit's regression. The whole file,
+52 tests, passes in agent-api with the model loaded. pytest needs files on disk, so a small runner
+exec'd the unchanged test file in memory there. On the Mac that runner reproduced pytest's result
+exactly: 35 passed and 17 failed before, 52 passed after. `rag_pipeline/tests` on the Mac: 2164
+passed, 4 skipped. The suite and the probes sent no request to Google.
+
+### Stage S32.4 What this stage did not change
+
+- **First-word candidates, settled before this stage.** On 2026-10-03 Google returned HTTP 200
+  `ZERO_RESULTS` for 13 bare words: ten sentence openers (Your, First, Use, Analyze, Finally,
+  Identify, Visualize, Calculate, Save, Then) and three place homonyms (Split, Lead, Mobile). So
+  the first-word candidates that S16.1 left unmeasured were judged harmless, and they stay. A rule
+  dropping a sentence's first word would lose places NER misses where they open a keyword query:
+  6 of the 40 measured (Tasmania, Champaign, Nepal, Amazon, Sahel, Madison). `ZERO_RESULTS`
+  requests are still billable.
+
+  One side effect follows from the existing rules. In "flood depth Illinois. Then county
+  summary", "Then" is now a run of its own. The feature-word rule extends it to "Then county",
+  and the longest candidate goes first: `['Then county', 'Illinois', 'Then']`. The old code did
+  the same for any sentence after a lowercase word ("…for the state. Then county summary" gave
+  `['Then county', 'Then', 'Map']`). Google returns `ZERO_RESULTS` for "Then county" (S32.5), so
+  "Illinois" is reached next, one billable request later.
+- **The three-candidate cut, longest first.** On the fallback path, "USA" in instruction 37 now
+  falls outside it, where the joined "USA. You" used to lead. "HKG" (instruction 25) and "Berlin"
+  (42) fall outside it in both versions. In production NER returns USA and Berlin as GPEs and HKG
+  as an ORG, so production offers HKG in neither version. In instructions 9 and 10 "Brazilian" (9
+  letters) still sorts ahead of "Rondônia" (8), and in instruction 10 so does "Visualize", one of
+  the 13 `ZERO_RESULTS` words. Google resolves "Brazilian" to Brazil (S32.5), so Rondônia is not
+  reached there in either version.
+- **An initial, an initialism or a listed abbreviation at a sentence end still joins the next
+  word.** "Washington D.C. Then map it" gives "Washington D.C. Then", as before, and so do "Plan
+  B. Then" and "Main St. Then". The spelling cannot tell the "U.S." of "U.S. Virgin Islands" from
+  a "U.S." that ends a sentence.
+- **A line break still joins a run**, because the gap is still any whitespace. No corpus text has
+  capitalized words on both sides of one.
+- **A lowercase particle still splits a name.** "Côte d'Ivoire" gives "Ivoire" and now "Côte".
+- **NER-path quirks seen while measuring,** where the fallback is never consulted: "trails near
+  Ft. Collins" gives "Ft" (GPE), "shipping at Sault Ste. Marie" gives "Sault Ste" (FAC), and
+  "flood risk in ST. LOUIS" gives "ST" and "LOUIS".
+
+### Stage S32.5 What Google returns, measured afterwards
+
+On 2026-10-05 at 03:56 UTC, with approval for four paid requests, a script inside agent-api
+geocoded four of the candidates above with the container's own key, one request each and no
+retry.
+
+| candidate | status | first result | partial match |
+|---|---|---|---|
+| "Rondônia" | OK | Rondônia, Brazil (`administrative_area_level_1`) | no |
+| "Brazilian" | OK | Brazil (`country`) | yes |
+| "Then county" | `ZERO_RESULTS` | none | |
+| "Illinois. Then county" | OK | Illinois, USA (`administrative_area_level_1`) | yes |
+
+Two conclusions change.
+
+- **Rondônia is reached only in the title.** For "Find the deforestation rate for Rondônia" the
+  state is now the first candidate, and it resolves to the state's own box. The old code's only
+  candidate there was "Find", whose answer was not measured. In instructions 9 and 10,
+  `resolve_query_bbox` stops at "Brazilian", which Google reads as Brazil. That box is about 43
+  times Rondônia's by area, and it is the scope in both versions, so the change does not alter what
+  those two instructions search.
+- **Google rescued the joined string.** "Illinois. Then county" resolves to Illinois as a partial
+  match. So for "flood depth Illinois. Then county summary" the old code already found the right
+  box, with one request. The new code reaches the same box with two, because "Then county" fails
+  first. Failures are cached (up to 512 entries), so the extra request is paid once per process.
+
+So the sentence-end rule is justified by its candidates, not by a box it gained here. It stops
+"Python." at `_NOT_PLACES`, and it no longer leans on Google's partial matching to find the
+place. Google's answers for the other joined strings ("USA. You", "Wyoming. You'll", "Catalina
+Island. Update", "Arcpy. First") were not measured. `get_bounding_box` takes the first result
+whatever its `partial_match`, which is how "Brazilian" becomes Brazil. Whether a partial match
+should rank below a later exact one is not decided here.
+
+Nothing was deployed. agent-api still runs the extractor from before Stage 16.
