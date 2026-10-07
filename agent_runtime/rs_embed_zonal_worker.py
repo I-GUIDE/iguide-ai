@@ -492,12 +492,22 @@ def fit(req: dict) -> dict:
         return {"ok": False, "error": f"zone_id_field {id_field!r} is not in the polygons",
                 "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
     ids = ([str(v) for v in gdf[id_field]] if id_field else [str(i) for i in range(len(gdf))])
-    gdf = gdf.assign(_zid=ids)
     df["zone_id"] = df["zone_id"].astype(str)
-    m = gdf.merge(df, left_on="_zid", right_on="zone_id", how="inner")
     feat = [c for c in df.columns if c.startswith("e") and c[1:].isdigit()]
-    m[label] = pd.to_numeric(m[label], errors="coerce")
-    m = m.dropna(subset=[label] + feat)
+    # Each side brings only what it owns to the join: the polygons their shape, the key and
+    # the label; the CSV the vectors and their support. pandas does not refuse a name both
+    # frames carry — it renames the two copies <name>_x and <name>_y, and the bare name stops
+    # existing — and the CSV's `pixels` and `area_km2` are the obvious names for a label added
+    # to tracts. Asked to predict tract area (2026-10-03), the fit died on KeyError: 'area_km2'
+    # and the model wrote its own regression in execute_code instead. So the label travels
+    # under a name of its own and zone_id is rebuilt from the key, which also lets the
+    # zone-groups layer embed_zones writes — zone_id, pixels and area_km2 again — be the
+    # polygons.
+    zones = gdf[[gdf.geometry.name]].assign(
+        zone_id=ids, _label=pd.to_numeric(gdf[label], errors="coerce"))
+    support = [c for c in ("pixels", "area_km2") if c in df.columns]
+    m = zones.merge(df[["zone_id"] + support + feat], on="zone_id", how="inner")
+    m = m.dropna(subset=["_label"] + feat)
     n = len(m)
     if n < 12:
         return {"ok": False, "error": f"only {n} zones have both a vector and a label",
@@ -505,7 +515,7 @@ def fit(req: dict) -> dict:
                         "blocks, so it needs enough zones to leave any for training."}
 
     X = m[feat].to_numpy(dtype=np.float64)
-    y = m[label].to_numpy(dtype=np.float64)
+    y = m["_label"].to_numpy(dtype=np.float64)
     cent = m.to_crs("EPSG:5070").geometry.centroid
     XY = np.c_[cent.x.to_numpy(), cent.y.to_numpy()]
     blocks = int(max(2, min(int(req.get("blocks") or 5), n // 4)))
