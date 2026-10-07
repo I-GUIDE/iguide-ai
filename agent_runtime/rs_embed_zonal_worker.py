@@ -466,6 +466,75 @@ def run(req: dict) -> dict:
     }
 
 
+def _row_number_join_refusal(gdf, vector_ids):
+    """Why these polygons' row numbers cannot be the vectors' keys, or None if they can be.
+
+    With no zone_id_field, polygon i is paired with the vector keyed "i". That is right for
+    the layer embed_zones read, whose rows the vectors are numbered by, and silently wrong for
+    any other. The zone-groups layer embed_zones puts on the map is the case that was measured:
+    it holds only the zones that received pixels, so with 30 zones and none at row 3, the
+    layer's row 3 is zone 4. 25 of the 28 zones fitted got another zone's vector, and the fit
+    reported no skill on a label the vectors determined exactly, while its prediction map,
+    carrying each matched vector's own zone_id, pixels and area_km2, looked complete. Ids
+    embedded by a column and fitted without naming it go the same way when they look like
+    row numbers: districts numbered 1 to 30 mispaired all 28 zones fitted.
+
+    A vector naming a zone the layer has no row for is the sign of both, and the groups layer
+    after a gap always shows it, because it is shorter by the gaps. The layer the vectors were
+    numbered by never does, so its row numbers stay the key beside any zone_id column of its
+    own. Refusing, rather than joining on whichever column fits, keeps the join the one that
+    was asked for; the hint names the column, so the retry is one call. An exact prefix of the
+    embedded layer is refused too, though its rows would pair correctly: they line up by the
+    accident of order, which a filtered or re-sorted copy does not keep.
+    """
+    rows = {str(i) for i in range(len(gdf))}
+    # A blank id names no zone, so it is no evidence either way; the join drops it as before.
+    named = list(dict.fromkeys(str(v) for v in vector_ids.dropna()))
+    stray = [z for z in named if z not in rows]
+    if not stray:
+        return None
+
+    # Columns that hold every vector's id and could key every polygon, as zone_id_field must:
+    # no blank, no repeat. str() of each value, as the fit itself keys a named column.
+    wanted = set(named)
+    holders = []
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+        values = gdf[col]
+        try:
+            if values.isna().any() or values.duplicated().any():
+                continue
+            if wanted <= {str(v) for v in values}:
+                holders.append(col)
+        except TypeError:  # unhashable cells, such as nested JSON, cannot be a key
+            continue
+    holders.sort(key=lambda c: c != "zone_id")  # the groups layer's key first
+
+    names = "names" if len(stray) == 1 else "name"
+    out = {"ok": False,
+           "error": f"zone_id_field was not given, so each polygon is paired with the vector "
+                    f"of its row number, but {len(stray)} of the {len(named)} vectors {names} "
+                    f"a zone this {len(gdf)}-row layer has no row for (e.g. {stray[:3]}). Its "
+                    f"row numbers are not the vectors' keys, and paired by them a polygon can "
+                    f"get another polygon's vector."}
+    if len(holders) == 1:
+        out["hint"] = (f"The layer's {holders[0]!r} column holds every vector's zone id: pass "
+                       f"zone_id_field={holders[0]!r}. The vectors need no re-embedding.")
+    elif holders:
+        out["hint"] = (f"Each of {holders} holds every vector's zone id. Pass the one the "
+                       f"vectors were embedded with as zone_id_field ('zone_id' on embed_zones' "
+                       f"zone-groups layer). The vectors need no re-embedding.")
+    else:
+        out["hint"] = ("Pass zone_id_field naming the column that holds the ids the vectors "
+                       "were embedded with, or fit against the layer embed_zones read, all of "
+                       "its rows in their original order. embed_zones' zone-groups layer holds "
+                       "only the zones that received pixels, so its rows are not the vectors' "
+                       "keys; its zone_id column is.")
+        out["available_columns"] = [c for c in gdf.columns if c != "geometry"][:40]
+    return out
+
+
 def fit(req: dict) -> dict:
     """Ridge on zone vectors, scored by SPATIAL BLOCK cross-validation.
 
@@ -496,6 +565,10 @@ def fit(req: dict) -> dict:
     if id_field and id_field not in gdf.columns:
         return {"ok": False, "error": f"zone_id_field {id_field!r} is not in the polygons",
                 "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
+    if not id_field:
+        refusal = _row_number_join_refusal(gdf, df["zone_id"])
+        if refusal:
+            return refusal
     ids = ([str(v) for v in gdf[id_field]] if id_field else [str(i) for i in range(len(gdf))])
     df["zone_id"] = df["zone_id"].astype(str)
     feat = [c for c in df.columns if c.startswith("e") and c[1:].isdigit()]
