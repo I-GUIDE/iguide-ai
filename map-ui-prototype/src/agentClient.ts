@@ -46,7 +46,11 @@ export interface ModelCatalogue {
                 *  A global list offered 'high' on models that refuse any real level. */
                effort_options?: Record<string, string[]>;
                /** Models that REFUSE tools unless this exact value is sent (gpt-5.6-*). */
-               effort_required?: Record<string, string> }[];
+               effort_required?: Record<string, string>;
+               /** Models the provider serves but this agent cannot use, with why: each one
+                *  answered a tool-call probe with a refusal or with no structured call, and
+                *  the agent binds tools on every step. Not in `models`. */
+               hidden?: Record<string, string> }[];
   /** The code-peer backends a request may select. A second axis, reported under its
    *  own key so nothing conflates "which model answers" with "which agent codes". */
   code_peers?: {
@@ -307,6 +311,25 @@ function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
   if (json) h['Content-Type'] = 'application/json';
   if (cfg.apiKey.trim()) h['X-API-KEY'] = cfg.apiKey.trim();
   return h;
+}
+
+/** Fetch a file the agent serves (a layer's GeoJSON, a download) with the credentials the chat
+ *  call itself carried, and only from the agent's own origin.
+ *
+ *  These fetches went out bare. In token mode `/agent/files/<id>/download` refuses a request
+ *  that has neither a sign-in cookie nor the service key (403, `not_signed_in`), so a browser
+ *  chatting on the key alone, which chat and upload both send, drew none of the layers its own
+ *  turn produced while the answer said they were on the map. Measured on agent.i-guide.io: four
+ *  layer downloads in one turn, all 403. Cross-origin (`npm run dev` against the deployed API)
+ *  the bare fetch also left the cookie behind, so a signed-in developer lost them the same way.
+ *
+ *  A layer's url can point anywhere, and the key must not travel with it: a credential sent to
+ *  someone else's host is a leaked credential. */
+export function fetchAgentFile(url: string, cfg: AgentConfig, init: RequestInit = {}): Promise<Response> {
+  let own = false;
+  try { own = new URL(url).origin === new URL(apiBase(cfg)).origin; } catch { /* not a url */ }
+  if (!own) return fetch(url, init);
+  return fetch(url, { ...init, headers: authHeaders(cfg, false), credentials: CREDENTIALS });
 }
 
 export function newThreadId(): string {

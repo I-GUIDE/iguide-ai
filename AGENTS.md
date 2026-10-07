@@ -176,6 +176,18 @@ Two providers are wired:
   (`_lumen_settings`). That is the operator's choice. The gate covers only picking it per
   request.
 
+  **The picker leaves out AnvilGPT models that cannot make a tool call.** Purdue configures
+  tool calling per model, and the agent binds tools on every step. On 2026-10-04 qwen3:4b and
+  qwen2.5:7b refused any request carrying tools (HTTP 400, their vLLM has no
+  `--tool-call-parser`), and no `tool_choice` value gets past that.
+  `agent_runtime/anvil_tool_probe.py` asks each model for one tool call and caches the answer
+  for six hours. `/agent/models` drops the models that refused, reports them under `hidden`
+  with the reason, and the UI resets a saved choice that is no longer offered. Only an answer
+  about tool calling hides a model. A timeout, a 5xx, or a 400 that does not mention tools is an
+  outage, and the model stays listed: during the same sweep Purdue's Ollama backend was down,
+  and LiteLLM reported each of its seven models as HTTP 400. Stage 33 of
+  `docs/agent-architecture-changes.md` has the measurements.
+
 **Do not set `max_tokens` for a reasoning model.** AnvilGPT's qwen3 line and the gpt-5.x line
 spend their first tokens on reasoning and only then write `content`, so a tight ceiling returns
 `finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads
@@ -539,6 +551,18 @@ pip. Consequences: code cannot fetch anything at runtime — an API call belongs
 the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
+
+**Public data reaches the code through the agent, and the sandbox stays offline.**
+`fetch_public_data` (`agent_runtime/public_data_tools.py`) downloads one URL into a
+conversation file, which `execute_code` reads through `input_files`. The URL must be HTTPS GET
+to a host on an allowlist: Census, USGS, OpenStreetMap Overpass and Chicago open data by
+default, replaced by `AGENT_PUBLIC_FETCH_HOSTS`. Every address the host resolves to must be
+public, redirects are re-checked hop by hop, and size and fetches per turn are capped. It is
+off unless `AGENT_PUBLIC_FETCH=1`, and while off the decider is not told it exists
+(`requires_flag` in `capability_registry`). Do not give the sandbox a network instead. A
+container with network reaches whatever its host can, not just the internet, and the code it
+runs is written by a model reading untrusted text. Stage 34 of
+`docs/agent-architecture-changes.md` has the measurements.
 
 **Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
 once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's

@@ -1162,8 +1162,11 @@ def agent_models():
           Selectable models. `default` is what a request with no `model`/`provider` uses —
           OpenAI gpt-4o in this deployment. AnvilGPT's list is fetched live from its own
           /api/models, so an id it no longer serves is never offered; `stale: true` on a
-          provider means that fetch failed and known ids are being shown instead. NCSA Lumen
-          is listed in dev and local mode only, since its calls spend the key owner's coins.
+          provider means that fetch failed and known ids are being shown instead. AnvilGPT
+          models that cannot make a structured tool call are left out of `models` and listed
+          under `hidden`, each with the reason, because the agent binds tools on every step.
+          NCSA Lumen is listed in dev and local mode only, since its calls spend the key
+          owner's coins.
         schema:
           type: object
           properties:

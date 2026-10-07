@@ -3077,7 +3077,9 @@ _TOOL_FAIL_REPEATS = 2
 
 
 def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
-    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
+    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times
+    since they last returned ok=true: a tool that is failing now, not one that failed and then
+    worked."""
     counts: Dict[str, int] = {}
     seen: Dict[str, List[str]] = {}
     for item in artifacts.get("tool_results") or []:
@@ -3094,6 +3096,14 @@ def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(parsed, dict) and parsed.get("ok") is False:
             counts[name] = counts.get(name, 0) + 1
             seen.setdefault(name, []).append(str(parsed.get("error") or "")[:300])
+        elif isinstance(parsed, dict) and parsed.get("ok") is True:
+            # A success after failures means the way out was found, not that there was none.
+            # Observed: regionalize refused a layer split into three parts, twice, naming the
+            # selection that would work; the peer made it and got its regions. Counting the two
+            # refusals anyway sent the peer to redo the work in execute_code and told synthesis
+            # the tool had failed.
+            counts.pop(name, None)
+            seen.pop(name, None)
 
     # The LATEST error, and a note when the failures were not the same one.
     #
@@ -3432,6 +3442,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         if unified_peer_enabled(state):
             # One agent, one tool list: fold in the retrieval set the search peer used to own.
             try:
@@ -3928,6 +3947,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,

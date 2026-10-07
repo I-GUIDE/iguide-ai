@@ -45,6 +45,9 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 29 | [Thirty-five branches into one log](#stage-29) | 2026-10-03 | every open PR and finished branch landed and renumbered; four conflicts git merged cleanly and got wrong |
 | 30 | [A file_id and a path are checked against the file's owner](#stage-30) | 2026-10-03 | every lookup by id makes the owner check, and so does a path into the store from the file, code and geo tools |
 | 31 | [Published to the host, not the network](#stage-31) | 2026-10-03 | the stack's three ports bind 127.0.0.1; the agent reaches its services by name and never used them |
+| 32 | [The fallback reads past ASCII and stops at a sentence end](#stage-32) | 2026-10-03 → 2026-10-05 | Rondônia and São Paulo become candidates; a period that ends a sentence ends the run, unless it closes an abbreviation |
+| 33 | [The picker offers only models that can call tools](#stage-33) | 2026-10-04 | AnvilGPT models are asked for one tool call and left out of `/agent/models` if they refuse; an outage hides nothing; a saved choice no longer offered resets to the default |
+| 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -415,6 +418,16 @@ The mandate is replaced by a **structural check**: the peer node looks for an `e
 record in its own tool calls and re-invokes **once** with the observation. The same shape then
 recurs four more times (`7e3c356` map delivery, `8489d94` repeated failures, `a19df4b` layer QA).
 
+*Revised 2026-10-04: `8489d94` also fired on a dead end that had already been passed.* The check
+counted every `ok=false` a tool returned in the turn, including those before an `ok=true`. On
+agent.i-guide.io, `regionalize` refused a layer split into three parts twice, and named the
+selection that would work. The peer made the selection, and `regionalize` returned five regions.
+The two refusals still made it a dead end. The peer was sent to redo the regions in
+`execute_code`, which took two more runs, one of them failed, and left duplicate downloads, and
+synthesis was told the tool had failed. `_repeatedly_failed_tools` now counts only the failures
+since a tool's last success. A refusal that names the way out is the error message doing its job,
+and the check could not tell that from a broken tool.
+
 `839a855` and `f8a2803` apply the principle to the search and decide prompts: *"each duplicated a
 deterministic mechanism in supervisor/graph.py… so the prose could not change behaviour when the
 detector fired and was unreliable when it did not."* `f8a2803` adds `_available_actions(state)`
@@ -520,6 +533,199 @@ architectures could only be compared by restarting the deployment between arms."
 *"also removed the decider's cue that retrieval was the opening move"*, so a retrieval question
 went straight to `done`. **Shaping the menu alone did nothing; a veto in `supervisor_node` was
 required.**
+
+### Stage S6.9 The fit's label is the polygons' column, whatever it is called
+
+*2026-10-03, `claude/fit-zone-model-label-collision`. Revises the fitter added in S6.6,
+Remote-sensing embeddings.*
+
+`b44a202`'s fitter joined the zone vectors to the polygons by merging the **whole** vectors CSV onto
+the polygon layer. Besides the features, that CSV carries `zone_id`, `pixels` and `area_km2`: the
+key, and the support `embed_zones` writes beside each vector. pandas does not refuse a column name
+both frames carry. It renames the two copies `<name>_x` and `<name>_y`, and the bare name stops
+existing, so a label called `area_km2` or `pixels` raised `KeyError`. Seen live in a local-mode
+demo: asked to predict census-tract area from GSE embeddings for Arlington County, VA (71 tracts),
+the agent added `area_km2` to the tracts, `fit_zone_model` failed with `KeyError: 'area_km2'` in
+0.04 s, and the model wrote its own ridge regression in `execute_code`. The blocked-CV score the
+tool exists to report never reached the user.
+
+The same collision had a quiet form. The zone-groups layer that `embed_zones` puts on the map
+carries `zone_id`, `pixels` and `area_km2` too. Passed as the polygons with a numeric label of any
+other name, the fit went through, but the prediction layer lost all three columns and
+`support_pixels` came back null: measured on 30 zones, `observed`, `predicted` and `residual` were
+the only properties left. With the groups layer's own `area_km2` or `pixels` as the label, it raised
+`KeyError` as above. So did a polygon layer that already carried a copy of the vectors' `e000…`
+columns, on the features themselves.
+
+**Each side now brings only what it owns to the join.** The polygons contribute their geometry, the
+key and the label, and the label travels under an internal name. The CSV contributes the features
+and their support. The prediction layer's `zone_id` is rebuilt from the key, which is the value the
+CSV row was matched on. Nothing else crosses the join, so no name can collide, the polygon layer's
+own `zone_id` included. The alternative, merging with explicit suffixes and resolving them
+afterwards, would have left every later reader of the merged frame to know which suffix held whose
+column.
+
+**Behaviour that changed on purpose:** the label is always the polygons' column, and the support
+(`pixels` and `area_km2` on the prediction layer, and `support_pixels`) is always the CSV's. A CSV
+without support columns, which `embed_zones` never writes, used to borrow the polygons' columns of
+those names, and now gets none: a polygon column says nothing about how many pixels a vector
+averaged. Apart from that, nothing moves where the two sides share no name. The old and new fitter
+gave identical results and byte-identical prediction files on five such layers: support columns
+present and absent, extra polygon columns, numeric GEOIDs, zones missing from the CSV, and
+unlabelled zones. An independent audit's 28 further cases agreed, among them shuffled row orders,
+mixed id types, a projected GeoPackage, a shapefile and multipolygons. That held on the development
+machine (pandas 2.2.3) and in the linux/amd64 replica of the deployed versions (CPython 3.11.16,
+pandas 3.0.5 with its string dtype on, geopandas 1.1.4, GDAL 3.12.4).
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_column_collisions.py`, which runs offline:
+
+- a label named `area_km2` and one named `pixels`, each beside a twin column holding the same values
+  under a name nothing else uses, which must give the same fit;
+- a polygon layer cluttered with a stale copy of the vectors, a `zone_id` that is not the key, and
+  its own `pixels` and `area_km2`, which must fit exactly as the clean layer does and map the key
+  and the CSV's support;
+- a CSV without support columns, which must leave the prediction map without support;
+- `embed_zones` → `fit_zone_model` on the tool's own two outputs, with the service stubbed and the
+  real file store, labelled by the groups layer's `area_km2` and by a column added to that layer.
+
+On `prototype` all six fail: four on a `KeyError` (on `area_km2` twice, on `pixels`, and on the
+`e000…` features), one on the borrowed support, and one on *"the prediction map lost ['area_km2',
+'pixels', 'zone_id']"*. With the change all six pass, on both stacks. The full `rag_pipeline`
+suite gives 2143 passed and 4 skipped on the Mac. In the replica, with `--network none`, it gives
+9 failed, 2131 passed and 7 skipped with the change, against 15 failed and 2125 passed on
+`prototype` with the new file added: the six new tests are the whole difference. The nine that
+fail on both need packages the deployed image lacks, such as pyarrow and xarray.
+
+**Found here, not fixed:**
+
+- **A zone id with a leading zero does not join.** When every id is digits, `read_csv` infers the
+  CSV's `zone_id` as an integer, so `06037100000` comes back as `6037100000`, while polygons whose
+  GEOID is text, as TIGER's are, keep the zero. Every such zone drops out of the fit without a
+  word. A layer of California tracts, or of any state from 01 Alabama to 09 Connecticut, finds
+  *"only 0 zones have both a vector and a label"*. A layer of 15 California and 15 Illinois tracts
+  fits the 15 Illinois ones and reports success. Both were measured through the two tools.
+  Fixed by reading the column as text: S6.10, *The vectors' zone_id is read as text*.
+- **The groups layer keyed by row number pairs zones with the wrong vectors.** Without
+  `zone_id_field`, both tools key zones by row number. The groups layer holds only the zones that
+  got pixels, so every zone after a missing one is paired with another zone's vector. With 30
+  zones, the gap at row 3 and a label the vectors determine exactly, 25 of the 28 zones fitted were
+  mispaired and the fit reported no skill (blocked r2 below zero on both stacks). Keyed by
+  `zone_id_field="zone_id"`, the same data joins all 29 correctly and scores 1.0. The fitted
+  numbers of such a join are the same before and after this change, but its prediction map now
+  carries the CSV row's `zone_id`, `pixels` and `area_km2`, so it looks complete where it used to
+  lack all three. Which key to use when none is named is a policy decision, so it is recorded
+  rather than changed.
+
+Nothing was deployed.
+
+### Stage S6.10 The vectors' zone_id is read as text
+
+*2026-10-04, `claude/zone-id-leading-zero`, stacked on `claude/fit-zone-model-label-collision`.
+Fixes the first defect S6.9 found and left.*
+
+`embed_zones` writes each zone's id into the vectors CSV as the polygons hold it, and a TIGER GEOID
+is text, so California's tract `06037100000` keeps its leading zero in the file. The fitter read
+that file with a bare `pd.read_csv`. When every id in a file is digits, pandas types `zone_id` as
+int64, and the `astype(str)` that follows turned `06037100000` into `6037100000`, which no GEOID in
+the polygons equals. Measured through `embed_zones` (service stubbed) → `fit_zone_model` on pandas
+2.2.3 and 3.0.5: 30 California tracts gave *"only 0 zones have both a vector and a label"*, and 15
+California with 15 Illinois tracts fitted the 15 Illinois ones, reported ok, and left every
+California tract off the prediction map. Any state from 01 Alabama to 09 Connecticut fails the same
+way, and so does any zero-padded code when every id in the file is digits, such as TRACTCE
+(`010110`) or a HUC of regions 01–09. So did the zone-groups layer of the California tracts, passed
+as the polygons with `zone_id_field="zone_id"`.
+
+**`fit()` now reads `zone_id` with `dtype=str`**, so pandas no longer decides what an id is:
+`06037100000` comes back as `embed_zones` wrote it, as does every id except those listed at the end.
+Nothing else about the read changed: the features and the support are still typed by inference. The
+same change ends the other rewrites inference made to a column of ids that all look like one kind of
+number: tract NAMEs (`101.10` came back `101.1`), `TRUE` (came back `True`), space-padded numbers
+(`" 42"` came back `42`) and exponents (`1e5` came back `100000.0`). Each was measured at the read
+on both stacks, and tract NAMEs also through the two tools.
+
+Two other failures of the same read went with it, on both stacks:
+
+- one empty or `NA` id in a layer of digits made pandas type the whole column float64, so every
+  other id came back with `.0` on the end (`17031100001.0`) and nothing joined. Now the other 29 of
+  30 zones fit;
+- a layer holding both `01` and `1`, distinct zones, read both as `1`. With `1`–`15` and
+  `01`–`015`, the fit said ok with 30 zones, but its map held 15 ids twice, one copy of each
+  carrying another zone's vector, and no zone keyed `01`–`015` (blocked r2 −0.10). Now all 30 zones
+  fit, each with its own vector (0.88).
+
+**Nothing else reads this CSV by key.** `read_vector` tries GDAL first, and GDAL's CSV reader types
+every field as text, as Stage 15 found. `inspect_file_for_analysis` previews it with `csv.reader`.
+The one other `read_csv` that can open it, `_read_plain_table` behind `time_series` and
+`detect_time_column`, does type by inference, but it serves time tools, and nothing in this file is
+a time. Code the model writes in `execute_code` can of course still read it with pandas.
+
+**Where inference rewrote no id, nothing moved.** The old and new `fit()` gave identical replies and
+byte-identical prediction files on seven layers: Illinois GEOIDs, row numbers, a CSV without
+support columns, ids with letters in them, Illinois polygons whose GEOID is stored as a number, a
+CSV with no `zone_id` column (the same `KeyError`), and two-letter codes that include `NA` (see
+below). Both stacks.
+
+**Pairings that worked by accident now fail.** Vectors embedded from ids held as text, then fitted
+against a *different* polygon layer that stores the same ids as numbers, met only because inference
+rewrote the CSV's ids the way that layer's type had already rewritten its own. For GEOIDs of a
+state from 01 to 09, stored as a number (`6037100000`, the zero already gone), 30 California
+tracts went from 30 fitted to *"only 0 zones…"*, and 15 California with 15 Illinois tracts from 30
+to 15, with no warning. TRACTCE stored as an integer and tract NAMEs stored as floats (`8300.1`)
+went from 30 to *"only 0 zones…"*. All on both stacks. Matching ids by their value rather than their
+text would make `01` and `1` one zone, the mispairing above, so that is a policy decision, recorded
+here rather than made.
+
+**Decided on 2026-10-07: report the unmatched side, and do not match by value.** The fit's reply now
+carries a `join` report: how many vectors and polygons there were, how many matched, how many
+vectors found no polygon and how many polygons had no vector. It also gives up to three example
+ids from each unmatched side. A vector without a polygon adds a `warning` that names an id from
+each side (`'06037100000'` against `'6037100000'`) and the two ways to fix it. The report and the
+warning come back with *"only 0 zones…"* too, so the failure says why. A vector meets no polygon
+only when the two sides key the zones differently, so that is the case that warns. A polygon
+without a vector is ordinary, because a subset was embedded or a zone had no pixels, so it is only
+counted. The mixed California and Illinois pairing still fits its 15 Illinois tracts, and now
+says that 15 of 30 vectors found no polygon. `_join_report` in `rs_embed_zonal_worker.py`; four
+tests in the same file cover the warning, a failed join, a clean join and a subset.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
+`embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
+
+- 30 California tracts, 15 California with 15 Illinois tracts, and 30 tract NAMEs such as
+  `8300.10`: every zone must fit, under its own id, carrying its own vector's pixel count (no two
+  zones share one) and its own polygon's label. Re-keying each CSV row with the next row's id, a
+  mispairing, fails all three at the pixel count;
+- 30 Illinois tracts must give the same reply and a byte-identical prediction file under the old
+  read and the new one. The old read is emulated by calling `read_csv` with the path alone, as the
+  old code did, and the emulation must still give *"only 0 zones…"* on the California tracts, so
+  the comparison cannot pass by comparing the new read with itself. Because the emulation drops
+  whatever the new call adds, the same fix written with `converters=` passes all four too.
+
+On S6.9's head the three in the first item fail (*"only 0 zones…"* twice, 15 of 30 once) and the
+comparison passes; with the change all four pass, on both stacks. The full `rag_pipeline` suite
+gives 2147 passed and 4 skipped on the Mac. In the replica, with `--network none`, it gives 9
+failed, 2135 passed and 7 skipped with the change, against 12 failed and 2132 passed on S6.9's head
+with the new file added: the three tests above are the whole difference. The nine that fail on both
+need packages the deployed image lacks, as in S6.9. An independent read-only audit re-derived these
+numbers and the ones above on both stacks before the first commit; its corrections are in.
+
+**Found here, not fixed:**
+
+- **An id pandas reads as missing still drops out.** `dtype=str` does not stop pandas' NA parsing,
+  so an id of `NA` (North America's continent code, Namibia's ISO code), `None`, `null`, `nan`,
+  `N/A` or nothing at all comes back missing, on both stacks. In a layer of two-letter codes, the
+  zone keyed `NA` left the fit without a word: 29 of 30 fitted and the reply said ok, before this
+  change and after it. The one exception is an id that is literally `nan` on pandas 2.2.3, where
+  the `astype(str)` after the read turns the missing value back into the text `nan`, so that zone
+  joins (30 of 30); on 3.0.5 it drops too. Keeping such ids takes `keep_default_na=False` with the
+  default list restored for every other column.
+- **An id containing a comma, or starting with a double quote, breaks the CSV.** `embed_zones`
+  joins each row with `,` and quotes nothing. `Census Tract 1001, Cook County, Illinois` becomes
+  three fields: 30 such tracts gave *"only 0 zones…"*, which names the wrong cause, and a layer
+  where every other name had a comma gave that when the first row had one and a `ParserError` when
+  it did not. An id written as `"Main 0" district` is read back as `Main 0 district`, and 30 of
+  them gave *"only 0 zones…"*. Same before and after, on both stacks.
+
+Nothing was deployed.
 
 ---
 
@@ -1469,6 +1675,42 @@ record, with that layer and the "Continuing…" line, and never wrote the Champa
 switch mid-stream does the same to the turn's messages: `patch` writes into the message at the
 turn's index in whatever list is on screen (read from the code). Closing it means holding the
 switch until the turn ends, or stopping the turn on a switch, which is a decision of its own.
+
+### Stage S9.11 A layer download that left its credentials behind
+
+The agent delivered its layers, and the map dropped them. On agent.i-guide.io on 2026-10-04, a
+Chrome tab chatting on the service key and not signed in uploaded Maui County's tracts and asked
+for regions. The trace showed `regionalize` reporting *"1 layer on the map"* and an `add_map_layer`
+call, and the answer said *"The resulting regions are visible on the interactive map"*. The map
+held one layer, the upload. The access log had the reason: the page fetched four layer files
+during the turn, `GET /agent/files/<id>/download`, and all four got 403 `not_signed_in`.
+
+**Every agent call carried the caller's credentials except the ones that fetch its files.**
+`agentClient.ts` sends `X-API-KEY` and `credentials: 'include'` on chat, upload, the model list
+and saving a conversation. `App.tsx` fetched a file the agent wrote in three places (a `map_layer`'s
+GeoJSON, the artifact fallback, and a restored conversation's layers), each with a bare `fetch`.
+In token mode the download route accepts a sign-in cookie or the key (`_require_user`), and a bare
+same-origin fetch sends the cookie but never the header. So a browser running on the key alone,
+as this one was, lost every layer, and the turn still counted as map-delivered. Cross-origin, where `npm run dev` runs against the deployed API, the bare fetch
+also left the cookie behind. A signed-in user on agent.i-guide.io keeps the cookie and should be
+unaffected. That is read from the code, not measured signed in.
+
+**`fetchAgentFile` (`agentClient.ts`) is the one way the page fetches an agent file.** It attaches
+the key and the cookie only when the url's origin is the API's own, because a layer url can point
+anywhere and a key sent to another host is a leaked key. A refused `map_layer` download now leaves
+a warning line in the turn's trace (*"map: … could not be loaded (HTTP 403, not_signed_in), so it
+is not on the map"*) instead of nothing.
+
+`npm run check:files` pins both halves: the agent's origin gets the key and the cookie, another
+host gets neither, the dev case sends the cookie, and Stop's signal survives. It also checks the
+class, not the instance: `App.tsx` must contain no `fetch(resolveUrl(`. The build passes. Run
+against the previous `App.tsx`, that guard finds all three bare fetches.
+
+**Not done here.** The answer's *"visible on the interactive map"* comes from the server, which
+cannot see a download fail in the browser. A restored conversation still counts a refused layer
+as *"no longer available"*, and a refused artifact-fallback download is still silent. The fix has
+not been seen in a browser yet. The only browser that reproduces the failure is the deployed site,
+whose UI is still the 2026-09-22 build (MapLibre 4.7.1).
 
 ---
 
@@ -5358,6 +5600,368 @@ from this file. That needs no rebuild (`--no-build`), and recreating agent-api c
 flight (Stage 13). The `describe_map` text lives in the mcp-server image, so it changes on that
 image's next rebuild.
 
+---
+
+## Stage 32 — The fallback reads past ASCII and stops at a sentence end {#stage-32}
+
+*2026-10-03 to 2026-10-05. Branch `claude/place-fallback-recall`.*
+
+`extract_locations_from_query` (`rag_pipeline/search/spatial.py`) asks spaCy for GPE, LOC and FAC
+entities first. When it finds none, or the model is missing (the Mac, CI), the capitalization
+fallback `_capitalized_candidates` builds the candidates that `resolve_query_bbox` sends, in
+order, to Google's paid Geocoding API. In production the fallback is no corner case. The deployed
+model finds no place entity in 30 of GeoAnalystBench's 44 distinct task titles, 28 of its 50
+instructions and 7 of the 10 geopathfinder prompts. Two recall defects in the fallback were
+measured on 2026-10-03 by importing the deployed module inside `agent-api`. Both came from one
+regex, `\b([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2})\b`.
+
+### Stage S32.1 A word had to be ASCII
+
+Python's `\b` is Unicode-aware, so "ô" counts as a word character. In "Rondônia" the class stops
+at the "ô", the closing `\b` then fails between "d" and "ô", and no candidate can start at the "R"
+at all. "São Paulo" became "Paulo". This mattered in production because NER misses exactly such
+names. en_core_web_sm 3.8.0 tags "Rondônia" as ORG in all three GeoAnalystBench texts that name it
+(task 9's title, and instructions 9 and 10). So production fell back, and the fallback offered
+"Find" for "Find the deforestation rate for Rondônia", never the state.
+
+Sixteen constructed sentences, one per non-ASCII place, show the same pattern. NER misses 8 of
+the 16: Rondônia, Curaçao, Île-de-France, Malmö and Martha’s Vineyard as ORG, Bogotá and Kraków as
+PERSON, and Xi’an as nothing. (A 17th repeats Rondônia in decomposed form, and NER tags it GPE.)
+The old fallback offered the right place for none of the eight. For two it offered fragments:
+"France region" and "France" for Île-de-France, and "Vineyard" and "Martha". Real queries carry
+such names. The agent-api container started on 2026-10-02 at 14:33 UTC had logged 8 distinct
+candidates when its log was read on 2026-10-03, and one of them is "México". NER returned it and
+it resolved, but the fallback could not have produced it.
+
+The change:
+
+1. A word starts with an uppercase letter of any cased script in the Basic Multilingual Plane.
+   Python's `re` has no `\p{Lu}`, so the letters are spelled out as one class: the plane's 1,200
+   uppercase and titlecase characters. 1,158 are letters, among them Latin, Greek, Cyrillic,
+   Armenian, Georgian, Coptic, Cherokee and Glagolitic, and 42 are Roman numerals and circled
+   letters. Cased scripts beyond the plane, such as Deseret, are left out. Building the class takes
+   about 5 ms at import in agent-api, and compiling the pattern about 3 ms more.
+2. The rest of a word is letters of any script, ".", "-", "'", the typographic apostrophe U+2019
+   ("Xi’an", "Martha’s Vineyard") and U+2018, which stands in for the okina ("Hawai‘i"). The
+   letter class is `[^\W\d_]`, which also admits a few numeric signs such as "²" and "½".
+   "Chicago’s" is now one word, as "Chicago's" always was.
+3. The query is NFC-normalized first. A combining mark is not a word character, so decomposed
+   text ("o" followed by U+0302) would cut the word to "Rondo". A mark with no precomposed letter
+   (an "M" with a macron, say) still cuts it.
+
+The CSV this was measured on spells the state "Rond么nia". Its UTF-8 bytes were once decoded as
+GBK, and the copy kept the result. NER tags that spelling ORG as well. The mojibake is reversible
+in 4 of the 100 GeoAnalystBench texts. The counts below are the same on the raw and the repaired
+text, and the candidates quoted are from the repaired one.
+
+### Stage S32.2 A run crossed a sentence end
+
+Words keep their "." for "U.S." and "St. Louis", and any whitespace could separate two words of a
+run, so a run went on past the end of a sentence. On the fallback path, 14 candidates in 13 of
+the 50 instructions crossed a period or kept one. Five carry a place: "Catalina Island. Update",
+"Tasmania.", "USA. You", "Georgia." and "Wyoming. You'll". Nine carry a technical term: "Arcpy.
+First" (4), "Python." (3), "L-function. First" and "GeoDataFrame. You". A bare "Tasmania." is the
+run "Tasmania. The" after `_NOT_PLACES` removed "The". The same happened to "Python. The", and
+"Python." with its period no longer matched `_NOT_PLACES`'s "python". So the fallback offered, in
+three instructions, a term the vocabulary exists to stop.
+
+NER returns all five of those places as GPE or LOC, so in production none of them reached the
+fallback. The defect shows where NER misses. For "flood depth Illinois. Then county summary" the
+model returns "flood depth Illinois" as a PERSON, and the fallback offered "Illinois. Then
+county" and "Illinois. Then", never "Illinois". Google resolves that joined string to Illinois
+anyway, as a partial match (S32.5). For the other joined strings its answer was not measured.
+
+The change: a period, or a period and a closing quote, ends the run unless it closes an initial
+("N. Dakota"), an initialism ("U.S.", "D.C.") or an abbreviation that opens a place name. Those
+are St, Ste, Mt, Ft and Pt, in capitals too ("ST. LOUIS"). "Mts" was left out, because it ends
+names ("Rocky Mts.") more often than it opens them. Each rule is a fixed-width lookbehind on the
+gap between two words. The rest of the pattern, and every rule applied after it, is unchanged.
+
+*Revised during the work.* The first version looked only at the character before the gap. An
+independent audit of this entry found what that missed. S32.1 had made U+2018 and U+2019 word
+characters, so "Ohio.’ Then" became one run where the old code had split it, the very defect this
+stage fixes, brought back by the other half of the change. A period followed by a closing quote
+now ends the run as well. That also splits the ASCII "Ohio.' Then", which both versions had
+joined.
+
+### Stage S32.3 Measured on the deployed stack
+
+Both versions of `spatial.py` ran in memory inside agent-api, from a script piped to `docker exec
+-i agent-api python -`. The container was created 2026-10-02 14:33 UTC from image
+`deeb331964f6` and runs Python 3.11.16, spaCy 3.8.16 and en_core_web_sm 3.8.0. The script wrote
+nothing to it. agent-api was recreated on 2026-10-04 at 05:01 UTC from image `21d65b66a1c9`,
+with the same versions and the same `spatial.py`, and every number below was measured again
+there, on the final code. "Before" is `prototype` at `5570d63`, whose extractor is Stage 16's.
+The running container predates Stage 16.
+
+| corpus | texts | fallback alone: changed | production path: changed |
+|---|---|---|---|
+| GeoAnalystBench task titles | 44 distinct | 1 | 1 |
+| GeoAnalystBench instructions | 50 | 15 | 7 |
+| geopathfinder prompts | 10 | 0 | 0 |
+| constructed probes | 40 | 25 | 11 |
+
+The fallback alone is what the Mac and CI run. Its output is identical under the Mac's Python
+3.13.5 and agent-api's 3.11.16 for every text measured here: 154, counting duplicate title rows
+and the 4 repaired copies. On the production path, 8 corpus texts change.
+The three that name Rondônia now offer it: first in the title, second in instruction 9 and third
+in instruction 10. The other five split "Arcpy. First" (4) or "L-function. First" (1), and the
+three-candidate cut then keeps a different set of non-place words. In instruction 25 those are
+"Finally", "COVID-" and "Second". No candidate crosses a period any more. 14 did on the fallback
+path, 5 of them on the production path. On 200,000 random ASCII strings, every output that
+differs between the versions comes from a text with a period, or a period and an apostrophe,
+before whitespace. Over the texts measured here the fallback costs 16.1 µs a text in agent-api,
+against 12.2 µs before.
+
+`test_spatial_locations.py` has 27 new cases. Against the old code, 17 fail on the Mac and the
+same 17 fail in agent-api. The other 10 pass on both, and they guard what must keep working: St.
+Louis, ST. LOUIS, U.S. Virgin Islands, Washington D.C. Metro, N. Dakota, Ft. Collins, Mt. Rainier,
+Sault Ste. Marie, Champaign Illinois, and "Ohio.’ Then", the audit's regression. The whole file,
+52 tests, passes in agent-api with the model loaded. pytest needs files on disk, so a small runner
+exec'd the unchanged test file in memory there. On the Mac that runner reproduced pytest's result
+exactly: 35 passed and 17 failed before, 52 passed after. `rag_pipeline/tests` on the Mac: 2164
+passed, 4 skipped. The suite and the probes sent no request to Google.
+
+### Stage S32.4 What this stage did not change
+
+- **First-word candidates, settled before this stage.** On 2026-10-03 Google returned HTTP 200
+  `ZERO_RESULTS` for 13 bare words: ten sentence openers (Your, First, Use, Analyze, Finally,
+  Identify, Visualize, Calculate, Save, Then) and three place homonyms (Split, Lead, Mobile). So
+  the first-word candidates that S16.1 left unmeasured were judged harmless, and they stay. A rule
+  dropping a sentence's first word would lose places NER misses where they open a keyword query:
+  6 of the 40 measured (Tasmania, Champaign, Nepal, Amazon, Sahel, Madison). `ZERO_RESULTS`
+  requests are still billable.
+
+  One side effect follows from the existing rules. In "flood depth Illinois. Then county
+  summary", "Then" is now a run of its own. The feature-word rule extends it to "Then county",
+  and the longest candidate goes first: `['Then county', 'Illinois', 'Then']`. The old code did
+  the same for any sentence after a lowercase word ("…for the state. Then county summary" gave
+  `['Then county', 'Then', 'Map']`). Google returns `ZERO_RESULTS` for "Then county" (S32.5), so
+  "Illinois" is reached next, one billable request later.
+- **The three-candidate cut, longest first.** On the fallback path, "USA" in instruction 37 now
+  falls outside it, where the joined "USA. You" used to lead. "HKG" (instruction 25) and "Berlin"
+  (42) fall outside it in both versions. In production NER returns USA and Berlin as GPEs and HKG
+  as an ORG, so production offers HKG in neither version. In instructions 9 and 10 "Brazilian" (9
+  letters) still sorts ahead of "Rondônia" (8), and in instruction 10 so does "Visualize", one of
+  the 13 `ZERO_RESULTS` words. Google resolves "Brazilian" to Brazil (S32.5), so Rondônia is not
+  reached there in either version.
+- **An initial, an initialism or a listed abbreviation at a sentence end still joins the next
+  word.** "Washington D.C. Then map it" gives "Washington D.C. Then", as before, and so do "Plan
+  B. Then" and "Main St. Then". The spelling cannot tell the "U.S." of "U.S. Virgin Islands" from
+  a "U.S." that ends a sentence.
+- **A line break still joins a run**, because the gap is still any whitespace. No corpus text has
+  capitalized words on both sides of one.
+- **A lowercase particle still splits a name.** "Côte d'Ivoire" gives "Ivoire" and now "Côte".
+- **NER-path quirks seen while measuring,** where the fallback is never consulted: "trails near
+  Ft. Collins" gives "Ft" (GPE), "shipping at Sault Ste. Marie" gives "Sault Ste" (FAC), and
+  "flood risk in ST. LOUIS" gives "ST" and "LOUIS".
+
+### Stage S32.5 What Google returns, measured afterwards
+
+On 2026-10-05 at 03:56 UTC, with approval for four paid requests, a script inside agent-api
+geocoded four of the candidates above with the container's own key, one request each and no
+retry.
+
+| candidate | status | first result | partial match |
+|---|---|---|---|
+| "Rondônia" | OK | Rondônia, Brazil (`administrative_area_level_1`) | no |
+| "Brazilian" | OK | Brazil (`country`) | yes |
+| "Then county" | `ZERO_RESULTS` | none | |
+| "Illinois. Then county" | OK | Illinois, USA (`administrative_area_level_1`) | yes |
+
+Two conclusions change.
+
+- **Rondônia is reached only in the title.** For "Find the deforestation rate for Rondônia" the
+  state is now the first candidate, and it resolves to the state's own box. The old code's only
+  candidate there was "Find", whose answer was not measured. In instructions 9 and 10,
+  `resolve_query_bbox` stops at "Brazilian", which Google reads as Brazil. That box is about 43
+  times Rondônia's by area, and it is the scope in both versions, so the change does not alter what
+  those two instructions search.
+- **Google rescued the joined string.** "Illinois. Then county" resolves to Illinois as a partial
+  match. So for "flood depth Illinois. Then county summary" the old code already found the right
+  box, with one request. The new code reaches the same box with two, because "Then county" fails
+  first. Failures are cached (up to 512 entries), so the extra request is paid once per process.
+
+So the sentence-end rule is justified by its candidates, not by a box it gained here. It stops
+"Python." at `_NOT_PLACES`, and it no longer leans on Google's partial matching to find the
+place. Google's answers for the other joined strings ("USA. You", "Wyoming. You'll", "Catalina
+Island. Update", "Arcpy. First") were not measured. `get_bounding_box` takes the first result
+whatever its `partial_match`, which is how "Brazilian" becomes Brazil. Whether a partial match
+should rank below a later exact one is not decided here.
+
+Nothing was deployed. agent-api still runs the extractor from before Stage 16.
+
+---
+
+## Stage 33 — The picker offers only models that can call tools {#stage-33}
+
+*2026-10-04. Branch `claude/hide-non-tool-models`.*
+
+The agent binds function tools on every step. `/agent/models` fetched AnvilGPT's roster live and
+offered all of it, but Purdue configures tool calling per model. Measured 2026-10-04, with one
+tool and `tool_choice` left to the server, as the agent sends it: qwen3:4b and qwen2.5:7b answer
+HTTP 400 in 0.2 s, "\"auto\" tool choice requires --enable-auto-tool-choice and
+--tool-call-parser to be set". No request parameter gets past that. `"required"` and a named
+function are refused for the same missing flag, and Open WebUI's `params.function_calling`
+changes nothing. Only `"none"` answers, with the call written into the text as `<tool_call>`. So
+choosing qwen3:4b failed the first step of every turn.
+
+A second defect made it worse. The choice is saved in localStorage, and a `<select>` whose value
+matches no option shows its first enabled one, "Agent default", while every turn still sends the
+saved id. A model that left the list, as qwen3.6:27b did on 2026-10-01, kept failing behind a
+picker that looked right.
+
+### Stage S33.1 What hides a model
+
+Every model on the roster was asked for one call, at the same time:
+
+| outcome | models | time |
+| --- | --- | --- |
+| structured tool call | gpt-oss:120b, llama4:latest, qwen3-coder:30b, qwen3.8:27b | 0.3–1.1 s |
+| refusal naming tool calling | qwen2.5:7b, qwen3:4b | 0.2 s |
+| HTTP 400, `litellm.APIConnectionError: OllamaException - Cannot connect to host` | codegemma, deepseek-r1:70b, llama3.2, llama3.3:70b, mistral, qwen3-vl:32b, qwen3:32b | 14–73 s |
+| timeout at 75 s | devstral-small-2, gemma4:26b-a4b, gemma | — |
+
+Purdue's Ollama backend was down, and LiteLLM reports that as a 400 too. Hiding on the status
+alone would have taken ten models out of the picker for the length of an outage. So only an
+answer about tool calling is a verdict: a structured call (offered), a refusal that names tool
+calling (hidden), or a plain-text answer twice in a row (hidden). A timeout, a 5xx, a 429, an
+auth error, or a 400 that does not mention tools is no verdict, and the model stays listed. The
+Anthropic list already draws this line for availability, which flaps by the minute.
+
+### Stage S33.2 How the question is asked
+
+`agent_runtime/anvil_tool_probe.py` sends one request per model, with no `max_tokens` (a reasoning
+model must not be cut off before its call) and a 45 s timeout. A verdict is kept for six hours.
+A failed probe is retried after ten minutes, and the last verdict stands meanwhile. Three
+measurements on the live roster, and one concern about shutdown, shaped the rest:
+
+- With eight probes at a time, the hung Ollama probes held every slot and the 0.2 s refusals
+  queued behind them, so the first catalogue hid nothing. The bound is now 32, which covers the
+  whole roster.
+- Asked all at once, a refusal took 2.7 s rather than 0.2 s, past a 2.5 s wait. `/agent/models`
+  now waits up to 5 s for models it has never asked. The first catalogue after a restart took
+  5.5 s and hid both, and the next took 0.5 s.
+- A re-probe does not wait. Otherwise an outage would make one page load in every ten minutes
+  sit out the full wait.
+- Probes run on daemon threads, not an executor, whose threads are joined at exit: one in flight
+  against a dead backend would hold a container stop for up to its timeout.
+
+### Stage S33.3 What the UI does with it
+
+The AnvilGPT group label says how many were hidden ("— 2 hidden: no tool calls"), and
+`/agent/models` lists them under `hidden` with the reason. A saved model that the catalogue no
+longer offers resets to the agent default, and a notice gives the reason. When there is no
+catalogue, the list could not be fetched, or the provider is not configured, the app cannot tell
+whether the model is still offered, so the choice stays. A demo resets the choice without a
+notice, because it pins its model server-side and hides the picker.
+
+Checked in Chrome against a local API (`AGENT_MODE=local`). The picker held 14 AnvilGPT models,
+without qwen3:4b or qwen2.5:7b. A tab with qwen3:4b saved reset on load with "qwen3:4b is no
+longer offered: AnvilGPT refuses tool calls for it (its server runs without a tool-call parser).
+Turns now use the agent default (gpt-5.6-luna).", and its next turn answered on the default.
+
+### Stage S33.4 What this stage does not do
+
+- An API request that names a hidden model still reaches AnvilGPT and fails on its first step,
+  with the server's 400. Only the picker and the saved choice changed.
+- A model that can make one structured call is offered, whether or not it can carry a turn with
+  forty tools bound.
+- qwen3:32b and qwen3-vl:32b were unreachable in this sweep. On 2026-10-02 both answered
+  without a structured call, so the probe will hide them once their backend answers, if they
+  still do. Both were taken out of `_ANVIL_FALLBACK_MODELS`, which offers only models measured
+  calling tools.
+- Verdicts live in the process, so each restart asks again.
+
+---
+
+## Stage 34 — Public data through a gate, not a network {#stage-34}
+
+*2026-10-04. Branch `claude/public-data-fetch`.*
+
+The code peer's sandbox runs `--network none`, so code on its own cannot reach public data. This
+was measured on 2026-10-04 in local mode, over 35 runs, with the code peer's own prompt, model
+(gpt-5.6-luna) and sandbox, and only `execute_code` bound:
+
+- **Data it was given:** code alone matched the dedicated tools, at two to four times the time.
+  DBSCAN at 300 m gave the same three clusters (605, 410 and 306 points). Gi* found the planted
+  block. A 1 km grid found the densest cell.
+- **Public data:** it had no way in. It asked for an upload in 12 of 12 runs, for a county
+  boundary, a buffered city and a DEM. Asked how many census tracts Champaign County has, it
+  answered "approximately 100" from memory in 5 of 6 runs, where TIGERweb says 48. The prompt's
+  ask-for-the-file rule covers loaders, not facts.
+
+### Stage S34.1 Why not give the sandbox a network
+
+Giving the sandbox network is one argument in `build_argv`, and with it the code fetched a
+correct county boundary from TIGER. It was not done, for two reasons. A container with network
+reaches whatever its host can: the services beside it and the cloud provider's internal
+endpoints, not just the public internet. And the code that would run there is written by a
+model that reads web pages, documents and uploads, any of which can carry instructions. So data
+comes in through the agent instead, one request at a time.
+
+### Stage S34.2 The gate
+
+`fetch_public_data(url, filename=None)` (`agent_runtime/public_data_tools.py`) saves one
+download as a conversation file. `execute_code` then reads it through `input_files`, and the
+other tools read it by its id. A request is refused unless:
+
+- It is HTTPS GET to a host on the allowlist. The defaults are Census TIGERweb, Census files and
+  the Census data API; USGS 3DEP, The National Map, earthquakes and water; Overpass; and Chicago
+  open data. `AGENT_PUBLIC_FETCH_HOSTS` replaces the list.
+- The URL carries no credentials, no other port and no IP literal.
+- Every address the host resolves to is public (`ipaddress.is_global`).
+- Each redirect passes the same checks, with at most five.
+- The body stays within 50 MB, read in a stream, and the turn within 10 fetches.
+
+The session takes no proxy settings, `.netrc` or cookies from the environment. TIGERweb answers
+a bad query with HTTP 200 and an error object, so that is reported, not saved as data. The
+result gives the data's shape (keys, feature count, geometry types, property names) and never
+its contents. It also carries `file_id`, `filename` and `download_url`, so the file appears in
+the Downloads panel.
+
+It is off unless `AGENT_PUBLIC_FETCH=1`, and is bound to both the analyze and code peers. The
+registry gained `requires_flag`, so the decider is told the capability exists only while it is
+on. `test_supervisor_knows_its_peers.py` checks that too.
+
+The connection is not pinned to the address that was checked, so a DNS answer could change
+between the check and the connect. Only a host on the list could exploit that, and the defaults
+are government and open-data services.
+
+### Stage S34.3 What it did
+
+Same harness, code only plus this tool:
+
+| question | code only | code + `fetch_public_data` | truth |
+| --- | --- | --- | --- |
+| census tracts in Champaign County | "approximately 100" (5 of 6) | 48 | 48 |
+| county area | asked for a file | 2,586.01 km² (2 of 2) | 2,586.0 km² |
+| 2 km buffer of Champaign city | asked for a file | 165.04 km² (2 of 2) | 165.0 km² |
+| Urbana elevation, min / max / mean | asked for a file | 205 / 259 / 223 m over a bounding box | 208 / 237 / 222 m inside the city (`dem_for_region`) |
+| M4.5+ earthquakes, past week | not asked | 135, largest M5.9 | 135, M5.9 |
+
+The first description gave URL shapes only. With it, the county run fetched the state outline,
+and the buffer run spent 11 fetches guessing TIGERweb layers. Naming the three common layers,
+and how to list a service's layers, fixed both.
+
+Without the tool, the full agent answered the earthquake question through `web_search` and
+`web_fetch`. It got the count right and the largest event wrong (M5.5): `web_fetch` returns
+passages, not data.
+
+The same question was then asked in the app, in Chrome against a local API: "How many
+earthquakes of magnitude 4.5 or greater has USGS recorded in the past 7 days? Show them on the
+map." The analyze peer fetched the USGS weekly feed (95 KB) and called `add_map_layer` on that
+file. 135 points reached the map, both files showed in the Downloads panel, and the turn took
+about 50 s. While bound, the tool's schema costs 475 tokens per model call.
+
+### Stage S34.4 What this stage does not do
+
+- The GSE embedding still needs the rs-embed service and its Earth Engine credentials. No public
+  endpoint replaces that.
+- A DEM covers the requested box. Clipping to a city needs its boundary, fetched as well.
+- It makes one GET per call. An API that needs POST, or that pages, spends one fetch per page
+  against the per-turn cap.
+- It is off by default. Turning it on is a deployment decision.
 
 ---
 

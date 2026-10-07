@@ -44,6 +44,10 @@ class Toolset:
     #: ``[]`` for an empty registry), so the clause is true only then. The deployed image shipped
     #: no skill roots at all while the decider was told the code peer had skills.
     requires_skills: bool = False
+    #: The factory binds nothing unless this environment variable is on, so the clause is true
+    #: only then. A gated capability the decider is told about while it is off sends work to a
+    #: tool that is not there.
+    requires_flag: str = ""
 
 
 # Both peers bind nearly the same spatial toolkit; the split below records which ones actually get
@@ -80,6 +84,10 @@ _SHARED: Tuple[Toolset, ...] = (
             "listing the files this conversation has produced"),
     Toolset("make_code_execution_tools",
             "running code in a sandbox"),
+    Toolset("make_public_data_tools",
+            "downloading public data (Census boundaries and tables, USGS elevation, "
+            "OpenStreetMap) from approved sources as files for that code",
+            requires_flag="AGENT_PUBLIC_FETCH"),
     # Shared, not code-only: both peers bind the same two loaders over the same skill roots. The
     # code peer calls make_skill_tools itself, and since 6ba1bd3 build_agent_executor adds it for
     # every peer that hands over a preloaded tool list, analyze included. Described as the code
@@ -134,15 +142,25 @@ def skills_available(skill_roots: Optional[Sequence[str]] = None) -> bool:
         return False
 
 
+def flag_on(name: str) -> bool:
+    """The same reading the gated factories make of their switch."""
+    import os
+
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def describe(capability: str, *, skill_roots: Optional[Sequence[str]] = None) -> str:
     """The inventory clause list for a capability, deduplicated and in declared order.
 
     ``skill_roots`` are the roots the peer's skill tools are built from. A ``requires_skills``
-    toolset is described only when discovery there finds at least one skill.
+    toolset is described only when discovery there finds at least one skill, and a
+    ``requires_flag`` toolset only when its switch is on.
     """
     seen, out = set(), []
     skills: Optional[bool] = None  # discovered once, and only if a toolset needs the answer
     for tool in CAPABILITIES.get(capability, ()):  # declared order is the reading order
+        if tool.requires_flag and not flag_on(tool.requires_flag):
+            continue
         if tool.requires_skills:
             if skills is None:
                 skills = skills_available(skill_roots)

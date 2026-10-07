@@ -4,6 +4,7 @@ import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
 import type { AppTab } from '../uiVariant';
 import { groupedSources, sourceHref, type SourceGroup } from '../answerFormat';
+import { hiddenNote } from '../modelChoice';
 
 export interface ChatMessage {
   role: 'user' | 'agent';
@@ -600,7 +601,8 @@ export function ChatPanel(p: Props) {
                     label={g.label
                       + (g.configured ? (g.caveat ? ` — ${g.caveat}` : '')
                                       : ` — needs ${g.needs || 'configuration'}`)
-                      + (g.stale ? ' — list unavailable' : '')}>
+                      + (g.stale ? ' — list unavailable' : '')
+                      + hiddenNote(g.hidden)}>
                     {g.models.map((m: string) => (
                       <option key={m} value={m} disabled={!g.configured}>{m}</option>
                     ))}
