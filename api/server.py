@@ -1165,6 +1165,8 @@ def agent_models():
           provider means that fetch failed and known ids are being shown instead. AnvilGPT
           models that cannot make a structured tool call are left out of `models` and listed
           under `hidden`, each with the reason, because the agent binds tools on every step.
+          NCSA Lumen is listed in dev and local mode only, since its calls spend the key
+          owner's coins.
         schema:
           type: object
           properties:

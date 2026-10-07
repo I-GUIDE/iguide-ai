@@ -263,7 +263,7 @@ def _reasoning_preserving_chat_openai() -> Any:
 def build_default_llm() -> Any:
     """Build a ``ChatOpenAI`` instance from environment variables.
 
-    Priority: AGENT_LLM_PROVIDER=anvilgpt → VLLM_* → OPENAI_* → defaults.
+    Priority: AGENT_LLM_PROVIDER=anvilgpt or lumen → VLLM_* → OPENAI_* → defaults.
     """
     try:
         ChatOpenAI = _reasoning_preserving_chat_openai()
@@ -275,6 +275,9 @@ def build_default_llm() -> Any:
     anvil = _anvilgpt_settings()
     if anvil:
         return ChatOpenAI(temperature=0.0, **anvil)
+    lumen = _lumen_settings()
+    if lumen:
+        return ChatOpenAI(temperature=0.0, **lumen)     # no max_tokens: see build_llm's branch
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -320,6 +323,70 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-2024-11-20"
 # call belong here (2026-10-04). qwen3:32b and qwen3-vl:32b were dropped: on 2026-10-02 both took
 # the tools and answered without a call, and this agent cannot run a turn on such a model.
 _ANVIL_FALLBACK_MODELS = ("qwen3.8:27b", "qwen3-coder:30b")
+
+# NCSA Lumen (https://lumen.ncsa.illinois.edu), an OpenAI-compatible API on campus. Offered in
+# dev and local mode ONLY: every call spends the Lumen coins of whoever created LUMEN_API_KEY, so
+# a token-mode deployment does not hand it to every platform user who signs in. A request naming
+# it there is refused at build_llm, not just left out of the picker.
+#
+# Probed 2026-10-06 with one tool and tool_choice left to the server, as the agent sends it. All
+# four text models made a structured call in 0.9-1.4 s and answered from the tool result in
+# 1.2-3.0 s. Driving the code peer with its full toolset, each got the census tract count (48),
+# Urbana's elevation (208.13 / 237.04 / 221.55 m) and a DBSCAN on an upload (605 / 410 / 306)
+# right, at 20-34 s a turn. Their reasoning arrives as `reasoning_content`, or as `reasoning` on
+# nemotron, and _REASONING_KEYS keeps both.
+LUMEN_DEFAULT_URL = "https://lumen.ncsa.illinois.edu/v1"
+_LUMEN_DEFAULT_MODEL = "deepseek-v4-flash"
+_LUMEN_FALLBACK_MODELS = ("deepseek-v4-flash", "gemma-4-31b-it", "nemotron-3-super-120b-a12b",
+                          "ornith-1.0-35b")
+
+
+def lumen_offered() -> bool:
+    """Whether this deployment offers NCSA Lumen: dev and local mode only.
+
+    The modes are compared by name, not through module constants. A tree older than local mode
+    has no ``deployment_mode.LOCAL``, and reading it raised AttributeError inside the catalogue,
+    which took the whole model picker down. Tested against the deployed tree, not just this one.
+    Any failure here means "not offered": this is a gate, and it must never break the picker.
+    """
+    try:
+        from agent_runtime import deployment_mode
+
+        return deployment_mode.current_mode() in ("dev", "local")
+    except Exception:  # noqa: BLE001 - an unknown AGENT_MODE is reported where it is read
+        return False
+
+
+def _lumen_base_url() -> str:
+    return normalize_openai_base_url(os.getenv("LUMEN_URL") or LUMEN_DEFAULT_URL)
+
+
+def _lumen_settings() -> Optional[Dict[str, Any]]:
+    """NCSA Lumen as the PROCESS default, or None. Selected by AGENT_LLM_PROVIDER=lumen.
+
+    This is the operator's choice of what every request answers with when it names no model, so
+    it applies in any mode. lumen_offered() governs something else: who may PICK a Lumen model
+    per request. A token-mode deployment can therefore default to Lumen while its users still
+    cannot choose other Lumen models from the picker. Setting the variables alone never moves the
+    default, as with AnvilGPT.
+    """
+    if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "lumen":
+        return None
+    key = os.getenv("LUMEN_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "AGENT_LLM_PROVIDER=lumen but LUMEN_API_KEY is unset. Create a key on your Lumen "
+            "profile page (https://lumen.ncsa.illinois.edu/profile) and click Save Key.")
+    return {"api_key": key, "base_url": _lumen_base_url(),
+            "model": os.getenv("LUMEN_MODEL") or _LUMEN_DEFAULT_MODEL}
+
+
+def _lumen_chat_model(entry: Dict[str, Any]) -> bool:
+    """A catalogue entry this agent can talk to: text in and out, and not down. Lumen also
+    serves speech models (granite-speech takes audio), which a chat turn cannot use."""
+    ins = entry.get("input_modalities") or ["text"]
+    outs = entry.get("output_modalities") or ["text"]
+    return "text" in ins and "text" in outs and entry.get("status") != "down"
 
 # This agent ALWAYS binds function tools, and on /v1/chat/completions the legal
 # reasoning_effort values depend on the model — a prefix rule got it wrong in both
@@ -451,6 +518,22 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         # and returns an EMPTY content rather than a short answer.
         return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.8:27b",
                           api_key=key, base_url=base_url, temperature=0.0)
+    if prov == "lumen":
+        if not lumen_offered():
+            raise ValueError(
+                "provider='lumen' is offered in dev and local mode only: its calls spend the "
+                "Lumen coins of whoever created LUMEN_API_KEY.")
+        key = os.getenv("LUMEN_API_KEY")
+        if not key:
+            raise ValueError(
+                "provider='lumen' needs LUMEN_API_KEY. Create one on your Lumen profile page "
+                "(https://lumen.ncsa.illinois.edu/profile) and click Save Key.")
+        if effort:
+            logger.info("reasoning_effort %r is an OpenAI parameter; not sent to Lumen", effort)
+        # No max_tokens, for the reason AnvilGPT gets none: every Lumen text model reports
+        # supports_reasoning, and a ceiling cuts the thinking short into an empty answer.
+        return ChatOpenAI(model=model or os.getenv("LUMEN_MODEL") or _LUMEN_DEFAULT_MODEL,
+                          api_key=key, base_url=_lumen_base_url(), temperature=0.0)
     if prov == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY")
         token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
@@ -505,7 +588,7 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
                         effort, kwargs["model"], sending)
         return ChatOpenAI(**kwargs)
     raise ValueError(
-        f"unknown provider {provider!r}; expected 'openai', 'anthropic' or 'anvilgpt'")
+        f"unknown provider {provider!r}; expected 'openai', 'anthropic', 'anvilgpt' or 'lumen'")
 
 
 # Fallback ids when Anthropic's own /v1/models cannot be reached (no key, or the call
@@ -631,6 +714,30 @@ def list_available_models(*, timeout: float = 6.0, probe_wait: float = 5.0) -> D
             anvil["hidden"] = hidden
     out["providers"].append(anvil)
 
+    # Absent entirely outside dev and local mode, not listed as disabled: there is nothing a
+    # token-mode user could configure to get it, and build_llm refuses it there anyway.
+    if lumen_offered():
+        lumen: Dict[str, Any] = {"provider": "lumen", "label": "NCSA Lumen",
+                                 "configured": bool(os.getenv("LUMEN_API_KEY")), "models": [],
+                                 "caveat": "spends this deployment's Lumen coins"}
+        if lumen["configured"]:
+            try:
+                import requests
+
+                auth = {"Authorization": f"Bearer {os.getenv('LUMEN_API_KEY')}"}
+                resp = requests.get(f"{_lumen_base_url()}/models", headers=auth, timeout=timeout)
+                resp.raise_for_status()
+                lumen["models"] = sorted(m.get("id") for m in (resp.json().get("data") or [])
+                                         if m.get("id") and _lumen_chat_model(m))
+            except Exception as exc:
+                logger.info("Lumen model list unavailable (%s); offering known ids", exc)
+                lumen["models"] = list(_LUMEN_FALLBACK_MODELS)
+                lumen["stale"] = True
+        else:
+            lumen["models"] = list(_LUMEN_FALLBACK_MODELS)
+            lumen["needs"] = "LUMEN_API_KEY"
+        out["providers"].append(lumen)
+
     # Anthropic, queried live for the same reason AnvilGPT is: a hardcoded id that has been
     # retired 404s at request time instead of being absent from the picker.
     # `configured` is credential presence, deliberately, and NOT a liveness probe. A probe was
@@ -690,6 +797,10 @@ def active_llm_description() -> Dict[str, Any]:
     if anvil:
         return {"provider": "anvilgpt", "model": anvil["model"],
                 "base_url": anvil["base_url"], "max_tokens": "unset (server default)"}
+    lumen = _lumen_settings()
+    if lumen:
+        return {"provider": "lumen", "model": lumen["model"],
+                "base_url": lumen["base_url"], "max_tokens": "unset (server default)"}
     if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
         return {"provider": "vllm",
                 "model": os.getenv("VLLM_MODEL"),
@@ -1138,6 +1249,13 @@ _MODEL_WINDOWS = (
     ("o3", 200_000),              # covers o3-mini
     # --- quoted, not measured here ---
     ("gpt-oss", 65_536),          # from AnvilGPT's own error: "exceeds ... (65,536)"
+    # --- reported by NCSA Lumen's /v1/models (max_model_len), 2026-10-06. Lumen is the one
+    # provider here that publishes its windows. gemma's is BELOW the 65,536 floor, so without
+    # its row every long turn on it would 400 ---
+    ("deepseek-v4-flash", 511_994),
+    ("gemma-4-31b-it", 46_790),
+    ("nemotron-3-super-120b-a12b", 262_144),
+    ("ornith-1.0-35b", 262_138),
     ("claude-", 200_000),         # not reachable with this key; unverified
 )
 # Deliberately the SMALLEST window we have seen, because being wrong low only wastes context

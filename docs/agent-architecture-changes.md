@@ -48,6 +48,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 32 | [The fallback reads past ASCII and stops at a sentence end](#stage-32) | 2026-10-03 → 2026-10-05 | Rondônia and São Paulo become candidates; a period that ends a sentence ends the run, unless it closes an abbreviation |
 | 33 | [The picker offers only models that can call tools](#stage-33) | 2026-10-04 | AnvilGPT models are asked for one tool call and left out of `/agent/models` if they refuse; an outage hides nothing; a saved choice no longer offered resets to the default |
 | 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
+| 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -5961,3 +5962,66 @@ about 50 s. While bound, the tool's schema costs 475 tokens per model call.
 - It makes one GET per call. An API that needs POST, or that pages, spends one fetch per page
   against the per-turn cap.
 - It is off by default. Turning it on is a deployment decision.
+
+---
+
+## Stage 35 — Lumen, in dev mode only {#stage-35}
+
+*2026-10-06. Branch `claude/lumen-provider`.*
+
+NCSA's Lumen (`https://lumen.ncsa.illinois.edu/v1`) speaks the OpenAI API with a Bearer key, so
+it fits the client the agent already builds for OpenAI and AnvilGPT. It is a fourth provider,
+`provider="lumen"` with `LUMEN_API_KEY`.
+
+### Stage S35.1 What was measured first
+
+The account's key lists five models: four text models and one speech model
+(`granite-speech-4.1-2b-plus`, audio in), which the picker leaves out. Each text model got three
+tests: a plain reply, one structured tool call with `tool_choice` left to the server as the
+agent sends it, and a round trip carrying the tool's result.
+
+| model | reply | tool call | round trip |
+| --- | --- | --- | --- |
+| deepseek-v4-flash | 0.7 s | 1.2 s | 1.3 s |
+| gemma-4-31b-it | 0.6 s | 1.3 s | 1.7 s |
+| ornith-1.0-35b | 1.5 s | 0.9 s | 1.2 s |
+| nemotron-3-super-120b-a12b | 1.0 s | 1.4 s | 3.0 s |
+
+One call is a low bar, so each model then drove the code peer with its full toolset on three
+questions with known answers: the census tracts in Champaign County, Urbana's elevation, and a
+DBSCAN on an uploaded point set. All twelve turns were right (48 tracts; 208.13 / 237.04 /
+221.55 m; clusters of 605, 410 and 306), at 20 to 34 s a turn. All four report
+`supports_reasoning`. Nemotron returns its reasoning as `reasoning`, the others as
+`reasoning_content`, and `_REASONING_KEYS` already keeps both.
+
+The first key answered `401 Invalid or inactive API key`. A Lumen key is shown once in a dialog
+and only becomes active when it is named and saved there. `.env.example` says so.
+
+### Stage S35.2 Why dev and local mode only
+
+Every call spends the Lumen coins of whoever created the key. On a token-mode deployment the
+picker serves every platform user who signs in, so Lumen is not offered there. `lumen_offered()`
+is the gate, and the picker omits the provider outside dev and local mode rather than listing it
+disabled, since nothing a token-mode user could do would enable it. Hiding it is not the whole
+gate: `build_llm` also refuses `provider="lumen"` outside those modes, so a request built by hand
+cannot spend the coins either. The deployment at agent.i-guide.io runs token mode, so it carries
+the key and does not offer Lumen.
+
+### Stage S35.3 Context windows from the provider
+
+`_MODEL_WINDOWS` was filled by sending oversized requests and reading each provider's rejection,
+because none of them published a window. Lumen does, as `max_model_len` on `/v1/models`, and
+those values are now in the table. One of them mattered. gemma-4-31b-it's window is 46,790
+tokens, below the 65,536 floor an unlisted model gets, so without its row every long turn on it
+would have overrun.
+
+### Stage S35.4 The deployment's default
+
+The operator can also make Lumen the default, the model every request uses when it names none,
+with `AGENT_LLM_PROVIDER=lumen` and `LUMEN_MODEL`. `_lumen_settings()` sits beside
+`_anvilgpt_settings()`. That choice holds in any mode, because the operator makes it for the
+whole deployment, while `lumen_offered()` decides who may pick a Lumen model per request. On a
+token-mode deployment the picker therefore shows "Agent default (deepseek-v4-flash)" but no
+Lumen group, and a hand-built request for another Lumen model is still refused. On 2026-10-06
+the maintainer set the deployment's default to `deepseek-v4-flash`, which had answered all three
+measured questions correctly at 22 to 33 s a turn.
