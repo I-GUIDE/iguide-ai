@@ -614,8 +614,9 @@ fail on both need packages the deployed image lacks, such as pyarrow and xarray.
   `zone_id_field="zone_id"`, the same data joins all 29 correctly and scores 1.0. The fitted
   numbers of such a join are the same before and after this change, but its prediction map now
   carries the CSV row's `zone_id`, `pixels` and `area_km2`, so it looks complete where it used to
-  lack all three. Which key to use when none is named is a policy decision, so it is recorded
-  rather than changed.
+  lack all three. Which key to use when none is named was a policy decision, so it was left to
+  the user, who chose on 2026-10-04 to refuse such a join: S6.11, *Row numbers key only the layer
+  the vectors were numbered by*.
 
 Nothing was deployed.
 
@@ -686,7 +687,9 @@ only when the two sides key the zones differently, so that is the case that warn
 without a vector is ordinary, because a subset was embedded or a zone had no pixels, so it is only
 counted. The mixed California and Illinois pairing still fits its 15 Illinois tracts, and now
 says that 15 of 30 vectors found no polygon. `_join_report` in `rs_embed_zonal_worker.py`; four
-tests in the same file cover the warning, a failed join, a clean join and a subset.
+tests in the same file cover the warning, a failed join, a clean join and a subset. S6.12, *The
+join report's examples line up, and a join that meets nothing points at the key*, orders and
+bounds the examples and changes the hint of a fit that met too few zones.
 
 **Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
 `embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
@@ -727,6 +730,143 @@ numbers and the ones above on both stacks before the first commit; its correctio
   them gave *"only 0 zones…"*. Same before and after, on both stacks.
 
 Nothing was deployed.
+
+### Stage S6.11 Row numbers key only the layer the vectors were numbered by
+
+*Written 2026-10-04 on `claude/zone-groups-row-number-join`, stacked on S6.9; landed 2026-10-07 on
+`claude/fit-zone-leftovers`, after S6.10. Fixes the second defect S6.9, The fit's label is the
+polygons' column, whatever it is called, found and left open.*
+
+Without `zone_id_field`, `embed_zones` and `fit_zone_model` both key zones by row number. The
+rs-embed service returns zone `"i"` for the polygon sent in row *i*, and the fitter pairs polygon
+*i* with the vector keyed `"i"`. That is right for the layer `embed_zones` read. The zone-groups
+layer it puts on the map keeps only the zones that received pixels, so after a zone with none, the
+layer's row numbers and its zones part ways. Passed to the fitter without `zone_id_field`, it paired
+every zone after the gap with another zone's vector. This was measured offline through the two
+tools, with only the service call stubbed: 30 zones, no pixels at row 3, and a label the vectors
+determine exactly. 25 of the 28 zones fitted were mispaired, and the fit reported no skill, with
+blocked r2 at -0.35 on the development machine and -0.69 in the replica of the deployed versions.
+The two differ because, from byte-identical polygons and the same PROJ and GEOS, the two stacks
+compute centroids a few units in the last place apart, and on a grid of equal squares that is enough
+to split them into different spatial blocks. With `zone_id_field="zone_id"` the same data joined all
+29 zones and scored 1.0 on both. Since S6.9 the prediction map of such a join carries each matched
+vector's own `zone_id`, `pixels` and `area_km2`, so nothing on it looked wrong: the shape of row 5
+said zone 4 and showed zone 4's pixel count.
+
+The same mechanism had a second form, measured while reproducing the first. Districts numbered 1 to
+30, embedded with `zone_id_field="district"` and fitted without it, met 28 vectors by row number,
+and each was the vector of the district before (blocked r2 -0.41 on both stacks). Embedded by GEOID,
+the groups layer failed loudly instead, but the message, *"only 0 zones have both a vector and a
+label"*, did not say why. Naming `GEOID` failed too, because the groups layer calls that column
+`zone_id`.
+
+**S6.10's join report saw both and named the wrong cause.** Re-measured on `prototype` after S6.10:
+the gap layer still fitted ok with 28 zones, 25 of them mispaired, at r2 -0.35 on the Mac and -0.69
+in the replica, and the districts 28 of 28 at r2 -0.41 on both. The `join` report counted one vector without a polygon, the last
+zone, which now ran past the end of the layer, and the `warning` blamed a key written two ways,
+such as a dropped leading zero. Neither said that most of the zones that *did* meet had met the
+wrong vector, because a row-number join meets by the number alone.
+
+**Which key to use when none is named was the user's decision.** Four answers were put to them: join
+on the layer's own `zone_id` when its values account for the vectors; refuse, with a hint to pass
+it; tell the model only, in the tool's description; or have `embed_zones` write every polygon into
+the groups layer, so that its row numbers are the keys, which would draw every zone without pixels
+in the map's grey for an unknown class. They chose to refuse, and to refuse wherever the sign
+appears, not only where a `zone_id` column explains it.
+
+**The sign is a vector naming a zone the polygons have no row for.** The layer the vectors were
+numbered by never shows it, because every id came from one of its rows. So that layer still joins by
+row number, even beside a `zone_id` column of its own that means something else, which was the
+constraint on any fix. The groups layer after a gap always shows it, because it is shorter by the
+gaps. The 1-based districts show it at district 30, and a GEOID shows it at once. `fit()` checks for
+it before the join (`_row_number_join_refusal` in `rs_embed_zonal_worker.py`), so a refused fit
+carries no `join` report. The refusal's hint names the column that holds every vector's id and could
+key every polygon, with no blank and no repeat: `zone_id` on the groups layer, the district or
+`GEOID` column on the others, and every such column when there are several. It says the vectors need
+no re-embedding, because a new sweep costs tiles. Without such a column, the hint says where keys
+come from. Refusing, rather than joining on whichever column fits, keeps the join the one that was
+asked for, as `run()` already does for a `zone_id_field` it cannot find. The retry is one call.
+
+**Behaviour that changed on purpose:** an exact prefix of the embedded layer, such as its first 20
+rows, is refused, though those rows would pair correctly. They line up by the accident of order,
+which a filtered or re-sorted copy does not keep, and the check does not try to tell the two apart.
+The user accepted that cost. A groups layer with no gap before its last zone still joins by row
+number, because its rows are then the keys. `fit_zone_model`'s description now says when
+`zone_id_field` may be omitted, and to pass `zone_id_field='zone_id'` for the groups layer, so a
+model that follows it does not meet the refusal.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_row_number_join.py`, which runs offline
+through both tools, with the service stubbed and the real file store:
+
+- the groups layer after a gap is refused, and the column its hint names joins all 29 zones, each to
+  its own vector, at r2 1.0;
+- the embedded layer still joins by row number with no `zone_id`, with a text one, and with one that
+  shuffles the row numbers, which names every vector too, for other polygons;
+- a groups layer with no gap, or with the gap at its last zone, joins by row number;
+- districts 1 to 30 embedded by a column not called `zone_id` are refused, and the hint names that
+  column;
+- an embed keyed by GEOID is refused, with `zone_id` named on its groups layer and `GEOID` on the
+  tracts;
+- a column with a blank or a repeat is never offered, and two columns that hold the ids are both
+  offered;
+- the first 20 rows of the embedded layer are refused, with the general hint.
+
+On `prototype` (after S6.10) 6 of the 11 fail, and the 5 that pass are the cases that must not
+change. With the change all 11 pass. The full `rag_pipeline` suite gives 2276 passed and 4 skipped
+on the Mac, against 6 failed and 2270 passed on `prototype` with the new file added: the six are the
+whole difference. In the replica, the same 6 fail on `prototype` and all 11 pass with the change;
+its full-suite numbers, taken with S6.12, are in S6.12. Nothing was deployed.
+
+### Stage S6.12 The join report's examples line up, and a join that meets nothing points at the key
+
+*2026-10-07, `claude/fit-zone-leftovers`, after S6.11. Revises the `join` report S6.10, The
+vectors' zone_id is read as text, shipped. Ported from a fuller report (`unmatched_zones`) written
+on 2026-10-04 beside S6.10 and never committed; only what the merged report lacked was taken, and
+the reply's `join` and `warning` keys are unchanged.*
+
+The merged report's counts were right; its examples were not always readable, and the hint of a
+failed fit sent the model the wrong way. Each was measured offline through `embed_zones` (service
+stubbed) → `fit_zone_model`, identically on the Mac (pandas 2.2.3) and in the replica (3.0.5):
+
+- **The examples were the first few in file order, so the two sides did not line up.** 15
+  California and 15 Illinois tracts, embedded from text GEOIDs and fitted against a copy that
+  stores GEOID as a number and lists the tracts in reverse, showed the vectors' `06037100000`,
+  `…001`, `…002` beside the polygons' `6037100014`, `…013`, `…012`: the leading zero was visible,
+  but on unrelated zones. The same with TRACTCE gave `000100`, `000200`, `000300` beside `1500`,
+  `1400`, `1300`. Both sides are now ordered by value where an id reads as a number, else as text,
+  so they show `6037100000`… and `100`, `200`, `300`: the same zones, written two ways. Sorting as
+  text would not do: `100` would face `1000` and `1100`, and the TRACTCE test fails that way.
+- **An id pandas read as missing showed as the text `nan`.** A zone keyed `NA` (Namibia's code)
+  comes back from the CSV missing, as S6.10 found, and the report named it `'nan'`, as if a zone
+  were called that. It is now `null`, and the warning says *"an id read as missing"*. The counts
+  still follow the merge: on pandas 2.2.3 the `astype(str)` makes a missing id the text `nan`,
+  which would meet a polygon keyed `nan`, and is counted that way.
+- **Ids were not bounded.** 110-character tract descriptions, fitted against a copy in capitals,
+  put six 110-character examples into the reply and two into the warning (599 characters). Each
+  is now cut to 80 (warning 539).
+- **A fit that met nothing was told to embed more zones.** 30 California tracts fitted against
+  numeric GEOIDs gave *"only 0 zones…"* with *"Embed more zones before fitting"*, which buys tiles
+  for vectors that already exist. When leftovers on both sides could have made up the shortfall
+  (fewer than 12 met, and 12 or more would have met had the smaller side's leftovers paired), the
+  hint now says *"Only 0 zones met: 30 of the 30 vectors and 30 of the 30 polygons found no
+  partner with the same zone id. Check zone_id_field…"*. With leftovers on one side only (10 of 30
+  tracts embedded), or too few to matter (10 met, one zone keyed two ways), the old hint stands.
+
+**Not ported from the fuller report:** a second report key (`unmatched_zones`) beside `join`, five
+examples a side instead of three, polygon examples when only polygons went without vectors (S6.10
+counts those and nothing more, on purpose), and a note telling the answer to say how many zones
+were left out, which is the warning's job.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_unmatched_zones.py`, offline, with every
+reply parsed as strict JSON: the reversed GEOID and TRACTCE layers, the `NA` zone, the long ids,
+the join that met nothing, and two guards for the cases where the old hint must stand. On S6.11's
+commit the first five fail and the two guards pass, on both stacks; with the change all seven
+pass. S6.10's four join tests pass unchanged. The full `rag_pipeline` suite gives 2283 passed
+and 4 skipped on the Mac. In the replica, with `--network none`, `prototype` with both new test
+files gives 20 failed, 2260 passed and 7 skipped, and S6.11 with S6.12 gives 9 failed, 2271 passed
+and 7 skipped: the eleven tests S6.11 and S6.12 add that fail on `prototype` are the whole
+difference, and the nine that fail either way need packages the image lacks, such as xarray and
+pyarrow. Nothing was deployed.
 
 ---
 

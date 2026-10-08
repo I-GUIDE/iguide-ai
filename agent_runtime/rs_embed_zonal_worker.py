@@ -466,6 +466,75 @@ def run(req: dict) -> dict:
     }
 
 
+def _row_number_join_refusal(gdf, vector_ids):
+    """Why these polygons' row numbers cannot be the vectors' keys, or None if they can be.
+
+    With no zone_id_field, polygon i is paired with the vector keyed "i". That is right for
+    the layer embed_zones read, whose rows the vectors are numbered by, and silently wrong for
+    any other. The zone-groups layer embed_zones puts on the map is the case that was measured:
+    it holds only the zones that received pixels, so with 30 zones and none at row 3, the
+    layer's row 3 is zone 4. 25 of the 28 zones fitted got another zone's vector, and the fit
+    reported no skill on a label the vectors determined exactly, while its prediction map,
+    carrying each matched vector's own zone_id, pixels and area_km2, looked complete. Ids
+    embedded by a column and fitted without naming it go the same way when they look like
+    row numbers: districts numbered 1 to 30 mispaired all 28 zones fitted.
+
+    A vector naming a zone the layer has no row for is the sign of both, and the groups layer
+    after a gap always shows it, because it is shorter by the gaps. The layer the vectors were
+    numbered by never does, so its row numbers stay the key beside any zone_id column of its
+    own. Refusing, rather than joining on whichever column fits, keeps the join the one that
+    was asked for; the hint names the column, so the retry is one call. An exact prefix of the
+    embedded layer is refused too, though its rows would pair correctly: they line up by the
+    accident of order, which a filtered or re-sorted copy does not keep.
+    """
+    rows = {str(i) for i in range(len(gdf))}
+    # A blank id names no zone, so it is no evidence either way; the join drops it as before.
+    named = list(dict.fromkeys(str(v) for v in vector_ids.dropna()))
+    stray = [z for z in named if z not in rows]
+    if not stray:
+        return None
+
+    # Columns that hold every vector's id and could key every polygon, as zone_id_field must:
+    # no blank, no repeat. str() of each value, as the fit itself keys a named column.
+    wanted = set(named)
+    holders = []
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+        values = gdf[col]
+        try:
+            if values.isna().any() or values.duplicated().any():
+                continue
+            if wanted <= {str(v) for v in values}:
+                holders.append(col)
+        except TypeError:  # unhashable cells, such as nested JSON, cannot be a key
+            continue
+    holders.sort(key=lambda c: c != "zone_id")  # the groups layer's key first
+
+    names = "names" if len(stray) == 1 else "name"
+    out = {"ok": False,
+           "error": f"zone_id_field was not given, so each polygon is paired with the vector "
+                    f"of its row number, but {len(stray)} of the {len(named)} vectors {names} "
+                    f"a zone this {len(gdf)}-row layer has no row for (e.g. {stray[:3]}). Its "
+                    f"row numbers are not the vectors' keys, and paired by them a polygon can "
+                    f"get another polygon's vector."}
+    if len(holders) == 1:
+        out["hint"] = (f"The layer's {holders[0]!r} column holds every vector's zone id: pass "
+                       f"zone_id_field={holders[0]!r}. The vectors need no re-embedding.")
+    elif holders:
+        out["hint"] = (f"Each of {holders} holds every vector's zone id. Pass the one the "
+                       f"vectors were embedded with as zone_id_field ('zone_id' on embed_zones' "
+                       f"zone-groups layer). The vectors need no re-embedding.")
+    else:
+        out["hint"] = ("Pass zone_id_field naming the column that holds the ids the vectors "
+                       "were embedded with, or fit against the layer embed_zones read, all of "
+                       "its rows in their original order. embed_zones' zone-groups layer holds "
+                       "only the zones that received pixels, so its rows are not the vectors' "
+                       "keys; its zone_id column is.")
+        out["available_columns"] = [c for c in gdf.columns if c != "geometry"][:40]
+    return out
+
+
 def fit(req: dict) -> dict:
     """Ridge on zone vectors, scored by SPATIAL BLOCK cross-validation.
 
@@ -496,7 +565,14 @@ def fit(req: dict) -> dict:
     if id_field and id_field not in gdf.columns:
         return {"ok": False, "error": f"zone_id_field {id_field!r} is not in the polygons",
                 "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
+    if not id_field:
+        refusal = _row_number_join_refusal(gdf, df["zone_id"])
+        if refusal:
+            return refusal
     ids = ([str(v) for v in gdf[id_field]] if id_field else [str(i) for i in range(len(gdf))])
+    # Which ids pandas read as missing ('NA', 'null', blank), before astype(str) makes some of
+    # them the text 'nan' (pandas 2) and leaves others missing (pandas 3).
+    read_as_missing = df["zone_id"].isna().tolist()
     df["zone_id"] = df["zone_id"].astype(str)
     feat = [c for c in df.columns if c.startswith("e") and c[1:].isdigit()]
     # Each side brings only what it owns to the join: the polygons their shape, the key and
@@ -511,15 +587,27 @@ def fit(req: dict) -> dict:
     zones = gdf[[gdf.geometry.name]].assign(
         zone_id=ids, _label=pd.to_numeric(gdf[label], errors="coerce"))
     support = [c for c in ("pixels", "area_km2") if c in df.columns]
-    join, warning = _join_report(list(df["zone_id"]), ids)
+    join, warning = _join_report(list(df["zone_id"]), ids, read_as_missing)
     m = zones.merge(df[["zone_id"] + support + feat], on="zone_id", how="inner")
+    met = len(m)
     m = m.dropna(subset=["_label"] + feat)
     n = len(m)
     if n < 12:
+        hint = ("Embed more zones before fitting; spatial-block CV holds out whole blocks, so it "
+                "needs enough zones to leave any for training.")
+        lone_v, lone_p = join["vectors_without_a_polygon"], join["polygons_without_a_vector"]
+        # Leftovers on BOTH sides, enough to have made up the shortfall, look like one set of
+        # zones keyed two ways. Then the key is what to fix, and embedding more would buy tiles
+        # for zones that already have vectors: 30 California tracts fitted against numeric
+        # GEOIDs met none, and the hint sent the model to embed more. Leftovers on one side
+        # only, or too few to matter, leave the zone count (or the labels) as the cause.
+        if lone_v and lone_p and met < 12 <= met + min(lone_v, lone_p):
+            hint = (f"Only {met} zones met: {lone_v} of the {join['vectors']} vectors and "
+                    f"{lone_p} of the {join['polygons']} polygons found no partner with the "
+                    "same zone id. Check zone_id_field, and how the key's values are written on "
+                    "each side (see join), before embedding more.")
         return {"ok": False, "error": f"only {n} zones have both a vector and a label",
-                "hint": "Embed more zones before fitting; spatial-block CV holds out whole "
-                        "blocks, so it needs enough zones to leave any for training.",
-                "join": join, **({"warning": warning} if warning else {})}
+                "hint": hint, "join": join, **({"warning": warning} if warning else {})}
 
     X = m[feat].to_numpy(dtype=np.float64)
     y = m["_label"].to_numpy(dtype=np.float64)
@@ -568,7 +656,7 @@ def fit(req: dict) -> dict:
     }
 
 
-def _join_report(vector_ids, polygon_ids):
+def _join_report(vector_ids, polygon_ids, read_as_missing=()):
     """Who found a partner in the vectors-to-polygons join, and a warning when a vector did not.
 
     The join is inner, and the fit reported only what matched, so a join that lost half its
@@ -581,8 +669,17 @@ def _join_report(vector_ids, polygon_ids):
     A vector without a polygon never happens when both sides key the same zones the same way,
     so it warns. A polygon without a vector is ordinary (a subset embedded, a zone with no
     pixels), so it is counted and nothing more.
+
+    Keys are counted as the merge saw them. The examples are ordered by value where an id reads
+    as a number, so the same zones written two ways take the same place on both sides (S6.12);
+    an id pandas read as missing is shown as null, and none is longer than 80 characters.
     """
-    vectors = list(dict.fromkeys(str(v) for v in vector_ids))
+    import pandas as pd
+
+    # As the merge keyed them: a value astype(str) left missing (pandas 3) meets nothing.
+    keys = [None if pd.isna(v) else str(v) for v in vector_ids]
+    missing = {k for k, gone in zip(keys, read_as_missing) if gone} | {None}
+    vectors = list(dict.fromkeys(keys))
     polygons = list(dict.fromkeys(str(p) for p in polygon_ids))
     vector_set, polygon_set = set(vectors), set(polygons)
     lonely_vectors = [v for v in vectors if v not in polygon_set]
@@ -593,15 +690,43 @@ def _join_report(vector_ids, polygon_ids):
             "polygons_without_a_vector": len(lonely_polygons)}
     if not lonely_vectors:
         return join, None
-    join["example_unmatched_vector_ids"] = lonely_vectors[:3]
-    join["example_polygon_ids"] = (lonely_polygons or polygons)[:3]
+    shown_vectors = _example_ids(lonely_vectors, missing)
+    shown_polygons = _example_ids(lonely_polygons or polygons, ())
+    join["example_unmatched_vector_ids"] = shown_vectors
+    join["example_polygon_ids"] = shown_polygons
+    first = ("an id read as missing" if shown_vectors[0] is None
+             else repr(shown_vectors[0]))
     warning = (f"{len(lonely_vectors)} of {len(vectors)} vectors found no polygon with the same "
-               f"zone id (for example {lonely_vectors[0]!r}, where the polygons have ids like "
-               f"{(lonely_polygons or polygons)[0]!r}), so the fit left them out. If they are the "
+               f"zone id (for example {first}, where the polygons have ids like "
+               f"{shown_polygons[0]!r}), so the fit left them out. If they are the "
                "same zones keyed differently, such as a leading zero dropped or a number stored "
                "as text, fit against the layer the vectors were embedded from, or pass "
                "zone_id_field naming a column that holds the ids exactly as the vectors do.")
     return join, warning
+
+
+def _example_ids(keys, missing, count: int = 3, width: int = 80):
+    """Up to `count` of these ids, ordered by value where they read as numbers, else as text.
+
+    In file order, the vectors' '06037100000', '06037100001'.. faced a reversed layer's
+    '6037100014', '6037100013'..: the right cause, but on unrelated zones. Sorted as text,
+    TRACTCE '000100', '000200'.. would face '100', '1000', '1100'.. Missing ids come first, as
+    null: pandas read them as missing, which is a cause of its own. Long text ids are cut, so
+    a column of descriptions cannot fill the reply.
+    """
+    import math
+
+    def _order(text):
+        try:
+            value = float(text)
+        except ValueError:
+            return (1, 0.0, text)
+        return (0, value, text) if math.isfinite(value) else (1, 0.0, text)
+
+    gone = [None] if any(k in missing for k in keys) else []
+    shown = sorted((k for k in keys if k not in missing), key=_order)
+    shown = [s if len(s) <= width else s[:width - 1] + "…" for s in shown]
+    return (gone + shown)[:count]
 
 
 def _box(x0, y0, x1, y1):
