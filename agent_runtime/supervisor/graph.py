@@ -1664,8 +1664,11 @@ def _run_peer(name: str, call, state: SupervisorState):
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
+        # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
+        # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
+        # later peer made good from one that left the answer short.
         failure = {"peer": name, "error": f"{type(exc).__name__}: {exc}"[:300],
-                   "fatal": _is_fatal_peer_error(exc)}
+                   "fatal": _is_fatal_peer_error(exc), "at": len(state.get("actions") or [])}
         try:
             import logging
             logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
@@ -1687,6 +1690,163 @@ def _with_failure(update: Dict[str, Any], state: SupervisorState,
         return update
     update["peer_failures"] = [*(state.get("peer_failures") or []), failure]
     return update
+
+
+# The peers whose result answers the question, and the field that holds that answer.
+_ANSWERING_PEERS = {"analyze": ("analysis_results", "summary"), "code": ("code_result", "answer")}
+
+
+def _unresolved_peer_failures(state: SupervisorState) -> List[Dict[str, Any]]:
+    """The peer failures the answer is still short by.
+
+    A failure is resolved when a LATER answering peer ran without failing and came back with an
+    answer. Live, 2026-10-08: analyze hit the recursion limit, code then answered in full, and
+    the reply still said it was "based on what completed before the failure" — the opposite of
+    what happened. The failures stay in state for the trace and the turn ledger either way; this
+    decides only whether the user is told the answer is partial.
+
+    A failure without a position (``at``) is never treated as resolved.
+    """
+    failures = list(state.get("peer_failures") or [])
+    actions = list(state.get("actions") or [])
+    failed_at = {f.get("at") for f in failures if isinstance(f.get("at"), int)}
+
+    def _delivered(peer: str) -> bool:
+        slot, field = _ANSWERING_PEERS[peer]
+        result = state.get(slot)
+        return isinstance(result, dict) and bool(str(result.get(field) or "").strip())
+
+    out = []
+    for f in failures:
+        at = f.get("at")
+        resolved = isinstance(at, int) and f.get("peer") in _ANSWERING_PEERS and any(
+            peer in _ANSWERING_PEERS and (j + 1) not in failed_at and _delivered(peer)
+            for j, peer in enumerate(actions) if j + 1 > at)
+        if not resolved:
+            out.append(f)
+    return out
+
+
+# --- where a listed set of features came from -------------------------------------------
+# Live, 2026-10-08: "which schools are within 1 mile of [a drawn box]?" was answered "18 schools",
+# each distance right to within 4 m, from the Chicago Public Schools locations file the code peer
+# had found on the Chicago Data Portal, and the answer never said so. OpenStreetMap has 31 schools
+# in the same buffer, two of them inside the box itself. Without its source, "18 schools" reads
+# as a claim about all schools. With it, it is a correct statement about one district's file.
+#
+# A check, not an instruction: the sources come from the tool record, and the line is added only
+# when the composed answer lists features and names none of them.
+_LIST_ROW = re.compile(r"^\s*(?:\|(?!\s*:?-{3})|[-*+]\s+|\d+[.)]\s+)")
+
+
+def _peer_tool_pairs(state: SupervisorState) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """(call, result) for every tool the answering peers ran this turn, paired by call id."""
+    pairs = []
+    for slot in ("analysis_results", "code_result"):
+        res = state.get(slot)
+        if not isinstance(res, dict):
+            continue
+        calls = {c.get("id"): c for c in (res.get("tool_calls") or []) if isinstance(c, dict)}
+        for r in res.get("tool_results") or []:
+            if isinstance(r, dict):
+                pairs.append((calls.get(r.get("tool_call_id")) or {}, r))
+    return pairs
+
+
+def _json_or_empty(text: Any) -> Dict[str, Any]:
+    try:
+        val = json.loads(text) if isinstance(text, str) else text
+    except (TypeError, ValueError):
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def _title_by_shared_id(url: str, titles: Dict[str, str]) -> str:
+    """The search title of a page on the same host that shares an id-like path segment.
+
+    A data portal's download URL is rarely the page the search found: Socrata serves
+    ``/api/views/<4x4>/rows.csv`` for a dataset whose page is ``/<Category>/<Name>/<4x4>``. The
+    dataset id is the segment both carry.
+    """
+    from urllib.parse import urlparse
+
+    target = urlparse(url)
+    ids = {seg for seg in target.path.split("/") if len(seg) >= 6 and any(c.isdigit() for c in seg)}
+    for page, title in titles.items():
+        parsed = urlparse(page)
+        if parsed.netloc == target.netloc and ids & set(parsed.path.split("/")):
+            return title
+    return ""
+
+
+def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
+    """(statement, names any of which counts as the answer naming it), one per data source."""
+    pairs = _peer_tool_pairs(state)
+    titles: Dict[str, str] = {}
+    for call, res in pairs:
+        if res.get("name") != "web_search":
+            continue
+        payload = _json_or_empty(res.get("content"))
+        for hit in [*(payload.get("documents") or []), *(payload.get("results") or [])]:
+            if isinstance(hit, dict) and hit.get("url") and hit.get("title"):
+                titles.setdefault(str(hit["url"]).split("?")[0].rstrip("/"), str(hit["title"]))
+    # One entry per SOURCE, not per call: a peer that retried Overpass with three boxes used
+    # one source, and the last good call is the one its list came from. Keyed "osm" for
+    # OpenStreetMap and by URL for a staged file.
+    found: Dict[str, Tuple[str, List[str]]] = {}
+    for call, res in pairs:
+        name = res.get("name")
+        payload = _json_or_empty(res.get("content"))
+        # Empty is not JSON: the repeat guard's note, a raw traceback. Neither is a source.
+        if not payload or payload.get("error"):
+            continue
+        if name == "overpass_search":
+            statement = payload.get("source_statement") or (
+                "OpenStreetMap features tagged "
+                f"{(payload.get('query') or {}).get('osm_filter') or 'as requested'}, as mapped by "
+                "OSM contributors")
+            found.pop("osm", None)          # re-insert, so the last good call is the one kept
+            found["osm"] = (str(statement), ["openstreetmap", "osm"])
+            continue
+        elif name in ("stage_url", "stage_element"):
+            url = str((call.get("args") or {}).get("url") or payload.get("origin") or "")
+            if not url:
+                continue
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc
+            title = titles.get(url.split("?")[0].rstrip("/"), "") or _title_by_shared_id(url, titles)
+            head = title.split(" | ")[0].strip()
+            statement = f"{title} ({host})" if title else url
+            found.setdefault(url, (statement, [n.lower() for n in (host, head) if n]))
+    return list(found.values())
+
+
+def _feature_sources(state: SupervisorState) -> List[str]:
+    """The data sources a list of features in this turn's answer could have come from."""
+    return [statement for statement, _ in _source_entries(state)]
+
+
+def _with_feature_source(answer: str, state: SupervisorState) -> str:
+    """*answer*, plus a line naming where its list came from when it lists and names nothing."""
+    if not isinstance(answer, str) or not answer.strip():
+        return answer
+    if sum(1 for line in answer.splitlines() if _LIST_ROW.match(line)) < 3:
+        return answer
+    entries = _source_entries(state)
+    if not entries:
+        return answer
+    low = answer.lower()
+    if any(n in low for _, names in entries for n in names):
+        return answer
+    joined = "; ".join(statement.rstrip(" .") for statement, _ in entries)
+    plural = "these sources hold" if len(entries) > 1 else "that source holds"
+    line = f"**Source:** {joined}. The list covers only what {plural}."
+    # Beside the list, ahead of any caveat block the answer already ends with.
+    cut = answer.find("\n⚠️")
+    if cut == -1:
+        return f"{answer.rstrip()}\n\n{line}"
+    return f"{answer[:cut].rstrip()}\n\n{line}\n\n{answer[cut:].lstrip(chr(10))}"
 
 
 def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
@@ -4151,6 +4311,16 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_langchain_geocode_tools())
         except Exception:
             pass
+        # Features by KIND in an area (schools, hospitals, rivers) from live OpenStreetMap,
+        # written to a file this peer can measure against. Not upload-gated, for the reason
+        # admin_boundary is not: it produces its own input. Without it, "schools within 1 mile
+        # of this box" was 27 geocoding calls of remembered school names and street corners
+        # (live, 2026-10-08). See make_langchain_osm_tools.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_osm_tools
+            tools.extend(make_langchain_osm_tools())
+        except Exception:
+            pass
         tools.append(request_tool)
         # When files are attached to the conversation, let the analysis peer inspect
         # them directly (read_text_file / inspect_file_for_analysis) instead of only
@@ -4679,6 +4849,13 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
             tools.extend(make_langchain_geocode_tools())
+        except Exception:
+            pass
+        # The same feature lookup analyze has (see default_analyze_fn): the sandbox has no
+        # network, so features this peer's code measures against are fetched agent-side.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_osm_tools
+            tools.extend(make_langchain_osm_tools())
         except Exception:
             pass
         # Staging, for the same reason and with the same boundary: the fetch happens HERE, where
@@ -5448,8 +5625,16 @@ def build_supervisor_graph(
         # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
         # and presenting it as a normal answer hides that a capability the user asked for did
         # not run.
-        if failures:
-            note = _peer_failure_note(failures)
+        # A list of features says which source it came from (see _with_feature_source). Before
+        # the failure note, so the note stays last.
+        for key in ("answer", "final_answer"):
+            if isinstance(update.get(key), str):
+                update[key] = _with_feature_source(update[key], state)
+        if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
+            update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+        unresolved = _unresolved_peer_failures({**state, **update})
+        if unresolved:
+            note = _peer_failure_note(unresolved)
             for key in ("answer", "final_answer"):
                 if isinstance(update.get(key), str) and update[key].strip():
                     update[key] = f"{update[key]}\n\n---\n\n{note}"

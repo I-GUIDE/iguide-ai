@@ -237,6 +237,15 @@ promoting deliberation onto a FINAL message would leak it into the user's answer
 construction paths use the subclass — including the per-request one, which is where the model
 picker actually selects gpt-oss.
 
+**Not every repeat loop is this defect.** Lumen's deepseek-v4-flash, called with tools bound as
+the agent calls it, returns `reasoning_content: null` and `reasoning_tokens: 0`, so it has no
+thinking to lose, and its plan stays in `content`. It still re-issued one identical
+`geocode_places` call fourteen times in a live turn (2026-10-08), and telling it the call was a
+repeat did not stop it. The fix for that is `_make_repeat_call_middleware`
+(`agent_runtime/executor_factory.py`), which answers the repeat and then ends the run. Stage 38 of
+`docs/agent-architecture-changes.md` has the measurements. Check `reasoning_tokens` before
+blaming the shim.
+
 Which model actually answered is not visible in the transport log — it shows only the host,
 and a dropped `reasoning_effort` looks identical to an applied one. So each per-request build
 logs `per-request LLM: provider=… model=… reasoning_effort=…`, and
@@ -380,7 +389,11 @@ The analysis toolsets load **only when files are attached** to the conversation
 (`default_analyze_fn` in `agent_runtime/supervisor/graph.py`), with the boundary/geocoding/
 terrain toolsets as the deliberate exception (`agent_runtime/graph_state.py`): they can produce
 their own input (a fetched boundary, a fetched DEM) rather than only consuming an upload, so
-gating them on `input_file_ids` would hide the very tool that fills that gap. `rs_embed_tools`
+gating them on `input_file_ids` would hide the very tool that fills that gap. `overpass_search`
+(features of a kind in an area, from OSM, written to a file) is bound the same way in both
+measuring peers, through `make_langchain_osm_tools`. Until 2026-10-08 only the search peer had
+it, and analyze answered "schools within 1 mile of this box" by geocoding remembered names one
+at a time (stage 38). `rs_embed_tools`
 calls an external service at `RS_EMBED_URL` (default `http://localhost:8077` — inside a
 container that means the container itself, not the host).
 

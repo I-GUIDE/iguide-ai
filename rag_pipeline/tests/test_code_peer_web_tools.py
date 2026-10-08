@@ -61,7 +61,12 @@ def test_the_retrieval_family_is_not_bound_wholesale(monkeypatch):
     names = _bound(monkeypatch)
     assert "keyword_search" not in names
     assert "semantic_search" not in names
-    assert "overpass_search" not in names
+    assert "spatial_search" not in names
+    assert "opengeodata_search" not in names
+    # overpass_search IS bound now, deliberately: through make_langchain_osm_tools, the variant
+    # that writes the features to a file the code can read, not through this family. Its
+    # siblings above staying out is what shows the family was not taken whole. Architecture
+    # stage 38.
 
 
 def test_the_prompt_says_to_look_up_before_writing(monkeypatch):

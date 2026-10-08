@@ -109,6 +109,9 @@ def consumer_capabilities(consumer: str = "answer") -> FrozenSet[str]:
 _SHARED: Tuple[Toolset, ...] = (
     Toolset("make_langchain_geocode_tools",
             "geocoding a place name or address to coordinates"),
+    Toolset("make_langchain_osm_tools",
+            "finding real-world features of a kind inside an area from live OpenStreetMap "
+            "(schools, hospitals, parks, rivers, roads) as a file to measure against"),
     Toolset("make_admin_boundary_tools",
             "fetching an administrative boundary (city, county, state, census tract) as real "
             "geometry"),
