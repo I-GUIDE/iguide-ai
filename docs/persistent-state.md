@@ -85,7 +85,11 @@ the `memoryId` the client and the agent share.
 
 ```
 chat_history        the AGENT's memory: what was asked and answered, context for the next turn
-session_snapshot    the CLIENT's view: messages, layer descriptors, fileIds, region, model
+session_snapshot_json
+                    the CLIENT's view, as ONE JSON string: messages, layer descriptors,
+                    fileIds, region, model (since M8.77; see below)
+session_snapshot    the same record as an OBJECT, where it was stored before M8.77. Read,
+                    never written; null once the conversation is saved again
 conversationName    title, mirrored from the snapshot so the list can sort and label without
                     opening a transcript
 owner_id            the platform user id (a CILogon URL)
@@ -98,12 +102,13 @@ createdAt  updatedAt
 
 ### The two halves are written by different things
 
-`chat_history` comes from `create_memory` / `update_memory`, during a turn. `session_snapshot`
+`chat_history` comes from `create_memory` / `update_memory`, during a turn. The client record
 comes from `save_session_snapshot`, when the client PUTs its record at the end of a turn. **A
 document can have either without the other**, and that asymmetry is load-bearing:
 
-- `GET /agent/conversations` lists documents that have **both** an `owner_id` match and an
-  `exists: session_snapshot`. Listed therefore means *restorable*.
+- `GET /agent/conversations` lists documents that have **both** an `owner_id` match and a client
+  record (`exists` on `session_snapshot_json` or `session_snapshot`). Listed therefore means
+  *restorable*.
 - `GET /agent/conversations/<id>` serves the snapshot, and 404s without one.
 
 The snapshot is **stored, not rebuilt**. `sessionStore.ts` was written server-shaped on purpose,
@@ -120,7 +125,81 @@ next action is to re-list. Without this the save lands and the immediate list do
 
 A snapshot over `AGENT_SESSION_SNAPSHOT_MAX_BYTES` (default 5,000,000) is refused with
 `SnapshotTooLarge` rather than silently truncated. The limit is read at call time, not frozen at
-import, so it can be raised without a restart.
+import, so it can be raised without a restart. Since M8.77 it counts the UTF-8 bytes of the
+string actually stored.
+
+### The record is stored as text, never as fields the index maps
+
+**The rule: a payload whose shape a tool or a model decides never goes into a dynamically mapped
+field.** `chat_memory` has no explicit mapping, so OpenSearch types each field from the first
+document that carries it, and a document that disagrees is refused *whole*.
+
+Until M8.77 the client's record went in as an object, and the record carries each answer's
+`agent_result`: tool arguments and tool results, whose shape is decided per turn by the tool and
+the model. On **2026-10-08 21:36:39 UTC** `overpass_search` sent `bbox` as the string
+`"-87.93,41.87,…"`, where an earlier conversation had sent a float array, and the save came back
+
+```
+PUT /agent/conversations/sess-07bc717f-… 500
+mapper_parsing_exception: failed to parse field [session_snapshot.messages.response.agent_result.
+orchestration_result.analysis_results.tool_calls.args.bbox] of type [float] … value: '-87.93…'
+```
+
+The conversation document existed with **0** snapshot messages, so the turn never reached
+History, and the client was told nothing it showed the user. Any turn whose tool payload took a
+different JSON type from one already seen would have been lost the same way. The live mapping,
+read that evening (`GET chat_memory/_mapping`, 1,722 documents):
+
+- **300** leaf fields, **266** of them under `session_snapshot`, **181** under `agent_result`
+  alone;
+- **559** fields counted toward the index's **1,000**-field limit (`.keyword` sub-fields
+  included). Every new argument name or result key added more, and past the limit *every* save
+  fails, not only the odd one;
+- typed traps already in place beside `bbox`: `layers.style.fill` is `long` (a hex colour is
+  refused), `opengeodata_results.datetime` is `date`, `region.coordinates` is `float`, and the
+  properties of inline GeoJSON features are mapped by name.
+
+Since M8.77 `save_session_snapshot` stores the record as **one JSON string in
+`session_snapshot_json`**. A string has one type whatever it holds, so no record can conflict
+with another and none adds a field. Nothing searches inside the record: the list filters and
+sorts on the document's own fields (`owner_id`, `updatedAt`, the counts), which keep their fixed
+types. The same write sets the old `session_snapshot` object to null, so a conversation holds one
+copy of its record. Reading prefers the string and falls back to the object, so a conversation
+not saved since still opens and lists, and `GET /agent/conversations/<id>` returns exactly the
+shape it did before. The client (`agentClient.ts`, `restoreSession`) is unchanged.
+
+Measured on a disposable OpenSearch 2.14.0 (prod's version) created with the exact live mapping:
+the old object shape of the 21:36 record is refused with the same `…tool_calls.args.bbox` error;
+the new writer stores the float-array record, the string record, and the string record over the
+float-array one, and each reads back identical when compared as JSON. A legacy object document opens and
+lists, re-saves to `session_snapshot: null` plus the string, and an untouched one still lists. A
+4.8 MB record stores. Thirty saves with thirty different argument shapes added no field beyond
+`session_snapshot_json` (`text` + `.keyword`). `test_snapshot_mapping.py` runs the same checks
+against a fake that keeps each field's first type, from the live mapping and from an empty index.
+
+**Not fixed by this, and why.** The 266 old fields stay in the mapping until the index is
+rebuilt, because a field cannot be removed in place; the 1,000-field limit now has about 440 to spare
+and no writer that grows it. `session_snapshot_json` is analysed as text, which indexes words
+nobody searches. The better long-term shape is a new index with an explicit mapping
+(`dynamic: strict` at the top level; the record under a field with `"index": false`, or an object
+with `"enabled": false`), copied with `_reindex` and swapped in behind an alias. That changes the
+prod cluster, so it is the user's call; the proposal is in the M8.77 PR.
+
+### The other writers to this cluster
+
+Audited 2026-10-08 for the same pattern:
+
+| writer | field | shape decided by | state |
+| --- | --- | --- | --- |
+| `save_session_snapshot` | the client record | tools and models | fixed here (M8.77) |
+| `save_turn_trace` | `chat_traces.events` | tools and models | fitted to the mapping since M8.74 |
+| `update_memory` | `chat_history[].elements` | search results | latent: every live caller passes `[]`; the 14 mapped `elements.*` fields come from older writers |
+| `update_rating` | `chat_history[].ratings` | the caller | latent: no caller left in the server; `ratings.*` are `long`, so a word would be refused |
+| `create_memory`, `get_or_create_memory` | document fields | this code | fixed shape |
+| `extractors/emitters/opensearch_emitter.py` | KB index `extracted.*` | the extraction analyzers | explicit mapping above `extracted`, dynamic below it by design; a separate writer, not changed here |
+
+The file metadata store is not on this cluster: it is one JSON file per record on the Docker
+volume (§2), and does not have a mapping to conflict with.
 
 ### What the numbers looked like
 
@@ -442,7 +521,7 @@ every answer publishes file ids as download links, and `outputs/` is where those
 ## Reproducing a session
 
 A stored conversation is close to self-contained, because the pieces cross-reference each other:
-`session_snapshot.fileIds` and each `artifacts[].file_id` point into the file store, which never
+the record's `fileIds` and each `artifacts[].file_id` point into the file store, which never
 deletes; `layers[].sourceUrl` are those same files; `threadId` identifies the agent thread and,
 through `sha256(f"{threadId}::codeexec")`, the code workspace directory.
 
