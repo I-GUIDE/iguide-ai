@@ -50,6 +50,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 | 36 | [The gate stops flagging correct runs, and its unknowns stop re-running them](#stage-36) | 2026-10-08 | a declared label is not a measurement; `points` is a count; a gate `cannot_determine` is a caveat, not a reason to redo the analysis |
+| 37 | [A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make](#stage-37) | 2026-10-08 | a second peer run adds to the result slot instead of replacing it; routing claims with no routing tool are cut, not re-run; imperial units; a unit-only unknown is a note |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -614,8 +615,9 @@ fail on both need packages the deployed image lacks, such as pyarrow and xarray.
   `zone_id_field="zone_id"`, the same data joins all 29 correctly and scores 1.0. The fitted
   numbers of such a join are the same before and after this change, but its prediction map now
   carries the CSV row's `zone_id`, `pixels` and `area_km2`, so it looks complete where it used to
-  lack all three. Which key to use when none is named is a policy decision, so it is recorded
-  rather than changed.
+  lack all three. Which key to use when none is named was a policy decision, so it was left to
+  the user, who chose on 2026-10-04 to refuse such a join: S6.11, *Row numbers key only the layer
+  the vectors were numbered by*.
 
 Nothing was deployed.
 
@@ -686,7 +688,9 @@ only when the two sides key the zones differently, so that is the case that warn
 without a vector is ordinary, because a subset was embedded or a zone had no pixels, so it is only
 counted. The mixed California and Illinois pairing still fits its 15 Illinois tracts, and now
 says that 15 of 30 vectors found no polygon. `_join_report` in `rs_embed_zonal_worker.py`; four
-tests in the same file cover the warning, a failed join, a clean join and a subset.
+tests in the same file cover the warning, a failed join, a clean join and a subset. S6.12, *The
+join report's examples line up, and a join that meets nothing points at the key*, orders and
+bounds the examples and changes the hint of a fit that met too few zones.
 
 **Verified** by `rag_pipeline/tests/test_fit_zone_model_leading_zero_ids.py`, offline, through
 `embed_zones` (service stubbed) → `fit_zone_model` with the real file store:
@@ -727,6 +731,143 @@ numbers and the ones above on both stacks before the first commit; its correctio
   them gave *"only 0 zones…"*. Same before and after, on both stacks.
 
 Nothing was deployed.
+
+### Stage S6.11 Row numbers key only the layer the vectors were numbered by
+
+*Written 2026-10-04 on `claude/zone-groups-row-number-join`, stacked on S6.9; landed 2026-10-07 on
+`claude/fit-zone-leftovers`, after S6.10. Fixes the second defect S6.9, The fit's label is the
+polygons' column, whatever it is called, found and left open.*
+
+Without `zone_id_field`, `embed_zones` and `fit_zone_model` both key zones by row number. The
+rs-embed service returns zone `"i"` for the polygon sent in row *i*, and the fitter pairs polygon
+*i* with the vector keyed `"i"`. That is right for the layer `embed_zones` read. The zone-groups
+layer it puts on the map keeps only the zones that received pixels, so after a zone with none, the
+layer's row numbers and its zones part ways. Passed to the fitter without `zone_id_field`, it paired
+every zone after the gap with another zone's vector. This was measured offline through the two
+tools, with only the service call stubbed: 30 zones, no pixels at row 3, and a label the vectors
+determine exactly. 25 of the 28 zones fitted were mispaired, and the fit reported no skill, with
+blocked r2 at -0.35 on the development machine and -0.69 in the replica of the deployed versions.
+The two differ because, from byte-identical polygons and the same PROJ and GEOS, the two stacks
+compute centroids a few units in the last place apart, and on a grid of equal squares that is enough
+to split them into different spatial blocks. With `zone_id_field="zone_id"` the same data joined all
+29 zones and scored 1.0 on both. Since S6.9 the prediction map of such a join carries each matched
+vector's own `zone_id`, `pixels` and `area_km2`, so nothing on it looked wrong: the shape of row 5
+said zone 4 and showed zone 4's pixel count.
+
+The same mechanism had a second form, measured while reproducing the first. Districts numbered 1 to
+30, embedded with `zone_id_field="district"` and fitted without it, met 28 vectors by row number,
+and each was the vector of the district before (blocked r2 -0.41 on both stacks). Embedded by GEOID,
+the groups layer failed loudly instead, but the message, *"only 0 zones have both a vector and a
+label"*, did not say why. Naming `GEOID` failed too, because the groups layer calls that column
+`zone_id`.
+
+**S6.10's join report saw both and named the wrong cause.** Re-measured on `prototype` after S6.10:
+the gap layer still fitted ok with 28 zones, 25 of them mispaired, at r2 -0.35 on the Mac and -0.69
+in the replica, and the districts 28 of 28 at r2 -0.41 on both. The `join` report counted one vector without a polygon, the last
+zone, which now ran past the end of the layer, and the `warning` blamed a key written two ways,
+such as a dropped leading zero. Neither said that most of the zones that *did* meet had met the
+wrong vector, because a row-number join meets by the number alone.
+
+**Which key to use when none is named was the user's decision.** Four answers were put to them: join
+on the layer's own `zone_id` when its values account for the vectors; refuse, with a hint to pass
+it; tell the model only, in the tool's description; or have `embed_zones` write every polygon into
+the groups layer, so that its row numbers are the keys, which would draw every zone without pixels
+in the map's grey for an unknown class. They chose to refuse, and to refuse wherever the sign
+appears, not only where a `zone_id` column explains it.
+
+**The sign is a vector naming a zone the polygons have no row for.** The layer the vectors were
+numbered by never shows it, because every id came from one of its rows. So that layer still joins by
+row number, even beside a `zone_id` column of its own that means something else, which was the
+constraint on any fix. The groups layer after a gap always shows it, because it is shorter by the
+gaps. The 1-based districts show it at district 30, and a GEOID shows it at once. `fit()` checks for
+it before the join (`_row_number_join_refusal` in `rs_embed_zonal_worker.py`), so a refused fit
+carries no `join` report. The refusal's hint names the column that holds every vector's id and could
+key every polygon, with no blank and no repeat: `zone_id` on the groups layer, the district or
+`GEOID` column on the others, and every such column when there are several. It says the vectors need
+no re-embedding, because a new sweep costs tiles. Without such a column, the hint says where keys
+come from. Refusing, rather than joining on whichever column fits, keeps the join the one that was
+asked for, as `run()` already does for a `zone_id_field` it cannot find. The retry is one call.
+
+**Behaviour that changed on purpose:** an exact prefix of the embedded layer, such as its first 20
+rows, is refused, though those rows would pair correctly. They line up by the accident of order,
+which a filtered or re-sorted copy does not keep, and the check does not try to tell the two apart.
+The user accepted that cost. A groups layer with no gap before its last zone still joins by row
+number, because its rows are then the keys. `fit_zone_model`'s description now says when
+`zone_id_field` may be omitted, and to pass `zone_id_field='zone_id'` for the groups layer, so a
+model that follows it does not meet the refusal.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_row_number_join.py`, which runs offline
+through both tools, with the service stubbed and the real file store:
+
+- the groups layer after a gap is refused, and the column its hint names joins all 29 zones, each to
+  its own vector, at r2 1.0;
+- the embedded layer still joins by row number with no `zone_id`, with a text one, and with one that
+  shuffles the row numbers, which names every vector too, for other polygons;
+- a groups layer with no gap, or with the gap at its last zone, joins by row number;
+- districts 1 to 30 embedded by a column not called `zone_id` are refused, and the hint names that
+  column;
+- an embed keyed by GEOID is refused, with `zone_id` named on its groups layer and `GEOID` on the
+  tracts;
+- a column with a blank or a repeat is never offered, and two columns that hold the ids are both
+  offered;
+- the first 20 rows of the embedded layer are refused, with the general hint.
+
+On `prototype` (after S6.10) 6 of the 11 fail, and the 5 that pass are the cases that must not
+change. With the change all 11 pass. The full `rag_pipeline` suite gives 2276 passed and 4 skipped
+on the Mac, against 6 failed and 2270 passed on `prototype` with the new file added: the six are the
+whole difference. In the replica, the same 6 fail on `prototype` and all 11 pass with the change;
+its full-suite numbers, taken with S6.12, are in S6.12. Nothing was deployed.
+
+### Stage S6.12 The join report's examples line up, and a join that meets nothing points at the key
+
+*2026-10-07, `claude/fit-zone-leftovers`, after S6.11. Revises the `join` report S6.10, The
+vectors' zone_id is read as text, shipped. Ported from a fuller report (`unmatched_zones`) written
+on 2026-10-04 beside S6.10 and never committed; only what the merged report lacked was taken, and
+the reply's `join` and `warning` keys are unchanged.*
+
+The merged report's counts were right; its examples were not always readable, and the hint of a
+failed fit sent the model the wrong way. Each was measured offline through `embed_zones` (service
+stubbed) → `fit_zone_model`, identically on the Mac (pandas 2.2.3) and in the replica (3.0.5):
+
+- **The examples were the first few in file order, so the two sides did not line up.** 15
+  California and 15 Illinois tracts, embedded from text GEOIDs and fitted against a copy that
+  stores GEOID as a number and lists the tracts in reverse, showed the vectors' `06037100000`,
+  `…001`, `…002` beside the polygons' `6037100014`, `…013`, `…012`: the leading zero was visible,
+  but on unrelated zones. The same with TRACTCE gave `000100`, `000200`, `000300` beside `1500`,
+  `1400`, `1300`. Both sides are now ordered by value where an id reads as a number, else as text,
+  so they show `6037100000`… and `100`, `200`, `300`: the same zones, written two ways. Sorting as
+  text would not do: `100` would face `1000` and `1100`, and the TRACTCE test fails that way.
+- **An id pandas read as missing showed as the text `nan`.** A zone keyed `NA` (Namibia's code)
+  comes back from the CSV missing, as S6.10 found, and the report named it `'nan'`, as if a zone
+  were called that. It is now `null`, and the warning says *"an id read as missing"*. The counts
+  still follow the merge: on pandas 2.2.3 the `astype(str)` makes a missing id the text `nan`,
+  which would meet a polygon keyed `nan`, and is counted that way.
+- **Ids were not bounded.** 110-character tract descriptions, fitted against a copy in capitals,
+  put six 110-character examples into the reply and two into the warning (599 characters). Each
+  is now cut to 80 (warning 539).
+- **A fit that met nothing was told to embed more zones.** 30 California tracts fitted against
+  numeric GEOIDs gave *"only 0 zones…"* with *"Embed more zones before fitting"*, which buys tiles
+  for vectors that already exist. When leftovers on both sides could have made up the shortfall
+  (fewer than 12 met, and 12 or more would have met had the smaller side's leftovers paired), the
+  hint now says *"Only 0 zones met: 30 of the 30 vectors and 30 of the 30 polygons found no
+  partner with the same zone id. Check zone_id_field…"*. With leftovers on one side only (10 of 30
+  tracts embedded), or too few to matter (10 met, one zone keyed two ways), the old hint stands.
+
+**Not ported from the fuller report:** a second report key (`unmatched_zones`) beside `join`, five
+examples a side instead of three, polygon examples when only polygons went without vectors (S6.10
+counts those and nothing more, on purpose), and a note telling the answer to say how many zones
+were left out, which is the warning's job.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_unmatched_zones.py`, offline, with every
+reply parsed as strict JSON: the reversed GEOID and TRACTCE layers, the `NA` zone, the long ids,
+the join that met nothing, and two guards for the cases where the old hint must stand. On S6.11's
+commit the first five fail and the two guards pass, on both stacks; with the change all seven
+pass. S6.10's four join tests pass unchanged. The full `rag_pipeline` suite gives 2283 passed
+and 4 skipped on the Mac. In the replica, with `--network none`, `prototype` with both new test
+files gives 20 failed, 2260 passed and 7 skipped, and S6.11 with S6.12 gives 9 failed, 2271 passed
+and 7 skipped: the eleven tests S6.11 and S6.12 add that fail on `prototype` are the whole
+difference, and the nine that fail either way need packages the image lacks, such as xarray and
+pyarrow. Nothing was deployed.
 
 ---
 
@@ -6117,4 +6258,245 @@ the noun list, a numeric string, a number with an unknown unit and a degree buff
 analyze once and still shows its caveat, that a gate `fail` re-runs with its message, and that
 an auditor issue beside a gate unknown still re-runs. Of the new tests, all fail on `aca61d7`
 except the two guards (unknown unit, degree buffer), which pass on both versions as intended.
+
+## Stage 37 — A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make {#stage-37}
+
+*2026-10-08. Branch `claude/regrounding-keeps-turn-record`, from `prototype` at `00e560f`
+(stage 36 merged, and live on the VM since its 19:05 UTC rebuild).*
+
+A live turn on agent.i-guide.io at 19:12:23 UTC (thread `sess-1e8e3edd-…`, trace
+`…:5513ff0e4b86`, Lumen deepseek-v4-flash) asked *"what is the area of Champaign County, Illinois,
+and how far is London from Paris?"*. It answered 2,584.6 km² and 340.0 km, and both are right.
+The user still saw ⚠️ *"A deterministic invariant check COULD NOT VERIFY this run … hallucination
+is detected at high severity"*, and 28 s of the 72 s turn went to a re-run that could not succeed.
+
+What happened, from the journal and the stored trace:
+
+1. analyze ran admin_boundary, geocode_places and two execute_code calls (the first passed the
+   file_id `file_2272c8426ec9` to `gpd.read_file` as a path and failed; the retry worked).
+2. The synthesizer added "roughly 460 km by road or ~340 km by the Eurostar rail line" from the
+   model's memory. The audit flagged both.
+3. The re-grounding pass (stage S7.4) re-ran analyze from 19:13:07 to 19:13:22. That pass ran
+   one execute_code, and synthesis and the second audit took until 19:13:35.
+4. The banner listed four items: `square_miles` as an unrecognised unit; "GEOID 17019" as
+   unsupported, although admin_boundary returned it; and the two road and rail figures, which the
+   second answer restated in a "What I could NOT establish" section that called them "the
+   earlier rejected answer".
+5. The journal logged `turn ledger: recorded 1 row(s) … ['execute_code']` for a 5-call turn.
+
+### Stage S37.1 The second run replaced the first
+
+`analysis_node` and `code_node` wrote their result slot outright: `{"analysis_results": clean}`.
+A second run of a peer in the same turn therefore replaced the first. The trace shows it exactly.
+The re-grounding pass's one execute_code call became the turn's whole `analysis_results`, so:
+
+* the second audit's execution record had no admin_boundary result, and the auditor marked
+  "GEOID 17019" absent (`evidence_quality._recompute_verdict`: "no span in the evidence or
+  execution record covers this claim");
+* `_record_actions` extracted one row, which is the `['execute_code']` in the journal;
+* the second answer's deterministic corrections and download allowlist saw one run as well.
+
+Both nodes now go through `_merge_peer_result(prior, new)`. The state is per run
+(`run_supervisor` gives each turn its own checkpoint thread), so the slot always holds this turn's
+earlier runs. Tool calls and results accumulate, deduplicated by id. `PeerSession` falls back to
+the whole thread when its prefix guard fails, and it then returns the first pass's calls again.
+Rows without an id are never deduplicated: two identical id-less results are two calls. The
+summary and other scalars come from the latest run, and an `error` from an earlier failed run is
+dropped when a later run succeeds. `on_map`, `executed` and `tool_failures` describe the turn, so
+they accumulate. When a peer raises on its second run, the first run's records are kept and the
+error is added.
+
+The test drives the real graph with the live turn's tool results. On `00e560f` the final
+`analysis_results` holds `['execute_code']`, the second audit's record has no "17019", and the
+ledger has one tool. After the change they hold all five results, "17019" and three tools.
+
+### Stage S37.2 A unit-name unknown was not checked, and it disabled more than itself
+
+The first pass declared `mi2` and `mi`, and the re-run declared `square_miles` and `miles` for the
+same two numbers. No square-mile spelling was in `_UNIT_ALIASES`. `mi` and `miles` were in
+`_KNOWN_UNITS` but not in the alias table, so `mile` was unknown. The table now covers miles,
+yards, nautical miles, square miles and square feet in the spellings models write (`mi2`, `mi²`,
+`sq mi`, `square_miles`, `ft2`, `sq ft`, …). Both of the live run's declared-output sets now pass
+with no unknowns.
+
+That unknown also did two things a unit name should not do:
+
+* **It disabled reconciliation rule (2) for every number.** Rule (2) drops a disputed number that
+  appears in the execution record. It is switched off under any gate verdict, because a wrong
+  number appears in the record too. But only the gated code's numbers are in question. The
+  GEOID came from admin_boundary, which no gate checks. New rule (2′) still accepts a disputed
+  number when it appears in a tool result that is not execute_code and carries no gate report
+  (`_ungated_record`). A number only the gated code produced is still not accepted.
+* **It produced an alarming banner.** The gate headline was followed by the LLM auditor's own
+  summary, even after reconciliation had removed every auditor issue. That is how "hallucination
+  is detected at high severity" got under a gate finding about a unit name. The auditor's
+  summary is now appended only when an auditor issue survives. A `cannot_determine` whose
+  findings are all unrecognised units gets an ℹ️ note ("did not recognise a declared unit, so
+  that value's unit was not checked. Nothing the check could read failed"), severity `low` and
+  `hallucination_detected: false`. Any other unknown keeps "COULD NOT VERIFY". This revises one
+  assertion of stage 36's `test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze`,
+  whose only finding is the unit `furlongs`. It now expects the note. A guard test checks that a
+  unit unknown beside a `coverage` unknown still says COULD NOT VERIFY.
+
+`_reconcile_audit_with_artifacts` now logs `audit reconciliation removed N issue(s): [(claim,
+rule)]`. Without that, a removal shows up only as "Grounded: flagged claims are supported…", and
+that sentence cannot tell a claim that was really in the record from one that just matched a
+rule (see S37.6).
+
+### Stage S37.3 A claim no bound tool can produce is cut, not re-run
+
+The re-grounding pass assumes the peer can establish what the audit found missing. There is no
+routing tool, so no run of analyze can produce a road or rail distance. The pass cost 28 s and
+ended with the same figures restated.
+
+`_UNPRODUCIBLE_CAPABILITIES` pairs a claim shape with the tool-name shape that would produce it.
+It has one entry, routing: "by road/rail/train/car…", "driving route", "travel time", "Eurostar",
+"a 5 h drive". The list is narrow on purpose, because a match removes text from the answer, so
+"driving factors", "Google Drive" and "road network layer" do not match. The analyze peer now
+reports `bound_tools`, and `analysis_node` lifts it into state so it never reaches the serialized
+`analysis_results` that synthesis reads. A claim is unproducible only when no bound tool matches
+`_ROUTING_TOOL_RE`. With `network_route_distance` bound, the same claim still re-runs.
+
+In synthesize, after reconciliation, `_remove_unproducible_claims` cuts each such flagged claim
+out of the answer with `_drop_claims` and removes its issue from the audit. If no auditor issue
+remains, the audit stops flagging. One line takes the claim's place ("Road and rail travel
+distances and times are not included: no routing tool is available here to compute them"),
+unless the answer already mentions roads or routing. A gate finding is untouched, because
+cutting prose changes nothing the gate checked. The re-run gaps leave out unproducible claims
+even when they could not be cut, so a paraphrased road claim keeps its caveat and does not cost a
+re-run.
+
+`_drop_claims` places the auditor's quoted claim in the markdown answer, allowing emphasis and
+code marks between words. It removes the smallest unit that holds the claim: a `;`-separated
+segment of a parenthetical (or the whole parenthetical once it is empty), the sentence, or the
+line when the sentence was the whole line. A section left empty loses its heading. A claim that
+cannot be placed verbatim, or that has fewer than three words, is left alone, because cutting a
+guess could remove a grounded sentence. On the live first answer it removes "Actual travel
+distance is longer — roughly 460 km by road or ~340 km by the Eurostar rail line (…)" and keeps
+"Note: this is the straight-line distance between the two city centers" on one side and the map
+sentence on the other.
+
+### Stage S37.4 The user never saw the draft
+
+`_REGROUND_DIRECTIVE` said a previous answer "was rejected" and offered "(b) say plainly which
+parts you could not establish". The peer did both: it wrote a section that repeated "~460 km" and
+"~340 km" to disown them and named "the earlier rejected answer". The directive now says the user
+has not seen the draft, says to leave unestablished claims out, and allows one short sentence
+naming the part of the question that could not be answered, "but do not repeat the values, not
+even to disown them, and do not mention a draft, an earlier answer or this check". It no longer
+contains "rejected".
+
+There are two deterministic backstops. On the synthesize pass after a re-run,
+`_drop_draft_mentions` cuts sentences that mention a rejected answer, draft or earlier attempt.
+The phrasings are chosen so they cannot be about the conversation's earlier turns, and "the null
+hypothesis was rejected" is left alone. And S37.3 runs on every pass, so a routing figure the
+second answer restates is cut again. A known limit: cutting is per sentence, so a follow-on such
+as "I am therefore not restating them." can stay behind.
+
+### Stage S37.5 Replayed locally
+
+The same question, in Chrome, against this branch in `AGENT_MODE=local` (port 5079, map UI on
+5179, Lumen deepseek-v4-flash), was replayed twice in separate tabs:
+
+| | live (00e560f) | local run 1 | local run 2 |
+|---|---|---|---|
+| analyze runs | 2 | 1 | 1 |
+| ledger rows | 1 (`execute_code`) | 4 (admin_boundary, geocode_places, execute_code ×2) | 4 |
+| banner | COULD NOT VERIFY … high severity | none | none |
+| London–Paris | 340.0 km | 343.7 km (S37.7) | 343.7 km |
+| turn time | 72 s (VM) | 83 s (Mac) | 79 s (Mac) |
+
+The Mac times include a failing first execute_code in both runs, so they are not comparable with
+the VM's 72 s. What they show is that no peer re-ran.
+
+### Stage S37.6 What this stage does not fix
+
+**Routing figures that the audit does not flag still reach the user.** Both local answers
+included memorised travel figures ("roughly 490 km by rail and ~450 km by road"; "about 490 km",
+"roughly 450–470 km"), with no caveat. In run 1 the auditor flagged something and reconciliation
+removed every issue ("Grounded: flagged claims are supported by …"). Which rule removed it was
+not logged then, and it is logged now. The likely candidate is rule (2), which matches a disputed
+number as a substring of the whole JSON record, so "450" can match inside a coordinate. In run 2
+the auditor itself called every claim supported. S37.3 acts on what the audit flags, so neither
+run reached it. A deterministic scan of the answer for routing quantities absent from the record,
+plus number-boundary matching in rule (2), is the follow-up.
+
+**The first execute_code cannot open the boundary.** All three runs (live and both local) had a
+failing first execute_code: `gpd.read_file("file_2272c8426ec9")` live, and `gpd.read_file("Champaign_County.geojson")`
+locally. Each recovered on its retry.
+
+Tests: `test_regrounding_turn_record.py` (53) drives the real graph with the live turn's tool
+results and answers. It checks the merged record, the second audit's record, the ledger, replay
+dedup, the code peer, routing claims cut without a re-run, mixed gaps, an unplaceable claim, the
+claim classifier both ways, the cutter's three units, the re-run answer, the directive, the
+units, the unit-only note and its guard, and rule (2′). On `00e560f` 42 of them fail. The 11 that
+pass are guards that are meant to pass on both: a replayed pass, a routing tool bound, the eight
+units that were already known, and a non-unit unknown. Three revised assertions in
+`test_supervisor_graph.py` (2) and `test_unified_peer.py` (1) fail there too, by design.
+
+### Stage S37.7 geocode_places returns Nominatim's point, not the box centre
+
+`geocode_places` reported each place's lat/lon as the centre of its Nominatim bounding box. For
+an administrative area that is not where the place is. Greater London's box
+(−0.510…0.334, 51.287…51.692) has its centre at 51.4893, −0.0882, which is 3.4 km from the point
+Nominatim itself returns (51.5074, −0.1278, Charing Cross). Paris's centre is 0.6 km off. The
+live turn's 340.0 km was the haversine between box centres. Between Nominatim's points it is
+343.7 km.
+
+`geocode_place` already had Nominatim's `lat`/`lon` in the response it parsed and threw them
+away. It now stores them in `geocode_point_cache`. `geocode_place_point(name)` reads that cache,
+which costs no second request. `geocode_places_tool` uses the point when it lies inside the box
+and the box centre otherwise. Each result says which one it used (`point: "nominatim"` or
+`"bbox_centre"`). The bbox is still returned unchanged, and `geocode_place`'s return value is the
+same, so search filtering and Overpass are untouched. Both local replays answered 343.7 km.
+
+Tests: `test_geocode_tool.py` replays Nominatim's real London and Paris responses through
+`geocode_place`, and checks the point, that the distance is 343.7 km and that two requests are
+made. It also checks the fallback to the centre when the point lies outside the box. Both fail on
+`00e560f`. The four existing tests pass on both.
+
+### Stage S37.8 Two more gate false alarms: a counted noun, and a column carried back to WGS84
+
+A second live turn, 2026-10-08 19:42:29 UTC (thread `sess-38c02242-…`, *"schools within 1 mile
+of a drawn box"*), answered correctly. It found 18 schools, and every distance was checked
+independently to within 4 m. It still showed COULD NOT VERIFY, for two reasons. No trace was
+stored for this thread, so the tests rebuild the pattern from the reported findings, and the
+assembled-gate test reproduces both of them word for word on `00e560f`.
+
+**(a) `unrecognised unit 'schools'`** on `{"num_schools_within_1mile": {"value": 18, "unit":
+"schools"}}`. A count has no physical unit; its "unit" is whatever was counted, so no list of
+nouns will ever be complete. Stage 36 added an explicit list and said why: a plural-stripping
+rule would read `metres` as a count. This stage does not guess from the noun. It reads the
+output's name. `_inferred_count` treats an unrecognised alphabetic unit as a count only when
+the name says it is one (`num_`, `n_`, `count`, `number`, `total`) and the value is a whole
+number ≥ 0. Then it passes, marked `inferred_count`. All of stage 36's guards still hold:
+`{"x": 1 furlongs}`, `bananas`, `{"r": 10.0 furlongs}`, and also `distance_furlongs: 3`,
+`num_schools: 2.5` and `num_schools: -1` stay unknown. An inferred count is never a FAIL, because
+a guessed category should not produce a hard failure. Any unrecognised unit that is left is
+marked `advisory`.
+
+**(b) `EPSG:4326 frame holds a measurement column ('distance_m') that no tracked operation
+produced`**. The script measured in EPSG:26916 and then called `to_crs("EPSG:4326")` for GeoJSON
+output. That is the normal pattern, and the column comes along with the frame. With the operation
+tracker live and no metric operation run on a geographic frame, `run_checks` now looks for a
+projected frame in scope that holds the same column. If it finds one, the finding passes with
+`measured_in` naming that frame. If not (for example a chained
+`to_crs(26916).assign(...).to_crs(4326)` that binds nothing in between), the finding stays
+cannot_determine but is marked `advisory`, and its message names the usual cause. A guard
+checks that a distance measured on the WGS84 frame still fails even when a projected frame with
+the same column exists, because the tracked `distance` operation fails on its own.
+
+**Supervisor.** S37.2's unit-only note now covers any gate verdict whose unknowns are all
+advisory (`advisory` flag, or the unrecognised-unit message for images built before the flag
+existed). It shows an ℹ️ note listing the items, with severity low and
+`hallucination_detected: false`. Every other unknown still says COULD NOT VERIFY.
+
+Tests: 7 in `test_invariant_gate.py` (count inference including a numpy int, its guards, the
+advisory mark, a credited carried column, an uncredited one, the WGS84-measurement guard, and the
+whole schools script through the assembled prologue/epilogue). There is 1 more in
+`test_regrounding_turn_record.py`, for the note. Six fail on `00e560f`, and the two guards pass
+on both.
+
+The same turn also showed "⚠️ Partial answer: analysis failed during this turn" although the code
+peer then answered in full. That is outside this stage and is being proposed separately.
 

@@ -78,3 +78,75 @@ def test_geocode_tool_wired_into_code_and_analyze_peers(monkeypatch):
     captured.clear()
     sg.default_analyze_fn(include_mcp_tools=False)("map institutions", [], {"thread_id": None})
     assert "geocode_places" in captured["tools"]
+
+
+# Live, 2026-10-08: London–Paris was answered 340.0 km because geocode_places returned bbox
+# centres; Greater London's sits 3.4 km from Nominatim's own point, and the great circle between
+# Nominatim's points is 343.7 km. These are the real Nominatim answers for both names.
+_NOMINATIM = {
+    "London": {"lat": "51.5074456", "lon": "-0.1277653",
+               "boundingbox": ["51.2867601", "51.6918741", "-0.5103751", "0.3340155"]},
+    "Paris": {"lat": "48.8534951", "lon": "2.3483915",
+              "boundingbox": ["48.8155755", "48.9021560", "2.2241220", "2.4697602"]},
+}
+
+
+class _Resp:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._body
+
+
+class _Session:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, url, params=None, headers=None):
+        self.calls += 1
+        hit = _NOMINATIM.get(params["q"])
+        return _Resp([hit] if hit else [])
+
+
+def _haversine(a, b):
+    from math import asin, cos, radians, sin, sqrt
+    (la1, lo1), (la2, lo2) = a, b
+    h = sin(radians(la2 - la1) / 2) ** 2 + \
+        cos(radians(la1)) * cos(radians(la2)) * sin(radians(lo2 - lo1) / 2) ** 2
+    return 2 * 6371.0 * asin(sqrt(h))
+
+
+def test_geocode_places_returns_nominatims_point_not_the_box_centre(monkeypatch):
+    sess = _Session()
+    monkeypatch.setattr(og, "session", lambda: sess)
+    monkeypatch.setattr(og, "last_geocode_call", -10.0)
+    for name in _NOMINATIM:
+        og.geocode_cache.pop(name, None)
+        og.geocode_point_cache.pop(name, None)
+    from agent_runtime.langchain_granular_tools import geocode_places_tool
+    try:
+        out = json.loads(geocode_places_tool(["London", "Paris"]))
+    finally:
+        for name in _NOMINATIM:
+            og.geocode_cache.pop(name, None)
+            og.geocode_point_cache.pop(name, None)
+    london, paris = out["results"]
+    assert (london["lat"], london["lon"]) == (51.507446, -0.127765)
+    assert london["point"] == "nominatim" and paris["point"] == "nominatim"
+    assert london["bbox"] == [-0.5103751, 51.2867601, 0.3340155, 51.6918741]
+    km = _haversine((london["lat"], london["lon"]), (paris["lat"], paris["lon"]))
+    assert abs(km - 343.7) < 0.1, km
+    assert sess.calls == 2                       # the point costs no extra request
+
+
+def test_geocode_places_falls_back_to_the_box_centre_without_a_point(monkeypatch):
+    monkeypatch.setattr(og, "geocode_place", _fake_geocode)
+    monkeypatch.setattr(og, "geocode_place_point", lambda name: (0.0, 0.0))  # outside the box
+    from agent_runtime.langchain_granular_tools import geocode_places_tool
+    uiuc = json.loads(geocode_places_tool(["University of Illinois Urbana-Champaign"]))["results"][0]
+    assert uiuc["point"] == "bbox_centre"
+    assert abs(uiuc["lat"] - 40.1) < 1e-6 and abs(uiuc["lon"] - (-88.2)) < 1e-6

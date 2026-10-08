@@ -318,6 +318,9 @@ def extract_json_payload(text: str) -> str:
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_USER_AGENT = "opengeodata-prototype (contact: help@i-guide.io)"
 geocode_cache: Dict[str, Optional[Tuple[float, float, float, float]]] = {}
+# Nominatim's own reference point for the same match, as (lat, lon). Filled by the same request
+# that fills geocode_cache, so asking for it costs nothing extra; see geocode_place_point.
+geocode_point_cache: Dict[str, Optional[Tuple[float, float]]] = {}
 last_geocode_call = 0.0
 
 # Named physical/administrative features that are inherently large. A "basin" or "watershed" that
@@ -375,6 +378,10 @@ def geocode_place(place: str) -> Optional[Tuple[float, float, float, float]]:
             logger.info(f"Geocoding found no match for place={place!r}")
             geocode_cache[place] = None
             return None
+        try:
+            geocode_point_cache[place] = (float(results[0]["lat"]), float(results[0]["lon"]))
+        except (KeyError, TypeError, ValueError):
+            geocode_point_cache[place] = None
         raw_bbox = results[0].get("boundingbox")  # [south, north, west, east] as strings
         if not raw_bbox or len(raw_bbox) < 4:
             geocode_cache[place] = None
@@ -392,6 +399,7 @@ def geocode_place(place: str) -> Optional[Tuple[float, float, float, float]]:
                 "discarding it rather than filtering on the wrong area", place, bbox,
             )
             geocode_cache[place] = None
+            geocode_point_cache[place] = None
             return None
         geocode_cache[place] = bbox
         logger.info(f"Geocoded place={place!r} -> bbox={bbox}")
@@ -401,6 +409,23 @@ def geocode_place(place: str) -> Optional[Tuple[float, float, float, float]]:
         geocode_cache[place] = None
         return None
     
+
+def geocode_place_point(place: str) -> Optional[Tuple[float, float]]:
+    """Nominatim's reference point for *place* as ``(lat, lon)``, or None.
+
+    For a city that is the point OpenStreetMap places at its centre (London: Charing Cross),
+    not the middle of its administrative bounding box. The two differ: Greater London's box
+    centre is 3.4 km from Charing Cross, and a London–Paris great circle measured between box
+    centres came out 340.0 km against 343.7 km between Nominatim's points (live, 2026-10-08).
+    Shares geocode_place's request and cache, so a name already geocoded costs nothing.
+    """
+    place = (place or "").strip()
+    if not place:
+        return None
+    if place not in geocode_point_cache:
+        geocode_place(place)
+    return geocode_point_cache.get(place)
+
 
 from ..llm_utils import call_llm as _call_llm
 

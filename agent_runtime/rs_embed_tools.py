@@ -2139,6 +2139,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         Reports the blocked score, the score a naive random split WOULD have claimed, and a
         predict-the-mean baseline — the gap between the first two is how much of an apparent
         result was just adjacency. Puts out-of-fold predictions on the map with residuals.
+
+        `zone_id_field` names the polygons' column holding the vectors' zone ids: the one given
+        to embed_zones, or 'zone_id' on the zone-groups layer embed_zones maps, which holds only
+        the zones that received pixels. Omit it only when embed_zones was given none and these
+        are the very polygons it read, matched row by row.
         """
         tmp = None
         try:

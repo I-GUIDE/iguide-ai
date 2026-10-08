@@ -1117,3 +1117,101 @@ def test_the_live_run_passes_through_the_assembled_gate(tmp_path, monkeypatch):
     exec(compile(prologue_source(None) + code + epilogue_source(), "<script>", "exec"), ns)
     report = json.loads((tmp_path / "checks.json").read_text())
     assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+
+
+# --- schools within 1 mile, live 2026-10-08 19:42 UTC (architecture stage S37.2) --------------
+#
+# 18 schools, every distance right to within 4 m, and the banner said COULD NOT VERIFY for two
+# reasons: unit "schools" was unrecognised, and `distance_m`, measured in EPSG:26916 and carried
+# back with to_crs(4326) for GeoJSON output, sat on a WGS84 frame "that no tracked operation
+# produced".
+
+def _schools(n=3):
+    return gpd.GeoDataFrame({"name": [f"s{i}" for i in range(n)]},
+                            geometry=[Point(-88.24 + i / 200, 40.11) for i in range(n)],
+                            crs="EPSG:4326")
+
+
+def test_a_count_named_as_one_is_a_count_whatever_was_counted():
+    np = pytest.importorskip("numpy")
+    for value in (18, np.int64(18), 18.0):
+        findings = check_declared_units(
+            {"num_schools_within_1mile": {"value": value, "unit": "schools"}})
+        assert {f["status"] for f in findings} == {PASS}, findings
+    for key in ("n_hospitals", "school_count", "total_wells", "number_of_stops"):
+        assert _declared({key: {"value": 4, "unit": key.split("_")[-1]}})["verdict"] == PASS, key
+
+
+def test_an_inferred_count_needs_a_count_name_and_a_whole_number():
+    """Guards: the old unknowns stay unknown, and an inferred count is never a FAIL."""
+    assert _declared({"x": {"value": 1, "unit": "furlongs"}})["verdict"] == UNKNOWN
+    assert _declared({"distance_furlongs": {"value": 3, "unit": "furlongs"}})["verdict"] == UNKNOWN
+    assert _declared({"num_schools": {"value": 2.5, "unit": "schools"}})["verdict"] == UNKNOWN
+    assert _declared({"num_schools": {"value": -1, "unit": "schools"}})["verdict"] == UNKNOWN
+    assert _declared({"num_x": {"value": 3, "unit": "km/h"}})["verdict"] == UNKNOWN
+
+
+def test_an_unrecognised_unit_is_marked_advisory():
+    findings = check_declared_units({"x": {"value": 1, "unit": "furlongs"}})
+    assert [f.get("advisory") for f in findings if f["status"] == UNKNOWN] == [True]
+
+
+def test_a_metres_column_carried_back_to_wgs84_is_credited_to_its_projected_frame(tracked,
+                                                                                  tmp_path):
+    tracked["schools"] = _schools()
+    tracked["center"] = gpd.GeoSeries([Point(-88.24, 40.11)], crs="EPSG:4326")
+    report = _run(tracked, tmp_path,
+                  "schools_proj = schools.to_crs('EPSG:26916')\n"
+                  "c = center.to_crs('EPSG:26916').iloc[0]\n"
+                  "schools_proj['distance_m'] = schools_proj.distance(c)\n"
+                  "schools_within = schools_proj[schools_proj['distance_m'] <= 1609.344]\n"
+                  "schools_within_4326 = schools_within.to_crs('EPSG:4326')\n")
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+    carried = [f for f in report["findings"] if f.get("target") == "schools_within_4326"
+               and f["check"] == "projected_crs"]
+    assert carried and carried[0]["status"] == PASS and carried[0].get("measured_in"), carried
+
+
+def test_a_carried_column_with_no_projected_frame_in_scope_is_advisory(tracked, tmp_path):
+    tracked["schools"] = _schools()
+    tracked["center"] = gpd.GeoSeries([Point(-88.24, 40.11)], crs="EPSG:4326")
+    report = _run(tracked, tmp_path,
+                  "c = center.to_crs('EPSG:26916').iloc[0]\n"
+                  "out = (schools.to_crs('EPSG:26916')\n"
+                  "       .assign(distance_m=lambda d: d.distance(c)).to_crs('EPSG:4326'))\n")
+    assert report["verdict"] == UNKNOWN
+    unknown = [f for f in report["findings"] if f["status"] == UNKNOWN]
+    assert unknown and all(f.get("advisory") for f in unknown), unknown
+
+
+def test_a_distance_measured_on_the_wgs84_frame_still_fails(tracked, tmp_path):
+    """Guard: a projected sibling holding the same column does not excuse a degree measurement."""
+    tracked["schools"] = _schools()
+    tracked["center"] = gpd.GeoSeries([Point(-88.24, 40.11)], crs="EPSG:4326")
+    report = _run(tracked, tmp_path,
+                  "schools_proj = schools.to_crs('EPSG:26916')\n"
+                  "schools_proj['distance_m'] = 0.0\n"
+                  "schools['distance_m'] = schools.distance(center.iloc[0])\n")
+    assert report["verdict"] == FAIL
+    assert any(f.get("op") == "distance" and f["status"] == FAIL for f in report["findings"])
+
+
+def test_the_schools_run_passes_through_the_assembled_gate(tmp_path, monkeypatch):
+    """Through the prologue/epilogue the sandbox runs, where `_inferred_count` must be inlined."""
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+    monkeypatch.chdir(tmp_path)
+    ns = {"schools": _schools(), "__name__": "__main__"}
+    code = ("from shapely.geometry import Point\n"
+            "import geopandas as gpd\n"
+            "center = gpd.GeoSeries([Point(-88.24, 40.11)], crs='EPSG:4326')\n"
+            "schools_proj = schools.to_crs('EPSG:26916')\n"
+            "schools_proj['distance_m'] = schools_proj.distance(center.to_crs('EPSG:26916').iloc[0])\n"
+            "schools_within_4326 = schools_proj[schools_proj['distance_m'] <= 1609.344]"
+            ".to_crs('EPSG:4326')\n"
+            "IGUIDE_OUTPUTS = {'num_schools_within_1mile': "
+            "{'value': len(schools_within_4326), 'unit': 'schools'}}\n")
+    exec(compile(prologue_source(None) + code + epilogue_source(), "<script>", "exec"), ns)
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
