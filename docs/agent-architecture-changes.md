@@ -49,6 +49,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 33 | [The picker offers only models that can call tools](#stage-33) | 2026-10-04 | AnvilGPT models are asked for one tool call and left out of `/agent/models` if they refuse; an outage hides nothing; a saved choice no longer offered resets to the default |
 | 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
+| 36 | [The gate stops flagging correct runs, and its unknowns stop re-running them](#stage-36) | 2026-10-08 | a declared label is not a measurement; `points` is a count; a gate `cannot_determine` is a caveat, not a reason to redo the analysis |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6025,3 +6026,95 @@ token-mode deployment the picker therefore shows "Agent default (deepseek-v4-fla
 Lumen group, and a hand-built request for another Lumen model is still refused. On 2026-10-06
 the maintainer set the deployment's default to `deepseek-v4-flash`, which had answered all three
 measured questions correctly at 22 to 33 s a turn.
+
+## Stage 36 — The gate stops flagging correct runs, and its unknowns stop re-running them {#stage-36}
+
+*2026-10-08. Branch `claude/gate-non-numeric-outputs`, from `prototype` at `aca61d7`.*
+
+The first live turn after the extraction bundle and its Postgres record were switched on
+(`AGENT_EXTRACTION=1`, Lumen deepseek-v4-flash, *"find a method in the library to buffer points
+by distance and run it on Champaign County"*) was right: 4 points, 10 km buffers in EPSG:26916,
+area / (πr²) = 0.9984. The user still saw ⚠️ *"COULD NOT VERIFY"*, and the turn ran its whole
+analysis twice. `docs/DEPLOYMENT.md` §6 says why that matters: a gate that flags correct runs
+trains its reader to ignore it. Trace: chat_traces `sess-b7648db5-…:538d1c9ca68b`.
+
+### Stage S36.1 What the gate said
+
+Run 1 came back `cannot_determine` for two reasons. Its work was inside a function, so the
+`coverage` check found no frame at module scope. And it declared
+`{"num_points_buffered": {"value": 4, "unit": "points"}}`, and `points` was not in
+`_UNIT_ALIASES`, although `features`, `items` and `records` were.
+
+Run 2 declared
+`{"buffer_radius_km": {"value": 10.0, "unit": "km"}, "num_points_buffered": {"value": 4, "unit": "count"}, "output_crs": {"value": "EPSG:26916", "unit": "crs"}}`.
+The counts were 15 pass, 0 fail and 2 cannot_determine. Both unknowns were about `output_crs`:
+`finite_value` said "not a numeric scalar" and `declared_units` said "unrecognised unit 'crs'".
+The run had reported the CRS it worked in, which is the most useful thing it could have said
+beside a buffer, and the gate counted that against it twice.
+
+### Stage S36.2 A label is not a measurement
+
+`check_declared_units` now asks first whether the declared value is a number
+(`_declared_number`). A value that is not one gets no unit, range or finiteness check, because
+none of them has anything to be about. Strings, bools, None, lists and dicts all count as not
+numbers. It is recorded as `declared_value`, status pass, `measurement: false`, with its type
+and value in the message, so the report still shows it. This covers a bare value as well as one
+with a unit.
+
+Two edges are deliberate. A numeric string such as `"10.0"` is still a measurement and gets
+every check, which is what the old `float(value)` path did. A number with a unit nobody
+recognises (`{"value": 10.0, "unit": "crs"}`, or `furlongs`) stays `cannot_determine`, because
+that is a measurement nobody can read. A degree buffer declared beside a CRS label still fails.
+
+### Stage S36.3 The nouns a geospatial run counts
+
+`_UNIT_ALIASES` maps point(s), polygon(s), zone(s), tract(s), county/counties, cell(s),
+pixel(s), region(s), site(s) and building(s) to `count`, so they also get the whole-number and
+population checks. It is still an explicit list. A plural-stripping rule would be shorter, but
+it would also read `metres` as a count of metres.
+
+### Stage S36.4 An unknown is a caveat, not a reason to run again
+
+The gate's findings become `"computed value from `<target>`"` issues in
+`_reconcile_audit_with_artifacts`. The synthesize node's re-grounding pass
+(stage S7.4, "The audit becomes a gate") treated every one of them as an unsupported claim and sent the turn back to
+analyze. That peer then repeated kb_method_search, admin_boundary, get_method_contract,
+execute_code and add_map_layer from scratch, at about 50 s and five extra LLM calls, and
+emitted both map layers again. It ran under `_REGROUND_DIRECTIVE`, which told it its claims
+"were NOT present in any tool result". That was false: the gate had read the value from the
+record.
+
+There were two ways to fix this: stop re-grounding on a gate `cannot_determine`, or keep the
+re-run and give the peer the finding so it fixes only that. This stage takes the first. The
+gate is deterministic, so the same code gives the same verdict. A re-run only helps if the
+model happens to declare things differently, and here it did declare them differently and
+still came back unknown. Re-running cannot turn "unconfirmed" into "confirmed". It only spends
+the step budget and puts the map layers on the map a second time. The re-grounding pass exists
+for answers taken from memory (the gazetteer turn in that stage), and a gate unknown is never that.
+
+The fix is in `_unsupported_claims`, the one place that decides what a re-run should
+establish. Gate issues are now tagged `source: invariant_gate` with their status. A gate
+`cannot_determine` is left out of that list, so if it is the only issue nothing re-runs. The
+caveat still appears, with the finding that caused it. A gate `fail` still re-runs, because a
+buffer in degrees is a wrong number the peer can fix. Its gap now includes the gate's own
+message ("ran on a GEOGRAPHIC CRS … Reproject"), which `"computed value from `bad`"` alone
+never told the peer. An auditor issue alongside a gate unknown still re-runs, and only the
+auditor's claim is passed on. The directive now also says "or failed a deterministic invariant
+check", so it is no longer false for a gate failure.
+
+### Stage S36.5 What this stage does not fix
+
+The run 1 `coverage` unknown is still there. A geospatial run that does its work inside
+`def main()` leaves nothing at module scope for the gate to inspect, so it cannot pass. After
+this stage it shows a caveat but no longer triggers a re-run. Fixing it means inspecting
+function frames, or a stronger instruction to bind results at module scope, and both are
+separate decisions.
+
+Tests: `test_invariant_gate.py` reproduces run 2's exact declared outputs, through the agent-side
+import and through the assembled prologue/epilogue the sandbox runs, and checks the label rule,
+the noun list, a numeric string, a number with an unknown unit and a degree buffer.
+`test_supervisor_graph.py` drives the real graph and checks that a gate `cannot_determine` runs
+analyze once and still shows its caveat, that a gate `fail` re-runs with its message, and that
+an auditor issue beside a gate unknown still re-runs. Of the new tests, all fail on `aca61d7`
+except the two guards (unknown unit, degree buffer), which pass on both versions as intended.
+

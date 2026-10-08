@@ -2128,3 +2128,74 @@ def test_unsupported_claims_reads_both_issue_shapes():
     assert g._unsupported_claims({"issues": [{"claim": "a"}, "b", {"claim": "  "}]}) == ["a", "b"]
     assert g._unsupported_claims({}) == []
     assert len(g._unsupported_claims({"issues": [{"claim": f"c{i}"} for i in range(20)]})) == 6
+
+
+# --- an invariant gate verdict and re-grounding -----------------------------------------------
+#
+# Live, 2026-10-08: a correct Champaign buffer run (area/(pi r^2) = 0.9984) came back from the
+# gate as cannot_determine, the synthesize node read its findings as unsupported claims, and the
+# analyze peer redid kb_method_search, admin_boundary, get_method_contract, execute_code and
+# add_map_layer from scratch — ~50 s, five LLM calls, both map layers re-emitted — under a
+# directive telling it its claims were "NOT present in any tool result". They were.
+
+def _gated_analyze(report, calls):
+    def analyze_fn(q, ev, st):
+        calls.append(list(st.get("grounding_gaps") or []))
+        return {"summary": "ran workflow",
+                "tool_results": [{"name": "execute_code", "tool_call_id": f"c{len(calls)}",
+                                  "content": json.dumps({"ok": True, "verification": report})}]}
+    return analyze_fn
+
+
+_UNVERIFIABLE = {"verdict": "cannot_determine", "counts": {"pass": 3, "fail": 0,
+                                                           "cannot_determine": 1},
+                 "findings": [{"check": "declared_units", "status": "cannot_determine",
+                               "target": "buffer_radius", "message": "unrecognised unit 'furlongs'"}]}
+_DEGREES = {"verdict": "fail", "counts": {"pass": 3, "fail": 1, "cannot_determine": 0},
+            "findings": [{"check": "projected_crs", "status": "fail", "target": "bad = gdf.buffer(0.1)",
+                          "message": "'buffer' ran on a GEOGRAPHIC CRS. Reproject before this operation."}]}
+
+
+def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypatch):
+    calls = []
+    state, _, _ = _run_with_audits(monkeypatch, [_GROUNDED],
+                                   analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
+    assert state["actions"].count("analyze") == 1, state["actions"]
+    assert not state.get("grounding_retries")
+    # Not swallowed: the caveat still reaches the user, with the finding that caused it.
+    assert "COULD NOT VERIFY" in state["final_answer"]
+    assert "furlongs" in state["final_answer"]
+
+
+def test_a_gate_fail_still_re_runs_and_the_peer_is_told_what_failed(monkeypatch):
+    """A degree buffer is a wrong number the peer can fix, so it keeps its one pass — and the gap
+    carries the gate's message, not just "computed value from `x`"."""
+    calls = []
+    state, _, _ = _run_with_audits(monkeypatch, [_GROUNDED],
+                                   analyze_fn=_gated_analyze(_DEGREES, calls))
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert len(calls) == 2 and calls[0] == []
+    assert any("GEOGRAPHIC CRS" in gap and "Reproject" in gap for gap in calls[1]), calls[1]
+
+
+def test_an_auditor_issue_beside_a_gate_cannot_determine_still_re_runs(monkeypatch):
+    """Only the gate's unknown is excused; a claim the auditor found absent is still sent back,
+    and the gate's finding is not among the claims the peer is told to establish."""
+    calls = []
+    state, _, _ = _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED],
+                                   analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert calls[1] == [_UNGROUNDED["issues"][0]["claim"]], calls[1]
+
+
+def test_unsupported_claims_excludes_a_gate_unknown_and_explains_a_gate_fail():
+    from agent_runtime.supervisor import graph as g
+    audit = {"issues": [
+        {"claim": "computed value from `output_crs`", "reason": "invariant gate (x): y",
+         "source": "invariant_gate", "status": "cannot_determine"},
+        {"claim": "computed value from `bad`", "reason": "invariant gate (projected_crs): degrees",
+         "source": "invariant_gate", "status": "fail"},
+        {"claim": "six counties border Champaign", "reason": "absent"}]}
+    assert g._unsupported_claims(audit) == [
+        "computed value from `bad` — invariant gate (projected_crs): degrees",
+        "six counties border Champaign"]
