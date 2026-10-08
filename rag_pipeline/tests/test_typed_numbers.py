@@ -148,3 +148,17 @@ def test_a_degree_buffer_still_fails_through_the_whole_path(tmp_path, monkeypatc
     report, _ = _run_script(tmp_path, monkeypatch, SCRIPT + "bad = g.buffer(0.01)\n")
     assert report["verdict"] == "fail"
     assert any("g.buffer(0.01)" in f["message"] for f in report["findings"])
+
+
+def test_without_the_unit_library_declarations_are_unknown_not_passed(tmp_path, monkeypatch):
+    """An image built without pint must not pass a null unit by skipping the check."""
+    from agent_runtime import code_execution
+
+    (tmp_path / "checks.json").write_text(json.dumps({
+        "verdict": "pass", "counts": {"pass": 1}, "findings": [],
+        "declared": [{"name": "r", "value": 25000, "unit": None}]}))
+    monkeypatch.setattr(declared_outputs, "evaluate", lambda r: (_ for _ in ()).throw(
+        ImportError("No module named 'pint'")))
+    report = code_execution._read_checks(tmp_path)
+    assert report["verdict"] == "cannot_determine"
+    assert "pint" in report["findings"][0]["message"]

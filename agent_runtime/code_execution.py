@@ -471,8 +471,19 @@ def _read_checks(work: Path) -> Dict[str, Any]:
         extra, outputs = declared_outputs.evaluate(data)
         data = {**data, "findings": [*(data.get("findings") or []), *extra],
                 **declared_outputs.merge_verdict(data, extra)}
-    except Exception:  # noqa: BLE001 - the unit check must never cost the run its report
-        pass
+    except Exception as exc:  # noqa: BLE001 - the unit check must never cost the run its report
+        # Never silently: an image built without the unit library would otherwise pass a null
+        # unit. Every declaration becomes an explicit unknown.
+        if data.get("declared"):
+            extra = [{"check": "declared_units", "status": "cannot_determine",
+                      "target": str(d.get("name")),
+                      "message": f"declared units were not checked: {type(exc).__name__}: {exc}"}
+                     for d in data["declared"] if isinstance(d, dict)][:12]
+            counts = dict(data.get("counts") or {})
+            counts["cannot_determine"] = counts.get("cannot_determine", 0) + len(extra)
+            data = {**data, "findings": [*(data.get("findings") or []), *extra],
+                    "counts": counts,
+                    "verdict": "fail" if counts.get("fail") else "cannot_determine"}
     order = {"fail": 0, "cannot_determine": 1}
     findings = sorted((f for f in (data.get("findings") or [])
                        if isinstance(f, dict) and f.get("status") != "pass"),
