@@ -216,9 +216,15 @@ def live_osm_schools(cache_dir=None) -> Dict[str, Any]:
     import time
 
     last = None
-    mirrors = ("https://overpass-api.de/api/interpreter",
+    # The order stage 40 (#89) measured: z.overpass-api.de answered when the others did not.
+    # Kept in step with rag_pipeline/search/overpass.py by hand: the reference must not depend
+    # on the agent's own code.
+    mirrors = ("https://z.overpass-api.de/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter",
                "https://overpass.private.coffee/api/interpreter",
-               "https://overpass.kumi.systems/api/interpreter")
+               "https://lz4.overpass-api.de/api/interpreter",
+               "https://overpass-api.de/api/interpreter",
+               "https://maps.mail.ru/osm/tools/overpass/api/interpreter")
     # Two passes with a pause: on 2026-10-08 all three refused once (504/500) and answered
     # minutes later.
     for attempt, url in enumerate([*mirrors, *mirrors]):
