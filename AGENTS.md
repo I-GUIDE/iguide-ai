@@ -577,6 +577,16 @@ container with network reaches whatever its host can, not just the internet, and
 runs is written by a model reading untrusted text. Stage 34 of
 `docs/agent-architecture-changes.md` has the measurements.
 
+**An input is staged under its file_id and its filename, and a file_id the code names is an
+input.** `_build_staging` (`agent_runtime/langchain_exec_tools.py`) gives every staged file both
+names in `/work`. Files are staged from three lists: the conversation's files, `input_files`, and
+every minted id (`file_` plus 12 hex digits) that the code, or an entrypoint file, spells out
+literally. A model holding a tool's `file_id` writes `gpd.read_file("file_…")` and lists nothing.
+It did that in all three live turns of 2026-10-08, and each turn paid one or two extra runs to
+find out. A named id goes through `get_file_record` only, the owner check a listed id gets
+(Stage 30), and never through the path fallback. Another user's id is refused with the same
+message as an id that was never minted. S30.7 has the trace.
+
 **Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
 once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
 fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close

@@ -5180,3 +5180,37 @@ rather than from the previous one.
   proposes it. Audited for the same pattern: `chat_traces` (fitted since M8.74), and
   `chat_history[].elements` and `ratings` (latent, since no live caller sends a non-empty one).
   The file metadata store is on the Docker volume, not this cluster.
+
+## 2026-10-08 · M8.79 · A file_id the code names is staged without being listed
+
+**Change** `execute_code` (`agent_runtime/langchain_exec_tools.py`) now stages every minted file_id
+  (`file_` plus 12 hex digits) that the code spells out. With an `entrypoint` and no inline code,
+  it reads the entrypoint file instead. These ids join the attached and listed inputs, and each one
+  gets both of its names through the existing `_build_staging`. A named id is looked up with
+  `get_file_record` only, which applies the owner check (Stage 30) and has no path fallback.
+  Another user's id, or one never minted, stages nothing and gets one message in
+  `input_file_errors`. The tool description says a named id is staged.
+
+**Why** Two live turns on 2026-10-08, `sess-1e8e3edd…` at 19:12 UTC and `sess-07bc717f…` at
+  21:34 UTC. In both stored traces the first `execute_code` was `gpd.read_file("file_…")` with no
+  `input_files`, and the run failed. Recovering cost one extra run in the first turn and two in the
+  second. Staging already gave each input both names. It just staged nothing the code had not
+  listed. Reasoning is in architecture S30.7, "A file_id the code names is an input".
+
+**Measured** 10 new tests; 6 fail on `40356bd`. Both suites: 3886 passed, 18 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx 3.4.2, failing on the base
+  too). Local replays in Chrome (`AGENT_MODE=local`, Lumen deepseek-v4-flash, the two live queries
+  verbatim):
+
+  | build | turn | first `execute_code` opened | first run |
+  |---|---|---|---|
+  | base `40356bd` | Champaign / London–Paris | `'Champaign_County.geojson'` | failed, ok on attempt 2 |
+  | base `40356bd` | schools within 1 mile | `"file_116f68539feb"` | failed, ok on attempt 2 |
+  | this change | Champaign / London–Paris | `"file_0ae2ae7e7894"` | ok |
+  | this change | Champaign / London–Paris, again | `"file_3dd7b031f78c"` | ok |
+  | this change | schools within 1 mile | `"file_efc175ca6441"` | ok |
+
+**Not fixed** A filename the code opens without listing it (the base Champaign row). Names are not
+  scanned, because a staged name is excluded from the run's artifacts, so a run that writes a file
+  under an earlier file's name would lose its output. The claude and opencode peers stage the
+  conversation's files once, at the start of a run. They do not scan.
