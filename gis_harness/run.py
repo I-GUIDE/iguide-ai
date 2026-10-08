@@ -161,6 +161,44 @@ def rescore(path: Path) -> Dict[str, Any]:
     return record
 
 
+def compare(base_dir: Path, new_dir: Path, trials: Optional[int] = None) -> Dict[str, Any]:
+    """Per-model metrics for two runs, over the task trials both have. A baseline with three
+    trials compared against an after-run with two compares only trials 0 and 1 of each."""
+    def load(d: Path) -> List[Dict[str, Any]]:
+        out = []
+        for p in sorted(d.rglob("*.json")):
+            if p.name == "summary.json" or "_data" in p.parts:
+                continue
+            r = rescore(p) if p.with_name(p.name[:-5] + ".events.jsonl").exists() else \
+                json.loads(p.read_text())
+            out.append(r)
+        return out
+
+    base, new = load(base_dir), load(new_dir)
+    key = lambda r: (r["provider"], r["model"], r["task"], r["trial"])  # noqa: E731
+    both = {key(r) for r in base} & {key(r) for r in new}
+    if trials is not None:
+        both = {k for k in both if k[3] < trials}
+    sb = summarise([r for r in base if key(r) in both])
+    sn = summarise([r for r in new if key(r) in both])
+    rows = {}
+    for model in sorted(set(sb) | set(sn)):
+        a, b = sb.get(model, {}), sn.get(model, {})
+        rows[model] = {k: (a.get(k), b.get(k)) for k in (
+            "tasks", "correct", "refused_gracefully", "strict", "zero_unproductive",
+            "unproductive_steps", "duplicate_calls", "failed_calls", "banners_on_correct",
+            "banners_total", "source_named", "seconds_total", "llm_calls", "input_tokens",
+            "output_tokens", "cost_usd")}
+        changed = {}
+        for t in sorted(set(a.get("per_task", {})) | set(b.get("per_task", {}))):
+            ra, rb = a.get("per_task", {}).get(t), b.get("per_task", {}).get(t)
+            if (ra or "").split(" [")[0] != (rb or "").split(" [")[0] or \
+                    ("unprod" in (ra or "")) != ("unprod" in (rb or "")):
+                changed[t] = (ra, rb)
+        rows[model]["changed_tasks"] = changed
+    return rows
+
+
 def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_model: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
@@ -240,7 +278,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--parallel", type=int, default=1, help="tasks in flight at once, per run")
     ap.add_argument("--summarise", type=Path, default=None, help="re-summarise a finished run dir")
     ap.add_argument("--resume", action="store_true", help="skip tasks this label already has")
+    ap.add_argument("--compare", nargs=2, type=Path, metavar=("BASE", "NEW"),
+                    help="per-model metrics of two finished runs over the trials both have")
+    ap.add_argument("--compare-trials", type=int, default=None)
     a = ap.parse_args(argv)
+
+    if a.compare:
+        rows = compare(a.compare[0], a.compare[1], a.compare_trials)
+        for model, r in rows.items():
+            print(f"\n== {model}   (base -> new)")
+            for k, v in r.items():
+                if k != "changed_tasks":
+                    print(f"  {k:22s} {v[0]!s:>12} -> {v[1]!s}")
+            for t, (x, y) in r["changed_tasks"].items():
+                print(f"    {t:8s} {x}  ->  {y}")
+        return 0
 
     if a.summarise:
         recs = [rescore(p) for p in sorted(a.summarise.rglob("*.json"))
