@@ -57,6 +57,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
 | 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
 | 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
+| 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7300,3 +7301,89 @@ verdict on every code run:
     model wandering. That is a stated limit of stage 42, not something this stage changes.
 - **Spend for these runs:** gate off $0.60 OpenAI and 7.6M Lumen tokens; gate on (both stages,
   one trial each) $0.63 and 8.7M. Program total: $2.88 OpenAI and 36.0M Lumen tokens.
+
+## Stage 44 — Facts, a number scan, one verdict {#stage-44}
+
+*2026-10-08. Branch `claude/one-verdict`, stacked on stage 43. DEVLOG M8.82. Phase 4 of the
+eight-flaws program, flaws 2 and 7. Review §F2 and §F7 have the root causes.*
+
+**Why.**
+
+Whether a figure in the answer was supported was decided four ways, each for one class:
+- the LLM audit's "verbatim" spans, which no code checked;
+- reconciliation rule (2), a substring match restricted to numbers of 3+ digits, so `21.5` was
+  never seen and `997.93` matched `997`;
+- stage 37's one-entry routing list (`_UNPRODUCIBLE_CAPABILITIES`);
+- stage 39's travel-figure scan.
+
+The next class shipped until someone wrote a rule. The open case was "~998 sq mi" in 3 of 4
+replays.
+
+Thirteen post-processing steps appended their own banners, none seeing the others' verdicts.
+"Could not check" was loud in the gate (COULD NOT VERIFY) and silent in the audit (a failed
+audit returned severity `unknown` and raised nothing).
+
+The gate's verdict was a union over every run in the turn. Live, 2026-10-08 21:34 UTC
+(`sess-07bc717f`, trace `…:0af26be5b3f8`, the first turn after `40356bd` was deployed): a correct
+23-school answer showed COULD NOT VERIFY, and all three findings came from side runs: an
+`os.listdir`, a lookup that matched 0 rows, and a failed first attempt. The run that produced the
+numbers raised none.
+
+**What changed.**
+
+1. **`agent_runtime/facts.py`.** The turn's fact set:
+   - the typed facts tools reported (stage 43);
+   - every number in a tool result, with the unit written beside it;
+   - the user's question, the retrieved evidence, and earlier turns' records.
+
+   `resolve` matches each figure the answer states to a recorded number:
+   - across units (pint), so `998 square miles` resolves to `2584.62 km²`;
+   - within the precision shown, so `2,585` resolves to 2,584.62 and `about 340` to 343.7,
+     since trailing zeros are rounding.
+
+   What is not a claim:
+   - identifiers (`EPSG:26916`, `GEOID 17019`: a number after an all-caps label), years, list
+     markers, code and links;
+   - small whole numbers without a unit.
+
+   A bare recorded number grounds a unit-bearing figure only when it is distinctive (≥100) or its
+   context names that dimension, so `"n": 5` is not evidence for "a 5-hour drive".
+2. **The writer is shown the typed facts,** with units and measurement CRS, in the synthesis note.
+3. **The number scan replaces the four rules.**
+   - A figure that resolves nowhere goes to the producer check (stage 42) with its sentence.
+   - If no bound tool produces it, the clause holding it is cut, whatever it is about. One
+     general note says so.
+   - If one does, the work goes back once (the existing re-grounding pass). What remains is
+     reported as not checked.
+   - Stage 37's routing list, stage 39's travel scan, `_remove_unproducible_claims` and
+     `_audit_without` are deleted.
+4. **The audit judges only what is not a number.** A claim that states a figure is the scan's;
+   the audit's sampled verdict on it is not used. A failed audit is "not checked", never clean.
+5. **`agent_runtime/verdict.py`: one finding type, one policy, one banner.**
+   - Every producer contributes `Finding`s: the gate, the audit, the number scan, artifact
+     corrections, and unresolved peer failures.
+   - `synthesize_node` renders them once, after peer failures are known: ⚠️ when something is a
+     problem, ℹ️ "Not everything here could be checked. Unchecked is not the same as wrong" when
+     something was not checked, and nothing when every check passed.
+   - At most six lines, the rest counted.
+   - `_apply_grounding_caveat`, `_peer_failure_note` and `_correct_artifact_claims` now render
+     through it. Their old banners (COULD NOT VERIFY, Grounding check, Partial answer,
+     Correction) are gone.
+   - The verdict travels on the state as `verdict: {status, findings, numbers}`, with each stated
+     figure's fact id.
+6. **The gate speaks for the code runs the answer uses:** runs a stated figure resolves to, or
+   runs that produced a file or layer.
+   - When no stated figure came from code (a qualitative answer), the runs that succeeded count.
+   - When the answer states figures that resolve nowhere, every run counts, because the gate
+     cannot tell which matter.
+   - A failed attempt that a later run superseded never counts (stage 42).
+
+**Tests.**
+- **New:** `test_number_scan_and_verdict.py` (24). Against stage 43 with only `facts.py` and
+  `verdict.py` copied in, the 7 graph-behaviour tests fail. The 17 that pass test the new modules
+  themselves.
+- **Rewritten:** the routing-figure scan tests now run the general pass with a scripted producer
+  model. The two routing-classifier parametrised tests are deleted with the classifier. Banner
+  assertions in 7 files moved to the new wording.
+- **Suites:** `rag_pipeline/tests` 3849 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
+  157 passed.

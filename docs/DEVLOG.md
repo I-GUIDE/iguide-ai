@@ -5242,3 +5242,21 @@ rather than from the previous one.
   practice. A number typed by hand into a script with the wrong unit still parses. Shapely-level
   operations on raw coordinates bypass the operation tracker. The agent image needs rebuilding
   to get pint; until then declared units are explicit unknowns.
+
+## 2026-10-08 · M8.82 · Facts, a number scan, one verdict (architecture stage 44)
+
+**Change**
+- **Facts and scan:** `agent_runtime/facts.py` holds the turn's facts, and a deterministic scan
+  resolves every stated figure to one, across units and at the precision shown.
+- **Cuts:** a figure no bound tool produces is cut, whatever its class.
+- **One verdict:** `agent_runtime/verdict.py` turns every check's findings into a single banner.
+- **Scoping:** the gate speaks only for the runs the answer uses.
+- **Deleted:** stage 37's routing list and stage 39's travel scan.
+
+**Why** Review flaws 2 and 7, and the live 21:34 UTC turn: a correct answer whose COULD NOT
+  VERIFY came entirely from side runs.
+
+**Measured** See stage 44.
+
+**Not fixed** A correct number attached to the wrong noun resolves. A memorised figure that
+  equals some recorded number resolves (the "~340 km by Eurostar" case).
