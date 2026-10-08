@@ -6874,6 +6874,12 @@ Design choices and why:
 - **Local only.** `--start-server` runs `api/server.py` with `AGENT_MODE=local` (stage 24) and
   blanks `GOOGLE_MAPS_API_KEY`: KB spatial search geocodes through Google, a metered call no task
   needs.
+- **The invariant gate: on since `33426a5`, OFF in the baselines below.** The deployment turns
+  the sandbox gate on through `AGENT_EXTRACTION=1`. The harness server set neither that nor
+  `AGENT_INVARIANT_GATE` until `33426a5`, so the sample and the full baseline ran with
+  `"verification": {}` on every code run. Their banner counts therefore include no gate
+  banners. `--start-server` now sets `AGENT_INVARIANT_GATE=1`, and each record lists the gate's
+  verdict on every code run (`gate`). Stage 42 records a gate-on run as the before for stage 43.
 
 **Every model call now reports its tokens.** The first sample turn streamed 2 model calls for a
 turn that made at least 4: `turn_instrumentation` is middleware on the peers' `create_agent`, so
