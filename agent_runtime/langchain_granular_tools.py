@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from rag_pipeline.search.utils import default_top_k
@@ -396,6 +399,96 @@ def make_langchain_geocode_tools() -> List[Any]:
         )
     ]
 
+
+
+# --------------------------------------------------------------------------- #
+# Real-world features, for the peers that measure
+# --------------------------------------------------------------------------- #
+# Live, 2026-10-08: "which schools are within 1 mile of [a drawn box]?" went to the analyze peer,
+# whose 43 tools held nothing that finds a feature by KIND in an AREA. overpass_search existed,
+# bound only to the search peer. So the peer geocoded school names it remembered (Hyde Park, 15
+# km away, first) and then street intersections, 27 calls, until the recursion limit. The code
+# peer then answered from the Chicago Public Schools file it found by web search, which leaves
+# out every private, Catholic and suburban school OSM has in the same area.
+#
+# Same name and same query as the search peer's tool. What this one adds is what a MEASURING
+# peer needs next: the features as a GeoJSON file, so execute_code and the overlay tools can
+# read them by file_id, and a statement of what the list is, so an answer built on it can say.
+_OSM_DEFAULT_LIMIT = 200
+
+
+def _osm_source_statement(payload: Dict[str, Any], feature: str) -> str:
+    query = payload.get("query") or {}
+    osm_filter = query.get("osm_filter") or f"name ~ {feature!r}"
+    where = query.get("place") or (f"bbox {query.get('bbox')}" if query.get("bbox") else "the area")
+    return (f"OpenStreetMap features tagged {osm_filter} in {where}, as mapped by OSM "
+            "contributors: public, private and religious ones alike wherever someone has mapped "
+            "them, and not an official register, so a recently opened or closed one may be "
+            "missing or still listed.")
+
+
+def osm_features_tool(feature: str, place: str = "", bbox: str = "",
+                      limit: int = _OSM_DEFAULT_LIMIT) -> str:
+    """overpass_search for the analyze and code peers: the same query, plus a file and a
+    statement of what the list covers."""
+    payload = json.loads(overpass_search_tool(feature, place=place, bbox=bbox,
+                                              limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT,
+                                                              maximum=500)))
+    if payload.get("error"):
+        return json.dumps(payload, ensure_ascii=True, default=str)
+    features = payload.get("features") or []
+    payload["source_statement"] = _osm_source_statement(payload, feature)
+    if features:
+        from agent_runtime.file_store import create_output_file_from_path
+
+        rows = []
+        for feat in features:
+            props = {str(k): v for k, v in (feat.get("tags") or {}).items()}
+            props.update({"name": feat.get("name"), "osm_type": feat.get("osm_type"),
+                          "osm_id": feat.get("osm_id"), "feature_type": feat.get("feature_type")})
+            rows.append({"type": "Feature", "geometry": feat.get("geometry"), "properties": props})
+        stem = re.sub(r"[^A-Za-z0-9_]+", "_", f"osm_{feature}").strip("_")[:40] or "osm_features"
+        out = Path(tempfile.mkdtemp(prefix="osm_features_")) / f"{stem}.geojson"
+        out.write_text(json.dumps({"type": "FeatureCollection", "features": rows}),
+                       encoding="utf-8")
+        rec = create_output_file_from_path(out, filename=out.name)
+        payload.update({"file_id": rec.get("file_id"), "download_url": rec.get("download_url"),
+                        "filename": rec.get("filename")})
+    asked = _safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500)
+    if len(features) >= asked:
+        payload["note"] = (f"{len(features)} features is the limit asked for, so there may be "
+                           "more in the area; a larger `limit` (up to 500) returns them.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
+def make_langchain_osm_tools() -> List[Any]:
+    """`overpass_search` for the analyze and code peers, bound with or without an upload."""
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception:  # pragma: no cover - optional dependency
+        return []
+    return [
+        StructuredTool.from_function(func=accept_null_defaults(osm_features_tool),
+            name="overpass_search",
+            description=(
+                "Find real-world features of a KIND inside an area, from live OpenStreetMap: "
+                "schools, hospitals, fire stations, parks, rivers, roads, rail lines, power "
+                "plants, buildings, and any raw OSM filter ('amenity=school', "
+                "'waterway=river'). It returns each feature's name, OSM tags and geometry, puts "
+                "them on the user's map, and writes them to a GeoJSON file whose `file_id` "
+                "execute_code (via `input_files`) and the overlay tools read, so distances, "
+                "buffers and counts can be measured against them. It returns only what lies "
+                "inside the area it is given: for 'within 1 mile of X', pass a bbox enlarged by "
+                "that distance and measure the exact distance afterwards. `source_statement` "
+                "says what the list covers. Geocoding names one place at a time; this finds "
+                "every mapped feature of a kind at once. Location: `place` (a name, geocoded) "
+                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. For the boundary of a named US "
+                f"state, county or city, admin_boundary is the better source. Default limit "
+                f"{_OSM_DEFAULT_LIMIT}, max 500."
+            ),
+            metadata={"category": "geospatial"},
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -873,6 +966,8 @@ __all__ = [
     "opengeodata_search_tool",
     "web_search_tool",
     "overpass_search_tool",
+    "osm_features_tool",
+    "make_langchain_osm_tools",
     "web_fetch_tool",
     "pyqgis_layer_summary_tool",
     "pyqgis_render_map_tool",

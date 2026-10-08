@@ -5103,3 +5103,35 @@ rather than from the previous one.
 **Not fixed** The scan matches numbers, not meanings, so a travel figure equal to a recorded
   number passes. Memorised figures outside travel ("the commonly cited ~998 sq mi") are still
   left to the audit.
+
+## 2026-10-08 · M8.76 · A peer that can find what it measures, and stops when it repeats itself
+
+**Change** Four changes. (1) `make_langchain_osm_tools` binds `overpass_search` in the analyze and
+  code peers, with or without an upload. It writes the features to a GeoJSON file that
+  `execute_code` can read, adds a `source_statement`, and notes when the result hits the limit.
+  (2) `_make_repeat_call_middleware` handles a call identical to one in the latest executed step
+  of the same run: it returns the earlier result with an observation, and at the fourth identical
+  ask it raises `RepeatedToolCallError`. A failed result is retried, never replayed. (3) `_run_peer`
+  records where a failure happened, and the "Partial answer" banner is shown only for failures
+  that no later answering peer made good. (4) `_with_feature_source` adds a **Source:** line when
+  the answer lists features and names none of the sources in the tool record.
+
+**Why** Live turn 2026-10-08 19:42 UTC (sess-38c02242, Lumen deepseek-v4-flash, "schools within
+  1 mile of a drawn box"): 13 min 5 s. Analyze had no feature lookup among its 43 tools, made 27
+  `geocode_places` calls (the last 15 identical), and hit the recursion limit. Code then answered
+  with 18 Chicago Public Schools, did not name the source, and the answer carried a false
+  "Partial answer" banner. OSM has 31 schools in the same mile. Reasoning is in architecture
+  stage 38, "A peer that can find what it measures, and stops when it repeats itself".
+
+**Measured** Lumen deepseek-v4-flash with tools bound returns `reasoning_tokens: 0` and
+  `reasoning_content: null`, so this was not reasoning loss. On the incident's rebuilt history (3
+  trials per cell), telling the model the call was a repeat did not stop it: 2/3 repeated after
+  one repeat and 3/3 after four, against 0/3 and 3/3 without the observation. Local replays in
+  Chrome (`AGENT_MODE=local`): before the change 4 min 55 s with 8 schools. After it, 2 min 8 s,
+  4 min 15 s (during an Overpass outage) and 2 min 42 s, each with 31 schools and no loop or
+  banner. Both suites, rebased on `81fd7c8`, with networkx at its pin of 3.6.1 in a throwaway
+  venv: 3700 passed, 18 skipped, 0 failed; and 135 passed. With the Mac's anaconda networkx 3.4.2, only
+  `test_the_installed_networkx_matches_the_pin` fails, as it does on the base.
+
+**Not fixed** The invariant gate's "COULD NOT VERIFY" on correct distances (PR #85's area),
+  Overpass mirror outages, A-B-A-B alternation loops, and the capability atlas entry.
