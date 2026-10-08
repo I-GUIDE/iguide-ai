@@ -6315,3 +6315,48 @@ Tests: `test_geocode_tool.py` replays Nominatim's real London and Paris response
 made. It also checks the fallback to the centre when the point lies outside the box. Both fail on
 `00e560f`. The four existing tests pass on both.
 
+### Stage S37.8 Two more gate false alarms: a counted noun, and a column carried back to WGS84
+
+A second live turn, 2026-10-08 19:42:29 UTC (thread `sess-38c02242-…`, *"schools within 1 mile
+of a drawn box"*), answered correctly. It found 18 schools, and every distance was checked
+independently to within 4 m. It still showed COULD NOT VERIFY, for two reasons. No trace was
+stored for this thread, so the tests rebuild the pattern from the reported findings, and the
+assembled-gate test reproduces both of them word for word on `00e560f`.
+
+**(a) `unrecognised unit 'schools'`** on `{"num_schools_within_1mile": {"value": 18, "unit":
+"schools"}}`. A count has no physical unit; its "unit" is whatever was counted, so no list of
+nouns will ever be complete. Stage 36 added an explicit list and said why: a plural-stripping
+rule would read `metres` as a count. This stage does not guess from the noun. It reads the
+output's name. `_inferred_count` treats an unrecognised alphabetic unit as a count only when
+the name says it is one (`num_`, `n_`, `count`, `number`, `total`) and the value is a whole
+number ≥ 0. Then it passes, marked `inferred_count`. All of stage 36's guards still hold:
+`{"x": 1 furlongs}`, `bananas`, `{"r": 10.0 furlongs}`, and also `distance_furlongs: 3`,
+`num_schools: 2.5` and `num_schools: -1` stay unknown. An inferred count is never a FAIL, because
+a guessed category should not produce a hard failure. Any unrecognised unit that is left is
+marked `advisory`.
+
+**(b) `EPSG:4326 frame holds a measurement column ('distance_m') that no tracked operation
+produced`**. The script measured in EPSG:26916 and then called `to_crs("EPSG:4326")` for GeoJSON
+output. That is the normal pattern, and the column comes along with the frame. With the operation
+tracker live and no metric operation run on a geographic frame, `run_checks` now looks for a
+projected frame in scope that holds the same column. If it finds one, the finding passes with
+`measured_in` naming that frame. If not (for example a chained
+`to_crs(26916).assign(...).to_crs(4326)` that binds nothing in between), the finding stays
+cannot_determine but is marked `advisory`, and its message names the usual cause. A guard
+checks that a distance measured on the WGS84 frame still fails even when a projected frame with
+the same column exists, because the tracked `distance` operation fails on its own.
+
+**Supervisor.** S37.2's unit-only note now covers any gate verdict whose unknowns are all
+advisory (`advisory` flag, or the unrecognised-unit message for images built before the flag
+existed). It shows an ℹ️ note listing the items, with severity low and
+`hallucination_detected: false`. Every other unknown still says COULD NOT VERIFY.
+
+Tests: 7 in `test_invariant_gate.py` (count inference including a numpy int, its guards, the
+advisory mark, a credited carried column, an uncredited one, the WGS84-measurement guard, and the
+whole schools script through the assembled prologue/epilogue). There is 1 more in
+`test_regrounding_turn_record.py`, for the note. Six fail on `00e560f`, and the two guards pass
+on both.
+
+The same turn also showed "⚠️ Partial answer: analysis failed during this turn" although the code
+peer then answered in full. That is outside this stage and is being proposed separately.
+

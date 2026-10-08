@@ -446,3 +446,23 @@ def test_any_other_gate_unknown_still_says_could_not_verify():
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is True
     assert "COULD NOT VERIFY" in g._apply_grounding_caveat("x", audit)
+
+
+def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():
+    """Live 19:42 UTC: a metres column carried back to WGS84 that the gate cannot trace is not a
+    reason to say COULD NOT VERIFY (with or without an unrecognised unit beside it)."""
+    from agent_runtime.supervisor import graph as g
+    report = {"verdict": "cannot_determine", "counts": {"pass": 9, "cannot_determine": 2},
+              "findings": [
+                  {"check": "projected_crs", "status": "cannot_determine",
+                   "target": "schools_within_4326", "advisory": True,
+                   "message": "EPSG:4326 frame holds a measurement column ('distance_m') …"},
+                  {"check": "declared_units", "status": "cannot_determine", "target": "x",
+                   "message": "unrecognised unit 'furlongs'; not checked"}]}
+    ctx = {"analysis_results": {"tool_results": [_result(
+        "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
+    audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
+    assert audit["hallucination_detected"] is False and audit["severity"] == "low"
+    note = g._apply_grounding_caveat("18 schools.", audit)
+    assert note.count("ℹ️") == 1 and "COULD NOT VERIFY" not in note
+    assert "distance_m" in note

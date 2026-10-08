@@ -380,6 +380,24 @@ def _count_finding(target: str, value: Any, unit: Any) -> Dict[str, Any]:
                     f"unit {unit}: a non-negative whole count ({int(value)})", unit=str(unit))
 
 
+def _inferred_count(target: Any, value: Any) -> bool:
+    """Whether a declared output with an UNRECOGNISED unit word is, by its name, a count.
+
+    Live, 2026-10-08 19:42 UTC: {"num_schools_within_1mile": {"value": 18, "unit": "schools"}}
+    came back "unrecognised unit 'schools'; not checked" and put COULD NOT VERIFY on a correct
+    answer. A count of things has no physical unit, and the noun is whatever was counted, so no
+    vocabulary of nouns can ever be complete. The output's NAME says it is a count (`num_`,
+    `n_`, `count`, `number`, `total`), and the value must be a whole number >= 0. Both are
+    required: `{"x": {"value": 1, "unit": "furlongs"}}` stays unknown, and so does a distance
+    whose name happens to contain the unit word. Only the unit word must look like a noun.
+    """
+    import re as _re
+    if value is None or value < 0 or not float(value).is_integer():
+        return False
+    key = str(target or "").strip().lower()
+    return bool(_re.search(r"(?:^|_)(?:num|n|nb|count|counts|number|total)(?:_|$)", key))
+
+
 def check_count_population(outputs: Any, namespace: Dict[str, Any],
                            *, max_frames: int = 12) -> List[Dict[str, Any]]:
     """Report the population each declared count could have come from, and fail an impossible one.
@@ -510,8 +528,20 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
             # Checked against the ALIAS table as well as the literal set. `km²` — which is how a
             # model actually writes it, observed live — was in neither, so a correctly declared
             # unit came back "unrecognised; not checked" and downgraded the whole run.
-            findings.append(_finding("declared_units", UNKNOWN, target,
-                                     f"unrecognised unit {unit!r}; not checked", unit=str(unit)))
+            if (str(unit).strip().replace(" ", "").replace("_", "").isalpha()
+                    and _inferred_count(target, _declared_number(value))):
+                findings.append(_finding("declared_units", PASS, target,
+                                         f"unit {unit!r} names what is counted ({target!r} is "
+                                         f"a count): a non-negative whole number "
+                                         f"({int(_declared_number(value))})", unit=str(unit),
+                                         inferred_count=True))
+            else:
+                # Advisory: a unit name the gate cannot read says nothing about whether the
+                # number is right, so the supervisor reports it as a note, not as COULD NOT
+                # VERIFY (architecture stage S37.2).
+                findings.append(_finding("declared_units", UNKNOWN, target,
+                                         f"unrecognised unit {unit!r}; not checked",
+                                         unit=str(unit), advisory=True))
         elif _UNIT_ALIASES.get(str(unit).strip().lower()) == "count" or \
                 str(unit).strip().lower() == "count":
             # A count is the one unit whose VALUE the gate can judge on its own: a negative or
@@ -996,11 +1026,40 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                     and f.get("status") == FAIL and "op" not in f):
                 continue
             if f.get("metric_column"):
-                f["status"] = UNKNOWN
-                f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds a measurement "
-                                f"column ({f['metric_column']!r}) that no tracked operation "
-                                f"produced in this run, so whether it is in degrees cannot be "
-                                f"determined.")
+                # Measure in a projected frame, then `to_crs(4326)` for GeoJSON output: the
+                # column rides along and the WGS84 frame now "holds a measurement". Live,
+                # 2026-10-08 19:42 UTC: `distance_m` computed in EPSG:26916, carried back to
+                # 4326, every distance right to within 4 m, and the banner said COULD NOT VERIFY.
+                # With the tracker live and no metric operation on a geographic frame, a
+                # projected frame in scope holding the SAME column is where it was measured.
+                source = None
+                for other_name, other in list(namespace.items()):
+                    if other_name.startswith("_") or other_name == f.get("target"):
+                        continue
+                    try:
+                        if (_looks_like_frame(other) and _is_projected(_crs_of(other))
+                                and f["metric_column"] in [str(c) for c in other.columns]):
+                            source = other_name
+                            break
+                    except Exception:
+                        continue
+                if source:
+                    f["status"] = PASS
+                    f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds "
+                                    f"{f['metric_column']!r}, which the projected frame "
+                                    f"{source!r} also holds and no metric operation ran on a "
+                                    f"geographic frame: measured in {source!r} and carried "
+                                    f"back for output.")
+                    f["measured_in"] = source
+                else:
+                    f["status"] = UNKNOWN
+                    f["advisory"] = True
+                    f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds a measurement "
+                                    f"column ({f['metric_column']!r}) that no tracked operation "
+                                    f"produced in this run and no projected frame in scope "
+                                    f"holds, so whether it is in degrees cannot be determined "
+                                    f"(usually it was measured in a projected frame and carried "
+                                    f"back with to_crs for output).")
             else:
                 f["status"] = PASS
                 f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but no metric "
@@ -1166,7 +1225,8 @@ def _inlined_helpers() -> str:
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
                 check_not_all_nan, _looks_like_join_result, _has_metric_column,
                 check_join_cardinality,
-                check_finite, _count_finding, _declared_number, check_declared_units,
+                check_finite, _count_finding, _declared_number, _inferred_count,
+                check_declared_units,
                 check_count_population,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
                 _looks_like_frame, _has_geometry, install_contract_guards,

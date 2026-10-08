@@ -5023,3 +5023,16 @@ rather than from the previous one.
   London's box centre is 3.4 km from Charing Cross, which made London–Paris 340.0 km instead of
   343.7 km. Stage S37.7.
 
+**M8.73, second live turn (19:42 UTC, schools within 1 mile)** This turn was correct too: 18
+  schools, distances right to within 4 m. It still showed COULD NOT VERIFY, because of unit
+  `schools` and because `distance_m` was carried back from EPSG:26916 to 4326. Now:
+  - an unrecognised unit on an output named as a count (`num_`, `count`, …) with a whole value
+    ≥ 0 is a count;
+  - a measurement column on a WGS84 frame is credited to a projected frame in scope that holds the
+    same column, when no metric operation ran on a geographic frame, and is otherwise an
+    advisory unknown;
+  - a verdict whose unknowns are all advisory is an ℹ️ note.
+
+  Six of the 8 new tests fail on `00e560f`. The full suite has 3629 passed and the same 1
+  machine-dependent failure. Stage S37.8.
+

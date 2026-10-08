@@ -1803,7 +1803,7 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
         # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
         # rather than restating it -- two headlines in a row read as a template, not a warning.
         icon = ("⛔" if gate == "fail"
-                else "ℹ️" if (audit or {}).get("gate_unit_only") else "⚠️")
+                else "ℹ️" if (audit or {}).get("gate_advisory_only") else "⚠️")
         note = f"{icon} {summary}" if summary else (
             f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
             f"on this run, so its numeric results are not verified.")
@@ -2257,15 +2257,26 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         # number may be wrong" — everything it could read passed. Live, 2026-10-08: a correct
         # 997.93 declared in `square_miles` produced "COULD NOT VERIFY ... hallucination is
         # detected at high severity". That case gets a note, not an alarm.
-        unit_only = gate_verdict == "cannot_determine" and all(
-            f.get("check") == "declared_units" and "unrecognised unit" in str(f.get("message"))
-            for f in gate)
+        # The same holds for a measurement column the gate could not trace on a WGS84 frame when no
+        # metric operation ran on a geographic frame (live 19:42 UTC: `distance_m` carried back
+        # from EPSG:26916 for output). The gate marks both `advisory`; the message test keeps an
+        # image built before the flag working.
+        def _advisory(f: Dict[str, Any]) -> bool:
+            return bool(f.get("advisory")) or (
+                f.get("check") == "declared_units"
+                and "unrecognised unit" in str(f.get("message")))
+
+        advisory_only = gate_verdict == "cannot_determine" and all(_advisory(f) for f in gate)
+        unit_only = advisory_only and all(f.get("check") == "declared_units" for f in gate)
         if gate_verdict == "fail":
             headline = ("A deterministic invariant check FAILED on this run, so its numeric "
                         "results are not verified.")
         elif unit_only:
             headline = ("The invariant check did not recognise a declared unit, so that value's "
                         "unit was not checked. Nothing the check could read failed.")
+        elif advisory_only:
+            headline = ("The invariant check left the item(s) below unchecked. Nothing it could "
+                        "check failed.")
         else:
             headline = ("A deterministic invariant check COULD NOT VERIFY this run, so its "
                         "numeric results are unconfirmed — this is not the same as them being "
@@ -2275,14 +2286,14 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         # gate's headline — which is how "hallucination is detected at high severity" reached
         # the banner of a turn whose only finding was a unit name.
         auditor_summary = str((audit or {}).get("summary") or "") if kept else ""
-        return {**(audit or {}), "hallucination_detected": not unit_only,
+        return {**(audit or {}), "hallucination_detected": not advisory_only,
                 # cannot_determine is a real caveat but not a detected error; calling it high
                 # would train the reader to ignore the label.
                 "severity": ("high" if gate_verdict == "fail"
-                             else "low" if unit_only else "medium"),
+                             else "low" if advisory_only else "medium"),
                 "issues": gate_issues + kept,
                 "summary": (headline + " " + auditor_summary).strip(),
-                "gate_headline": headline, "gate_unit_only": unit_only,
+                "gate_headline": headline, "gate_advisory_only": advisory_only,
                 "invariant_gate": gate_verdict}
 
     if not kept:
