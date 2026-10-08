@@ -871,6 +871,72 @@ and 7 skipped: the eleven tests S6.11 and S6.12 add that fail on `prototype` are
 difference, and the nine that fail either way need packages the image lacks, such as xarray and
 pyarrow. Nothing was deployed.
 
+### Stage S6.13 A label with nothing to predict is refused, not fitted
+
+*2026-10-08, `claude/fit-constant-label`. Found by the independent audit of a draft of S6.12, and
+kept out of that change because it predates the join report.*
+
+A label that holds one value in every zone leaves nothing to predict, and `fit()` fitted it
+anyway. With 5.0 in each of 30 zones it reported ok, with rmse 0 and a map of zero residuals, and
+its `r2` came back NaN, the stand-in `_r2` gives for 0/0. `json.dumps` writes that as a bare `NaN`,
+which is not JSON, and none of the tool's verdicts fired, because NaN compares false. 0.1 in every
+zone did worse. The mean of thirty 0.1s rounds, so the spread came out a few 1e-17 rather than 0,
+and the scores became ratios of rounding noise: blocked r2 0.55 and 33% skill over the baseline,
+with the random split at 0.75, so the verdict line explained the "skill" as spatial adjacency. A
+third in every zone claimed r2 0.85 and 61% skill, and 2e-5 in every zone r2 0.96 and 81% skill,
+with no verdict at all. Two more ways to the same bare `NaN` turned up in the audit: a label of
+`"Infinity"` in one zone, which `pd.to_numeric` reads as inf and `dropna` keeps, turned every score
+into NaN; and a label that does vary, but on the scale of 1e-200 or 1e308, cannot be squared in
+double precision. All of it measured the same on pandas 2.2.3 and 3.0.5.
+
+**`fit()` now compares the label's values, not their spread, and refuses when there is only one.**
+The error gives the value to six significant digits and says how many zones hold it, and the
+reply lists the polygons' numeric columns that do vary, as the missing-label error lists the
+numeric columns there are. The label, the key column and any column that is constant across the
+layer (its state, its year, the likely mistake) stay off that list. Only the zones that met a
+vector and carry a label are compared, since those are what would be fitted: 25 embedded zones
+labelled 5.0 are refused, whatever the five without a vector hold. Comparing values, rather than
+testing the spread against a tolerance, keeps fitting a label of which one zone is a
+ten-millionth away from the rest, as before.
+
+**An infinite label counts as no label,** like text that does not parse as a number: that zone
+drops out, and the others are fitted. **A fit whose scores still come out not finite is refused**,
+naming the label's range and asking for it to be rescaled, so the reply never carries NaN.
+
+**Where the label varies and is finite, nothing moved.** The old and new `fit()` gave identical
+replies and byte-identical prediction files on twenty layers covering what S6.10 measured: full
+and partial joins, keys held as text and as numbers, ids pandas reads as missing, and failures
+before and after the join. Both stacks.
+
+**Verified** by `rag_pipeline/tests/test_fit_zone_model_constant_label.py`, offline, through
+`embed_zones` (service stubbed) → `fit_zone_model`, with every `fit_zone_model` reply parsed as
+strict JSON:
+
+- 5.0, 0.1 and a third in all 30 zones: refused, the value named, no score reported, and `canopy`
+  offered while the numeric key and the constant `state` are not;
+- 5.0 in the 25 zones embedded and other values in the five that were not: refused, counting 25;
+- 1.0 in 29 zones and 1.0000001 in one: fitted;
+- `"Infinity"` in one zone of 30: the other 29 fitted;
+- a label from 1e-200 to 3e-199, and one from 1e306 to 3e307: refused, asking for a rescale.
+
+On `prototype` the first seven fail, five because the reply carries NaN and two because the fit
+says ok, and the eighth passes. With the change all eight pass, on both stacks.
+
+One existing test changed. `test_both_cross_validation_scores_use_the_same_fold_count` simulated
+three spatial blocks by dropping two of five folds. That left their zones with no out-of-fold
+prediction, and its fit with an rmse of NaN. It passed because it never read the score, and the
+new guard refuses that fit. It now collapses the groups to three, which is how fewer blocks arise
+in `fit()`. It passes on `prototype` and with the change, and it still fails a fitter whose naive
+split ignores the blocks that ran.
+
+The full `rag_pipeline` suite gives 1 failed, 3744 passed and 18 skipped on the Mac, against 8
+failed and 3737 passed on `prototype` with both test files. The one that fails either way finds
+networkx 3.4.2 where `constraints.txt` pins 3.6.1, which describes the development machine. In
+the replica, with `--network none`, it gives 10 failed, 3728 passed and 25 skipped with the
+change, against 17 failed and 3721 passed. On both stacks the seven tests above are the whole
+difference, and the ten that fail either way in the replica need packages the image lacks, such
+as pypdf and pyarrow. Nothing was deployed.
+
 ---
 
 ## Stage 7 — The action ledger {#stage-7}
