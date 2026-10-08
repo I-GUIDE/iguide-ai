@@ -109,6 +109,31 @@ def run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
     return record
 
 
+def rescore(path: Path) -> Dict[str, Any]:
+    """Re-score a stored task from its own event stream, with no model call.
+
+    The record keeps the expected values it was scored against, and `<task>.events.jsonl`
+    every SSE event, so a fix to score.py applies to past runs exactly.
+    """
+    from .client import _reduce
+
+    record = json.loads(path.read_text())
+    events = path.with_name(path.name[: -len(".json")] + ".events.jsonl")
+    if not events.exists():
+        return record
+    turn = {"answer": None, "tool_calls": [], "tool_results": [], "tool_errors": [],
+            "usage": [], "map_layers": 0, "events": 0, "route": None, "error": None,
+            "audit_severity": None}
+    for line in events.read_text().splitlines():
+        ev = json.loads(line)
+        _reduce(turn, ev["event"], ev["data"])
+    turn["error"] = record.get("error") or turn["error"]
+    record["score"] = score(BY_ID[record["task"]], record["expected"], turn).to_dict()
+    record["usage"] = cost_usd(turn["usage"])
+    path.write_text(json.dumps(record, indent=2, default=str))
+    return record
+
+
 def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_model: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
@@ -185,8 +210,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
 
     if a.summarise:
-        recs = [json.loads(p.read_text()) for p in sorted(a.summarise.rglob("*.json"))
-                if p.name != "summary.json"]
+        recs = [rescore(p) for p in sorted(a.summarise.rglob("*.json"))
+                if p.name != "summary.json" and "_data" not in p.parts]
         summary = summarise(recs)
         (a.summarise / "summary.json").write_text(json.dumps(summary, indent=2))
         print_summary(summary)

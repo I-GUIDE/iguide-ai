@@ -182,3 +182,11 @@ def test_earthquake_snapshot_is_the_pinned_one(out):
     assert exp["mainshock_id"] == "ci38457511"
     assert exp["mainshock_mag"] == pytest.approx(7.1)
     assert exp["aftershocks_7d_25km"] > exp["aftershocks_m4_7d_25km"] > 0
+
+
+def test_a_typographic_apostrophe_still_reads_as_a_refusal():
+    # gpt-5.6-luna, 2026-10-08: "I can’t compute the mean NDVI ... it contains only a red band.
+    # NDVI requires both red and near-infrared" scored as not refused.
+    ans = ("I can’t compute the mean NDVI from the attached scene because it contains only "
+           "a red band. NDVI requires both red and near-infrared (NIR) data.")
+    assert refusal(ans, BY_ID["U02"].fabrication)["refused"]

@@ -65,7 +65,7 @@ REFUSAL_RE = re.compile(
     r"(?:is|are)(?: not|n't) (?:present|available|included|in the|on the|connected|part of|"
     r"reachable)|not (?:found|present|available)|lacks?|missing|only (?:one|a single) band|"
     r"no (?:near[- ]infrared|NIR|elevation|DEM|mercury|Hg|path|route|road|edge|data)|"
-    r"unreachable|off the network|outside the network)\b", re.I)
+    r"requires? both|needs? both|unreachable|off the network|outside the network)\b", re.I)
 
 
 @dataclass
@@ -97,8 +97,11 @@ def numbers(text: str) -> List[Number]:
 
 
 def _clean(text: str) -> str:
-    return (text or "").replace("**", "").replace("__", "").replace(" ", " ").replace(
-        " ", " ")
+    # Typographic apostrophes and spaces as models write them: "can’t" is "can't".
+    for a, b in (("**", ""), ("__", ""), ("\u202f", " "), ("\u00a0", " "),
+                 ("\u2019", "'"), ("\u2018", "'")):
+        text = (text or "").replace(a, b)
+    return text or ""
 
 
 def _within(v: float, e: float, rel: float, abs_: float) -> bool:
