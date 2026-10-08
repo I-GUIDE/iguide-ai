@@ -1,0 +1,99 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on the two uploaded scenes:\n\n**Mean NDVI:**\n- **2020: 0.5326**\n- **2024: 0.4998**\n\n**Vegetation change between dates:**\n- Mean NDVI change (2024 \u2212 2020): **\u22120.0328**, indicating an overall decline in vegetation across the scene.\n- The per-pixel change ranged from \u22120.350 to +0.001.\n\n**Area losing more than 0.2 NDVI:**\n- **9.00 hectares** (900 pixels \u00d7 0.01 ha/pixel) experienced an NDVI drop greater than 0.2 between the two dates.\n\nAll 9,975 valid pixels were common to both dates, so the loss figure covers the full scene. The NDVI change raster (per-pixel difference, 2024 minus 2020) is available for download as **file_ad2c650be42c** \u2014 [download](/agent/files/file_ad2c650be42c/download).",
+  "seconds": 98.5,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 156138,
+    "cached_input_tokens": 146688,
+    "output_tokens": 3221,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791494400-0"
+}

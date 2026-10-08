@@ -1,0 +1,99 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on your uploaded files, here are the results:\n\n## NDVI Analysis Results\n\nI computed NDVI = (NIR \u2212 Red) / (NIR + Red) for each scene (band 1 = red, band 2 = NIR), using the 9,975 valid pixels in each scene (25 nodata pixels per scene).\n\n**Mean NDVI:**\n- **2020:** 0.5326\n- **2024:** 0.4998\n- Mean change (2024 \u2212 2020): **\u22120.0328** (a decline in vegetation greenness)\n\n**Area that lost more than 0.2 NDVI:**\n- 900 pixels dropped by more than 0.2 NDVI\n- At 10 m resolution (100 m\u00b2 = 0.01 ha per pixel), that is **9.00 hectares**\n\nThe change range was \u22120.350 to +0.001, so essentially no pixels gained greenness \u2014 the whole scene declined, with the largest losses concentrated in 9 ha.\n\n**Method notes:**\n- Both rasters are 100\u00d7100, 10 m pixels, EPSG:32616 (UTM 16N), so the two scenes align exactly and pixel areas are true ground distances.\n- NDVI was computed only where both bands were valid (nodata = 0 excluded); the mean is over the 9,975 valid pixels in each scene.\n- \"Lost more than 0.2\" = NDVI_2024 \u2212 NDVI_2020 < \u22120.2.\n\n**Downloadable output:** [ndvi_change_summary.txt](/agent/files/file_ba81781d83a4/download)",
+  "seconds": 108.7,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 156911,
+    "cached_input_tokens": 146688,
+    "output_tokens": 4173,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791494956-1"
+}

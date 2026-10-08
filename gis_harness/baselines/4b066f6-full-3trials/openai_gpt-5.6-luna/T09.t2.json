@@ -1,0 +1,81 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 2,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Global Moran\u2019s I for `value` is **0.2252** using queen contiguity with row-standardised weights. This indicates significant positive spatial autocorrelation:\n\n- Expected Moran\u2019s I: \u22120.0101\n- z-score: 4.371\n- p-value: 0.001\n\nUsing Getis\u2013Ord Gi* with binary queen weights and each cell included in its own neighbourhood, **15 cells are hot spots with z > 1.96**.",
+  "seconds": 51.7,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 67904,
+    "cached_input_tokens": 0,
+    "output_tokens": 846,
+    "usage_absent": 0,
+    "cost_usd": 0.0146,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T09-gpt-5.6-luna-1791496394-2"
+}

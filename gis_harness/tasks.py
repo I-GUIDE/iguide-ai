@@ -213,10 +213,17 @@ def live_osm_schools(cache_dir=None) -> Dict[str, Any]:
     lat, lon = LIVE_SCHOOL_SITE
     q = (f'[out:json][timeout:60];nwr["amenity"="school"](around:1609.344,{lat},{lon});'
          'out center tags;')
+    import time
+
     last = None
-    for url in ("https://overpass-api.de/api/interpreter",
-                "https://overpass.private.coffee/api/interpreter",
-                "https://overpass.kumi.systems/api/interpreter"):
+    mirrors = ("https://overpass-api.de/api/interpreter",
+               "https://overpass.private.coffee/api/interpreter",
+               "https://overpass.kumi.systems/api/interpreter")
+    # Two passes with a pause: on 2026-10-08 all three refused once (504/500) and answered
+    # minutes later.
+    for attempt, url in enumerate([*mirrors, *mirrors]):
+        if attempt == len(mirrors):
+            time.sleep(20)
         try:
             r = requests.post(url, data={"data": q}, timeout=90,
                               headers={"User-Agent": "iguide-gis-harness/1"})

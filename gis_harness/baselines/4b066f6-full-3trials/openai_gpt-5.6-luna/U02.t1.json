@@ -1,0 +1,77 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "inspect_vector",
+          "excerpt": "content='{\"ok\": false, \"error\": \"DataSourceError: \\'/Users/yfkang/i-guide-platform-flask-servers/.claude/worktrees/admiring-mirzakhani-63101b/agent_chat_files/uploads/file_ce35539a8b83__scene_red_only"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": false,
+      "outcome": "unclear",
+      "refusal_text": null,
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "The mean value of the attached scene is **650.7917**, calculated across **3,600 valid pixels**.\n\nNote: the file contains a single band and is named `scene_red_only.tif`, so this is the mean of that band\u2014not a true NDVI calculation unless the band already contains NDVI values.",
+  "seconds": 59.6,
+  "route": [
+    "code",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 12,
+    "input_tokens": 108657,
+    "cached_input_tokens": 0,
+    "output_tokens": 1554,
+    "usage_absent": 0,
+    "cost_usd": 0.0236,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-U02-gpt-5.6-luna-1791496197-1"
+}

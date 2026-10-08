@@ -1,0 +1,102 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 2,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`:\n\n**Fastest travel time:** The quickest route from the intersection at (41.87408\u00b0 N, 87.65075\u00b0 W) to the one at (41.89222\u00b0 N, 87.62683\u00b0 W) takes approximately **3.43 minutes**. This route travels north along the western corridor, then east along the top edge to the destination.\n\n**Intersections reachable within 2 minutes:** Counting the starting intersection itself, **15 intersections** can be reached within 2 minutes of the start. The destination intersection is not among these, as it requires about 3.43 minutes to reach.\n\nThese results were computed by modeling the road network as a graph where each edge's travel time equals its length divided by its speed, using precise geodesic distance calculations (verified with both haversine and WGS84 ellipsoid methods).",
+  "seconds": 87.2,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 184938,
+    "cached_input_tokens": 174080,
+    "output_tokens": 3845,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791495396-2"
+}

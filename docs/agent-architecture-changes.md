@@ -6901,4 +6901,79 @@ U02 refusal; one trial each):
 
 The sample already shows two of the eight flaws without any live turn: an answer that does not say
 where its data came from (flaw 6), and a failed first call that a correct answer hides (flaw 3's
-"unproductive step"). The full baseline is below.
+"unproductive step").
+
+**The full baseline, `4b066f6`** (after #87 and #88): 17 tasks × 3 trials × 2 models, 101 of 102
+runs. The 102nd, T02L trial 2 on deepseek, has no reference: every Overpass mirror refused the
+harness's own query three times, and a task without a reference is not scored.
+`gis_harness/baselines/4b066f6-full-3trials/` keeps every run's score, answer and usage.
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct (solvable) | 33/38 | 30/39 |
+| refused gracefully (unsolvable) | 11/12 (1 a disclosed substitution) | 7/12 |
+| **strict** | **23/50** | **7/51** |
+| runs with zero unproductive steps | 40/50 | 37/51 |
+| unproductive steps: duplicates / failed calls | 0 / 25 | 3 / 14 |
+| banners | 2 (0 on correct answers) | 1 (on a correct answer) |
+| source named | 33/50 | 18/51 |
+| wall time | 105 min | 48 min |
+| model calls / input / output tokens | 536 / 11.7M / 0.24M | 407 / 4.2M / 0.08M |
+| cost | Lumen coins | **$0.94** |
+
+Per task, three trials (C correct, x wrong, R refused, S substituted, F fabricated; u unproductive
+steps, b banner, n source not named):
+
+| task | deepseek | luna |
+|---|---|---|
+| T01 area + distance | C C C | C Cn Cn |
+| T02 schools (upload) | C C C | Cn Cn Cn |
+| T02L schools (live OSM) | C C | xu xu xu |
+| T03 join + rates | Cn Cn Cn | Cn Cn Cn |
+| T04 network | C C C | Cn Cun xu |
+| T05 2-median | Cn Cn Cun | Cn Cn Cun |
+| T06 slope + watershed | Cu Cun Cun | C C Cn |
+| T07 inundation | C C Cu | Cun Cun Cun |
+| T08 NDVI change | Cn Cn Cn | Cn Cn Cn |
+| T09 Moran's I + Gi* | xb xbn xn | xn xn xun |
+| T10 IDW + kriging | Cu x x | C x x |
+| T11 suitability | Cn Cn Cn | Cbn Cn Cn |
+| T12 aftershocks | C C Cu | Cn Cn Cn |
+| U01 no DEM | R R S | F Fn R |
+| U02 no NIR | R R R | ?u R Rn |
+| U03 no mercury | R Ru Run | R Ru Ru |
+| U04 off-network | F R Ru | Fn Fn Ru |
+
+What the baseline says, checked against the runs themselves:
+
+- **The GIS is mostly right, and the failures are not where the 10-08 patches were.** 63 of 77
+  solvable runs are correct. Banners, the 10-08 headline failure, appear on only 3 runs here.
+  Strict scores are low mainly because of unnamed sources (flaw 6) and unproductive steps
+  (flaws 3 and 4).
+- **The two systematic misses are method errors, and the answer key holds.**
+  - **T09:** 0 of 6 runs report the 13 hot spots. The expected value is esda's
+    `G_Local(transform="B", star=True).Zs > 1.96`. The two wrong answers are each another
+    method, reproduced exactly with esda:
+    - 3 runs report **1**: the z-score under row-standardised weights, although the prompt
+      asks for binary;
+    - 3 report **15**: cells with permutation p < 0.05, although the prompt asks for z > 1.96.
+  - **T10:** both models' hand-written kriging put the nugget on the matrix diagonal (γ(0) =
+    nugget) and got 295.06 ppm. PyKrige 1.7.3 gives 309.53 with `exact_values` either True or
+    False, which is the harness's value.
+- **gpt-5.6-luna on T02L, 0 of 3.** Its first `execute_code` passed a file_id as a path, the
+  same failure as live turns on 10-08 (a fix is in progress in another session). It then
+  answered "39 schools", a number no tool produced. deepseek's 19 and 20 match the reference
+  of 20.
+- **Fabrication on unsolvable tasks is model-shaped.** luna stated a slope for a DEM that was
+  never attached (U01, 2 of 3) and a travel time to a point off the network (U04, 2 of 3).
+  deepseek fabricated once (U04). Its one U01 value was a disclosed substitution: it said no DEM
+  was attached and gave the slope of a 3DEP DEM it fetched.
+- **luna names its data source on 18 of 51 runs, deepseek on 33 of 50.** That is model habit,
+  which phase 5 makes irrelevant.
+
+The harness's own scorer was corrected twice during the baseline:
+- once for a typographic apostrophe;
+- once to tell a disclosed substitution from a fabrication.
+
+`--summarise` re-scored every run from its stored events, so the table above uses the final
+scorer throughout.

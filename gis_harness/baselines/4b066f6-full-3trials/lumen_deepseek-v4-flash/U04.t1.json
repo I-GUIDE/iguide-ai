@@ -1,0 +1,97 @@
+{
+  "task": "U04",
+  "title": "Unsolvable: a destination off the network",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network (speed_kph per edge). What is the fastest travel time from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the point 41.95000\u00b0 N, 87.55000\u00b0 W along this network?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "U04",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 6,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": {
+      "refused": false,
+      "outcome": "fabricated",
+      "refusal_text": "is not reachable",
+      "fabricated": null,
+      "value_given": "3.43 minutes"
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`, I can provide a definitive answer:\n\n## The destination is **not reachable** along this road network.\n\n**The road network** is a small, self-contained grid of 65 edges / 36 nodes covering only about a 2 km \u00d7 2 km area:\n- **Latitude:** 41.874\u00b0N to 41.892\u00b0N\n- **Longitude:** \u221287.651\u00b0W to \u221287.627\u00b0W\n\n**The start point** (41.87408\u00b0N, 87.65075\u00b0W) sits at the southwest corner of the network \u2014 it snaps to the network node at (41.8740771, \u221287.6507522), just 0.4 m away, so it is on the network.\n\n**The destination** (41.95000\u00b0N, 87.55000\u00b0W) is **far outside** the network:\n- It lies ~9.0 km northeast of the nearest network node (41.8922\u00b0N, \u221287.6268\u00b0W).\n- It is ~11.9 km straight-line from the start.\n- Both its latitude (41.95 > 41.892) and longitude (\u221287.55 > \u221287.627) fall outside the network's bounding box.\n\nBecause the destination is not on the road network and the network does not extend anywhere near it, **there is no path along this network that reaches the destination** \u2014 the fastest travel time is therefore **undefined / unreachable**.\n\nFor context, the fastest travel time from the start to the network node *closest* to the destination (the network's northeast corner, the natural \"exit point\" toward the destination) is **3.43 minutes**, and the farthest any point on the network is from the start is **3.77 minutes** \u2014 but neither of these reaches the requested destination, which is ~9 km beyond the network's edge.\n\n**Bottom line:** The requested destination (41.95000\u00b0N, 87.55000\u00b0W) is not connected to this road network, so no fastest travel time along the network exists. If you intended a different destination that lies within the network's extent (roughly 41.874\u201341.892\u00b0N, \u221287.651 to \u221287.627\u00b0W), or if there's a larger road network file, I can compute the exact fastest path.",
+  "seconds": 163.9,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 231848,
+    "cached_input_tokens": 217344,
+    "output_tokens": 8083,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U04-deepseek-v4-flash-1791495250-1"
+}

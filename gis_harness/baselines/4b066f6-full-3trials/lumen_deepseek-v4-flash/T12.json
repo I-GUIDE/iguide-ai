@@ -1,0 +1,91 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog (`usgs_comcat_ridgecrest_2019-07.csv`), here are the results:\n\n**Largest event's magnitude: 7.1**\n\nThe largest event in the catalog is the **M7.1 Ridgecrest mainshock** (event id `ci38457511`), which occurred on **2019-07-06 03:19:53 UTC** at 35.7695\u00b0N, -117.5993\u00b0W.\n\n**Events within 7 days after it and within 25 km of its epicentre: 673**\n\n**Of those, magnitude 4 or greater: 63**\n\n### Details\n- The 7-day window ran from the mainshock (2019-07-06 03:19 UTC) through 2019-07-13 03:19 UTC.\n- The 25 km radius was measured from the mainshock's epicentre using great-circle (haversine) distance.\n- The largest aftershock in that window was a **M5.5** event on 2019-07-06 03:47 UTC (~15 km ESE of Little Lake, CA), followed by a M5.44 and a M4.97.\n- The count of 673 is strictly *after* the mainshock (the mainshock itself is excluded since the question asks for events occurring \"after it\").",
+  "seconds": 60.4,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 88685,
+    "cached_input_tokens": 80640,
+    "output_tokens": 2453,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791494579-0"
+}

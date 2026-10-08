@@ -86,7 +86,27 @@ def expected_for(task, data_dir: Path, cache: Path):
 
 
 def run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
-            data_dir: Path, cache: Path, trial: int = 0) -> Dict[str, Any]:
+            data_dir: Path, cache: Path, trial: int = 0, resume: bool = False) -> Optional[Dict[str, Any]]:
+    """One task, one trial. A harness failure (a live reference that cannot be fetched, an
+    upload error) is recorded for that task and does not end the run: on 2026-10-08 every
+    Overpass mirror refused the live reference for one trial, and the exception took the whole
+    102-task run down at task 100, with no summary."""
+    stem = f"{task_id}" + (f".t{trial}" if trial else "")
+    if resume and (out / f"{stem}.json").exists():
+        return json.loads((out / f"{stem}.json").read_text())
+    try:
+        return _run_one(task_id, provider, model, base_url, out, cache, trial)
+    except Exception as exc:  # noqa: BLE001
+        record = {"task": task_id, "trial": trial, "provider": provider, "model": model,
+                  "harness_error": f"{type(exc).__name__}: {exc}"[:500]}
+        (out / f"{stem}.harness-error.txt").write_text(record["harness_error"])
+        print(f"{provider}:{model} {task_id} HARNESS ERROR {record['harness_error'][:160]}",
+              flush=True)
+        return None
+
+
+def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
+             cache: Path, trial: int) -> Dict[str, Any]:
     task = BY_ID[task_id]
     # Per task and trial: T02 and U01 share a dataset, and runs in flight must not share files.
     files, expected = expected_for(task, out / "_data" / f"{task_id}.t{trial}", cache)
@@ -212,6 +232,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--label", default=None)
     ap.add_argument("--parallel", type=int, default=1, help="tasks in flight at once, per run")
     ap.add_argument("--summarise", type=Path, default=None, help="re-summarise a finished run dir")
+    ap.add_argument("--resume", action="store_true", help="skip tasks this label already has")
     a = ap.parse_args(argv)
 
     if a.summarise:
@@ -251,10 +272,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for trial in range(a.trials):
                     for tid in ids:
                         jobs.append(ex.submit(run_one, tid, provider, model, base, out,
-                                              data_dir, cache, trial))
+                                              data_dir, cache, trial, a.resume))
             records = []
             for j in cf.as_completed(jobs):
                 r = j.result()
+                if r is None:
+                    continue
                 print(f"{r['provider']}:{r['model']} {r['task']} {_row(r)}", flush=True)
                 records.append(r)
     finally:
