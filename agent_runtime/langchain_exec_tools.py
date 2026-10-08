@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from agent_runtime.tool_args import accept_null_defaults
@@ -161,6 +162,48 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     return staging, staged_info, errors, skipped
 
 
+# The shape of every id the store mints (file_store: f"file_{uuid4().hex[:12]}"). Bounded on both
+# sides so a longer identifier that merely contains one is not read as one.
+_MINTED_FILE_ID = re.compile(r"(?<![A-Za-z0-9_])file_[0-9a-f]{12}(?![A-Za-z0-9_])")
+
+
+def _file_ids_named_in(source: str) -> List[str]:
+    """The file_ids the program names literally, first-seen order, each once.
+
+    Every tool that makes a file (admin_boundary, overpass_search, add_map_layer, an upload)
+    hands the model a file_id, and staging puts each input under that file_id as well as its
+    filename. But it staged only what `input_files` listed, so a program that simply opened what
+    it had been given, gpd.read_file("file_2272c8426ec9"), ran against an empty directory. In all
+    three live turns of 2026-10-08 that was the first run: the model listed the directory, found
+    nothing, and retried with `input_files`. Code that NAMES an id is asking for that file.
+
+    Only minted ids are taken. Anything else the code mentions is a path or a filename, which a
+    scan of program text cannot tell apart from a string it builds for some other purpose.
+    """
+    return list(dict.fromkeys(_MINTED_FILE_ID.findall(str(source or ""))))
+
+
+def _readable_ids(ids: List[str]) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Split ids the code names into those THIS caller may read and those it may not.
+
+    Through ``get_file_record`` only, the lookup an explicit ``input_files`` id gets, with its
+    owner check (Stage 30). Another user's id is refused the same way as one never minted. The
+    path fallback ``_resolve_input_file`` has is deliberately not used here: a token found in
+    program text is never read as a host path.
+    """
+    from agent_runtime.file_store import get_file_record
+
+    readable: List[str] = []
+    refused: List[Dict[str, str]] = []
+    for fid in ids:
+        if get_file_record(fid):
+            readable.append(fid)
+        else:
+            refused.append({"ref": fid, "error": "named in the code, but no file you can read "
+                                                 "has this file_id"})
+    return readable, refused
+
+
 # Appended to execute_code's description only while the extraction bundle is on
 # (agent_runtime/extraction_flag.py): it describes the gate and the mounted library, and a
 # model told about a library that is not mounted guesses at it.
@@ -223,8 +266,25 @@ def make_code_execution_tools(
         # Union: conversation-attached files (auto) first, then any explicitly
         # named files, order-preserving and deduped.
         explicit = [str(r).strip() for r in (input_files or []) if str(r).strip()]
-        refs = list(dict.fromkeys([*default_ids, *explicit]))
+        # …then every file_id the program itself names. An entrypoint run has no inline
+        # source, so its file is what gets read; a file the workspace refuses names nothing.
+        source = code or ""
+        if entrypoint and not source.strip() and session_id:
+            try:
+                from agent_runtime.code_execution import resolve_workspace_file
+                source = resolve_workspace_file(session_id, entrypoint).read_text(
+                    encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                source = ""
+        listed = set(default_ids) | set(explicit)
+        named, refused = _readable_ids(
+            [fid for fid in _file_ids_named_in(source) if fid not in listed])
+        refs = list(dict.fromkeys([*default_ids, *explicit, *named]))
         staging, staged_info, input_errors, skipped = _build_staging(refs)
+        for info in staged_info:
+            if info.get("ref") in named:
+                info["staged_because"] = "named in the code"
+        input_errors = [*input_errors, *refused]
 
         # `label` only names the saved source, so pass it optionally: an executor
         # implementing the older signature (or a test double) still works.
@@ -371,7 +431,9 @@ def make_code_execution_tools(
             "open('data.csv') or pd.read_csv('data.csv')). To read any OTHER file, add its "
             "file_id to `input_files` — an upload, or a file_id an earlier TOOL returned in "
             "this conversation (e.g. an embedding package's embedding_package.file_id, to "
-            "cluster or difference its vectors). Use this to RUN and DEBUG code: run, read "
+            "cluster or difference its vectors). A file_id your code names literally (e.g. "
+            "gpd.read_file(\"file_2272c8426ec9\")) is staged too, without listing it. "
+            "Use this to RUN and DEBUG code: run, read "
             "stdout/stderr, fix, re-run. Files you write persist in this conversation's working "
             "directory, so a later run can open what an earlier one produced and keep building "
             "on it (the container itself is fresh each time). `label` is a short slug for what this particular run "

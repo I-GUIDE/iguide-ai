@@ -5628,6 +5628,49 @@ things:
 - Outside the store's own directories, every tool keeps the rules for a path that it already had.
 - A write by path changes a file without updating its record's `size_bytes`.
 
+### Stage S30.7 A file_id the code names is an input
+
+*2026-10-08. Branch `claude/file-id-staging`, off `40356bd`.*
+
+`execute_code` stages each input under its file_id and its filename (S30.3, and `_build_staging`
+since before that). It staged only what it was told to, though: the conversation's attached files
+and `input_files`. The file-making tools (`admin_boundary`, `overpass_search`, `add_map_layer`)
+each hand the model a `file_id`, and the model then wrote code that opened that id and listed
+nothing. The stored traces (`chat_traces`) of both live turns show it:
+
+| turn | first `execute_code` | `input_files` | then |
+|---|---|---|---|
+| 19:12 UTC, `sess-1e8e3edd…` | `gpd.read_file("file_2272c8426ec9")` | none | run 2 passed `input_files` and read the filename |
+| 21:34 UTC, `sess-07bc717f…` | `gpd.read_file("file_1ca3fe170834")` | none | run 2 listed `/work` (no GeoJSON in it), run 3 passed `input_files` |
+
+The id was the right name for the file, and the interface took it in `input_files` but not in the
+code. So the tool now reads the file_ids out of the program itself. `_file_ids_named_in` scans the
+code, or the entrypoint file when there is no inline code. It matches minted ids only: `file_`
+followed by 12 hex digits, with no identifier character on either side. Each id it finds joins the
+staging list after the attached and listed ones, and the run's `input_files` marks it with
+`staged_because: "named in the code"`.
+
+**Ownership is the listed id's, no wider.** `_readable_ids` looks a named id up with
+`get_file_record` alone, so it gets the same owner check S30.3 put there. It never uses
+`_resolve_input_file`'s path fallback: a token found in program text is never a host path. Bob's
+code naming Alice's id stages nothing, and `input_file_errors` reads "named in the code, but no
+file you can read has this file_id". An id that was never minted gets the same message, so the
+reply does not reveal that Alice's file exists. The staging itself is unchanged: the same
+`_build_staging`, caps and `_stage_inputs` boundary checks. Since the change sits in the tool, it
+applies to every backend.
+
+Tests (`test_file_id_named_in_code.py`, 10): six fail on `40356bd`. These are the positive cases
+(inline code, the filename of a named id, an entrypoint file, an upload) and the two that check the
+refusal message. The other four pass on both versions: a listed id unchanged, an id both listed and
+named staged once, code naming no id staging nothing, and another user's id never reaching the
+sandbox.
+
+**What it does not fix.** In the local replay the before-run's first program opened
+`'Champaign_County.geojson'` by filename and listed nothing, the same miss PR #85 saw locally.
+Names are not scanned. A name in the code may be a file the run is about to write, and a staged
+name is excluded from the run's artifacts and from the copy back to the workspace. Staging an
+earlier file under that name would silently drop the run's own output.
+
 ---
 
 ## Stage 31 — Published to the host, not the network {#stage-31}
