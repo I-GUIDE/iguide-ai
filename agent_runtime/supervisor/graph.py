@@ -41,6 +41,7 @@ from agent_runtime.supervisor.evidence_subgraph import (
 from agent_runtime.streaming_trace import emit_trace_event
 from agent_runtime import facts as turn_facts
 from agent_runtime import turn_log
+from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
 
 # Words that carry no retrieval signal — stripped when judging topical coverage and when building
@@ -1941,9 +1942,7 @@ def _title_by_shared_id(url: str, titles: Dict[str, str]) -> str:
     return ""
 
 
-def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
-    """(statement, names any of which counts as the answer naming it), one per data source."""
-    pairs = _peer_tool_pairs(state)
+def _web_titles(pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> Dict[str, str]:
     titles: Dict[str, str] = {}
     for call, res in pairs:
         if res.get("name") != "web_search":
@@ -1952,63 +1951,71 @@ def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
         for hit in [*(payload.get("documents") or []), *(payload.get("results") or [])]:
             if isinstance(hit, dict) and hit.get("url") and hit.get("title"):
                 titles.setdefault(str(hit["url"]).split("?")[0].rstrip("/"), str(hit["title"]))
-    # One entry per SOURCE, not per call: a peer that retried Overpass with three boxes used
-    # one source, and the last good call is the one its list came from. Keyed "osm" for
-    # OpenStreetMap and by URL for a staged file.
-    found: Dict[str, Tuple[str, List[str]]] = {}
+    return titles
+
+
+def _answer_sources(state: SupervisorState,
+                    numbers: Optional[List[Dict[str, Any]]] = None) -> List[Tuple[str, List[str]]]:
+    """The data sources behind what the answer used (stage 45, agent_runtime/source_catalog.py).
+
+    "Used" means a stated figure resolved to the result (the number scan's links), or the result
+    put a layer on the map or produced a file. When the answer states no figure from any result
+    (a list, a qualitative answer), every successful result counts. A dataset staged from a URL is
+    named by the title its web search found it under, matched by the id the page and the
+    download share (a Socrata `/api/views/<4x4>/rows.csv` beside `/<Category>/<Name>/<4x4>`).
+    """
+    pairs = _peer_tool_pairs(state)
+    used = {n.get("call_id") for n in (numbers or []) if n.get("call_id")}
     for call, res in pairs:
-        name = res.get("name")
+        parsed = turn_log.parse_result(res.get("content"))
         payload = _json_or_empty(res.get("content"))
-        # Empty is not JSON: the repeat guard's note, a raw traceback. Neither is a source.
-        if not payload or payload.get("error"):
-            continue
-        if name == "overpass_search":
-            statement = payload.get("source_statement") or (
-                "OpenStreetMap features tagged "
-                f"{(payload.get('query') or {}).get('osm_filter') or 'as requested'}, as mapped by "
-                "OSM contributors")
-            found.pop("osm", None)          # re-insert, so the last good call is the one kept
-            found["osm"] = (str(statement), ["openstreetmap", "osm"])
-            continue
-        elif name in ("stage_url", "stage_element"):
-            url = str((call.get("args") or {}).get("url") or payload.get("origin") or "")
-            if not url:
-                continue
-            from urllib.parse import urlparse
+        if parsed["ok"] and (payload.get("map_layer") or payload.get("map_layers")
+                             or payload.get("on_map")):
+            used.add(res.get("tool_call_id"))
+    from urllib.parse import urlparse
 
-            host = urlparse(url).netloc
-            title = titles.get(url.split("?")[0].rstrip("/"), "") or _title_by_shared_id(url, titles)
-            head = title.split(" | ")[0].strip()
-            statement = f"{title} ({host})" if title else url
-            found.setdefault(url, (statement, [n.lower() for n in (host, head) if n]))
-    return list(found.values())
+    sources = source_catalog.sources_of(pairs, used or None)
+    titles = _web_titles(pairs)
+    # A dataset staged from a URL is named by the title its search found it under, beside its
+    # host's catalogue entry: "Chicago Public Schools - School Locations SY2425: City of Chicago
+    # Data Portal, which leaves out ...".
+    staged: Dict[str, str] = {}
+    for call, res in pairs:
+        if res.get("name") in ("stage_url", "stage_element", "fetch_public_data"):
+            url = str((call.get("args") or {}).get("url")
+                      or _json_or_empty(res.get("content")).get("origin") or "")
+            title = (titles.get(url.split("?")[0].rstrip("/"), "")
+                     or _title_by_shared_id(url, titles)).split(" | ")[0].strip()
+            if url and title:
+                staged[urlparse(url).netloc] = title
+    out = []
+    for statement, names in sources:
+        host = next((n for n in names if "." in n and " " not in n), "")
+        if statement.startswith("http"):
+            host = urlparse(statement).netloc
+            title = staged.get(host, "")
+            statement = f"{title} ({host})" if title else statement
+        elif host in staged:
+            statement = f"{staged[host]}: {statement}"
+        out.append((statement, names))
+    return out
 
 
-def _feature_sources(state: SupervisorState) -> List[str]:
-    """The data sources a list of features in this turn's answer could have come from."""
-    return [statement for statement, _ in _source_entries(state)]
+def _with_sources(answer: str, state: SupervisorState,
+                  numbers: Optional[List[Dict[str, Any]]] = None) -> str:
+    """*answer* with a Sources line naming every data source it used.
 
-
-def _with_feature_source(answer: str, state: SupervisorState) -> str:
-    """*answer*, plus a line naming where its list came from when it lists and names nothing."""
+    Stage 38 added a source line only to a list of three or more rows that named none of two
+    tool families' sources. The harness's first baseline found answers naming their source on
+    33 of 50 runs (deepseek-v4-flash) and 18 of 51 (gpt-5.6-luna): whether the user learns where a
+    number came from depended on the model. The line is now rendered from the record, always.
+    """
     if not isinstance(answer, str) or not answer.strip():
         return answer
-    if sum(1 for line in answer.splitlines() if _LIST_ROW.match(line)) < 3:
+    line = source_catalog.sources_line(answer, _answer_sources(state, numbers))
+    if not line:
         return answer
-    entries = _source_entries(state)
-    if not entries:
-        return answer
-    low = answer.lower()
-    if any(n in low for _, names in entries for n in names):
-        return answer
-    joined = "; ".join(statement.rstrip(" .") for statement, _ in entries)
-    plural = "these sources hold" if len(entries) > 1 else "that source holds"
-    line = f"**Source:** {joined}. The list covers only what {plural}."
-    # Beside the list, ahead of any caveat block the answer already ends with.
-    cut = answer.find("\n⚠️")
-    if cut == -1:
-        return f"{answer.rstrip()}\n\n{line}"
-    return f"{answer[:cut].rstrip()}\n\n{line}\n\n{answer[cut:].lstrip(chr(10))}"
+    return f"{answer.rstrip()}\n\n{line}"
 
 
 def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
@@ -2164,6 +2171,11 @@ def _turn_brief(state: SupervisorState) -> str:
                if isinstance(n, dict) and n.get("reason")]
     if reasons:
         lines.append("Requested by another step: " + "; ".join(reasons)[:600])
+    # What each data source covers and leaves out (stage 45). A count from a city's school file
+    # and a count from OpenStreetMap answer different questions; which one fits is a choice
+    # made knowing both.
+    lines.append("Data sources reachable here, and what each leaves out:\n"
+                 + source_catalog.describe())
     return "\n".join(lines)
 
 
@@ -5971,11 +5983,12 @@ def build_supervisor_graph(
         # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
         # and presenting it as a normal answer hides that a capability the user asked for did
         # not run.
-        # A list of features says which source it came from (see _with_feature_source). Before
+        # Every answer that used data names its sources (see _with_sources, stage 45). Before
         # the failure note, so the note stays last.
+        _numbers = (update.get("verdict") or {}).get("numbers") or []
         for key in ("answer", "final_answer"):
             if isinstance(update.get(key), str):
-                update[key] = _with_feature_source(update[key], state)
+                update[key] = _with_sources(update[key], {**state, **update}, _numbers)
         if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
             update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
         # ONE verdict (stage 44): every check's findings, including the peers that failed and
@@ -6199,7 +6212,8 @@ def build_supervisor_graph(
                                 *turn_verdict.from_audit(audit, numeric_claims_resolved=True),
                                 *scan_findings]
             number_links = [{"text": r.quantity.text, "fact": r.fact.id if r.fact else None,
-                             "source": r.fact.source if r.fact else None}
+                             "source": r.fact.source if r.fact else None,
+                             "call_id": r.fact.call_id if r.fact else None}
                             for r in resolutions if turn_facts.is_claim(r.quantity)]
             # The verdict is rendered ONCE, by synthesize_node, after peer failures are known.
             final = answer

@@ -389,6 +389,20 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                             buffer_m, polygon_extent_ok=True)
         if isinstance(box, dict):
             return json.dumps({"ok": False, **box})
+        # The source's declared extent, from the catalogue (stage 45), before the call: 3DEP
+        # outside it answers 200 with a frame of NoData, which the check below still catches,
+        # but only after a fetch, and without saying what the source covers.
+        from agent_runtime.source_catalog import outside_extent
+
+        uncovered = outside_extent("dem_for_region", box)
+        if uncovered is not None:
+            return json.dumps({
+                "ok": False, "region_bbox": box,
+                "error": f"{uncovered.name} covers {uncovered.extent} only; this region is "
+                         f"outside it, so no elevation can be fetched from it.",
+                "source": uncovered.name,
+                "hint": "No elevation source for this region is bound here. Say so, rather "
+                        "than substitute another region or a guessed value."})
         px = max(_MIN_SIZE, min(int(size or _DEFAULT_SIZE), _MAX_SIZE))
 
         body = _fetch_dem(box, px)
