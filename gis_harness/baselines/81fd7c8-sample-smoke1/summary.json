@@ -1,0 +1,27 @@
+{
+  "lumen:deepseek-v4-flash": {
+    "tasks": 4,
+    "correct": "3/3",
+    "refused_gracefully": "1/1",
+    "strict": "3/4",
+    "zero_unproductive": "4/4",
+    "unproductive_steps": 0,
+    "duplicate_calls": 0,
+    "failed_calls": 0,
+    "banners_on_correct": 0,
+    "banners_total": 0,
+    "source_named": "3/4",
+    "errors": 0,
+    "seconds_total": 320.1,
+    "llm_calls": 35,
+    "input_tokens": 594799,
+    "output_tokens": 11076,
+    "cost_usd": null,
+    "per_task": {
+      "T01": "OK  [] 76.2s",
+      "T02": "OK  [] 106.5s",
+      "T08": "OK  [no-source] 63.2s",
+      "U02": "REFUSED [] 74.2s"
+    }
+  }
+}

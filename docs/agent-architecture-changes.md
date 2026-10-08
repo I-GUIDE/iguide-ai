@@ -54,6 +54,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 38 | [A peer that can find what it measures, and stops when it repeats itself](#stage-38) | 2026-10-08 | `overpass_search` bound to both measuring peers with a file; an identical repeated call is answered, then ends the run; a delivered answer drops the partial banner; a feature list names its source |
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
+| 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6827,3 +6828,77 @@ mirrors in list order, that the first answer ends the search, and that all faili
 - **No memory between calls.** Every call starts again at z, even when z failed a moment ago.
 - **Not tested from the VM.** All of this was measured from one Mac on one afternoon. The VM's
   network may rank the mirrors differently.
+## Stage 41 — Whole tasks, re-run after every change {#stage-41}
+
+*2026-10-08. Branch `claude/gis-task-harness`, built on `prototype` at `81fd7c8` and rebased onto
+`4b066f6` once #88 (stage 38) and #87 (stage 39) merged. Stage 40 is `claude/overpass-mirrors`
+(#89, open); 41 was the next free number on every branch and worktree. DEVLOG M8.78. Phase 1 of the eight-flaws program: it changes no agent
+behaviour, and every later phase is measured against it.*
+
+**Why.** On 2026-10-08 two live turns on agent.i-guide.io got every GIS number right (2,584.6 km²
+and 340 km; 18 schools to within 4 m) and still showed the user false COULD NOT VERIFY banners, a
+lost turn record, memorised road and rail figures, a 27-call geocoding loop and a false "Partial
+answer". Each was fixed by a patch written for that turn: stages 36–39, PRs #84–#88, five in one
+day. `sandbox_verify.py` and `supervisor/graph.py` together carry 22 comments of the form "a live
+run found X", most of which added one more entry to a list. Nothing re-ran whole tasks after a
+change, so each patch could be checked only against the turn that prompted it, and a patch that
+broke a different task would surface only when a user hit it.
+
+**What.** `gis_harness/`: twelve classic GIS problems, a live-data variant and four unsolvable
+questions (README there). The data are generated from fixed seeds or pinned (USGS ComCat snapshot
+committed; Meuse by SHA-256). Each expected value is computed from the same bytes by a route
+independent of the agent: brute force (2-median over all 28 pairs, geodesic point counts), a
+closed form (a watershed exactly 120 of 200 rows by construction), or a second library (Moran's I
+and Gi* checked against esda in `tests/test_gis_harness.py`). Most datasets carry a trap with its
+wrong answer named: Web Mercator at 42 N is 1.34x long, NoData counted as flooded adds 1 ha, a
+uint16 NIR−red wraps around, the shortest street path is not the fastest.
+
+Design choices and why:
+
+- **Through the HTTP API, not in-process.** The failures this program targets live in the
+  supervisor, the audit and the banners: the layers a user sees through `/agent/chat/stream`.
+  The request sets only the model, a thread id and `agentDev` (so the stream carries tool calls
+  and usage); everything else is the server's default, the path a user takes. `claude/benchmark`'s
+  EarthVerse harness made the opposite choice (in-process `run_supervisor`) for reproducibility;
+  here the point is to see what the user would see.
+- **Mechanistic scores, no LLM judge.** Correct (every expected value within tolerance, in any unit
+  of the right dimension), productive (no repeated identical call, no failed call), clean (no
+  banner), sourced (the answer names where its data came from), refused (unsolvable: says so and
+  states no value). `strict` is all at once. GeoNatureAgent and GISAgentBench avoid a judge for
+  the same reason: a judge shares the agent's premises.
+- **Per-model, never pooled.** The 2026-10-08 failures were model-shaped (deepseek-v4-flash
+  repeating a call that gpt-5.6-luna does not), so a pooled score would hide the regressions that
+  matter.
+- **Local only.** `--start-server` runs `api/server.py` with `AGENT_MODE=local` (stage 24) and
+  blanks `GOOGLE_MAPS_API_KEY`: KB spatial search geocodes through Google, a metered call no task
+  needs.
+
+**Every model call now reports its tokens.** The first sample turn streamed 2 model calls for a
+turn that made at least 4: `turn_instrumentation` is middleware on the peers' `create_agent`, so
+the supervisor's decider, synthesis and audit, which call the model directly, never reported.
+`streaming_trace.UsageCallbackHandler` is registered through LangChain's configure hook on a
+context variable that `trace_context` sets, so every runnable configured inside a traced turn, on
+any thread that copied the context, gets it without being wired. It emits `llm_usage` (detail
+tier, forwarded by `api/server.py`) with the provider's input, output, cached and reasoning
+tokens, or `usage: "absent"`, which is a different fact from zero. On the sample, deepseek's
+first call is the decider's 1,446-token request: before this it was invisible.
+`rag_pipeline/tests/test_llm_usage_events.py`: 3 of 5 fail on `81fd7c8`; the 2 that pass are guards.
+
+**Measured: the 4-task sample on `81fd7c8`** (T01 fetch + measure, T02 vector upload, T08 raster,
+U02 refusal; one trial each):
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct | 3/3 | 3/3 |
+| refused gracefully | 1/1 | 1/1 |
+| strict | 3/4 | 1/4 |
+| unproductive steps | 0 | 1 (T01: first `execute_code` could not open the boundary, the S37 symptom) |
+| banners | 0 | 0 |
+| source named | 3/4 | 1/4 |
+| wall time | 320 s | 222 s |
+| model calls / input tokens | 35 / 595k | 29 / 287k |
+| cost | Lumen coins (no $ rate) | $0.062 |
+
+The sample already shows two of the eight flaws without any live turn: an answer that does not say
+where its data came from (flaw 6), and a failed first call that a correct answer hides (flaw 3's
+"unproductive step"). The full baseline is below.

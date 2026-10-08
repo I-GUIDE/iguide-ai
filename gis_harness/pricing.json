@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "USD per MILLION tokens. OpenAI rates as recorded in claude/benchmark's pricing.json",
+    "(verified 2026-09-17 against developers.openai.com/api/docs/pricing); gpt-4o from the",
+    "same page's long-standing rate. A model with null rates reports cost_usd null, never 0:",
+    "Lumen spends the key owner's NCSA coins, which have no per-token dollar price."
+  ],
+  "models": {
+    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    "gpt-4o-2024-11-20": {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+    "gpt-4o": {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+    "deepseek-v4-flash": {"input": null, "cached_input": null, "output": null}
+  }
+}
