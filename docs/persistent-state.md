@@ -182,6 +182,54 @@ record, and a recorder that throws cannot break the stream.
 the least important thing happening during a turn, and losing an answer because the trace could
 not be written would invert that.
 
+### It must fit the index's mapping, or the whole turn is refused
+
+`chat_traces` has **no explicit mapping**. OpenSearch typed each field from the first document
+that carried it, and a document that disagrees with a field's type is rejected *whole*: one bad
+field costs every event of the turn. `save_turn_trace` can only log the 400, so the loss is
+silent. Until M8.74 this lost **30 turns between 10-01 and 10-08**, every one on
+`events.data.args`:
+
+- LangChain hands `on_tool_start` a Python repr of the arguments, `"{'query': 'x'}"`. That is not
+  JSON, so `args` stayed a string, and the field was mapped `text`.
+- A tool called with **no** arguments arrives as `"{}"`. That *is* JSON, so it parsed to a dict,
+  and a dict cannot go in a `text` field. `list_conversation_files` and `list_available_skills`
+  take no arguments, so turns that listed files or skills were the ones not recorded.
+- Emitters that send real dicts (`{query=…, limit=6}` in the error) were refused the same way.
+
+The fix is on the writer (`rag_pipeline/trace_mapping.py`). The index is on the shared prod
+cluster, and a field's type cannot be changed in place. Every document is fitted before it is
+sent:
+
+| value | stored as |
+|---|---|
+| a tool's arguments (`args`, `arguments`, `tool_args`), anywhere | JSON text, always |
+| a structure in a mapped `text` field | JSON text, same field |
+| anything a mapped numeric, boolean or object field cannot hold | JSON text in a sibling `<field>_text` |
+| an unmapped field: strings | as they are |
+| an unmapped field: anything else, or a date-like string | JSON text |
+
+Arguments are text rather than an object because no single object mapping could hold them: each
+tool has its own argument names and types (`limit: 6` here, `limit: "all"` there), and as an
+object they would collide, and grow the mapping by one field for every argument name ever used.
+
+New fields go in as text because dynamic typing is the bug itself, not just the dict case.
+Measured on a disposable OpenSearch 2.14.0 (the prod version) loaded with the live mapping:
+
+- a new field first seen as `6` maps `long`, then refuses `"all"`;
+- a new field seen as text and as a number in the *same* document is refused at once
+  (`cannot be changed from type [text] to [long]`);
+- a new string field first seen as `"2026-10-08"` maps `date`, then refuses `"yesterday"`.
+
+The cost is that a new numeric or date field is searchable only as text until someone maps it
+deliberately. Doing that needs a new index, which is a change to the prod cluster and the user's
+call. `TRACE_MAPPING` in that module is a snapshot of the live mapping, read 2026-10-08. It is a
+Python module and not a `.json` file because `.dockerignore` excludes `*.json`, so a JSON snapshot
+would not reach the image. When the live mapping gains a field, add it there.
+
+Already-stored traces are untouched. Turns refused before M8.74 are gone; the journal holds only
+the warning.
+
 ### Two ceilings
 
 `AGENT_TRACE_MAX_EVENTS` (default 4,000) bounds the list *in memory* during a turn — a runaway
@@ -411,7 +459,7 @@ layer descriptors, the tool sequence with truncated arguments, and the model tha
 | The code the sandbox ran | lives in the workspace, gone after 72 hours |
 
 Full tool arguments and outcomes *were* on this list. They are now in `chat_traces`, which is
-what that index exists for.
+what that index exists for. Turns the index refused before M8.74 are not there (see 1b).
 
 That makes past sessions a good basis for **building benchmark cases** — a real question, the
 files it produced and an expected answer is exactly the shape an EarthVerse-style task takes —

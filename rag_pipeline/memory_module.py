@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover - optional dependency
     SentenceTransformer = None  # type: ignore[assignment]
 
 from .state import AgentState, ensure_state_shapes
+from .trace_mapping import fit_trace_document
 
 load_dotenv()
 
@@ -464,6 +465,13 @@ def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
         "events": kept,
         "createdAt": _now(),
     }
+    try:
+        # Fitted to the index's mapping, because a field of the wrong type rejects the WHOLE
+        # document: a tool called with no arguments sent `args: {}` to a `text` field and lost
+        # 30 turns' traces before anyone looked. See `trace_mapping` for the rules.
+        body = fit_trace_document(body)
+    except Exception as err:  # noqa: BLE001 - an unfittable trace is still worth attempting
+        logger.warning("Could not fit trace for %s to the index mapping: %s", memory_id, err)
     try:
         # NO `refresh="wait_for"` here, unlike the snapshot. That flag exists for save-then-list,
         # and the client re-lists conversations the instant a turn ends; nothing lists traces —
