@@ -4987,3 +4987,34 @@ rather than from the previous one.
 **Not fixed** The run 1 `coverage` unknown for work done inside a function. It shows a caveat
   and no longer causes a re-run.
 
+## 2026-10-08 · M8.73 · A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make
+
+**Change** `analysis_node` and `code_node` merge a second run into their result slot
+  (`_merge_peer_result`: tool calls and results accumulate, deduplicated by id) instead of
+  replacing it. `_UNIT_ALIASES` reads miles, yards, nautical miles, square miles and square feet.
+  Reconciliation rule (2′) accepts a disputed number found in a tool result the gate does not
+  cover. A unit-only gate unknown is an ℹ️ note with no auditor summary appended. Flagged claims
+  no bound tool can produce (routing, when no routing tool is bound) are cut from the answer
+  (`_remove_unproducible_claims`, `_drop_claims`) and never become re-run gaps.
+  `_REGROUND_DIRECTIVE` no longer says "rejected" and forbids repeating the values, and the pass
+  after a re-run cuts any mention of the draft. Reconciliation logs which rule removed which issue.
+
+**Why** Live turn 2026-10-08 19:12 UTC (thread sess-1e8e3edd-…, deepseek-v4-flash): "area of
+  Champaign County, and how far is London from Paris?" was answered correctly. The answer
+  carried a false "COULD NOT VERIFY … hallucination at high severity" banner and spent 28 s of 72 s
+  re-running analyze for "460 km by road / 340 km by Eurostar", which no tool can compute. The
+  re-run's single execute_code replaced the first pass's five calls, so the auditor flagged
+  admin_boundary's GEOID 17019 and the ledger recorded 1 row. `square_miles` was unrecognised.
+  Reasoning is in architecture stage 37.
+
+**Measured** Local replays in Chrome (`AGENT_MODE=local`, same model), twice: 1 analyze run (was 2),
+  4 ledger rows (was 1), no banner. In the old code, 42 of the 53 new tests fail, and the 11 that
+  pass are guards. Full suite on the Mac at the branch head: 3621 passed, 18 skipped, 1 failed, the
+  machine-dependent
+  `test_the_installed_networkx_matches_the_pin` (anaconda 3.4.2 vs the 3.6.1 pin, which also
+  fails on the base). `tests/`: 135 passed.
+
+**Not fixed** Memorised routing figures that the audit does not flag still ship. In local run 1
+  reconciliation removed the flag (the rule was not logged; now it is), and in run 2 the auditor
+  passed them. The first execute_code failing to open the boundary was seen in all three runs.
+

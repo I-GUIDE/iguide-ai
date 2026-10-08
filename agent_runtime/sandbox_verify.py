@@ -128,6 +128,23 @@ _UNIT_ALIASES = {
     "county": "count", "counties": "count", "cell": "count", "cells": "count",
     "pixel": "count", "pixels": "count", "region": "count", "regions": "count",
     "site": "count", "sites": "count", "building": "count", "buildings": "count",
+    # IMPERIAL lengths and areas. Live, 2026-10-08 (Champaign area + London–Paris): one run
+    # declared `mi2` and `mi`, its re-run declared `square_miles` and `miles` for the same two
+    # numbers, and neither area unit was in this table — so a correct 997.93 came back
+    # "unrecognised unit 'square_miles'; not checked" and put COULD NOT VERIFY on the answer.
+    # `miles` and `mi` were in _KNOWN_UNITS but not here, so `mile` (singular) was unknown.
+    "mile": "miles", "miles": "miles", "mi": "miles",
+    "yard": "yards", "yards": "yards", "yd": "yards", "yds": "yards",
+    "nautical mile": "nautical_miles", "nautical miles": "nautical_miles",
+    "nautical_miles": "nautical_miles", "nmi": "nautical_miles",
+    "mi2": "square_miles", "mi^2": "square_miles", "mi²": "square_miles",
+    "sq mi": "square_miles", "sqmi": "square_miles", "sq_mi": "square_miles",
+    "square mile": "square_miles", "square miles": "square_miles",
+    "square_mile": "square_miles", "square_miles": "square_miles",
+    "ft2": "square_feet", "ft^2": "square_feet", "ft²": "square_feet",
+    "sq ft": "square_feet", "sqft": "square_feet", "sq_ft": "square_feet",
+    "square foot": "square_feet", "square feet": "square_feet",
+    "square_foot": "square_feet", "square_feet": "square_feet",
     "hectare": "hectares", "hectares": "hectares", "ha": "hectares",
     "acre": "acres", "acres": "acres",
     "degree": "degrees", "degrees": "degrees", "deg": "degrees", "°": "degrees",

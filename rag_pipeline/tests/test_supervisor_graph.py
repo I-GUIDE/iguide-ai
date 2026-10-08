@@ -1999,7 +1999,9 @@ def test_the_directive_names_the_claims_and_permits_an_honest_failure():
     assert "were NOT present in any tool result" in note
     assert "  - Champaign borders six counties" in note
     assert "Do NOT restate them from your own knowledge" in note
-    assert "which parts you could not establish" in note
+    # Stage 37: leaving a claim out is allowed, repeating its value "to disown it" is not.
+    assert "which part of the question you could not answer" in note
+    assert "not even to disown them" in note
     # the specific failure observed: an exploratory download mistaken for the computation
     assert "downloading or inspecting a file is not the same as computing" in note
     assert g._reground_note({}) is None
@@ -2162,8 +2164,10 @@ def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypa
                                    analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
     assert state["actions"].count("analyze") == 1, state["actions"]
     assert not state.get("grounding_retries")
-    # Not swallowed: the caveat still reaches the user, with the finding that caused it.
-    assert "COULD NOT VERIFY" in state["final_answer"]
+    # Not swallowed: the caveat still reaches the user, with the finding that caused it. An
+    # unrecognised unit is the whole finding here, so since stage 37 it is a note, not "COULD
+    # NOT VERIFY" (test_regrounding_turn_record.py has the unit-only and other-unknown cases).
+    assert "did not recognise a declared unit" in state["final_answer"]
     assert "furlongs" in state["final_answer"]
 
 

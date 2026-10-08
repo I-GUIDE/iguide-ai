@@ -130,6 +130,8 @@ class SupervisorState(TypedDict, total=False):
     grounding_gaps: List[str]      # claims the audit could not ground, for a re-grounding pass
     grounding_retries: int         # how many re-grounding passes this turn has spent (cap 1)
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
+    bound_tools: List[str]         # tool names the analyze peer had bound this turn; decides
+                                   # which ungrounded claims a re-run could ever produce
 
 
 
@@ -960,16 +962,273 @@ def _map_environment_lines(delivered: bool) -> List[str]:
 # construction.
 _MAX_GROUNDING_RETRIES = 1
 
+# No "rejected", and no invitation to list what failed. The first wording said a previous
+# answer "was rejected" and offered "(b) say plainly which parts you could not establish".
+# Live, 2026-10-08, the peer did exactly that: a "What I could NOT establish" section that
+# repeated "~460 km" and "~340 km" and called them "the earlier rejected answer" — a draft the
+# user never saw, and the very figures the pass existed to keep out of the answer.
 _REGROUND_DIRECTIVE = (
-    "IMPORTANT — a previous attempt at this same question produced an answer whose key claims "
-    "were NOT present in any tool result, or failed a deterministic invariant check, so it was "
-    "rejected. The claims that could not be grounded were:\n{gaps}\n\n"
+    "IMPORTANT — the answer drafted for this question contained claims that were NOT present in "
+    "any tool result, or that failed a deterministic invariant check. The user has not seen "
+    "that draft. The claims were:\n{gaps}\n\n"
     "Do NOT restate them from your own knowledge. Either (a) actually compute or retrieve them "
-    "now with the tools you have, so the values appear in a tool result, or (b) say plainly "
-    "which parts you could not establish. A partial answer that is fully grounded is better "
-    "than a complete one that is not. Note that downloading or inspecting a file is not the "
-    "same as computing the answer: finish the computation and print the result."
+    "now with the tools you have, so the values appear in a tool result, or (b) leave them out. "
+    "If you leave one out you may say, in one short sentence, which part of the question you "
+    "could not answer and why — but do not repeat the values, not even to disown them, and do "
+    "not mention a draft, an earlier answer or this check: the user never saw any of it. A "
+    "partial answer that is fully grounded is better than a complete one that is not. Note that "
+    "downloading or inspecting a file is not the same as computing the answer: finish the "
+    "computation and print the result."
 )
+
+
+# --- claims no bound tool can produce ------------------------------------------------------
+#
+# The re-grounding pass assumes the peer CAN establish what the audit found missing. For some
+# claims no tool it holds ever could. Live, 2026-10-08 (thread sess-1e8e3edd-…): the synthesizer
+# added "roughly 460 km by road or ~340 km by the Eurostar rail line" to a correct 340.0 km
+# great-circle answer; the audit flagged both; analyze was re-run, ran execute_code again
+# (~28 s of a 72 s turn), and could not compute a road distance because there is no routing
+# tool. Such a claim is removed from the answer instead, and never becomes a re-run gap.
+#
+# Each entry: a label, the claim shape, the tool-name shape that WOULD produce it, and the line
+# the answer gets in its place. Kept narrow on purpose — a match removes text from the answer —
+# so "driving factors", "Google Drive" and "road network layer" are not routing claims.
+_ROUTING_CLAIM_RE = re.compile(
+    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle|foot)\b"
+    r"|\b(?:road|rail|railway|train|driving|walking|cycling)\s+(?:distance|time|route|journey|trip)s?\b"
+    r"|\b(?:drive|driving|travel|journey|transit|commute|walking|cycling)\s+times?\b"
+    r"|\btravel\s+distances?\b|\bdriving\s+directions?\b|\brail\s+line\b"
+    r"|\b(?:eurostar|amtrak|tgv)\b"
+    r"|\b\d+(?:[.,]\d+)?[\s-]*(?:h|hrs?|hours?|mins?|minutes?)[\s-]+"
+    r"(?:drive|walk|ride|flight|train\s+ride|bus\s+ride|journey|trip)\b",
+    re.I)
+_ROUTING_TOOL_RE = re.compile(r"rout|directions|isochrone|travel_time|osrm|valhalla|graphhopper",
+                              re.I)
+_UNPRODUCIBLE_CAPABILITIES = (
+    ("routing", _ROUTING_CLAIM_RE, _ROUTING_TOOL_RE,
+     re.compile(r"\b(?:rout(?:e|es|ing)|road|rail|driv(?:e|ing))\b", re.I),
+     "Road and rail travel distances and times are not included: no routing tool is "
+     "available here to compute them."),
+)
+
+
+def _unproducible_capability(claim: str, bound_tools: Optional[List[str]]) -> Optional[str]:
+    """The capability *claim* needs when no bound tool provides it, else None."""
+    text = str(claim or "")
+    for label, claim_re, tool_re, _mention, _note in _UNPRODUCIBLE_CAPABILITIES:
+        if claim_re.search(text) and not any(tool_re.search(str(t)) for t in bound_tools or []):
+            return label
+    return None
+
+
+# Locating a claim in the answer. The auditor quotes the answer, but the answer is markdown, so
+# emphasis and code marks may sit between the quoted words.
+_CLAIM_TOKEN_RE = re.compile(r"\w+|[^\w\s]")
+_INLINE_SEP = r"[ \t*_`]*"
+_LINE_MARKER_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*)?")
+_SENTENCE_END_RE = re.compile(r"[.!?]+[\"')\]*_]*(?=\s|$)")
+_NOT_A_SENTENCE_END = {"e.g", "i.e", "vs", "approx", "ca", "cf", "fig", "no", "st", "dr", "mr",
+                       "mrs", "ms", "jr", "sr", "u.s", "etc.,"}
+
+
+def _claim_pattern(claim: str) -> Optional["re.Pattern[str]"]:
+    """A pattern for *claim* as written in markdown, or None when too short to place safely."""
+    core = str(claim or "").strip().strip(".;:,!?\"'“”‘’ ")
+    tokens = _CLAIM_TOKEN_RE.findall(core)
+    if sum(1 for t in tokens if t[0].isalnum()) < 3:
+        return None
+    return re.compile(_INLINE_SEP.join(re.escape(t) for t in tokens), re.I)
+
+
+def _sentence_ends(line: str) -> List[int]:
+    """Offsets in *line* just past each sentence end, skipping abbreviations and initials."""
+    ends: List[int] = []
+    for m in _SENTENCE_END_RE.finditer(line):
+        word = re.search(r"(\S+)$", line[:m.start()])
+        token = (word.group(1) if word else "").lstrip("(*_\"'").lower()
+        if token in _NOT_A_SENTENCE_END or (len(token) == 1 and token.isalpha()):
+            continue
+        ends.append(m.end())
+    return ends
+
+
+def _enclosing_parens(text: str, ls: int, le: int, s: int, e: int) -> Optional[tuple]:
+    """(open, close) of the innermost parenthesis on this line that contains [s, e)."""
+    depth, open_at = 0, None
+    for i in range(s - 1, ls - 1, -1):
+        if text[i] == ")":
+            depth += 1
+        elif text[i] == "(":
+            if depth == 0:
+                open_at = i
+                break
+            depth -= 1
+    if open_at is None:
+        return None
+    depth = 0
+    for j in range(e, le):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            if depth == 0:
+                return open_at, j
+            depth -= 1
+    return None
+
+
+def _cut_unit(text: str, s: int, e: int) -> str:
+    """*text* without the smallest unit holding [s, e): a parenthetical segment, a sentence, or
+    the whole line when the sentence was all of it."""
+    ls = text.rfind("\n", 0, s) + 1
+    le = text.find("\n", e)
+    le = len(text) if le < 0 else le
+    parens = _enclosing_parens(text, ls, le, s, e)
+    if parens:
+        po, pc = parens
+        inner_start = po + 1
+        kept = []
+        offset = inner_start
+        for seg in text[inner_start:pc].split(";"):
+            seg_s, seg_e = offset, offset + len(seg)
+            offset = seg_e + 1
+            if not (seg_s < e and s < seg_e) and seg.strip():
+                kept.append(seg.strip())
+        if kept:
+            return text[:inner_start] + "; ".join(kept) + text[pc:]
+        cut_from = po
+        while cut_from > ls and text[cut_from - 1] in " \t":
+            cut_from -= 1
+        return text[:cut_from] + text[pc + 1:]
+    body = ls + _LINE_MARKER_RE.match(text[ls:le]).end()
+    ends = [body + o for o in _sentence_ends(text[body:le])]
+    start = max([o for o in ends if o <= s], default=body)
+    while start < le and text[start] in " \t":
+        start += 1
+    stop = min([o for o in ends if o >= e], default=le)
+    if not text[body:start].strip() and not text[stop:le].strip():
+        return text[:ls] + text[le + 1:]          # the sentence was the whole line
+    while stop < le and text[stop] in " \t":
+        stop += 1
+    return text[:start] + text[stop:]
+
+
+def _tidy_after_cuts(text: str) -> str:
+    """Collapse what cutting leaves behind: doubled spaces, empty bullets, emptied sections."""
+    text = re.sub(r"(?<=\S)[ \t]{2,}(?=\S)", " ", text)
+    text = re.sub(r"[ \t]+([.,;:])", r"\1", text)
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if not re.fullmatch(r"\s*(?:[-*+]|\d+[.)])\s*", ln)]
+    out: List[str] = []
+    for i, ln in enumerate(lines):
+        if re.match(r"^#{1,6}\s", ln):
+            rest = next((x for x in lines[i + 1:] if x.strip()), None)
+            if rest is None or re.match(r"^(?:#{1,6}\s|---\s*$)", rest):
+                continue                           # a heading whose section is now empty
+        out.append(ln)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def _drop_claims(text: str, claims: List[str]) -> tuple:
+    """*text* with each claim's sentence (or parenthetical segment) removed.
+
+    Returns ``(new_text, dropped)``; a claim counts as dropped when it is no longer in the text,
+    including when it went out with an earlier claim's sentence. A claim that cannot be placed
+    verbatim — the auditor paraphrased it, or it is too short to place safely — is left alone:
+    removing a guess at it could remove a grounded sentence.
+    """
+    original = str(text or "")
+    out = original
+    dropped: List[str] = []
+    for claim in claims:
+        pat = _claim_pattern(claim)
+        if pat is None or not pat.search(original):
+            continue
+        for _ in range(8):                          # the same claim may be repeated
+            m = pat.search(out)
+            if not m:
+                break
+            out = _cut_unit(out, m.start(), m.end())
+        if not pat.search(out):
+            dropped.append(claim)
+    return (_tidy_after_cuts(out) if dropped else original), dropped
+
+
+def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
+                                bound_tools: Optional[List[str]]) -> tuple:
+    """Cut flagged claims no bound tool can produce out of *answer*, and out of *audit*.
+
+    Returns ``(answer, audit, dropped)``. The answer gains one line per capability whose claims
+    were cut, unless it already talks about that capability, so the user is told what is missing
+    without being shown the unsupported figures. If no auditor issue survives, the audit stops
+    flagging; a gate finding is untouched, because cutting prose changes nothing it checked.
+    """
+    issues = [i for i in ((audit or {}).get("issues") or [])]
+    candidates: Dict[str, str] = {}
+    for item in issues:
+        if isinstance(item, dict) and item.get("source") == "invariant_gate":
+            continue
+        claim = str(item.get("claim") if isinstance(item, dict) else item or "").strip()
+        label = _unproducible_capability(claim, bound_tools)
+        if claim and label:
+            candidates[claim] = label
+    if not candidates:
+        return answer, audit, []
+    new_answer, dropped = _drop_claims(answer, list(candidates))
+    if not dropped:
+        return answer, audit, []
+    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
+        if label in {candidates[c] for c in dropped} and not mention_re.search(new_answer):
+            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
+    gone = set(dropped)
+    kept = [i for i in issues
+            if str(i.get("claim") if isinstance(i, dict) else i or "").strip() not in gone]
+    _LEDGER_LOG.info("dropped %d claim(s) no bound tool can produce: %s", len(dropped), dropped)
+    emit_trace_event(
+        "unproducible_claims_dropped",
+        {"stage": "synthesize", "claims": dropped,
+         "capabilities": sorted({candidates[c] for c in dropped}),
+         "message": f"removed {len(dropped)} claim(s) no available tool can produce: "
+                    f"{'; '.join(c[:80] for c in dropped[:3])}"},
+        node="synthesize",
+    )
+    auditor_left = [i for i in kept
+                    if not (isinstance(i, dict) and i.get("source") == "invariant_gate")]
+    new_audit = {**(audit or {}), "issues": kept, "removed_claims": dropped}
+    if not auditor_left:
+        gate = str((audit or {}).get("invariant_gate") or "")
+        if gate:
+            new_audit["summary"] = (audit or {}).get("gate_headline") or new_audit.get("summary")
+        else:
+            new_audit.update({"hallucination_detected": False, "severity": "none",
+                              "summary": "Grounded: claims no available tool could produce were "
+                                         "removed from the answer."})
+    return new_answer, new_audit, dropped
+
+
+# After a re-grounding pass the answer is about to reach a user who never saw the draft it
+# replaced. Live, 2026-10-08: "those figures were in the earlier rejected answer". Applied only
+# on the pass after a re-run, and only to phrasings that cannot be about the conversation's
+# earlier turns or a statistical test ("the null hypothesis was rejected" is left alone).
+_DRAFT_MENTION_RE = re.compile(
+    r"\brejected\s+(?:answer|draft|response|attempt|version)\b"
+    r"|\b(?:answer|draft|response|attempt)\s+(?:was|were|has\s+been)\s+rejected\b"
+    r"|\b(?:earlier|previous|prior|first|initial|original)\s+(?:rejected\s+)?(?:attempt|draft)\b"
+    r"|\b(?:earlier|previous|prior|first|initial|original)\s+rejected\s+(?:answer|response)\b",
+    re.I)
+
+
+def _drop_draft_mentions(answer: str) -> str:
+    """*answer* without the sentences that talk about the draft a re-grounding pass replaced."""
+    text = str(answer or "")
+    changed = False
+    for _ in range(8):
+        m = _DRAFT_MENTION_RE.search(text)
+        if not m:
+            break
+        text = _cut_unit(text, m.start(), m.end())
+        changed = True
+    return _tidy_after_cuts(text) if changed else answer
 
 
 def _reground_note(state: SupervisorState) -> Optional[str]:
@@ -1111,6 +1370,56 @@ def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
         return get_session_actions(str(thread_id))
     except Exception:  # noqa: BLE001 - a missing ledger must never break routing
         return []
+
+
+def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
+    """*earlier* then *later*, with a row whose id was already seen dropped.
+
+    Only rows WITH an id are deduplicated: two id-less `execute_code` results with the same
+    content are two calls, and collapsing them would hide a retry.
+    """
+    out: List[Any] = []
+    seen: set = set()
+    for row in [*(earlier or []), *(later or [])]:
+        rid = row.get(id_key) if isinstance(row, dict) else None
+        if rid:
+            if rid in seen:
+                continue
+            seen.add(rid)
+        out.append(row)
+    return out
+
+
+def _merge_peer_result(prior: Any, new: Any) -> Any:
+    """A peer's result for the TURN: its earlier runs' tool records plus this run's.
+
+    The analyze and code nodes used to write their result slot outright, so a second run of a
+    peer in the same turn replaced the first. Live, 2026-10-08 (Champaign area + London–Paris,
+    thread sess-1e8e3edd-…): the first pass ran admin_boundary, geocode_places and two
+    execute_code calls; the re-grounding pass ran ONE execute_code, and that one call became
+    the turn's whole `analysis_results`. The auditor was then shown no admin_boundary result and
+    flagged "GEOID 17019" as unsupported, and the ledger recorded 1 row for a 5-call turn.
+
+    The state is per run (run_supervisor gives every turn its own checkpoint thread), so what is
+    in the slot is always THIS turn's. Tool calls and results accumulate, deduplicated by id —
+    PeerSession falls back to the whole thread when its prefix guard fails, and then hands back
+    the first pass's calls again. Everything else is the latest run's: its summary is what the
+    peer now says, and an `error` from an earlier failed run does not outlive a later success.
+    `on_map`, `executed` and `tool_failures` are facts about the turn, so they accumulate too.
+    """
+    if not isinstance(prior, dict) or not isinstance(new, dict):
+        return new
+    merged = {**{k: v for k, v in prior.items() if k != "error"}, **new}
+    for key, id_key in (("tool_calls", "id"), ("tool_results", "tool_call_id")):
+        if key in prior or key in new:
+            merged[key] = _merge_rows(prior.get(key) or [], new.get(key) or [], id_key)
+    for flag in ("on_map", "executed"):
+        if flag in prior or flag in new:
+            merged[flag] = bool(prior.get(flag) or new.get(flag))
+    failures = {**(prior.get("tool_failures") or {}), **(new.get("tool_failures") or {})}
+    if failures:
+        merged["tool_failures"] = failures
+    return merged
 
 
 def _record_actions(state: SupervisorState, *contexts: Any,
@@ -1493,7 +1802,8 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
     if gate in {"fail", "cannot_determine"}:
         # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
         # rather than restating it -- two headlines in a row read as a template, not a warning.
-        icon = "⛔" if gate == "fail" else "⚠️"
+        icon = ("⛔" if gate == "fail"
+                else "ℹ️" if (audit or {}).get("gate_unit_only") else "⚠️")
         note = f"{icon} {summary}" if summary else (
             f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
             f"on this run, so its numeric results are not verified.")
@@ -1842,6 +2152,25 @@ def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]],
     return _map_delivered_this_turn(execution_context) or _map_delivered_earlier(prior_rows)
 
 
+def _ungated_record(execution_context: Optional[Any]) -> str:
+    """This turn's tool results that carry NO invariant-gate report, comma-stripped like the
+    record blob in `_reconcile_audit_with_artifacts`, or "" when there are none."""
+    rows: List[Any] = []
+    for key in ("analysis_results", "code_result"):
+        result = (execution_context or {}).get(key) if isinstance(execution_context, dict) else None
+        if not isinstance(result, dict):
+            continue
+        for row in result.get("tool_results") or []:
+            # By name as well as by report: an execute_code run that crashed before the gate
+            # wrote anything is still code, and its numbers are not another tool's.
+            if (isinstance(row, dict) and row.get("name") != "execute_code"
+                    and '"verification"' not in str(row.get("content") or "")):
+                rows.append(row)
+    if not rows:
+        return ""
+    return json.dumps(rows, default=str).replace(",", "")
+
+
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
                                     execution_context: Optional[Dict[str, Any]] = None,
@@ -1879,7 +2208,16 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             blob = str(execution_context)
         blob = blob.replace(",", "")
     map_delivered = _map_layer_was_delivered(execution_context, prior_rows)
+    # Rule (2) is disabled under a gate verdict because a wrong number sits in the record too —
+    # but only the GATED code's numbers are in question. Live, 2026-10-08: one unrecognised unit
+    # on a computed area also disabled the rule for "GEOID 17019", which admin_boundary returned
+    # and no code computed. Numbers in a tool result that carries no gate report stay checkable.
+    ungated = _ungated_record(execution_context) if gate else ""
     kept = []
+    # Which rule removed which issue. A removal is invisible otherwise: the turn only reports
+    # "Grounded: flagged claims are supported…", and that line cannot say whether the claim was
+    # really in the record or merely matched one of these rules.
+    removed: List[tuple] = []
     for it in issues:
         if isinstance(it, dict):
             claim = str(it.get("claim") or "").lower()
@@ -1888,16 +2226,23 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             # Tolerate a malformed issue (e.g. a bare string) from a strict small judge that
             # ignored the {claim, reason} schema — never crash synthesize over audit shape.
             claim, reason = str(it or "").lower(), ""
-        if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
-            continue  # (1) artifact dispute, but an artifact was produced
-        if map_delivered and _is_map_claim(claim):
-            continue  # (4) a map claim, and a layer really did reach the map
-        if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
-            continue  # (3) the auditor's own reason concedes grounding
         nums = _claim_numbers(claim)
-        if nums and blob and not gate and all(n in blob for n in nums):
-            continue  # (2) every disputed number is present in a VERIFIED execution record
-        kept.append(it)
+        if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
+            rule = "1 artifact"           # artifact dispute, but an artifact was produced
+        elif map_delivered and _is_map_claim(claim):
+            rule = "4 map"                # a map claim, and a layer really did reach the map
+        elif any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
+            rule = "3 concedes"           # the auditor's own reason concedes grounding
+        elif nums and blob and not gate and all(n in blob for n in nums):
+            rule = "2 number"             # every disputed number is in a VERIFIED record
+        elif nums and ungated and all(n in ungated for n in nums):
+            rule = "2' number"            # ... or in a tool result the gate does not cover
+        else:
+            kept.append(it)
+            continue
+        removed.append((claim[:120], rule))
+    if removed:
+        _LEDGER_LOG.info("audit reconciliation removed %d issue(s): %s", len(removed), removed)
 
     if gate:
         # Prepended: the deterministic finding is the one the reader must see first, and it
@@ -1908,17 +2253,36 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
                         "source": "invariant_gate", "status": f.get("status")}
                        for f in gate]
-        headline = ("A deterministic invariant check FAILED on this run, so its numeric results "
-                    "are not verified."
-                    if gate_verdict == "fail" else
-                    "A deterministic invariant check COULD NOT VERIFY this run, so its numeric "
-                    "results are unconfirmed — this is not the same as them being wrong.")
-        return {**(audit or {}), "hallucination_detected": True,
+        # An unrecognised UNIT is the gate saying "I could not read this label", not "this
+        # number may be wrong" — everything it could read passed. Live, 2026-10-08: a correct
+        # 997.93 declared in `square_miles` produced "COULD NOT VERIFY ... hallucination is
+        # detected at high severity". That case gets a note, not an alarm.
+        unit_only = gate_verdict == "cannot_determine" and all(
+            f.get("check") == "declared_units" and "unrecognised unit" in str(f.get("message"))
+            for f in gate)
+        if gate_verdict == "fail":
+            headline = ("A deterministic invariant check FAILED on this run, so its numeric "
+                        "results are not verified.")
+        elif unit_only:
+            headline = ("The invariant check did not recognise a declared unit, so that value's "
+                        "unit was not checked. Nothing the check could read failed.")
+        else:
+            headline = ("A deterministic invariant check COULD NOT VERIFY this run, so its "
+                        "numeric results are unconfirmed — this is not the same as them being "
+                        "wrong.")
+        # The auditor's own summary describes ITS issues. When reconciliation removed all of
+        # them, appending it puts a verdict about claims that are no longer flagged under the
+        # gate's headline — which is how "hallucination is detected at high severity" reached
+        # the banner of a turn whose only finding was a unit name.
+        auditor_summary = str((audit or {}).get("summary") or "") if kept else ""
+        return {**(audit or {}), "hallucination_detected": not unit_only,
                 # cannot_determine is a real caveat but not a detected error; calling it high
                 # would train the reader to ignore the label.
-                "severity": "high" if gate_verdict == "fail" else "medium",
+                "severity": ("high" if gate_verdict == "fail"
+                             else "low" if unit_only else "medium"),
                 "issues": gate_issues + kept,
-                "summary": (headline + " " + str((audit or {}).get("summary") or "")).strip(),
+                "summary": (headline + " " + auditor_summary).strip(),
+                "gate_headline": headline, "gate_unit_only": unit_only,
                 "invariant_gate": gate_verdict}
 
     if not kept:
@@ -3978,6 +4342,11 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "summary": extract_final_answer(resp) or "",
             "tool_calls": artifacts.get("tool_calls") or [],
             "tool_results": artifacts.get("tool_results") or [],
+            # What this peer COULD have called. analysis_node lifts it into state (it never
+            # reaches synthesis's serialized analysis_results), where it decides whether an
+            # ungrounded claim is one a re-run could produce; see _unproducible_capability.
+            "bound_tools": sorted({str(getattr(t, "name", "")) for t in tools
+                                   if getattr(t, "name", "")}),
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
 
@@ -4943,17 +5312,24 @@ def build_supervisor_graph(
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
         raw, failure = _run_peer(
             "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
+        prior = state.get("analysis_results")
         if failure is not None:
             # Degrade to an analysis_results that STATES the failure: this is the peer the
             # router sends code-shaped work to, and synthesis should answer from what the other
             # peers found rather than read silence as "nothing to report".
-            return _with_failure({"analysis_results": {"summary": "", "tool_calls": [],
-                                                       "tool_results": [],
-                                                       "error": failure["error"]}},
+            return _with_failure({"analysis_results": _merge_peer_result(
+                prior, {"summary": (prior or {}).get("summary", "") if isinstance(prior, dict)
+                        else "", "tool_calls": [], "tool_results": [],
+                        "error": failure["error"]})},
                                  state, failure)
         clean, needs = _extract_needs(raw)
+        bound = clean.pop("bound_tools", None) if isinstance(clean, dict) else None
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
-        update: Dict[str, Any] = {"analysis_results": clean}
+        # A second run of this peer in the same turn (a re-grounding pass, a queued need) ADDS to
+        # the turn's record; see _merge_peer_result.
+        update: Dict[str, Any] = {"analysis_results": _merge_peer_result(prior, clean)}
+        if bound:
+            update["bound_tools"] = sorted({*(state.get("bound_tools") or []), *bound})
         if unified_peer_enabled(state) and isinstance(clean, dict):
             # The state KEYS stay exactly as they were. evidence_quality.py and
             # runtime_utils.py read "analysis_results"/"evidence" by name, and a rename there
@@ -4976,16 +5352,17 @@ def build_supervisor_graph(
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
         raw, failure = _run_peer(
             "code", lambda: do_code(q, state.get("evidence") or [], state), state)
+        prior = state.get("code_result")
         if failure is not None:
             # Degrade to a code_result that states the failure (executed=False), and let
             # synthesis answer from what search and analyze already produced.
-            return _with_failure({"code_result": {"answer": "", "executed": False,
-                                                  "tool_calls": [], "tool_results": [],
-                                                  "error": failure["error"]}},
+            return _with_failure({"code_result": _merge_peer_result(
+                prior, {"answer": "", "executed": False, "tool_calls": [], "tool_results": [],
+                        "error": failure["error"]})},
                                  state, failure)
         clean, needs = _extract_needs(raw)
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
-        update: Dict[str, Any] = {"code_result": clean}
+        update: Dict[str, Any] = {"code_result": _merge_peer_result(prior, clean)}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
         if enq is not None:
             update["needs"] = enq
@@ -5178,12 +5555,22 @@ def build_supervisor_graph(
             # map/file or a number/method it actually computed.
             audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx,
                                                     prior_rows=_rows)
+            # A flagged claim no bound tool can produce (a road distance, with no routing tool)
+            # is cut from the answer: re-running a peer cannot establish it, and a caveat over
+            # a figure we know is unsupported is worse than not printing the figure.
+            _bound = state.get("bound_tools") or []
+            answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound)
+            if state.get("grounding_retries"):
+                answer = _drop_draft_mentions(answer)
             # THE GATE. A surviving flag means the audit still cannot find these claims in the
             # record after all four deterministic drops — the shape of "answered from memory".
             # Send the work back once instead of shipping a caveat over unfinished work.
             _reground_to = _reground_target(state) if _audit_flagged(audit) else None
             if _reground_to:
-                gaps = _unsupported_claims(audit)
+                # A claim that could not be cut (paraphrased by the auditor) but still needs a
+                # tool nobody bound keeps its caveat and does not buy a re-run.
+                gaps = [g for g in _unsupported_claims(audit)
+                        if _unproducible_capability(g, _bound) is None]
                 if gaps:
                     emit_trace_event(
                         "node_completed",
