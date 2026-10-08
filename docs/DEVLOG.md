@@ -4940,3 +4940,21 @@ rather than from the previous one.
   The other 10 fail identically on a `git archive` of pure `origin/prototype` in the same image.
   The freeze predates the readers prototype now declares (xarray, pyarrow, pypdf, docx). CI
   installs `requirements.txt -c constraints.txt`, which has them.
+
+## 2026-10-08 · M8.71 · The contract job runs without the agent, and so does the offline stub
+
+**Change** `rag_pipeline/tests/conftest.py`'s autouse `_no_live_services` returns early when its
+  imports fail on a missing third-party package. A missing module of our own still raises.
+
+**Why** CI on PR #83 failed `deployment-contract` with 29 errors and no assertions. That job
+  (ours) installs only pytest, pyyaml, python-dotenv and networkx, because it reads Dockerfiles
+  and compose rather than the agent. The fixture (prototype's, #55) imports
+  `langchain_mcp_tools`, which imports `requests`, so every test errored in setup. Neither side
+  failed alone; only the merge put them together. The stub prevents live calls, and code that
+  cannot be imported makes none, so skipping it there loses nothing. Re-raising on our own
+  modules keeps a real breakage from silently disabling the guard in the full suite.
+
+**Measured** Reproduced the job in clean `python:3.11-slim` (amd64), with its exact
+  `pip install … -c constraints.txt`: **27 passed, 2 skipped** (was 29 errors in CI). In the
+  replica, the contract tests and the stub's own consumers (web search, artifact claims, ports):
+  91 passed, 2 skipped.

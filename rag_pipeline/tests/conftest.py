@@ -127,11 +127,22 @@ if not _LIVE:
 # answering patches over it as usual. `RUN_LIVE_BACKEND_TESTS=1` leaves this in place: the live
 # tests above use none of the three. The imports are inside the fixture so that the lines above
 # and below still run before anything imports the code under test.
+#
+# CI's `deployment-contract` job runs this directory with only pytest, pyyaml, python-dotenv and
+# networkx installed, on purpose: it reads Dockerfiles and compose, not the agent. There the
+# imports below fail on a missing THIRD-PARTY package (`requests`), and code that cannot be
+# imported cannot reach a service either, so there is nothing to stub. A missing module of our
+# own is a real breakage and still raises.
 @pytest.fixture(autouse=True)
 def _no_live_services(monkeypatch):
-    from agent_runtime import langchain_mcp_tools
-    from agent_runtime.supervisor import graph
-    from rag_pipeline.search import web
+    try:
+        from agent_runtime import langchain_mcp_tools
+        from agent_runtime.supervisor import graph
+        from rag_pipeline.search import web
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").split(".")[0] in {"agent_runtime", "rag_pipeline", "extractors", "api"}:
+            raise
+        return
 
     def _no_search_engine(query, **_kwargs):
         raise ConnectionError("rag_pipeline/tests reaches no search engine")
