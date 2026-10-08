@@ -104,6 +104,29 @@ def parse_result(content: Any, status: Optional[str] = None) -> Dict[str, Any]:
     return {"ok": ok, "error": error, "artifacts": artifacts}
 
 
+def typed_outputs(content: Any) -> List[Dict[str, Any]]:
+    """Typed values a result carries (stage 43): `outputs` from a tool, and
+    `verification.outputs` from execute_code's gate. Each is `{name, value, unit, dimension,
+    measured_in_crs, source}`."""
+    body = content
+    if isinstance(content, str) and content.lstrip().startswith("{"):
+        try:
+            body = json.loads(content)
+        except ValueError:
+            return []
+    if not isinstance(body, dict):
+        return []
+    found = []
+    for holder in (body, body.get("verification") if isinstance(body.get("verification"), dict)
+                   else None):
+        for item in (holder or {}).get("outputs") or []:
+            if isinstance(item, dict) and "value" in item and "name" in item:
+                found.append({k: item.get(k) for k in ("name", "value", "unit", "dimension",
+                                                       "counted", "measured_in_crs", "source",
+                                                       "op") if item.get(k) is not None})
+    return found[:48]
+
+
 class TurnLog:
     """Append-only. Events are dicts with a monotonically increasing `seq`."""
 
@@ -178,6 +201,10 @@ class TurnLog:
                                 world=self.world, memo_of=memo_of, content=text)
             if in_step:
                 self._runs[run]["pending"].append(event)
+        if parsed["ok"] and memo_of is None:
+            for typed in typed_outputs(content):
+                self.append("fact", peer=peer, run=run, tool=name, call_id=call_id,
+                            result_seq=event["seq"], **typed)
         return event
 
     def ingest(self, peer: str, result: Any, run: Optional[str] = None) -> int:
@@ -297,6 +324,10 @@ class TurnLog:
         return last
 
     # ------------------------------------------------------------------ views
+
+    def facts(self) -> List[Dict[str, Any]]:
+        """Every typed value the turn's tools reported, in order, with the call that made it."""
+        return [e for e in self.events if e["kind"] == "fact"]
 
     def results(self, peer: Optional[str] = None) -> List[Dict[str, Any]]:
         return [e for e in self.events if e["kind"] == "tool_result"

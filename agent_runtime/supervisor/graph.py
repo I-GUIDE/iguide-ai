@@ -2945,27 +2945,19 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
                         "source": "invariant_gate", "status": f.get("status")}
                        for f in gate]
-        # An unrecognised UNIT is the gate saying "I could not read this label", not "this
-        # number may be wrong" — everything it could read passed. Live, 2026-10-08: a correct
-        # 997.93 declared in `square_miles` produced "COULD NOT VERIFY ... hallucination is
-        # detected at high severity". That case gets a note, not an alarm.
-        # The same holds for a measurement column the gate could not trace on a WGS84 frame when no
-        # metric operation ran on a geographic frame (live 19:42 UTC: `distance_m` carried back
-        # from EPSG:26916 for output). The gate marks both `advisory`; the message test keeps an
-        # image built before the flag working.
+        # A finding the gate marks `advisory` says something was left unchecked, not that a
+        # number may be wrong; when every unknown is advisory the banner says so. Stage 43's gate
+        # no longer emits the two advisory classes stage 37 added (an unrecognised unit word, a
+        # measurement column it could not trace): units parse with a unit library, and the
+        # operations, not the columns, say where a number was measured. A unit that does not
+        # parse is a real unknown: nobody can check that number.
         def _advisory(f: Dict[str, Any]) -> bool:
-            return bool(f.get("advisory")) or (
-                f.get("check") == "declared_units"
-                and "unrecognised unit" in str(f.get("message")))
+            return bool(f.get("advisory"))
 
         advisory_only = gate_verdict == "cannot_determine" and all(_advisory(f) for f in gate)
-        unit_only = advisory_only and all(f.get("check") == "declared_units" for f in gate)
         if gate_verdict == "fail":
             headline = ("A deterministic invariant check FAILED on this run, so its numeric "
                         "results are not verified.")
-        elif unit_only:
-            headline = ("The invariant check did not recognise a declared unit, so that value's "
-                        "unit was not checked. Nothing the check could read failed.")
         elif advisory_only:
             headline = ("The invariant check left the item(s) below unchecked. Nothing it could "
                         "check failed.")

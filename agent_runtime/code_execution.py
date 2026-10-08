@@ -461,6 +461,18 @@ def _read_checks(work: Path) -> Dict[str, Any]:
     # used to slice an unsorted list, so a report with 12 cannot_determine findings ahead of a
     # single `fail` shipped verdict="fail" with no fail finding — and the gate keyed on
     # findings, so nothing reacted.
+    # Units are judged HERE, where a unit library is available, from the declarations the
+    # sandbox reported as written (stage 43; agent_runtime/declared_outputs.py). The typed
+    # values travel on the result as `outputs`: {name, value, unit, dimension, measured_in_crs}.
+    outputs: List[Dict[str, Any]] = []
+    try:
+        from agent_runtime import declared_outputs
+
+        extra, outputs = declared_outputs.evaluate(data)
+        data = {**data, "findings": [*(data.get("findings") or []), *extra],
+                **declared_outputs.merge_verdict(data, extra)}
+    except Exception:  # noqa: BLE001 - the unit check must never cost the run its report
+        pass
     order = {"fail": 0, "cannot_determine": 1}
     findings = sorted((f for f in (data.get("findings") or [])
                        if isinstance(f, dict) and f.get("status") != "pass"),
@@ -468,6 +480,8 @@ def _read_checks(work: Path) -> Dict[str, Any]:
     truncated = max(0, len(findings) - 12)
     return {"verdict": data.get("verdict"), "counts": data.get("counts") or {},
             "inspected": data.get("inspected") or [], "findings": findings[:12],
+            **({"outputs": outputs} if outputs else {}),
+            **({"metric_ops": data["metric_ops"][:12]} if data.get("metric_ops") else {}),
             **({"findings_truncated": truncated} if truncated else {}),
             **({"error": data["error"]} if data.get("error") else {})}
 

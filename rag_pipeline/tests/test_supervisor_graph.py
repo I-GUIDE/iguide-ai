@@ -2152,7 +2152,9 @@ def _gated_analyze(report, calls):
 _UNVERIFIABLE = {"verdict": "cannot_determine", "counts": {"pass": 3, "fail": 0,
                                                            "cannot_determine": 1},
                  "findings": [{"check": "declared_units", "status": "cannot_determine",
-                               "target": "buffer_radius", "message": "unrecognised unit 'furlongs'"}]}
+                               "target": "buffer_radius",
+                               "message": "unit 'km/hr^^' does not parse as a unit; the number "
+                                          "cannot be checked"}]}
 _DEGREES = {"verdict": "fail", "counts": {"pass": 3, "fail": 1, "cannot_determine": 0},
             "findings": [{"check": "projected_crs", "status": "fail", "target": "bad = gdf.buffer(0.1)",
                           "message": "'buffer' ran on a GEOGRAPHIC CRS. Reproject before this operation."}]}
@@ -2164,11 +2166,11 @@ def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypa
                                    analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
     assert state["actions"].count("analyze") == 1, state["actions"]
     assert not state.get("grounding_retries")
-    # Not swallowed: the caveat still reaches the user, with the finding that caused it. An
-    # unrecognised unit is the whole finding here, so since stage 37 it is a note, not "COULD
-    # NOT VERIFY" (test_regrounding_turn_record.py has the unit-only and other-unknown cases).
-    assert "did not recognise a declared unit" in state["final_answer"]
-    assert "furlongs" in state["final_answer"]
+    # Not swallowed: the caveat still reaches the user, with the finding that caused it. Since
+    # stage 43 a unit that does not parse is a real unknown (units parse with a unit library),
+    # so it says COULD NOT VERIFY rather than stage 37's quieter note.
+    assert "COULD NOT VERIFY" in state["final_answer"]
+    assert "km/hr^^" in state["final_answer"]
 
 
 def test_a_gate_fail_still_re_runs_and_the_peer_is_told_what_failed(monkeypatch):
