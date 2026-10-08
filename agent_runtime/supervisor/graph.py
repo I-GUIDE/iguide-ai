@@ -39,6 +39,7 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime import turn_log
 
 # Words that carry no retrieval signal — stripped when judging topical coverage and when building
 # a fallback query reformulation.
@@ -132,6 +133,12 @@ class SupervisorState(TypedDict, total=False):
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
     bound_tools: List[str]         # tool names the analyze peer had bound this turn; decides
                                    # which ungrounded claims a re-run could ever produce
+    turn_log_id: str               # this turn's event log (agent_runtime.turn_log): the one
+                                   # record of what the turn did; every other view derives from it
+    plan: Dict[str, Any]           # {goal, subgoals: [{id, text, status, produced}]}: what the
+                                   # turn is for, owned by the agent, rendered to every peer step
+    turn_log_summary: Dict[str, Any]  # counts from the log, set by run_supervisor at the end
+    bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
 
 
 
@@ -1014,12 +1021,71 @@ _UNPRODUCIBLE_CAPABILITIES = (
 
 
 def _unproducible_capability(claim: str, bound_tools: Optional[List[str]]) -> Optional[str]:
-    """The capability *claim* needs when no bound tool provides it, else None."""
+    """The capability *claim* needs when no bound tool provides it, else None.
+
+    Stage 42: no longer decides re-runs or cuts (see `_producing_tools`). It survives only for
+    stage 39's travel scan, `_remove_unrecorded_travel`, which phase 4's number scan replaces.
+    """
     text = str(claim or "")
     for label, claim_re, tool_re, _mention, _note in _UNPRODUCIBLE_CAPABILITIES:
         if claim_re.search(text) and not any(tool_re.search(str(t)) for t in bound_tools or []):
             return label
     return None
+
+
+# --- which bound tool could produce a missing claim ------------------------------------------
+# Stage 37 decided whether a re-run could establish an ungrounded claim with a list:
+# `_UNPRODUCIBLE_CAPABILITIES`, one entry (routing), a regex for the claim and a regex for the
+# tool. Any capability outside the list was assumed producible and bought a re-run, and every
+# new class needed a new entry. The question is general: given the tools this turn has bound,
+# does one of them produce this value? It is asked of the model once per flagged answer, with the
+# bound tools' own descriptions, and the answer is checked: a tool that is not bound counts as
+# none. A wrong "yes" costs one re-run, which the progress rule ends after two steps that add
+# nothing; a "no" cuts the claim instead of re-running.
+
+_PRODUCER_PROMPT = (
+    "These claims appear in a draft answer, but no tool result recorded this turn contains "
+    "them. For each claim, name the ONE tool below that would compute or retrieve that value "
+    "from data, or NONE when none of these tools produces it.\n\nTools:\n{tools}\n\n"
+    "Claims:\n{claims}\n\nRespond ONLY with JSON mapping each claim number to a tool name or "
+    "\"NONE\", e.g. {{\"1\": \"execute_code\", \"2\": \"NONE\"}}.")
+
+
+def _producing_tools(claims: List[str], tool_docs: Dict[str, str],
+                     llm: Optional[Any]) -> Dict[str, Optional[str]]:
+    """claim -> the bound tool that would produce it, or None. Unknown means producible: with
+    no model to ask, the re-run is allowed and the progress rule bounds it."""
+    out: Dict[str, Optional[str]] = {c: "unknown" for c in claims}
+    if not claims or not tool_docs:
+        return out
+    if llm is None:
+        # The same default the decider falls back to (default_decide_fn).
+        try:
+            from agent_runtime.executor_factory import build_default_llm
+            llm = build_default_llm()
+        except Exception:  # noqa: BLE001
+            return out
+    if not hasattr(llm, "invoke"):
+        return out
+    tools = "\n".join(f"- {name}: {doc}" for name, doc in sorted(tool_docs.items()))
+    numbered = "\n".join(f"{i}. {c[:300]}" for i, c in enumerate(claims, start=1))
+    try:
+        raw = llm.invoke(_PRODUCER_PROMPT.format(tools=tools[:12000], claims=numbered))
+        parsed = _extract_json_object(_content_to_text(raw))
+    except Exception:  # noqa: BLE001 - an unanswerable question leaves every claim producible
+        return out
+    if not isinstance(parsed, dict):
+        return out
+    for i, claim in enumerate(claims, start=1):
+        name = str(parsed.get(str(i)) or "").strip()
+        out[claim] = name if name in tool_docs else None
+    emit_trace_event(
+        "producer_check",
+        {"stage": "synthesize", "claims": len(claims),
+         "producible": sum(1 for v in out.values() if v),
+         "message": "; ".join(f"{c[:60]} -> {v or 'no tool'}" for c, v in out.items())[:600]},
+        node="synthesize")
+    return out
 
 
 # Locating a claim in the answer. The auditor quotes the answer, but the answer is markdown, so
@@ -1192,8 +1258,25 @@ def _drop_claims(text: str, claims: List[str]) -> tuple:
     return (_tidy_after_cuts(out, before=original) if dropped else original), dropped
 
 
+def _flagged_auditor_claims(audit: Optional[Dict[str, Any]]) -> List[str]:
+    """The claims the LLM auditor flagged (gate findings are not claims)."""
+    out = []
+    for item in (audit or {}).get("issues") or []:
+        if isinstance(item, dict) and item.get("source") == "invariant_gate":
+            continue
+        claim = str(item.get("claim") if isinstance(item, dict) else item or "").strip()
+        if claim:
+            out.append(claim)
+    return out
+
+
+_NO_PRODUCER_NOTE = ("Some figures were left out of this answer: none of the tools available "
+                     "here can establish them.")
+
+
 def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
-                                bound_tools: Optional[List[str]]) -> tuple:
+                                bound_tools: Optional[List[str]],
+                                producers: Optional[Dict[str, Optional[str]]] = None) -> tuple:
     """Cut flagged claims no bound tool can produce out of *answer*, and out of *audit*.
 
     Returns ``(answer, audit, dropped)``. The answer gains one line per capability whose claims
@@ -1203,21 +1286,19 @@ def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
     """
     issues = [i for i in ((audit or {}).get("issues") or [])]
     candidates: Dict[str, str] = {}
-    for item in issues:
-        if isinstance(item, dict) and item.get("source") == "invariant_gate":
-            continue
-        claim = str(item.get("claim") if isinstance(item, dict) else item or "").strip()
-        label = _unproducible_capability(claim, bound_tools)
-        if claim and label:
-            candidates[claim] = label
+    for claim in _flagged_auditor_claims(audit):
+        # Stage 42: "no bound tool produces it" is the producer check's answer (a claim mapped
+        # to None), not a match against a list of capability regexes.
+        if producers is not None and claim in producers and producers[claim] is None:
+            candidates[claim] = "no_tool"
     if not candidates:
         return answer, audit, []
     new_answer, dropped = _drop_claims(answer, list(candidates))
     if not dropped:
         return answer, audit, []
-    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
-        if label in {candidates[c] for c in dropped} and not mention_re.search(new_answer):
-            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
+    if _NO_PRODUCER_NOTE not in new_answer:
+        new_answer = (f"{new_answer}\n\n{_NO_PRODUCER_NOTE}" if new_answer.strip()
+                      else _NO_PRODUCER_NOTE)
     gone = set(dropped)
     kept = [i for i in issues
             if str(i.get("claim") if isinstance(i, dict) else i or "").strip() not in gone]
@@ -1628,7 +1709,7 @@ def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
     return out
 
 
-def _merge_peer_result(prior: Any, new: Any) -> Any:
+def _merge_peer_result(prior: Any, new: Any, log: Any = None, peer: Optional[str] = None) -> Any:
     """A peer's result for the TURN: its earlier runs' tool records plus this run's.
 
     The analyze and code nodes used to write their result slot outright, so a second run of a
@@ -1644,19 +1725,41 @@ def _merge_peer_result(prior: Any, new: Any) -> Any:
     the first pass's calls again. Everything else is the latest run's: its summary is what the
     peer now says, and an `error` from an earlier failed run does not outlive a later success.
     `on_map`, `executed` and `tool_failures` are facts about the turn, so they accumulate too.
+
+    Stage 42: with a turn log (*log*, *peer*), the tool records are not merged at all. They are
+    the log's view of this peer, which every run of the peer appended to as it went. Calls the
+    middleware did not see (a test double, a CLI peer) are ingested by tool_call_id first.
+    `tool_failures` is recomputed from that view, so a tool that failed in an earlier run and
+    then succeeded is no longer reported as failing.
     """
-    if not isinstance(prior, dict) or not isinstance(new, dict):
+    if not isinstance(new, dict):
         return new
+    if not isinstance(prior, dict):
+        prior = {}
     merged = {**{k: v for k, v in prior.items() if k != "error"}, **new}
-    for key, id_key in (("tool_calls", "id"), ("tool_results", "tool_call_id")):
-        if key in prior or key in new:
-            merged[key] = _merge_rows(prior.get(key) or [], new.get(key) or [], id_key)
+    if log is not None and peer:
+        run = log.last_run(peer)
+        log.ingest(peer, new, run=run)
+        log.record_answer(peer, run, new.get("summary") or new.get("answer"))
+        view = log.artifacts_view([peer])
+        for key in ("tool_calls", "tool_results"):
+            if view[key] or key in prior or key in new:
+                merged[key] = view[key]
+        failing = _repeatedly_failed_tools(view)
+        if failing:
+            merged["tool_failures"] = failing
+        else:
+            merged.pop("tool_failures", None)
+    else:
+        for key, id_key in (("tool_calls", "id"), ("tool_results", "tool_call_id")):
+            if key in prior or key in new:
+                merged[key] = _merge_rows(prior.get(key) or [], new.get(key) or [], id_key)
+        failures = {**(prior.get("tool_failures") or {}), **(new.get("tool_failures") or {})}
+        if failures:
+            merged["tool_failures"] = failures
     for flag in ("on_map", "executed"):
         if flag in prior or flag in new:
             merged[flag] = bool(prior.get(flag) or new.get(flag))
-    failures = {**(prior.get("tool_failures") or {}), **(new.get("tool_failures") or {})}
-    if failures:
-        merged["tool_failures"] = failures
     return merged
 
 
@@ -1694,6 +1797,27 @@ def _record_actions(state: SupervisorState, *contexts: Any,
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _record_turn(state: SupervisorState, ar: Any = None, cr: Any = None) -> None:
+    """Append the turn to the thread ledger, once, from the turn log.
+
+    The ledger used to be extracted from the analyze and code result slots at the end of
+    synthesis, so a turn that raised before then recorded nothing, and a slot that had been
+    overwritten recorded only its last run. The log holds every call either way. Recorded once
+    per log: synthesis and the failure paths can both reach here.
+    """
+    log = turn_log.get_log(state.get("turn_log_id"))
+    if log is not None:
+        if getattr(log, "ledger_written", False):
+            return
+        log.ledger_written = True
+        for peer, slot in (("analyze", ar), ("code", cr)):
+            log.ingest(peer, slot)
+        contexts = [log.artifacts_view(["analyze", "code"])]
+    else:
+        contexts = [ar, cr]
+    _record_actions(state, *contexts, extra_rows=state.get("action_rows"))
 
 
 def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str, Any]:
@@ -1752,12 +1876,17 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "has_answer": bool((state.get("answer") or "").strip()),
         "audit_severity": audit.get("severity"),
         "pending_needs": [n.get("capability") for n in (state.get("needs") or []) if isinstance(n, dict)],
+        # Why each need was queued. The capability name alone told the decider that something
+        # was wanted, never what (review §F5).
+        "pending_need_reasons": [str(n.get("reason") or "")[:200] for n in (state.get("needs") or [])
+                                 if isinstance(n, dict)],
         "actions_taken": actions,
         "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
         "search_attempts": state.get("search_attempts", 0),
         "search_exhausted": _search_exhausted(state),
         # What the decider may actually choose this step (see _available_actions).
         "available_actions": _available_actions(state),
+        **({"plan": state.get("plan")} if for_decision and state.get("plan") else {}),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
         # THIS turn's ledger, in the same rendering the answering model and the grounding
@@ -2135,14 +2264,20 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     """True if *nxt* re-runs the peer that JUST ran and already produced a result,
     with no pending need driving it.
 
-    Applies to ``analyze`` / ``code``: each overwrites a single result slot and
-    iterates internally (the code peer runs+debugs its own code), so re-running it
-    back-to-back with the same inputs just reproduces the same result — the
-    signature of a decision loop. ``search`` is intentionally NOT guarded: it
-    *accumulates* (dedup-merges) into evidence, so a follow-up search can add new
-    documents. A genuine multi-hop refinement interleaves a *different* peer (or a
-    request_capability need), so only consecutive same-peer repeats are blocked.
+    Applies to ``analyze`` / ``code``: each iterates internally (the code peer
+    runs+debugs its own code), so re-running it back-to-back with the same inputs just
+    reproduces the same result — the signature of a decision loop. ``search`` is
+    intentionally NOT guarded: it *accumulates* (dedup-merges) into evidence, so a
+    follow-up search can add new documents.
+
+    Stage 42 adds the rule that does not depend on adjacency: a peer whose last run this turn
+    added nothing to the turn's record is not run again. Back-to-back was the only shape the
+    old rule caught; an analyze, code, analyze, code alternation passed it until the per-peer
+    run cap. Whether a run added anything is read from the turn log, so it holds for any route
+    to the peer: a decision, a queued need, or a re-grounding pass.
     """
+    if nxt in ("analyze", "code") and _last_run_added_nothing(nxt, state):
+        return True
     actions = state.get("actions") or []
     if not actions or actions[-1] != nxt:
         return False  # not a back-to-back repeat
@@ -2151,6 +2286,100 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     if nxt == "analyze":
         return state.get("analysis_results") is not None
     return False
+
+
+def _last_run_added_nothing(peer: str, state: SupervisorState) -> bool:
+    """Whether *peer* ran this turn and its latest run appended nothing new to the turn log."""
+    log = turn_log.get_log(state.get("turn_log_id"))
+    if log is None:
+        return False
+    run = log.last_run(peer)
+    return run is not None and not log.run_was_productive(run)
+
+
+# --- the plan: what the turn is for, owned by the agent -----------------------------------
+# Before stage 42 the only record of what a turn was trying to do, and what was still missing,
+# was the model's own context. A reasoning model behind a shim loses its reasoning between steps
+# (AGENTS.md, "Which model answers"); the context budget keeps only the latest human message, so
+# on a retry the original task can be trimmed away; a queued need's reason never reached the
+# peer that was re-run for it. The plan lives in state, is rendered into every peer step's
+# SYSTEM message (never trimmed), and its progress is read from the turn log, not the model.
+
+class Decision(str):
+    """The decider's action, carrying the plan update it made. A str, so every caller that
+    compares the decision to "done" keeps working."""
+
+    plan: Optional[Dict[str, Any]] = None
+    subgoal: Optional[str] = None
+
+
+def _initial_plan(state: SupervisorState) -> Dict[str, Any]:
+    return {"goal": str(state.get("query") or "")[:600], "subgoals": [], "active": None}
+
+
+def _plan_from_decision(state: SupervisorState, decided: Any) -> Optional[Dict[str, Any]]:
+    """Merge a decider's plan update into the plan. Progress fields are kept: `produced` is
+    measured, not declared, so a model restating its plan cannot erase what was recorded."""
+    plan = dict(state.get("plan") or _initial_plan(state))
+    new = getattr(decided, "plan", None)
+    if isinstance(new, dict):
+        if str(new.get("goal") or "").strip():
+            plan["goal"] = str(new["goal"])[:600]
+        old = {str(g.get("id")): g for g in plan.get("subgoals") or [] if isinstance(g, dict)}
+        merged = []
+        for i, g in enumerate(new.get("subgoals") or []):
+            if not isinstance(g, dict):
+                continue
+            gid = str(g.get("id") or f"s{i + 1}")
+            prev = old.get(gid, {})
+            status = str(g.get("status") or prev.get("status") or "todo").lower()
+            if status not in {"todo", "doing", "done", "blocked"}:
+                status = "todo"
+            merged.append({"id": gid, "text": str(g.get("text") or prev.get("text") or "")[:300],
+                           "status": status, "produced": int(prev.get("produced") or 0)})
+        if merged:
+            plan["subgoals"] = merged[:8]
+    active = getattr(decided, "subgoal", None)
+    if active:
+        plan["active"] = str(active)
+    return plan
+
+
+def _plan_after_run(state: SupervisorState, log: Any, run: Optional[str]) -> Dict[str, Any]:
+    """Credit the active subgoal with what the run actually recorded."""
+    plan = dict(state.get("plan") or _initial_plan(state))
+    if not run:
+        return plan
+    produced = sum(1 for e in log.results() if e.get("run") == run and e.get("new")
+                   and e.get("ok"))
+    subgoals = [dict(g) for g in plan.get("subgoals") or []]
+    for g in subgoals:
+        if g.get("id") == plan.get("active"):
+            g["produced"] = int(g.get("produced") or 0) + produced
+            if produced == 0 and g.get("status") in ("todo", "doing"):
+                g["status"] = "blocked"
+            elif produced and g.get("status") == "todo":
+                g["status"] = "doing"
+    plan["subgoals"] = subgoals
+    return plan
+
+
+def _turn_brief(state: SupervisorState) -> str:
+    """The task and the plan, for the peer's system message (executor_factory)."""
+    lines = [f"Task (the user's request, verbatim): {str(state.get('query') or '')[:1500]}"]
+    plan = state.get("plan") or {}
+    if plan.get("subgoals"):
+        lines.append("Plan (kept by the supervisor; `produced` counts new results recorded "
+                     "while a subgoal was active):")
+        for g in plan["subgoals"]:
+            mark = " <- now" if g.get("id") == plan.get("active") else ""
+            lines.append(f"- [{g.get('status')}] {g.get('id')}: {g.get('text')} "
+                         f"(produced {g.get('produced', 0)}){mark}")
+    reasons = [f"{n.get('capability')}: {n.get('reason')}" for n in state.get("needs") or []
+               if isinstance(n, dict) and n.get("reason")]
+    if reasons:
+        lines.append("Requested by another step: " + "; ".join(reasons)[:600])
+    return "\n".join(lines)
 
 
 # Severities at which the grounding audit appends a user-visible caveat. Only HIGH —
@@ -2369,18 +2598,18 @@ def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
     "Grounded". Now the VERDICT decides, and a fail with no surviving finding still yields an
     issue.
     """
-    found: List[Dict[str, Any]] = []
+    reports: List[Dict[str, Any]] = []
     seen: set = set()
     keep: List[Any] = []          # anchors parsed graphs so their ids cannot be recycled
 
     def walk(node: Any, depth: int = 0) -> None:
-        if depth > 12 or len(found) >= 24 or id(node) in seen:
+        if depth > 12 or len(reports) >= 24 or id(node) in seen:
             return
         seen.add(id(node))
         if isinstance(node, dict):
             report = node.get("verification")
             if isinstance(report, dict):
-                found.extend(_gate_issues_from(report))
+                reports.append(report)
             for value in node.values():
                 walk(value, depth + 1)
         elif isinstance(node, (list, tuple)):
@@ -2395,7 +2624,38 @@ def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
             walk(parsed, depth + 1)
 
     walk(execution_context)
-    return found
+    return _unsuperseded_gate_issues(reports)[:24]
+
+
+def _unsuperseded_gate_issues(reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Gate issues from *reports* (in turn order) that no later run has superseded.
+
+    The tool tells the model "FIX AND RE-RUN" when the gate fails, and stage 37 made the turn
+    keep every run's results. Together they meant a run that failed, was fixed and re-ran
+    correctly still marked the turn as failed: the walk collected every report, and nothing
+    said a later one replaced an earlier one (review §F1). A finding about a target is
+    superseded when a later report inspected the same target and did not flag it; a finding
+    about the run as a whole ("this run") is superseded by any later run that passed.
+    """
+    out: List[Dict[str, Any]] = []
+    for i, report in enumerate(reports):
+        later = reports[i + 1:]
+        for issue in _gate_issues_from(report):
+            target = issue.get("target")
+            superseded = False
+            for r2 in later:
+                flagged = {f.get("target") for f in (r2.get("findings") or [])
+                           if isinstance(f, dict) and f.get("status") in {"fail",
+                                                                         "cannot_determine"}}
+                if target == "this run" and r2.get("verdict") == "pass":
+                    superseded = True
+                elif target and target in (r2.get("inspected") or []) and target not in flagged:
+                    superseded = True
+                if superseded:
+                    break
+            if not superseded:
+                out.append(issue)
+    return out
 
 
 def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3127,7 +3387,14 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
             "tool rather than a question about the literature — computing a DEM, buffering, "
             "embedding a region — retrieval cannot help at all, however thin the evidence "
             "looks.\n\n"
-            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
+            "`plan` in Progress is this turn's plan: a goal and subgoals, each with a status and "
+            "`produced`, the number of new results the turn recorded while it was the active "
+            "subgoal. Every peer step is shown it. You can revise it with each decision; a "
+            "subgoal whose last run produced nothing is marked blocked.\n\n"
+            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\", "
+            "\"plan\": {\"goal\": \"...\", \"subgoals\": [{\"id\": \"s1\", \"text\": \"...\", "
+            "\"status\": \"todo|doing|done|blocked\"}]}, \"subgoal\": \"<id the next action works on>\"}"
+            " (`plan` and `subgoal` optional)\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
             + f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
@@ -3155,7 +3422,12 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
                      "message": nxt + (f" — {reason}" if reason else "")},
                     node="supervisor",
                 )
-                return nxt
+                decision = Decision(nxt)
+                if isinstance(parsed.get("plan"), dict):
+                    decision.plan = parsed["plan"]
+                if parsed.get("subgoal"):
+                    decision.subgoal = str(parsed["subgoal"])
+                return decision
         except Exception:
             pass
         # The decider output was unusable; fall back to the deterministic heuristic.
@@ -4800,6 +5072,10 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             # ungrounded claim is one a re-run could produce; see _unproducible_capability.
             "bound_tools": sorted({str(getattr(t, "name", "")) for t in tools
                                    if getattr(t, "name", "")}),
+            # Their own one-line descriptions, for `_producing_tools`.
+            "bound_tool_docs": {str(getattr(t, "name", "")):
+                                str(getattr(t, "description", "") or "").strip().split("\n")[0][:200]
+                                for t in tools if getattr(t, "name", "")},
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
 
@@ -5551,6 +5827,7 @@ def build_supervisor_graph(
 
     def supervisor_node(state: SupervisorState) -> Dict[str, Any]:
         step = state.get("step", 0)
+        plan_update: Optional[Dict[str, Any]] = None
         actions = state.get("actions") or []
         needs = list(state.get("needs") or [])
         # Drop peer requests that can no longer be productive, so a peer that keeps
@@ -5566,6 +5843,11 @@ def build_supervisor_graph(
             # Peer-requested re-search dies only at the hard attempt cap — a single empty
             # result must NOT permanently close search (allows a narrowed re-try).
             if cap == "search" and state.get("search_attempts", 0) >= _max_searches():
+                return True
+            # A queued need used to bypass the repeat guard entirely (review §3.6). It now
+            # meets the same progress rule as a decision: a peer whose last run added nothing
+            # is not run again because someone asked for it.
+            if cap in ("analyze", "code") and _last_run_added_nothing(cap, state):
                 return True
             return actions.count(cap) >= _max_peer_runs()
         needs = [n for n in needs if not _dead(n)]
@@ -5599,7 +5881,8 @@ def build_supervisor_graph(
                 remaining, why = needs, f"decider unavailable → {nxt}"
                 failures = [*failures, decide_failure]
             else:
-                nxt = decided
+                nxt = str(decided)
+                plan_update = _plan_from_decision(state, decided)
                 remaining, why = needs, "decision"
             _LEDGER_LOG.info(
                 "supervisor step=%s prior_actions=%d -> %s",
@@ -5652,6 +5935,14 @@ def build_supervisor_graph(
             "step": step + 1,
             "needs": remaining,
         }
+        # The turn's log and plan exist from the first step, so every peer node finds the same
+        # log through the state, whichever route the graph was entered by.
+        if not turn_log.get_log(state.get("turn_log_id")):
+            update["turn_log_id"] = turn_log.new_log().id
+        if plan_update is not None:
+            update["plan"] = plan_update
+        elif not state.get("plan"):
+            update["plan"] = _initial_plan(state)
         if len(failures) != len(state.get("peer_failures") or []):
             update["peer_failures"] = failures
         return update
@@ -5659,7 +5950,9 @@ def build_supervisor_graph(
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        raw, failure = _run_peer("search", lambda: do_search(q, state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "search", _turn_brief(state)):
+            raw, failure = _run_peer("search", lambda: do_search(q, state), state)
         if failure is not None:
             # Return the state we still have. `evidence` already in state survives because a
             # node update MERGES; returning early simply adds nothing to it. The attempt is
@@ -5770,26 +6063,36 @@ def build_supervisor_graph(
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
-        raw, failure = _run_peer(
-            "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "analyze", _turn_brief(state)) as bound_run:
+            raw, failure = _run_peer(
+                "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
         prior = state.get("analysis_results")
+        logged = {"turn_log_id": log.id, "plan": _plan_after_run(state, log, bound_run.run)}
         if failure is not None:
             # Degrade to an analysis_results that STATES the failure: this is the peer the
             # router sends code-shaped work to, and synthesis should answer from what the other
-            # peers found rather than read silence as "nothing to report".
-            return _with_failure({"analysis_results": _merge_peer_result(
+            # peers found rather than read silence as "nothing to report". What the run did
+            # before it failed is in the turn log, and stays in the record.
+            return _with_failure({**logged, "analysis_results": _merge_peer_result(
                 prior, {"summary": (prior or {}).get("summary", "") if isinstance(prior, dict)
                         else "", "tool_calls": [], "tool_results": [],
-                        "error": failure["error"]})},
+                        "error": failure["error"]}, log, "analyze")},
                                  state, failure)
         clean, needs = _extract_needs(raw)
+        log.record_needs("analyze", bound_run.run, needs)
         bound = clean.pop("bound_tools", None) if isinstance(clean, dict) else None
+        docs_ = clean.pop("bound_tool_docs", None) if isinstance(clean, dict) else None
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         # A second run of this peer in the same turn (a re-grounding pass, a queued need) ADDS to
         # the turn's record; see _merge_peer_result.
-        update: Dict[str, Any] = {"analysis_results": _merge_peer_result(prior, clean)}
+        update: Dict[str, Any] = {**logged,
+                                  "analysis_results": _merge_peer_result(prior, clean, log,
+                                                                         "analyze")}
         if bound:
             update["bound_tools"] = sorted({*(state.get("bound_tools") or []), *bound})
+        if docs_:
+            update["bound_tool_docs"] = {**(state.get("bound_tool_docs") or {}), **docs_}
         if unified_peer_enabled(state) and isinstance(clean, dict):
             # The state KEYS stay exactly as they were. evidence_quality.py and
             # runtime_utils.py read "analysis_results"/"evidence" by name, and a rename there
@@ -5810,19 +6113,24 @@ def build_supervisor_graph(
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        raw, failure = _run_peer(
-            "code", lambda: do_code(q, state.get("evidence") or [], state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "code", _turn_brief(state)) as bound_run:
+            raw, failure = _run_peer(
+                "code", lambda: do_code(q, state.get("evidence") or [], state), state)
         prior = state.get("code_result")
+        logged = {"turn_log_id": log.id, "plan": _plan_after_run(state, log, bound_run.run)}
         if failure is not None:
             # Degrade to a code_result that states the failure (executed=False), and let
             # synthesis answer from what search and analyze already produced.
-            return _with_failure({"code_result": _merge_peer_result(
+            return _with_failure({**logged, "code_result": _merge_peer_result(
                 prior, {"answer": "", "executed": False, "tool_calls": [], "tool_results": [],
-                        "error": failure["error"]})},
+                        "error": failure["error"]}, log, "code")},
                                  state, failure)
         clean, needs = _extract_needs(raw)
+        log.record_needs("code", bound_run.run, needs)
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
-        update: Dict[str, Any] = {"code_result": _merge_peer_result(prior, clean)}
+        update: Dict[str, Any] = {**logged,
+                                  "code_result": _merge_peer_result(prior, clean, log, "code")}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
         if enq is not None:
             update["needs"] = enq
@@ -5872,6 +6180,12 @@ def build_supervisor_graph(
         failures = state.get("peer_failures") or []
         try:
             update = _synthesize_core(state)
+            # Every exit but the one that asks for a re-grounding pass clears the flag. Each
+            # early return (the general-knowledge answer, the insufficiency reply) used to leave
+            # an earlier pass's `reground: True` in state, and the conditional edge sent the graph
+            # back to the supervisor on every composition, to the recursion limit.
+            if not update.get("reground"):
+                update["reground"] = False
         except BaseException as exc:                  # noqa: BLE001 - deliberately total
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -5887,7 +6201,14 @@ def build_supervisor_graph(
                              node="synthesize")
             final = _deterministic_answer(state, reason)
             merged = {**state, "answer": final, "audit": {}}
+            # What the turn did is still recorded: a turn whose answer could not be composed
+            # did its work all the same, and the next turn should know it.
+            _record_turn(state, state.get("analysis_results"), state.get("code_result"))
             return {"answer": final, "final_answer": final,
+                    # A failed composition must not route the graph back for a re-grounding
+                    # pass: the flag from an earlier pass would otherwise survive, and every
+                    # pass back would fail the same way until the graph's recursion limit.
+                    "reground": False, "grounding_gaps": [],
                     "audit": {"hallucination_detected": False, "severity": "none", "issues": [],
                               "summary": "Composed without the model; synthesis failed."},
                     "peer_failures": [*failures,
@@ -6027,7 +6348,10 @@ def build_supervisor_graph(
             # is cut from the answer: re-running a peer cannot establish it, and a caveat over
             # a figure we know is unsupported is worse than not printing the figure.
             _bound = state.get("bound_tools") or []
-            answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound)
+            _producers = _producing_tools(
+                [c for c in (_flagged_auditor_claims(audit)) if c],
+                state.get("bound_tool_docs") or {}, llm) if _audit_flagged(audit) else {}
+            answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound, _producers)
             # ... and one the audit did not flag, or that reconciliation let through.
             answer, audit, _ = _remove_unrecorded_travel(answer, audit, _bound, exec_ctx)
             if state.get("grounding_retries"):
@@ -6039,8 +6363,10 @@ def build_supervisor_graph(
             if _reground_to:
                 # A claim that could not be cut (paraphrased by the auditor) but still needs a
                 # tool nobody bound keeps its caveat and does not buy a re-run.
+                # A gap the producer check was not asked about (a gate finding: a wrong number
+                # the peer can fix) is producible by definition.
                 gaps = [g for g in _unsupported_claims(audit)
-                        if _unproducible_capability(g, _bound) is None]
+                        if _producers.get(g, "not asked") is not None]
                 if gaps:
                     emit_trace_event(
                         "node_completed",
@@ -6118,7 +6444,7 @@ def build_supervisor_graph(
         final = _correct_artifact_claims(final, ar, cr, prior_rows=_rows)
         # Record what this turn DID before the state is discarded — the next turn's routing
         # decision is the only thing standing between a follow-up and a redundant search.
-        _record_actions(state, ar, cr, extra_rows=state.get("action_rows"))
+        _record_turn(state, ar, cr)
         merged = {**state, "answer": final, "audit": audit}
         # Clear the turn's rows on the way out. They are already in the thread ledger, this
         # state ships to the client verbatim, and an empty list makes double-recording
@@ -6196,20 +6522,31 @@ def run_supervisor(
     # and `evidence`, so a follow-up would start at step 8 and route straight to `done`.
     run_thread = f"{thread_id or 'auto'}::run::{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": run_thread}}
-    state = graph.invoke(
-        {
-            "query": query,
-            "chat_history": chat_history or [],
-            "thread_id": thread_id,
-            "unified_peer": unified_peer,
-            "evidence": [],
-            "needs": [],
-            "actions": [],
-            "step": 0,
-            "max_steps": max_steps,
-        },
-        config,
-    )
+    log = turn_log.new_log()
+    initial = {
+        "query": query,
+        "chat_history": chat_history or [],
+        "thread_id": thread_id,
+        "unified_peer": unified_peer,
+        "evidence": [],
+        "needs": [],
+        "actions": [],
+        "step": 0,
+        "max_steps": max_steps,
+        "turn_log_id": log.id,
+    }
+    try:
+        state = graph.invoke(initial, config)
+    except Exception:
+        # The ledger used to be written only at the end of synthesis, so a turn that raised
+        # left no trace of what it had already done. The log has it.
+        try:
+            _record_turn(initial)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    if isinstance(state, dict):
+        state.setdefault("turn_log_summary", log.summary())
     # Handed back so a caller that wants the partial state after an unexpected failure has a
     # key to read it with. Recording it is the difference between "unused" and "unrecoverable".
     if isinstance(state, dict):

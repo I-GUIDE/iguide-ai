@@ -5200,3 +5200,22 @@ rather than from the previous one.
 
 **Not fixed** The harness measures; it changes no behaviour. The live-OSM task's reference can
   move between runs. The number matcher accepts the right value anywhere in the answer.
+
+## 2026-10-08 · M8.80 · One record of the turn, progress instead of counts, a plan in state (architecture stage 42)
+
+**Change** New `agent_runtime/turn_log.py`.
+- The peers' tool records, the ledger and the progress rule all read it.
+- Identical calls are answered from it for the whole turn while nothing new has happened.
+- Two steps that add nothing end a peer run, and a peer whose last run added nothing is not re-run.
+- The task and plan ride in every peer step's system message.
+- Gate failures are superseded by a later run that fixes the same target.
+- Re-runs are decided by a producer check over bound tools.
+- Every composition clears the re-ground flag.
+
+**Why** Seven records of one turn, loop bounds that counted steps and not progress, and a plan
+  that lived only in the model's context: review flaws 3–5, and 14 + 15 + 12 catalogued incidents.
+
+**Measured** See stage 42: the harness before and after, per model.
+
+**Not fixed** A step that adds a wrong fact counts as productive (phases 3–4). The producer check
+  is a model call: a wrong "yes" costs one bounded re-run.

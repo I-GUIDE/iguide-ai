@@ -24,8 +24,11 @@ import pytest
 from agent_runtime.supervisor.graph import (_gate_failures, _gate_issues_from,
                                             _reconcile_audit_with_artifacts)
 
-PASSING = {"verdict": "pass", "inspected": ["gdf"], "counts": {"pass": 3},
-           "findings": [{"check": "projected_crs", "status": "pass", "target": "gdf",
+# The passing runs inspect a DIFFERENT frame. Since stage 42 a later run that inspects the same
+# target and does not flag it supersedes the failure (see the supersession tests below), which is
+# not what this matrix is about: it holds the walk against id() reuse.
+PASSING = {"verdict": "pass", "inspected": ["loaded"], "counts": {"pass": 3},
+           "findings": [{"check": "projected_crs", "status": "pass", "target": "loaded",
                          "message": "projected CRS EPSG:32616"}]}
 FAILING = {"verdict": "fail", "inspected": ["gdf"], "counts": {"fail": 1},
            "findings": [{"check": "projected_crs", "status": "fail", "target": "gdf",
@@ -212,3 +215,30 @@ def test_the_issue_list_is_capped_so_the_answer_is_not_flooded():
     out = _caveat({"verdict": "fail", "counts": {"fail": 9}, "findings": findings})
     assert out.count("- computed value") == 4
     assert "and 5 more" in out
+
+
+# ------------------------------------------------------------------ supersession (stage 42)
+
+FIXED = {"verdict": "pass", "inspected": ["gdf"], "counts": {"pass": 2}, "findings": []}
+
+
+def _ctx(*reports):
+    return {"messages": [{"role": "tool", "content": _tool_result(r)} for r in reports]}
+
+
+def test_a_failure_fixed_by_a_later_run_is_superseded():
+    """The tool tells the model to fix and re-run, and stage 37 keeps every run's results. A
+    fixed run must clear the failure it fixed, or a correct turn is still marked failed."""
+    assert _gate_failures(_ctx(FAILING, FIXED)) == []
+
+
+def test_a_later_run_that_did_not_look_at_the_target_supersedes_nothing():
+    assert _gate_failures(_ctx(FAILING, PASSING))
+
+
+def test_a_failure_after_a_pass_stands():
+    assert _gate_failures(_ctx(FIXED, FAILING))
+
+
+def test_a_later_run_that_fails_the_same_target_keeps_it_failed():
+    assert len(_gate_failures(_ctx(FAILING, FAILING))) == 2

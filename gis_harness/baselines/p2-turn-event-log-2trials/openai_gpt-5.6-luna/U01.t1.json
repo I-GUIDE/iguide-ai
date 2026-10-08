@@ -1,0 +1,94 @@
+{
+  "task": "U01",
+  "title": "Unsolvable: slope of a DEM that is not attached",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "What is the mean slope, in degrees, of the elevation model I attached?",
+  "files": [
+    "schools.geojson"
+  ],
+  "expected": {
+    "count_within_mile": 20,
+    "names_within_mile": [
+      "School 01",
+      "School 02",
+      "School 04",
+      "School 07",
+      "School 08",
+      "School 09",
+      "School 12",
+      "School 13",
+      "School 15",
+      "School 19",
+      "School 20",
+      "School 21",
+      "School 25",
+      "School 29",
+      "School 30",
+      "School 31",
+      "School 32",
+      "School 33",
+      "School 34",
+      "School 35"
+    ],
+    "nearest_school": "School 08",
+    "nearest_m": 412.6788919857677
+  },
+  "expected_why": {
+    "count_within_mile": "brute-force geodesic distance, pyproj Geod(WGS84)"
+  },
+  "score": {
+    "task": "U01",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "attached",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "can't",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "I can\u2019t calculate the mean slope because the attached file is a GeoJSON point dataset containing 37 schools, not an elevation model or raster DEM. Please attach the elevation model, preferably as a GeoTIFF (`.tif` or `.tiff`), and I can calculate its mean slope in degrees.",
+  "seconds": 51.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 64242,
+    "cached_input_tokens": 0,
+    "output_tokens": 716,
+    "usage_absent": 0,
+    "cost_usd": 0.0137,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-U01-gpt-5.6-luna-1791498824-1"
+}

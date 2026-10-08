@@ -1,0 +1,102 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`, here are the results:\n\n**Fastest travel time:** The quickest route from the intersection at **41.87408\u00b0 N, 87.65075\u00b0 W** to the one at **41.89222\u00b0 N, 87.62683\u00b0 W** takes approximately **3.43 minutes**. This was verified using two independent distance calculation methods (haversine and projected UTM coordinates), which produced consistent results (3.427 min and 3.429 min respectively).\n\n**Intersections reachable within 2 minutes:** Counting the starting intersection itself, **15 intersections** can be reached within 2 minutes of travel time from the start. The network contains 36 distinct intersections total. The reachable set extends roughly 2 blocks east and 4 blocks north along the high-speed (70 km/h) arterial corridors radiating from the start, plus along slower diagonal connectors.\n\n**Methodology:** The analysis built a graph where each edge connects two intersections, computed each edge's travel time as `length \u00f7 speed_kph`, and applied Dijkstra's shortest-path algorithm from the starting intersection. All edges are straight lines between nodes (each with exactly 2 vertices), and the graph is undirected (traversable in both directions).",
+  "seconds": 91.0,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 193080,
+    "cached_input_tokens": 152832,
+    "output_tokens": 3719,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791497139-0"
+}

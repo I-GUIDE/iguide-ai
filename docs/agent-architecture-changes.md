@@ -55,6 +55,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 | 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
+| 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6995,3 +6996,136 @@ The harness's own scorer was corrected twice during the baseline:
 
 `--summarise` re-scored every run from its stored events, so the table above uses the final
 scorer throughout.
+
+## Stage 42 — One record of the turn, progress instead of counts, a plan in state {#stage-42}
+
+*2026-10-08. Branch `claude/turn-event-log`, stacked on `claude/gis-task-harness` (#90), whose
+harness measures it. DEVLOG M8.80; M8.79 is #93. Phase 2 of the eight-flaws program, flaws 3, 4
+and 5. `docs/design-review-2026-10.md` gives the root causes with line references. This entry gives
+what changed, what it replaced, and what it measured.*
+
+**Why.** "What happened this turn" lived in seven places:
+- the peers' result slots;
+- the search node's `action_rows`;
+- the session ledger, written only at the end of synthesis;
+- each peer's checkpointed thread;
+- the decision list;
+- the failure lists;
+- the trace.
+
+Each consumer read a different one, and the incident catalogue (review, appendix A) counts 14
+class-C incidents where two of them disagreed.
+
+Every loop bound counted something other than progress:
+- `max_steps` 8;
+- the peer `recursion_limit` 60;
+- #88's fourth identical ask, inside the latest step only;
+- `_is_unproductive_repeat`, which caught back-to-back runs only.
+
+The plan existed only in the model's context. The context budget keeps only the latest human
+message plus the tail that fits, so on a retry the task could be trimmed away.
+
+**What changed.**
+
+1. **`agent_runtime/turn_log.py`, an append-only event log per turn.** Run ids, tool calls and
+   results, answers, needs, steps.
+   - The tool middleware every peer already has (`_make_repeat_call_middleware`) records into it.
+   - The node ingests, by tool_call_id, anything a peer reports that the middleware did not see,
+     such as a test double or a CLI peer.
+   - `_merge_peer_result` no longer merges tool records: the analyze and code slots hold the
+     log's view of that peer. `tool_failures` is recomputed from that view, so a tool that failed
+     and then succeeded is no longer reported as failing.
+   - The ledger is written from the log, once per turn, also when composition fails.
+     `run_supervisor` writes it when the graph raises.
+2. **Repeats are answered from the log for the whole turn,** across peers and runs. Each answer
+   is valid while the "world" has not moved: the world advances when a step adds something new,
+   so a listing after a write still runs again, and so does a read after an edit. A failed call
+   is retried once (an outage can recover) and then answered from the log. This supersedes #88's
+   window, which was the latest executed step of one run.
+3. **Progress, not counts.**
+   - A step is productive when one of its results is new to the turn: a success with unseen
+     content, a failure of an unseen error class (particulars stripped), a new answer, or a new
+     request for a missing capability.
+   - Two consecutive unproductive steps end a peer run. `_make_progress_middleware` returns a
+     plain message instead of calling the model again, so the run ends without an exception and
+     the turn keeps what it recorded.
+   - At the supervisor, a peer whose last run added nothing is not run again, whether a
+     decision or a queued need asks for it. This replaces #88's `RepeatedToolCallError` at the
+     fourth identical ask.
+4. **A plan in state.** The decider can return `plan` and `subgoal` alongside `next`;
+   `Decision` is a `str`, so every caller that compares it to `"done"` still works. The plan's
+   `produced` counts are measured from the log, not declared, and a subgoal whose run produced
+   nothing is marked `blocked`. The task and the plan are rendered into every peer step's
+   **system** message, which the context budget never trims.
+5. **Re-runs by a capability predicate.** `_producing_tools` asks the model, once per flagged
+   answer and with the bound tools' own descriptions, which bound tool would produce each
+   flagged claim, and checks the answer: a name that is not bound counts as none.
+   - A claim no bound tool produces is cut.
+   - A claim some tool produces earns the re-run, which the progress rule bounds.
+   - This replaces `_UNPRODUCIBLE_CAPABILITIES`, a one-entry list, as the deciding rule. The
+     list survives only for #87's travel scan, which phase 4 replaces.
+6. **Gate failures are superseded.** A failure on a target is cleared by a later run that
+   inspected the same target and did not flag it. Before this, a fixed and re-run script still
+   marked the turn failed (review §F1).
+7. **Every composition clears the re-ground flag** unless it asks for a pass. The
+   general-knowledge exit returned without clearing it, and a test reproduced the loop to
+   LangGraph's recursion limit of 10,000.
+
+**Tests.**
+- `test_turn_event_log.py` (20), `test_repeat_tool_calls.py` (15, rewritten for the log) and
+  four supersession tests in `test_gate_reaches_the_answer.py`.
+- Run against the base (stage 41) with only `turn_log.py` copied in: 19 fail. The 39 that pass
+  are guards, unchanged cases, and unit tests of the new module.
+- Changed tests, each because the behaviour changed on purpose:
+  - #88's repeat tests: memo plus progress, not a count of 4;
+  - #85's routing tests: the producer check's answer is scripted, not a list;
+  - one id-reuse matrix test: its passing runs now inspect a different frame, since a run that
+    inspects the same frame now supersedes the failure;
+  - the middleware-order test;
+  - one source-text test.
+- Suites on `e85e8ae`: `rag_pipeline/tests` 3792 passed, 18 skipped, 1 failed (the
+  machine-dependent networkx pin); `tests/` 157 passed.
+
+**Measured with the harness.** Stage 41's baseline (`4b066f6`, trials 0 and 1) against this
+branch (`5b5e7ef` + stages 41–42, 2 trials), over the 67 task trials both have
+(`python -m gis_harness.run --compare`):
+
+| | deepseek-v4-flash, base → after | gpt-5.6-luna, base → after |
+|---|---|---|
+| correct | 22/25 → 23/25 | 20/26 → 26/26 |
+| refused gracefully | 7/8 → 6/8 | 5/8 → 6/8 |
+| strict | 14/33 → 15/33 | 4/34 → 9/34 |
+| unproductive steps (duplicate + failed calls) | 19 → 26 | 15 → 6 |
+| banners | 2 → 1 | 0 → 2 |
+| input tokens | 8.17M → 6.22M | 2.85M → 2.56M |
+| wall time | 4414 s → 5135 s | 1909 s → 2006 s |
+| cost | Lumen coins | $0.63 → $0.59 |
+
+**What this does and does not show.**
+
+- **The harness does not measure this stage's mechanisms, because its tasks do not loop.**
+  Across the 68 after-run turns, the result payloads' `turn_log_summary` records 1 memoised
+  call and 0 progress stops.
+  - The 10-08 loop that motivated this stage cannot be re-created as a task: it needed an
+    analyze peer with no feature lookup, and #88 (in the base) bound `overpass_search` there.
+  - So the evidence that loops, repeats, plan loss and stale flags are bounded is the tests
+    above, each written for a class rather than a turn.
+  - The harness's evidence is that nothing regressed.
+- **The differences above are mostly trial variance,** and the base also changed by #89
+  (Overpass mirror order).
+  - luna's T02L went from 0/2 to 2/2.
+    - In both base runs, the first `execute_code` failed to open the Overpass file
+      (file_id-as-path, #93's subject), and luna then answered "39" without computing it.
+    - After: one run avoided the failure; the other hit it, retried and answered 19 (reference
+      20).
+    - Two trials cannot attribute that to this stage.
+  - deepseek's extra unproductive steps are first-attempt code failures: syntax errors, a
+    `pip install gdal` that fails, a QGIS help call failing twice. This stage does not prevent
+    those; it stops their repetition.
+  - Per-task, both models changed in both directions on T09, T10 and U04. Those are the tasks
+    whose outcome is a model's method choice.
+- **No regression found in correctness.** Correct answers did not drop for either model, and
+  input tokens fell 24% (deepseek) and 10% (luna), although the plan now rides in every peer
+  step. The harness cannot attribute the fall.
+- **Spend for this run:** $0.62 OpenAI and 6.6M Lumen tokens. Program total so far: $1.65 and
+  19.7M.

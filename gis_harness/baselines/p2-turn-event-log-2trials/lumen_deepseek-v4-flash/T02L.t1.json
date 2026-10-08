@@ -1,0 +1,89 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://z.overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "19"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 4, in <module>\\\\n with open(\\'osm_school.geojson\\') as f:\\\\n ^^^^"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "**OpenStreetMap has 19 schools within 1 mile of the point (41.9231 N, 87.7093 W)** \u2014 that point is in the Logan Square neighborhood of Chicago, Illinois.\n\nI searched OSM for all features tagged `amenity=school` in a bounding box around the point, then computed each school's exact distance from the point using a projected CRS (UTM zone 16N, EPSG:26916) and counted those within 1 mile (1,609.3 m).\n\n### The 19 schools within 1 mile\n\n| School | Distance |\n|---|---|\n| Darwin Elementary School | 0.22 mi |\n| Saint Sylvester School | 0.37 mi |\n| Funston Elementary School | 0.54 mi |\n| Jehovah School | 0.62 mi |\n| (unnamed school, 2430-2446 N Ridgeway) | 0.63 mi |\n| Our Lady of Grace School | 0.63 mi |\n| Logan Square Elementary School | 0.66 mi |\n| Mozart Elementary School | 0.68 mi |\n| Stowe Elementary School | 0.75 mi |\n| Yates Elementary School | 0.76 mi |\n| Marine Leadership Academy | 0.82 mi |\n| Avondale-Logandale Elementary School | 0.82 mi |\n| Chase Elementary School | 0.82 mi |\n| Goethe Elementary School | 0.82 mi |\n| St. Hyacinth Catholic School | 0.87 mi |\n| Brentano Elementary Math and Science Academy | 0.89 mi |\n| McAuliffe Elementary School | 0.94 mi |\n| Moos Elementary School | 0.95 mi |\n| ASPIRA Business & Finance High School | 1.00 mi |\n\nThe nearest is **Darwin Elementary School** at 0.22 mi. Five more schools in the search area fell just outside the 1-mile radius (St. John Berchmans at 1.01 mi, Maternity of the Blessed Virgin Mary at 1.07 mi, Acero Fuentes at 1.10 mi, Pritzker College Prep at 1.18 mi, and ASPIRA Early College at 1.36 mi).\n\nThe 24 schools found in the search area are now on your interactive map as a clickable layer (\"OSM Schools near 41.9231, -87.7093\"). Note this reflects what OSM contributors have mapped \u2014 it's not an official register, so a recently opened or closed school may be missing or still listed.",
+  "seconds": 137.5,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 2,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 171183,
+    "cached_input_tokens": 133376,
+    "output_tokens": 5318,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791498952-1"
+}
