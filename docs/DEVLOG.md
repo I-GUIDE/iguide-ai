@@ -5273,3 +5273,17 @@ rather than from the previous one.
 **Not fixed** English words pint knows as units ("20 are"). The gate's `all_nan` check on sparse
   OSM join columns. A correct number attached to the wrong noun resolves. A memorised figure that
   equals some recorded number resolves (the "~340 km by Eurostar" case).
+
+## 2026-10-08 · M8.83 · Every source catalogued, every answer naming its sources (architecture stage 45)
+
+**Change** `agent_runtime/source_catalog.py` gives every data source its coverage, extent and
+  licence. Peers see what each source leaves out. `dem_for_region` checks its extent before
+  fetching. Every answer that used data gets a Sources line rendered from the results it used.
+
+**Why** Review flaw 6. The baseline's answers named their source on 33/50 (deepseek) and 18/51
+  (luna) runs; the 10-08 schools answer did not say it was one district's file.
+
+**Measured** See stage 45.
+
+**Not fixed** The map layer event carries no source yet. Choosing a source is still the model's,
+  now with each source's coverage in front of it.
