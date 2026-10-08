@@ -56,6 +56,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 | 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
 | 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
+| 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7140,3 +7141,90 @@ branch (`5b5e7ef` + stages 41–42, 2 trials), over the 67 task trials both have
   - Counting failures as no progress would not help. Across stages 42 and 43's runs, deepseek
     had 8 streaks of two or more failed `execute_code` calls, and all 8 ended in a success.
   - Telling convergence from wandering needs more than novelty. That is open.
+
+## Stage 43 — A number carries its unit and where it was measured {#stage-43}
+
+*2026-10-08. Branch `claude/typed-numbers`, stacked on stage 42 (#94). DEVLOG M8.81. Phase 3 of
+the eight-flaws program, flaw 1. `docs/design-review-2026-10.md` §F1 has the root cause with line
+references.*
+
+**Why.** The invariant gate decided what a declared number was by inference:
+- **Is the word a unit?** Two hand-kept vocabularies, `_UNIT_ALIASES` (113 spellings) and
+  `_KNOWN_UNITS` (25), which disagreed on 9 tokens. Plural `kilometres` was in one and not the
+  other.
+- **Was a frame measured in degrees?** Column names (`area`, `dist`, `_m`, ...), which also matched
+  `pop_male` and `district_id`, plus a "reprojected" rescue and a twin-frame credit keyed on the
+  same names.
+- **Is a number a count?** The variable's name (`num_`, `count`, `total`).
+
+Each piece was extended after a correct answer was flagged: `km²` (DL2531), `records` (DL3795),
+`points`, `square_miles` and `schools` (2026-10-08). Stage 36's noun list broke on `schools`
+within hours. The review's catalogue counts 17 class-A incidents, 8 of them fixed by a list entry.
+
+**What changed.**
+
+1. **`agent_runtime/units.py` parses units with pint**, under three rules, none of them a vocabulary:
+   - **Grammar:** a unit token followed by a digit is an exponent (`m2`, `km2`, `mi2`),
+     underscores are spaces, a hyphen between words is a product, `per` is a division, and a
+     scale is allowed only in a rate's denominator.
+   - **A word pint does not know names what is counted** (`schools`, `records`); inside a
+     compound it is the counted factor (`person*km`).
+   - **pint's own `Printer` group** (point, pixel, pica) is read as counted things, so "points"
+     is not 1/72 inch.
+
+   Anything else is unparseable: loud, never a silent pass. A plural word is a count and must be
+   whole and non-negative; a singular one (`index`, `ratio`) is a named dimensionless measure,
+   so NDVI declared as an `index` passes.
+2. **The sandbox gate stops judging units.** It reports:
+   - the declarations as written (`declared`);
+   - every metric operation with the CRS of its receiver (`metric_ops`), projected ones included.
+     A one-time patch on geopandas' `GeoPandasBase`, installed through an import hook so that
+     runs which never import geopandas do not pay for it, records each operation with the
+     user's own line;
+   - the size of every frame (`frame_sizes`).
+
+   A geographic frame is decided by the operations: a metric operation on it is a FAIL, and
+   otherwise it is an input. Without a live tracker the gate says it cannot tell.
+3. **`agent_runtime/declared_outputs.py` judges declarations in the agent process.**
+   - **Checks:** missing unit, unparseable unit, fractional or negative counts, a count larger
+     than every frame, and a length or area declared in a geographic CRS.
+   - **Typed outputs** `{name, value, unit, dimension, counted, measured_in_crs, source}`, with
+     `measured_in_crs` from the declaration or from the projected CRS of the operations that ran.
+   - **Wiring:** `code_execution._read_checks` merges them into the verdict and puts the typed
+     values on the result as `verification.outputs`.
+   - **Without the unit library** (an image built without it), every declaration becomes an
+     explicit unknown, never a pass.
+4. **Tools that measure emit typed outputs where the number is made:** `buffer_layer`, the
+   geometry measures, `inundation_at_level` and slope (`units.typed_value`, which raises on a unit
+   that does not parse). The turn log records every typed output as a `fact` event, linked to
+   the call that produced it, for phase 4.
+5. **Deleted:** `_UNIT_ALIASES`, `_KNOWN_UNITS`, `_METRIC_COLUMN_HINTS`, `_has_metric_column`,
+   `_inferred_count`, `check_declared_units`, `check_count_population` (moved agent-side), the
+   reprojection rescue, the twin-frame credit, and the supervisor's match on the
+   "unrecognised unit" message. A structural test fails if any of them is re-added.
+   - **Kept, deliberately:** a small table for the units a CONTRACT may declare
+     (`extractors/contracts.py`, our own extractor's vocabulary), now compared with the CRS axis
+     by pyproj's conversion factor rather than by name.
+6. **New dependency:** `pint==0.24.4`, pinned in `requirements.txt`, because `constraints.txt` is
+   a verbatim freeze of the deployed image. The sandbox image does not need it. The agent image
+   needs a rebuild to get it, and until then the explicit-unknown fallback above applies.
+
+**Tests.**
+- **New:** `test_typed_numbers.py` (46).
+- **Rewritten:** `test_invariant_gate.py`. Its declared-output tests run the whole
+  sandbox-then-agent path. 20 tests changed intent and say so in their docstrings:
+  - a geographic frame alone is undecided, not FAIL;
+  - `furlongs` is a length, not unknown;
+  - a column name is no evidence;
+  - the carried-column and chained cases pass on the operations.
+
+  One test was deleted: the advisory-flag case for an unrecognised unit. That class no longer
+  exists.
+- **Adapted:** `test_regrounding_turn_record.py` and `test_supervisor_graph.py` fixtures now
+  imitate the new gate's output.
+- **Fail-first:** run against stage 42 with only `units.py` and `declared_outputs.py` copied in,
+  28 of the new and rewritten tests fail.
+- **CI's own gate step** (a 25,000-degree buffer fails, the reprojected one passes) still passes
+  locally.
+- **Suites:** `rag_pipeline/tests` 3837 passed, 18 skipped, 1 failed (the networkx pin);
+  `tests/` 157 passed.

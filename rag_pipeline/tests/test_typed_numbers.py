@@ -82,8 +82,13 @@ def test_no_column_or_variable_name_reaches_a_verdict():
     whether a word was a count. The same outputs under any names now score the same."""
     a = {"area": {"value": 2.5, "unit": "km^2"}, "num_schools": {"value": 3, "unit": "schools"}}
     b = {"x1": {"value": 2.5, "unit": "km^2"}, "pop_male": {"value": 3, "unit": "schools"}}
-    va, vb = (declared_outputs.evaluate(sv.run_checks({sv.DECLARED_OUTPUTS: o})) for o in (a, b))
-    assert [f["status"] for f in va[0]] == [f["status"] for f in vb[0]]
+    def statuses(outputs):
+        rep = sv.run_checks({sv.DECLARED_OUTPUTS: outputs})
+        extra, _ = declared_outputs.evaluate(rep)
+        return sorted(f["status"] for f in [*rep["findings"], *extra])
+
+    assert statuses(a) == statuses(b)
+    assert "cannot_determine" not in statuses(b)
 
 
 # --------------------------------------------------------------------------- where it was measured

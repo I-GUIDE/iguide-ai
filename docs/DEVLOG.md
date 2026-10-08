@@ -5219,3 +5219,20 @@ rather than from the previous one.
 
 **Not fixed** A step that adds a wrong fact counts as productive (phases 3–4). The producer check
   is a model call: a wrong "yes" costs one bounded re-run.
+
+## 2026-10-08 · M8.81 · A number carries its unit and where it was measured (architecture stage 43)
+
+**Change** `agent_runtime/units.py` parses units with pint. The sandbox gate reports
+  declarations, metric operations with their CRS, and frame sizes. `declared_outputs.py` judges
+  them agent-side and returns typed outputs. Tools that measure emit typed outputs, and the turn
+  log records them as facts. The unit vocabularies and the column- and variable-name heuristics
+  are deleted.
+
+**Why** Class A of the review's catalogue: 17 incidents, 8 fixed by adding a word to a list,
+  most of them a correct answer marked unverified.
+
+**Measured** See stage 43.
+
+**Not fixed** A number typed by hand into a script with the wrong unit still parses. Shapely-level
+  operations on raw coordinates bypass the operation tracker. The agent image needs rebuilding
+  to get pint; until then declared units are explicit unknowns.
