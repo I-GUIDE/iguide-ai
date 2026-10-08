@@ -5231,8 +5231,14 @@ rather than from the previous one.
 **Why** Class A of the review's catalogue: 17 incidents, 8 fixed by adding a word to a list,
   most of them a correct answer marked unverified.
 
-**Measured** See stage 43.
+**Measured** Harness, gate off (2 trials) and on (1 trial), both models: correct answers
+  unchanged (deepseek 23/26 and 10/13, luna 26/26 and 13/13). No model declared `IGUIDE_OUTPUTS`
+  in 96 gate reports, so the new declaration checks never ran. deepseek's rise in
+  `cannot_determine` (26 → 44) is one task, T06, a pysheds thrash (numpy 2 removed `in1d`); the
+  `coverage` rate per run is unchanged. Stage 42's progress rule did not stop it, because every
+  step printed something new. Details in stage 43.
 
-**Not fixed** A number typed by hand into a script with the wrong unit still parses. Shapely-level
+**Not fixed** Models are not asked to declare outputs, so the declaration checks are idle in
+  practice. A number typed by hand into a script with the wrong unit still parses. Shapely-level
   operations on raw coordinates bypass the operation tracker. The agent image needs rebuilding
   to get pint; until then declared units are explicit unknowns.

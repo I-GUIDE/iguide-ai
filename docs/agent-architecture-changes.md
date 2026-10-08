@@ -7228,3 +7228,75 @@ within hours. The review's catalogue counts 17 class-A incidents, 8 of them fixe
   locally.
 - **Suites:** `rag_pipeline/tests` 3837 passed, 18 skipped, 1 failed (the networkx pin);
   `tests/` 157 passed.
+
+**Measured with the harness, twice.**
+
+*Gate off* (stage 42 `p2-after` → this branch `p3-after`, 2 trials, 34 task trials per model):
+
+| | deepseek-v4-flash, before → after | gpt-5.6-luna, before → after |
+|---|---|---|
+| correct | 24/26 → 23/26 | 26/26 → 26/26 |
+| strict | 15/34 → 16/34 | 9/34 → 10/34 |
+| unproductive steps | 27 → 24 | 6 → 5 |
+| banners on correct answers | 0 → 0 | 1 → 4 |
+| input tokens | 6.39M → 7.40M | 2.56M → 2.58M |
+| cost | Lumen tokens | $0.589 → $0.599 |
+
+With the gate off, no phase 3 code runs. That run checks only that nothing else moved.
+- luna's 3 extra banners are all the LLM audit's "Grounding check", not this stage. Two flag the
+  outlet coordinates the question itself gave (T06); one flags "includes private schools".
+- deepseek's T09 and T10 changed in both directions, as in stage 42. They are the method-choice
+  tasks.
+
+*Gate on* (`AGENT_INVARIANT_GATE=1`, the deployment's setting through `AGENT_EXTRACTION`;
+stage 42 `p2-gate` → `p3-gate`, 1 trial, 17 tasks per model). The harness now records the gate's
+verdict on every code run:
+
+| | deepseek-v4-flash, before → after | gpt-5.6-luna, before → after |
+|---|---|---|
+| correct | 10/13 → 10/13 | 13/13 → 13/13 |
+| strict | 3/17 → 4/17 | 3/17 → 1/17 |
+| code runs the gate judged | 59 → 75 | 20 → 23 |
+| gate verdicts: pass / cannot determine / fail | 28 / 26 / 3 → 28 / 44 / 1 | 10 / 10 / 0 → 12 / 11 / 0 |
+| non-pass verdicts in turns with a correct answer | 27 → 42 | 9 → 9 |
+| banners on correct answers | 6 → 4 | 7 → 7 |
+| unproductive steps | 6 → 21 | 2 → 5 |
+| input tokens | 3.16M → 5.39M | 1.35M → 1.38M |
+| cost | Lumen tokens | $0.312 → $0.320 |
+
+**What this does and does not show.**
+
+- **The models never exercised the new declaration checks.** In the 96 gate reports of the gate-on run, no
+  model assigned `IGUIDE_OUTPUTS`, so the unit, count and `measured_in` checks never ran.
+  - luna once *printed* `IGUIDE_OUTPUTS`, and the gate's existing message said so.
+  - What did run: the operation recorder logged metric operations in 7 of the 96 reports (5
+    deepseek, 2 luna), and measuring tools returned typed outputs twice, both on deepseek, which
+    uses `buffer_layer` and the terrain tools.
+  - This stage's effect on the reader therefore depends on phase 4, which reads typed outputs
+    and tool facts, not declarations.
+  - Whether models should be asked to declare outputs is a prompt question this program has not
+    taken up.
+- **deepseek's jump in non-pass verdicts is one task, and not this stage.**
+  - T06 (DEM watershed) went from 9 code runs to 32. 27 of the 32 ended `cannot_determine` with
+    the `coverage` finding, the same rate as before (9 of 9): raster work with no frame at
+    module scope.
+  - Without T06, deepseek's non-pass verdicts on correct answers fell, from 18 to 11.
+  - The `coverage` branch of `run_checks` is unchanged by this stage.
+  - No check errored and no `NameError` from a deleted helper appears in any of the 102 turns
+    run on this branch.
+  - The 32 runs were deepseek choosing pysheds and working through its API: 16 failures from
+    `numpy.in1d`, removed in numpy 2 and still used by the sandbox's pysheds, plus wrong
+    `Grid` constructors and dtype errors.
+  - The same task thrashed in the baseline as well, with 32 calls and 7 unproductive steps.
+- **Stage 42's progress rule did not stop T06, and this is why.**
+  - The code run counted 29 of its 30 steps as productive. Its 12 failures were interleaved
+    with successful scripts, each printing something new.
+  - By the rule's definition (a new result), exploration is progress. So the rule bounds
+    repetition, not open-ended trying; the step budget bounded this run.
+  - Making failures count as no progress would be wrong on the evidence. Across all gate-on and
+    gate-off runs of stages 42 and 43, deepseek had 8 streaks of two or more failed
+    `execute_code` calls, and all 8 ended in a success.
+  - A rule that only "a new result" counts as progress cannot tell a model converging from a
+    model wandering. That is a stated limit of stage 42, not something this stage changes.
+- **Spend for these runs:** gate off $0.60 OpenAI and 7.6M Lumen tokens; gate on (both stages,
+  one trial each) $0.63 and 8.7M. Program total: $2.88 OpenAI and 36.0M Lumen tokens.
