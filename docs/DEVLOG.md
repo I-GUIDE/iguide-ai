@@ -4987,3 +4987,40 @@ rather than from the previous one.
 **Not fixed** The run 1 `coverage` unknown for work done inside a function. It shows a caveat
   and no longer causes a re-run.
 
+
+## 2026-10-08 · M8.74 · A trace fits the index's mapping, so a tool with no arguments no longer loses the turn
+
+**Change** New `rag_pipeline/trace_mapping.py`. It holds a snapshot of the live `chat_traces`
+  mapping and `fit_trace_document`, which `save_turn_trace` runs before indexing. A tool's
+  arguments (`args`, `arguments`, `tool_args`) are always JSON text. A structure sent to a mapped
+  `text` field becomes JSON text in place. A value that a mapped numeric, boolean or object field
+  cannot hold moves to a sibling `<field>_text`. Unmapped fields are stored as text: strings
+  unchanged, anything else and date-like strings as JSON. The live stream is unchanged.
+
+**Why** A live turn at 2026-10-08 19:55 UTC was never recorded:
+  `mapper_parsing_exception … [events.data.args] of type [text] … Preview of field's value: '{}'`.
+  The journal shows 30 such failures since 10-01, all on `events.data.args`. `chat_traces` has
+  no explicit mapping, and `args` was typed `text` because LangChain hands `on_tool_start` a
+  Python repr (`"{'query': 'x'}"`) that does not parse as JSON. `"{}"`, from a no-argument tool
+  (`list_conversation_files`, `list_available_skills`), *does* parse, so it became a dict and the
+  whole document was refused. Emitters that send dicts with keys failed the same way. The fix is
+  on the writer because the index is on the shared prod cluster and a field's type cannot be
+  changed in place. The rules and their reasons are in `persistent-state.md` §1b, "It must fit the
+  index's mapping".
+
+**Measured** On a disposable OpenSearch 2.14.0 (prod's version) loaded with the exact live
+  mapping, 25 payloads ran raw and fitted through both real OpenSearch and the test's fake
+  index. They covered the no-arg turn, dict args, content blocks, a dict in `tools`/`message`, a
+  named bbox in `bounds`, a word in `count`, a bool in `duration_s`, strings in `issues`, a hex
+  legend colour, and new fields that flip type across documents, within one document, or from a
+  date. Raw: the cluster refused 17. Fitted: it refused 0. The fake agreed on every verdict.
+  Getting there found two traps the first version missed: a new field seen as text and as a
+  number in one document, and dynamic date detection. A turn with the two no-argument tools,
+  run through the real `StreamingTraceCallbackHandler` and `save_turn_trace`, stores and reads
+  back as `args: "{}"`. The new tests (`test_trace_mapping.py`, 17): 15 fail when the fit is
+  removed. Full suite on the Mac: 3583 passed, 18 skipped, 1 failed. The failure is
+  `test_the_installed_networkx_matches_the_pin`, which depends on the machine.
+
+**Not fixed** Turns refused before this are gone. A new numeric or date field is searchable only
+  as text until someone maps it, and that needs a new index (prod, the user's call). The snapshot
+  must be kept in step with the live mapping by hand.
