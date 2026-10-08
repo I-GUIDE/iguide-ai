@@ -244,10 +244,15 @@ def test_only_producible_claims_are_sent_back(monkeypatch, ledger):
 
 def test_an_unproducible_claim_that_cannot_be_located_is_not_re_run(monkeypatch, ledger):
     """Paraphrased by the auditor, so it cannot be cut out — the caveat stays, the re-run does not
-    happen, because no re-run can produce a road distance."""
-    audit = {**ROUTING_AUDIT, "issues": [{"claim": "the driving distance is about 460 km",
+    happen, because no re-run can produce a driving route.
+
+    The claim carries no figure: since Stage 38 the answer scan cuts a travel sentence whose
+    figure is in no tool result, and drops a flagged claim whose figures it cut (see
+    test_routing_figures_scan.py), so a paraphrased "about 460 km" no longer reaches here."""
+    audit = {**ROUTING_AUDIT, "issues": [{"claim": "the driving route goes via the A26",
                                           "reason": "absent"}]}
-    state, _ = _run(monkeypatch, [audit, GROUNDED])
+    answer = ANSWER_1 + " The quickest drive follows the A26 motorway."
+    state, _ = _run(monkeypatch, [audit, GROUNDED], answers=(answer,))
     assert state["actions"].count("analyze") == 1
     assert "Grounding check" in state["final_answer"]
 

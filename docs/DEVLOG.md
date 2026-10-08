@@ -5072,3 +5072,34 @@ rather than from the previous one.
 **Not fixed** Turns refused before this are gone. A new numeric or date field is searchable only
   as text until someone maps it, and that needs a new index (prod, the user's call). The snapshot
   must be kept in step with the live mapping by hand.
+
+## 2026-10-08 · M8.75 · Travel figures in no tool result are cut, whether or not the audit flags them
+
+**Change** Reconciliation rules (2) and (2′) match a disputed number on numeric boundaries
+  (`_number_in`) instead of as a substring. Rule (2)'s record leaves out the peers' own summaries
+  (`_without_peer_prose`), and its log line says where a number was found. `_claim_numbers` no
+  longer takes a decimal's tail. New `_remove_unrecorded_travel` runs in synthesize after
+  `_remove_unproducible_claims`. With no routing tool bound, it cuts each travel sentence (or `;`
+  segment of a parenthetical) whose distance or duration is in no tool result, adds the routing
+  note, and drops any flagged routing claim whose figures it removed. `_tidy_after_cuts` removes
+  a lead-in ("Actual travel distances are longer:") whose whole list was cut. Architecture
+  stage 39 (Stage 38 is taken by `claude/peer-repeat-and-scope`; M8.74 is #86).
+
+**Why** S37.6: in 2 of 2 local replays memorised travel figures shipped with no caveat. Stage 37
+  cuts only what the audit flags, and here the audit either passed the figures or reconciliation
+  removed its flag. The suspected cause was the substring match. The new log line showed the real
+  one in a replay: `('roughly 490 km by road', '2 number @analysis_results.summary')`. The analyze
+  peer's summary repeated the memorised figures, and rule (2) read it as part of the record.
+
+**Measured** Four Chrome replays (`AGENT_MODE=local`, deepseek-v4-flash, one new tab each, left
+  open). All four synthesized answers carried a memorised road/rail sentence (450–490 km by road,
+  340 or 490 km by Eurostar). The audit flagged it twice, and rule (2) removed both flags. The
+  audit passed it twice. The scan cut it all four times. The shipped answers kept 2,584.6 km²,
+  343.7 km and GEOID 17019, gained the routing note, and showed no warning. On `81fd7c8`, 30 of
+  the 37 new tests fail, and the 7 that pass are guards. Full suite on the Mac: 3701 passed,
+  18 skipped, and 1 failed, the machine-dependent `test_the_installed_networkx_matches_the_pin`
+  (also failing on the base). `tests/`: 135 passed.
+
+**Not fixed** The scan matches numbers, not meanings, so a travel figure equal to a recorded
+  number passes. Memorised figures outside travel ("the commonly cited ~998 sq mi") are still
+  left to the audit.
