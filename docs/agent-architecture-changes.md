@@ -50,6 +50,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 34 | [Public data through a gate, not a network](#stage-34) | 2026-10-04 | `fetch_public_data` downloads from allowlisted public hosts into a conversation file the offline sandbox reads; code alone had answered a tract count from memory, wrong |
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 | 36 | [The gate stops flagging correct runs, and its unknowns stop re-running them](#stage-36) | 2026-10-08 | a declared label is not a measurement; `points` is a count; a gate `cannot_determine` is a caveat, not a reason to redo the analysis |
+| 37 | [A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make](#stage-37) | 2026-10-08 | a second peer run adds to the result slot instead of replacing it; routing claims with no routing tool are cut, not re-run; imperial units; a unit-only unknown is a note |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6257,4 +6258,245 @@ the noun list, a numeric string, a number with an unknown unit and a degree buff
 analyze once and still shows its caveat, that a gate `fail` re-runs with its message, and that
 an auditor issue beside a gate unknown still re-runs. Of the new tests, all fail on `aca61d7`
 except the two guards (unknown unit, degree buffer), which pass on both versions as intended.
+
+## Stage 37 — A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make {#stage-37}
+
+*2026-10-08. Branch `claude/regrounding-keeps-turn-record`, from `prototype` at `00e560f`
+(stage 36 merged, and live on the VM since its 19:05 UTC rebuild).*
+
+A live turn on agent.i-guide.io at 19:12:23 UTC (thread `sess-1e8e3edd-…`, trace
+`…:5513ff0e4b86`, Lumen deepseek-v4-flash) asked *"what is the area of Champaign County, Illinois,
+and how far is London from Paris?"*. It answered 2,584.6 km² and 340.0 km, and both are right.
+The user still saw ⚠️ *"A deterministic invariant check COULD NOT VERIFY this run … hallucination
+is detected at high severity"*, and 28 s of the 72 s turn went to a re-run that could not succeed.
+
+What happened, from the journal and the stored trace:
+
+1. analyze ran admin_boundary, geocode_places and two execute_code calls (the first passed the
+   file_id `file_2272c8426ec9` to `gpd.read_file` as a path and failed; the retry worked).
+2. The synthesizer added "roughly 460 km by road or ~340 km by the Eurostar rail line" from the
+   model's memory. The audit flagged both.
+3. The re-grounding pass (stage S7.4) re-ran analyze from 19:13:07 to 19:13:22. That pass ran
+   one execute_code, and synthesis and the second audit took until 19:13:35.
+4. The banner listed four items: `square_miles` as an unrecognised unit; "GEOID 17019" as
+   unsupported, although admin_boundary returned it; and the two road and rail figures, which the
+   second answer restated in a "What I could NOT establish" section that called them "the
+   earlier rejected answer".
+5. The journal logged `turn ledger: recorded 1 row(s) … ['execute_code']` for a 5-call turn.
+
+### Stage S37.1 The second run replaced the first
+
+`analysis_node` and `code_node` wrote their result slot outright: `{"analysis_results": clean}`.
+A second run of a peer in the same turn therefore replaced the first. The trace shows it exactly.
+The re-grounding pass's one execute_code call became the turn's whole `analysis_results`, so:
+
+* the second audit's execution record had no admin_boundary result, and the auditor marked
+  "GEOID 17019" absent (`evidence_quality._recompute_verdict`: "no span in the evidence or
+  execution record covers this claim");
+* `_record_actions` extracted one row, which is the `['execute_code']` in the journal;
+* the second answer's deterministic corrections and download allowlist saw one run as well.
+
+Both nodes now go through `_merge_peer_result(prior, new)`. The state is per run
+(`run_supervisor` gives each turn its own checkpoint thread), so the slot always holds this turn's
+earlier runs. Tool calls and results accumulate, deduplicated by id. `PeerSession` falls back to
+the whole thread when its prefix guard fails, and it then returns the first pass's calls again.
+Rows without an id are never deduplicated: two identical id-less results are two calls. The
+summary and other scalars come from the latest run, and an `error` from an earlier failed run is
+dropped when a later run succeeds. `on_map`, `executed` and `tool_failures` describe the turn, so
+they accumulate. When a peer raises on its second run, the first run's records are kept and the
+error is added.
+
+The test drives the real graph with the live turn's tool results. On `00e560f` the final
+`analysis_results` holds `['execute_code']`, the second audit's record has no "17019", and the
+ledger has one tool. After the change they hold all five results, "17019" and three tools.
+
+### Stage S37.2 A unit-name unknown was not checked, and it disabled more than itself
+
+The first pass declared `mi2` and `mi`, and the re-run declared `square_miles` and `miles` for the
+same two numbers. No square-mile spelling was in `_UNIT_ALIASES`. `mi` and `miles` were in
+`_KNOWN_UNITS` but not in the alias table, so `mile` was unknown. The table now covers miles,
+yards, nautical miles, square miles and square feet in the spellings models write (`mi2`, `mi²`,
+`sq mi`, `square_miles`, `ft2`, `sq ft`, …). Both of the live run's declared-output sets now pass
+with no unknowns.
+
+That unknown also did two things a unit name should not do:
+
+* **It disabled reconciliation rule (2) for every number.** Rule (2) drops a disputed number that
+  appears in the execution record. It is switched off under any gate verdict, because a wrong
+  number appears in the record too. But only the gated code's numbers are in question. The
+  GEOID came from admin_boundary, which no gate checks. New rule (2′) still accepts a disputed
+  number when it appears in a tool result that is not execute_code and carries no gate report
+  (`_ungated_record`). A number only the gated code produced is still not accepted.
+* **It produced an alarming banner.** The gate headline was followed by the LLM auditor's own
+  summary, even after reconciliation had removed every auditor issue. That is how "hallucination
+  is detected at high severity" got under a gate finding about a unit name. The auditor's
+  summary is now appended only when an auditor issue survives. A `cannot_determine` whose
+  findings are all unrecognised units gets an ℹ️ note ("did not recognise a declared unit, so
+  that value's unit was not checked. Nothing the check could read failed"), severity `low` and
+  `hallucination_detected: false`. Any other unknown keeps "COULD NOT VERIFY". This revises one
+  assertion of stage 36's `test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze`,
+  whose only finding is the unit `furlongs`. It now expects the note. A guard test checks that a
+  unit unknown beside a `coverage` unknown still says COULD NOT VERIFY.
+
+`_reconcile_audit_with_artifacts` now logs `audit reconciliation removed N issue(s): [(claim,
+rule)]`. Without that, a removal shows up only as "Grounded: flagged claims are supported…", and
+that sentence cannot tell a claim that was really in the record from one that just matched a
+rule (see S37.6).
+
+### Stage S37.3 A claim no bound tool can produce is cut, not re-run
+
+The re-grounding pass assumes the peer can establish what the audit found missing. There is no
+routing tool, so no run of analyze can produce a road or rail distance. The pass cost 28 s and
+ended with the same figures restated.
+
+`_UNPRODUCIBLE_CAPABILITIES` pairs a claim shape with the tool-name shape that would produce it.
+It has one entry, routing: "by road/rail/train/car…", "driving route", "travel time", "Eurostar",
+"a 5 h drive". The list is narrow on purpose, because a match removes text from the answer, so
+"driving factors", "Google Drive" and "road network layer" do not match. The analyze peer now
+reports `bound_tools`, and `analysis_node` lifts it into state so it never reaches the serialized
+`analysis_results` that synthesis reads. A claim is unproducible only when no bound tool matches
+`_ROUTING_TOOL_RE`. With `network_route_distance` bound, the same claim still re-runs.
+
+In synthesize, after reconciliation, `_remove_unproducible_claims` cuts each such flagged claim
+out of the answer with `_drop_claims` and removes its issue from the audit. If no auditor issue
+remains, the audit stops flagging. One line takes the claim's place ("Road and rail travel
+distances and times are not included: no routing tool is available here to compute them"),
+unless the answer already mentions roads or routing. A gate finding is untouched, because
+cutting prose changes nothing the gate checked. The re-run gaps leave out unproducible claims
+even when they could not be cut, so a paraphrased road claim keeps its caveat and does not cost a
+re-run.
+
+`_drop_claims` places the auditor's quoted claim in the markdown answer, allowing emphasis and
+code marks between words. It removes the smallest unit that holds the claim: a `;`-separated
+segment of a parenthetical (or the whole parenthetical once it is empty), the sentence, or the
+line when the sentence was the whole line. A section left empty loses its heading. A claim that
+cannot be placed verbatim, or that has fewer than three words, is left alone, because cutting a
+guess could remove a grounded sentence. On the live first answer it removes "Actual travel
+distance is longer — roughly 460 km by road or ~340 km by the Eurostar rail line (…)" and keeps
+"Note: this is the straight-line distance between the two city centers" on one side and the map
+sentence on the other.
+
+### Stage S37.4 The user never saw the draft
+
+`_REGROUND_DIRECTIVE` said a previous answer "was rejected" and offered "(b) say plainly which
+parts you could not establish". The peer did both: it wrote a section that repeated "~460 km" and
+"~340 km" to disown them and named "the earlier rejected answer". The directive now says the user
+has not seen the draft, says to leave unestablished claims out, and allows one short sentence
+naming the part of the question that could not be answered, "but do not repeat the values, not
+even to disown them, and do not mention a draft, an earlier answer or this check". It no longer
+contains "rejected".
+
+There are two deterministic backstops. On the synthesize pass after a re-run,
+`_drop_draft_mentions` cuts sentences that mention a rejected answer, draft or earlier attempt.
+The phrasings are chosen so they cannot be about the conversation's earlier turns, and "the null
+hypothesis was rejected" is left alone. And S37.3 runs on every pass, so a routing figure the
+second answer restates is cut again. A known limit: cutting is per sentence, so a follow-on such
+as "I am therefore not restating them." can stay behind.
+
+### Stage S37.5 Replayed locally
+
+The same question, in Chrome, against this branch in `AGENT_MODE=local` (port 5079, map UI on
+5179, Lumen deepseek-v4-flash), was replayed twice in separate tabs:
+
+| | live (00e560f) | local run 1 | local run 2 |
+|---|---|---|---|
+| analyze runs | 2 | 1 | 1 |
+| ledger rows | 1 (`execute_code`) | 4 (admin_boundary, geocode_places, execute_code ×2) | 4 |
+| banner | COULD NOT VERIFY … high severity | none | none |
+| London–Paris | 340.0 km | 343.7 km (S37.7) | 343.7 km |
+| turn time | 72 s (VM) | 83 s (Mac) | 79 s (Mac) |
+
+The Mac times include a failing first execute_code in both runs, so they are not comparable with
+the VM's 72 s. What they show is that no peer re-ran.
+
+### Stage S37.6 What this stage does not fix
+
+**Routing figures that the audit does not flag still reach the user.** Both local answers
+included memorised travel figures ("roughly 490 km by rail and ~450 km by road"; "about 490 km",
+"roughly 450–470 km"), with no caveat. In run 1 the auditor flagged something and reconciliation
+removed every issue ("Grounded: flagged claims are supported by …"). Which rule removed it was
+not logged then, and it is logged now. The likely candidate is rule (2), which matches a disputed
+number as a substring of the whole JSON record, so "450" can match inside a coordinate. In run 2
+the auditor itself called every claim supported. S37.3 acts on what the audit flags, so neither
+run reached it. A deterministic scan of the answer for routing quantities absent from the record,
+plus number-boundary matching in rule (2), is the follow-up.
+
+**The first execute_code cannot open the boundary.** All three runs (live and both local) had a
+failing first execute_code: `gpd.read_file("file_2272c8426ec9")` live, and `gpd.read_file("Champaign_County.geojson")`
+locally. Each recovered on its retry.
+
+Tests: `test_regrounding_turn_record.py` (53) drives the real graph with the live turn's tool
+results and answers. It checks the merged record, the second audit's record, the ledger, replay
+dedup, the code peer, routing claims cut without a re-run, mixed gaps, an unplaceable claim, the
+claim classifier both ways, the cutter's three units, the re-run answer, the directive, the
+units, the unit-only note and its guard, and rule (2′). On `00e560f` 42 of them fail. The 11 that
+pass are guards that are meant to pass on both: a replayed pass, a routing tool bound, the eight
+units that were already known, and a non-unit unknown. Three revised assertions in
+`test_supervisor_graph.py` (2) and `test_unified_peer.py` (1) fail there too, by design.
+
+### Stage S37.7 geocode_places returns Nominatim's point, not the box centre
+
+`geocode_places` reported each place's lat/lon as the centre of its Nominatim bounding box. For
+an administrative area that is not where the place is. Greater London's box
+(−0.510…0.334, 51.287…51.692) has its centre at 51.4893, −0.0882, which is 3.4 km from the point
+Nominatim itself returns (51.5074, −0.1278, Charing Cross). Paris's centre is 0.6 km off. The
+live turn's 340.0 km was the haversine between box centres. Between Nominatim's points it is
+343.7 km.
+
+`geocode_place` already had Nominatim's `lat`/`lon` in the response it parsed and threw them
+away. It now stores them in `geocode_point_cache`. `geocode_place_point(name)` reads that cache,
+which costs no second request. `geocode_places_tool` uses the point when it lies inside the box
+and the box centre otherwise. Each result says which one it used (`point: "nominatim"` or
+`"bbox_centre"`). The bbox is still returned unchanged, and `geocode_place`'s return value is the
+same, so search filtering and Overpass are untouched. Both local replays answered 343.7 km.
+
+Tests: `test_geocode_tool.py` replays Nominatim's real London and Paris responses through
+`geocode_place`, and checks the point, that the distance is 343.7 km and that two requests are
+made. It also checks the fallback to the centre when the point lies outside the box. Both fail on
+`00e560f`. The four existing tests pass on both.
+
+### Stage S37.8 Two more gate false alarms: a counted noun, and a column carried back to WGS84
+
+A second live turn, 2026-10-08 19:42:29 UTC (thread `sess-38c02242-…`, *"schools within 1 mile
+of a drawn box"*), answered correctly. It found 18 schools, and every distance was checked
+independently to within 4 m. It still showed COULD NOT VERIFY, for two reasons. No trace was
+stored for this thread, so the tests rebuild the pattern from the reported findings, and the
+assembled-gate test reproduces both of them word for word on `00e560f`.
+
+**(a) `unrecognised unit 'schools'`** on `{"num_schools_within_1mile": {"value": 18, "unit":
+"schools"}}`. A count has no physical unit; its "unit" is whatever was counted, so no list of
+nouns will ever be complete. Stage 36 added an explicit list and said why: a plural-stripping
+rule would read `metres` as a count. This stage does not guess from the noun. It reads the
+output's name. `_inferred_count` treats an unrecognised alphabetic unit as a count only when
+the name says it is one (`num_`, `n_`, `count`, `number`, `total`) and the value is a whole
+number ≥ 0. Then it passes, marked `inferred_count`. All of stage 36's guards still hold:
+`{"x": 1 furlongs}`, `bananas`, `{"r": 10.0 furlongs}`, and also `distance_furlongs: 3`,
+`num_schools: 2.5` and `num_schools: -1` stay unknown. An inferred count is never a FAIL, because
+a guessed category should not produce a hard failure. Any unrecognised unit that is left is
+marked `advisory`.
+
+**(b) `EPSG:4326 frame holds a measurement column ('distance_m') that no tracked operation
+produced`**. The script measured in EPSG:26916 and then called `to_crs("EPSG:4326")` for GeoJSON
+output. That is the normal pattern, and the column comes along with the frame. With the operation
+tracker live and no metric operation run on a geographic frame, `run_checks` now looks for a
+projected frame in scope that holds the same column. If it finds one, the finding passes with
+`measured_in` naming that frame. If not (for example a chained
+`to_crs(26916).assign(...).to_crs(4326)` that binds nothing in between), the finding stays
+cannot_determine but is marked `advisory`, and its message names the usual cause. A guard
+checks that a distance measured on the WGS84 frame still fails even when a projected frame with
+the same column exists, because the tracked `distance` operation fails on its own.
+
+**Supervisor.** S37.2's unit-only note now covers any gate verdict whose unknowns are all
+advisory (`advisory` flag, or the unrecognised-unit message for images built before the flag
+existed). It shows an ℹ️ note listing the items, with severity low and
+`hallucination_detected: false`. Every other unknown still says COULD NOT VERIFY.
+
+Tests: 7 in `test_invariant_gate.py` (count inference including a numpy int, its guards, the
+advisory mark, a credited carried column, an uncredited one, the WGS84-measurement guard, and the
+whole schools script through the assembled prologue/epilogue). There is 1 more in
+`test_regrounding_turn_record.py`, for the note. Six fail on `00e560f`, and the two guards pass
+on both.
+
+The same turn also showed "⚠️ Partial answer: analysis failed during this turn" although the code
+peer then answered in full. That is outside this stage and is being proposed separately.
 
