@@ -72,6 +72,7 @@ REQUIRED_TERMS = {
     "make_conversation_file_tools": ("file", "upload"),
     "make_code_execution_tools": ("code", "execut"),
     "make_skill_tools": ("skill",),
+    "make_langchain_staging_tools": ("staging", "stage"),
     "make_langchain_mcp_tools": ("mcp", "external tool", "qgis"),
     "make_public_data_tools": ("download", "public data"),
 }

@@ -24,6 +24,7 @@ def _by_resource_type() -> Dict[str, str]:
         "CodeAsset": f"{p}code_assets",
         "Dataset": f"{p}datasets",
         "PublicationMethodSpec": f"{p}publication_methodspecs",
+        "MethodUnit": f"{p}method_units",
     }
 
 

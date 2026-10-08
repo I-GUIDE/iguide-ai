@@ -68,7 +68,41 @@ __all__ = [
     "getenv",
     "normalize_source_fields",
     "safe_score",
+    "default_top_k",
 ]
+
+
+def default_top_k(default: int = 20) -> int:
+    """Retrieval window: candidates each retrieval method returns per call.
+
+    Single source of truth for a number that was previously the literal ``8`` in six
+    independent places — ``keyword.py``, ``semantic.py``, four tool signatures in
+    ``agent_runtime/langchain_granular_tools.py``, and ``_direct_search_sweep`` — none of
+    which the agent ever overrode.
+
+    Measured against the GeoPathfinder benchmark's full expected sets (37 ids, BM25, each
+    task's verbatim prompt), recall by window:
+
+        k=8  -> 22/37 (59%)      k=20 -> 29/37 (78%)
+        k=50 -> 33/37 (89%)      k=100 -> 34/37 (92%)
+
+    Hence the default of 20: it recovers 7 of the 15 elements the old window dropped, for
+    the cost of one integer. Only 3 of the 37 are unreachable at any k and are genuine
+    indexing gaps (afbee4bd, 643aaea1, de05a428).
+
+    This is NOT the same knob as ``AGENT_SUPERVISOR_TOP_K`` (``supervisor/graph.py:71``),
+    which caps how much evidence survives the rerank into the answer prompt. Retrieve wide,
+    rerank, then show few — raising both would scale answer-prompt tokens with k for no
+    recall gain. Tune with ``AGENT_SEARCH_TOP_K``.
+
+    IMPORTANT for callers: resolve this at CALL time, never as a function default argument.
+    A default is bound at import, so `limit: int = default_top_k()` would freeze the value
+    and silently ignore the environment.
+    """
+    try:
+        return max(1, min(int(os.getenv("AGENT_SEARCH_TOP_K", str(default))), 100))
+    except (TypeError, ValueError):
+        return default
 
 
 def snippet_chars(default: int = 4000) -> int:

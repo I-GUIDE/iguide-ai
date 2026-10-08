@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
+from rag_pipeline.search.utils import default_top_k
+
 from .langchain_file_tools import make_langchain_file_tools
 from rag_pipeline.search.opengeodata import get_opengeodata_results
 from rag_pipeline.search.web import results_to_hits, run_web_search
@@ -28,9 +30,15 @@ from rag_pipeline.qgis_headless_tools import (
     qgis_processing_run_tool,
 )
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.extraction_flag import extraction_enabled
 
 
-def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100) -> int:
+def _safe_int(value: Any, default: Optional[int] = None, minimum: int = 1, maximum: int = 100) -> int:
+    """Coerce a model-supplied limit. ``default=None`` resolves the shared retrieval window
+    at CALL time -- a literal default would freeze it at import and ignore
+    AGENT_SEARCH_TOP_K, which is exactly how the old hardcoded 8 survived."""
+    if default is None:
+        default = default_top_k()
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -114,17 +122,17 @@ def _build_payload(hits: List[Dict[str, Any]], source: str) -> str:
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def keyword_search_tool(query: str, limit: int = 8) -> str:
+def keyword_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_keyword_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="keyword")
 
 
-def semantic_search_tool(query: str, limit: int = 8) -> str:
+def semantic_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = run_semantic_search(query, size=_safe_int(limit))
     return _build_payload(hits, source="semantic")
 
 
-def neo4j_search_tool(query: str, limit: int = 8) -> str:
+def neo4j_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_neo4j_agent_results(query, limit=_safe_int(limit))
     return _build_payload(hits, source="neo4j")
 
@@ -143,12 +151,12 @@ def neo4j_explore_related_nodes_tool(element_id: str, depth: int = 2, limit: int
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def spatial_search_tool(query: str, limit: int = 8) -> str:
+def spatial_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_spatial_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="spatial")
 
 
-def agent_kb_search_tool(query: str, limit: int = 8) -> str:
+def agent_kb_search_tool(query: str, limit: Optional[int] = None) -> str:
     """Search the agent knowledge base (extracted blocks/method-specs from ingested submissions)."""
     payload = run_agent_kb_search(query, size=_safe_int(limit))
     return json.dumps(payload, ensure_ascii=True, default=str)
@@ -159,7 +167,46 @@ def get_kb_block_tool(doc_id: str) -> str:
     return json.dumps(run_get_kb_block(doc_id), ensure_ascii=True, default=str)
 
 
-def opengeodata_search_tool(query: str, limit: int = 8,
+def kb_method_search_tool(query: str, limit: Optional[int] = None) -> str:
+    """Find callable methods in the extracted library, with the exact import line for each."""
+    from agent_runtime.method_library import library_summary, search_methods
+
+    results = search_methods(query, limit=_safe_int(limit, default=8, maximum=25) or 8)
+    summary = library_summary()
+    # `count` is emitted because the CLIENT cannot derive it: a method-unit row has `symbol`
+    # and `signature` but no title/name/doc_id/url, so the prototype's row builder skipped every
+    # one and rendered "kb_method_search -> no results" for 10 real hits. The server knows how
+    # many it found; it should say so rather than leave the reader to infer it.
+    # `count` comes BEFORE `results`, and that ordering is load-bearing. The trace payload is
+    # truncated for display and the client salvages what it can by regex, so a scalar placed
+    # after a long array is simply gone — which is how 10 real hits rendered as
+    # "kb_method_search -> no results (log truncated)". `json.dumps` preserves dict order, so the
+    # summary survives the cut. Put the counts first; put the bulk last.
+    payload: Dict[str, Any] = {"source": "method_library", "count": len(results),
+                               "library": {"units": summary["units"],
+                                           "elements": summary["elements"]},
+                               "results": results}
+    if not summary["units"]:
+        # An empty library and a query that matched nothing are different situations, and the
+        # model cannot tell them apart from an empty result list. Left implicit, it reports
+        # "the platform has no such method" when in fact nothing has been ingested yet.
+        payload["note"] = ("No method library has been built yet (no elements ingested with "
+                           "--targets library). This is not evidence that no such method exists.")
+    elif not results:
+        payload["note"] = (f"No method matched. The library holds {summary['units']} units from "
+                           f"{summary['elements']} elements; try the operation name or the "
+                           f"source element's topic.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
+def get_method_contract_tool(symbol: str) -> str:
+    """Full contract for one library method: signature, params, invariants, deps, import line."""
+    from agent_runtime.method_library import get_contract
+
+    return json.dumps(get_contract(symbol), ensure_ascii=True, default=str)
+
+
+def opengeodata_search_tool(query: str, limit: Optional[int] = None,
                             session_context_json: Optional[Union[str, Dict[str, Any]]] = None) -> str:
     """Search OpenGeoData. ``session_context_json`` takes the context object either as a JSON
     string or as the object itself.
@@ -335,6 +382,116 @@ def make_langchain_geocode_tools() -> List[Any]:
             ),
             metadata={"category": "geospatial"},
         )
+    ]
+
+
+
+# --------------------------------------------------------------------------- #
+# Staging — putting a platform dataset's bytes where the sandbox can read them
+# --------------------------------------------------------------------------- #
+
+def _staging_result(fn, *args, **kwargs) -> str:
+    """Run one staging call and return JSON, turning a refusal into a readable answer.
+
+    A raised exception reaches the model as a stack trace it cannot act on. A refusal with a
+    ``kind`` and a sentence explaining it is something the model can respond to — by staging a
+    different element, or by telling the user the dataset is a portal pointer with no file.
+    """
+    from agent_runtime.staging import StagingError
+
+    try:
+        return json.dumps({"ok": True, **fn(*args, **kwargs)}, ensure_ascii=True, default=str)
+    except StagingError as exc:
+        return json.dumps({"ok": False, "kind": exc.kind, "error": str(exc)},
+                          ensure_ascii=True, default=str)
+    except Exception as exc:                                # pragma: no cover - defensive
+        return json.dumps({"ok": False, "kind": "error",
+                           "error": f"{type(exc).__name__}: {exc}"[:300]}, ensure_ascii=True)
+
+
+def stage_element_tool(element_id: str, session_id: str = "", filename: str = "") -> str:
+    """Stage a platform element's file into the sandbox workspace by element id."""
+    from agent_runtime.staging import stage_element
+
+    return _staging_result(stage_element, element_id, session_id or "default", filename=filename)
+
+
+def stage_url_tool(url: str, session_id: str = "", filename: str = "") -> str:
+    """Stage a public http(s) file into the sandbox workspace."""
+    from agent_runtime.staging import stage_url
+
+    return _staging_result(stage_url, url, session_id or "default", filename=filename)
+
+
+def list_staged_inputs_tool(session_id: str = "") -> str:
+    """Everything staged into this session so far, with provenance."""
+    from agent_runtime.staging import staged_inputs
+
+    rows = staged_inputs(session_id or "default")
+    return json.dumps({"count": len(rows), "inputs": rows}, ensure_ascii=True, default=str)
+
+
+def make_langchain_staging_tools(*, session_id: Optional[str] = None) -> List[Any]:
+    """Staging tools for the peers that RUN code.
+
+    Agent-side by design: the sandbox runs ``--network none`` and holds no credentials, so the
+    fetch happens here and only the bytes cross the boundary. That is why a dataset the agent
+    found can be opened at all — the 44 generated loaders take a ``staged_path`` and, before this,
+    nothing could produce one.
+
+    Part of the extraction bundle: returns NO tools while AGENT_EXTRACTION is off.
+    """
+    if not extraction_enabled():
+        return []
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception:  # pragma: no cover - optional dependency
+        return []
+
+    session = session_id or "default"
+
+    def _stage_element(element_id: str, filename: str = "") -> str:
+        return stage_element_tool(element_id, session, filename)
+
+    def _stage_url(url: str, filename: str = "") -> str:
+        return stage_url_tool(url, session, filename)
+
+    def _list_inputs() -> str:
+        return list_staged_inputs_tool(session)
+
+    return [
+        StructuredTool.from_function(
+            func=accept_null_defaults(_stage_element), name="stage_element",
+            description=(
+                "Download a PLATFORM ELEMENT's data file into the sandbox workspace so code can "
+                "open it. Input: the element id from a search result. Returns `staged_path` — the "
+                "path INSIDE execute_code (e.g. /work/inputs/export.csv) — plus sha256, size and "
+                "origin. USE THIS before calling a generated `load_*` method: those take exactly "
+                "this path. Sandboxed code has NO network and cannot download anything itself. "
+                "If the element is a portal pointer rather than a deposited file, this says so."
+            ),
+            metadata={"category": "data"},
+        ),
+        StructuredTool.from_function(
+            func=accept_null_defaults(_stage_url), name="stage_url",
+            description=(
+                "Download a public http(s) data file into the sandbox workspace. Returns "
+                "`staged_path` for use inside execute_code, with sha256 and size recorded for "
+                "reproducibility. Prefer stage_element when the data belongs to a platform "
+                "element, so the run stays attributable. Private, loopback and cloud-metadata "
+                "addresses are refused."
+            ),
+            metadata={"category": "data"},
+        ),
+        StructuredTool.from_function(
+            func=accept_null_defaults(_list_inputs), name="list_staged_inputs",
+            description=(
+                "List the files already staged into this session, with their paths and origins. "
+                "Check here before staging again — the workspace persists across execute_code "
+                "calls within a session."
+            ),
+            metadata={"category": "data"},
+        ),
     ]
 
 
@@ -623,17 +780,59 @@ def make_langchain_granular_tools(
             ),
             metadata={"category": "retrieval_internal"},
         ),
+        StructuredTool.from_function(
+            func=accept_null_defaults(kb_method_search_tool),
+            name="kb_method_search",
+            description=(
+                "Search the METHOD LIBRARY: real, importable Python functions extracted from "
+                "platform notebooks and code, each verified to be independently callable. "
+                "Returns a signature, a summary and the EXACT import line for each hit. "
+                "USE IT BEFORE WRITING ANALYSIS CODE FROM SCRATCH — the library is already "
+                "mounted read-only in the execution sandbox, so an import line returned here "
+                "works verbatim inside execute_code with no installation and no download. "
+                "Prefer a library method over re-implementing one: it carries the source "
+                "element's provenance, so results stay attributable to a platform element."
+            ),
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
+            func=accept_null_defaults(get_method_contract_tool),
+            name="get_method_contract",
+            description=(
+                "Full contract for one method from kb_method_search: parameters with types, "
+                "return value, declared invariants (e.g. requires a projected CRS), pip "
+                "requirements, the pinned import line and the source element. "
+                "Call it before invoking an unfamiliar method — the invariants say what the "
+                "method assumes about its inputs, and violating one produces a plausible "
+                "wrong number rather than an error."
+            ),
+            metadata={"category": "retrieval_internal"},
+        ),
     ]
+    if not extraction_enabled():
+        # Part of the extraction bundle (agent_runtime/extraction_flag.py). Off, the method tools
+        # are not offered at all, rather than offered and empty: a model told about a tool it
+        # cannot use guesses around it.
+        retrieval_tools = [t for t in retrieval_tools
+                           if getattr(t, "name", "") not in {"kb_method_search",
+                                                             "get_method_contract"}]
     if enabled_search_methods is not None:
         enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
         neo4j_companion_tools = {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"}
+        # A reader tool is the second half of its search tool, never an independent method:
+        # enabling the search alone must not leave the agent able to FIND something but unable
+        # to READ it. web_search/web_fetch already worked this way; agent_kb_search and
+        # kb_method_search return truncated hits and are useless without their readers.
+        companion_of = {
+            "get_kb_block": "agent_kb_search",
+            "get_method_contract": "kb_method_search",
+            "web_fetch": "web_search",
+        }
         retrieval_tools = [
             tool for tool in retrieval_tools
             if getattr(tool, "name", "") in enabled
             or ("neo4j_search" in enabled and getattr(tool, "name", "") in neo4j_companion_tools)
-            # web_fetch is the second half of web_search, not an independent method: asking for
-            # web_search alone must not leave the agent able to find pages but unable to read one.
-            or ("web_search" in enabled and getattr(tool, "name", "") == "web_fetch")
+            or companion_of.get(getattr(tool, "name", ""), "\0") in enabled
         ]
 
     tools = [*retrieval_tools, *make_langchain_qgis_tools(session_id=session_id)]

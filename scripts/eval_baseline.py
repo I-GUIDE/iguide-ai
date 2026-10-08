@@ -27,7 +27,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
-from dotenv import load_dotenv; load_dotenv(REPO / ".env", override=True)
+# override=False: an explicitly exported variable must WIN over the file. With
+# override=True a stale .env value (e.g. a decommissioned FLASK_EMBEDDING_URL)
+# silently replaced whatever the caller set, making a per-run override impossible
+# and the reason invisible.
+from dotenv import load_dotenv; load_dotenv(REPO / ".env")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--tasks", default=""); ap.add_argument("--all", action="store_true")

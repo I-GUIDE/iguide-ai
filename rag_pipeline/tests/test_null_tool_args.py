@@ -94,9 +94,15 @@ def _all_tools():
     from agent_runtime.analysis_overlay_tools import make_overlay_tools
     from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
     from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
+    from agent_runtime.langchain_granular_tools import (make_langchain_granular_tools,
+                                                         make_langchain_staging_tools)
+
     out = []
+    # The extraction toolsets joined on 2026-10-01: listing the factory, not five tool names, is
+    # what keeps the NEXT tool added to either of them inside this scan.
     for make in (make_rs_embed_tools, make_terrain_tools, make_overlay_tools,
-                 make_aggregate_tools, make_admin_boundary_tools):
+                 make_aggregate_tools, make_admin_boundary_tools, make_langchain_granular_tools,
+                 lambda: make_langchain_staging_tools(session_id="null-scan")):
         try:
             out.extend(make())
         except Exception:  # noqa: BLE001 - a toolset needing credentials is not this test's job

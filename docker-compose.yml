@@ -69,6 +69,11 @@ services:
       - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
       - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      # Pinned, not inherited from .env: `env_file` supplies the file's value, which has
+      # historically been a decommissioned remote host. agent-api already pins this;
+      # the services that did not were silently embedding-less. In-container the
+      # embedder is reachable by service name, never by 127.0.0.1.
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
     env_file:
       - .env
     volumes:
@@ -97,6 +102,11 @@ services:
     environment:
       # Service wiring (override anything in .env)
       - FLASK_EMBEDDING_URL=http://embedding-server:5000
+      # GENERATED skills go on the shared volume, not container-local disk, and that path is
+      # added to the discovery roots. Written to /app/.agents/skills they would vanish on every
+      # restart — and the image runs as non-root, so that directory is not even writable.
+      - AGENT_GENERATED_SKILLS_ROOT=/app/agent_chat_files/skills
+      - AGENT_SKILL_PATHS=/app/agent_chat_files/skills
       - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       - PORT=5002
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
@@ -188,6 +198,12 @@ services:
       # submissions to /ingest, and MinIO its legacy bucket events to /webhook, from wherever
       # they run, which need not be this host. Decide that before binding it to 127.0.0.1.
       - "5001:5001"
+    environment:
+      # Pinned, not inherited from .env: `env_file` supplies the file's value, which has
+      # historically been a decommissioned remote host. agent-api already pins this;
+      # the services that did not were silently embedding-less. In-container the
+      # embedder is reachable by service name, never by 127.0.0.1.
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
     env_file:
       - .env
     restart: unless-stopped
@@ -200,9 +216,46 @@ services:
     networks:
       - iguide-network
 
+  # The agent's OWN store. OpenSearch and Neo4j belong to the website; the agent writes into
+  # their cluster today, so re-indexing its knowledge base needs write access to production
+  # website infrastructure and a mapping change means re-crawling the corpus. This holds the
+  # record those indices are built from. pgvector is in the image so embeddings can live beside
+  # the rows they describe rather than in a fourth place.
+  agent-db:
+    image: pgvector/pgvector:pg17
+    container_name: iguide-agent-db
+    # Behind a profile, because the extraction bundle is OFF by default and agent-api does not
+    # depend on this service. Start it with: docker compose --profile extraction up -d agent-db
+    profiles: ["extraction"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AGENT_DB_USER:-iguide}
+      # NOT `${AGENT_DB_PASSWORD:?...}`. Compose interpolates the WHOLE file before it applies
+      # profiles (checked: v5.5.1 errors even with this service profiled out), so a required
+      # variable here failed `docker compose up` for EVERY service on a host whose .env had not
+      # gained it. The password stays mandatory: the postgres image refuses to initialise with
+      # an empty superuser password, so it is this service that fails, and only this one.
+      POSTGRES_PASSWORD: ${AGENT_DB_PASSWORD:-}
+      POSTGRES_DB: ${AGENT_DB_NAME:-iguide_agent}
+    ports:
+      # Loopback only. Nothing outside this host has any reason to reach it, and a bare
+      # "5544:5432" would publish it on every interface.
+      - "127.0.0.1:${AGENT_DB_PORT:-5544}:5432"
+    volumes:
+      - agent_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AGENT_DB_USER:-iguide} -d ${AGENT_DB_NAME:-iguide_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - iguide-network
+
 networks:
   iguide-network:
     driver: bridge
 
 volumes:
   agent_chat_files:
+  agent_db_data:

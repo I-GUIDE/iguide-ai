@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover - optional dependency
 from opensearchpy import OpenSearch
 from dotenv import load_dotenv
 
-from .utils import get_logger, getenv, normalize_source_fields, safe_score
+from .utils import get_logger, getenv, normalize_source_fields, safe_score, default_top_k
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 load_dotenv()
@@ -60,30 +60,11 @@ def _os_index(default: Optional[str] = None) -> str:
     return index
 
 
-def infer_geo_shape(coords_array: List[List[float]]) -> Dict[str, Any]:
-    """
-    Infer a GeoJSON shape from coordinate pairs:
-      - 1 pair  => point
-      - 2 pairs => envelope (normalized to top-left & bottom-right)
-      - ≥3 pairs => polygon (auto-closed)
-    """
-    if not isinstance(coords_array, list) or not coords_array:
-        raise ValueError("Coordinates must be a non-empty array of [lon, lat] pairs.")
-
-    if len(coords_array) == 1:
-        return {"type": "point", "coordinates": coords_array[0]}
-
-    if len(coords_array) == 2:
-        lon1, lat1 = coords_array[0]
-        lon2, lat2 = coords_array[1]
-        top_left = [min(lon1, lon2), max(lat1, lat2)]
-        bottom_right = [max(lon1, lon2), min(lat1, lat2)]
-        return {"type": "envelope", "coordinates": [top_left, bottom_right]}
-
-    if coords_array[0] != coords_array[-1]:
-        coords_array = [*coords_array, coords_array[0]]
-    return {"type": "polygon", "coordinates": [coords_array]}
-
+# infer_geo_shape now lives in the leaf module geo_shapes.py and is re-exported here so the
+# existing caller below is unaffected. Moved because importing THIS module builds a Flask app
+# and loads a spaCy model — 1.2s and a warning — which the dataset extractor should not pay to
+# turn two coordinate pairs into an envelope.
+from .geo_shapes import bbox_geo_shape, infer_geo_shape, to_wgs84_bounds  # noqa: F401,E402
 
 def _format_search_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
@@ -492,7 +473,7 @@ def retrieve_spatial(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
             logger.debug("No coordinates in state; attempting NLP extraction from query")
             limit_value: Any = config.get("limit")
             if limit_value is None:
-                limit_value = state.get("params", {}).get("top_k", 8)
+                limit_value = state.get("params", {}).get("top_k", default_top_k())
             
             # Use the NLP + Maps API flow
             result = get_spatial_search_results(query_text, size=limit_value)
@@ -514,7 +495,7 @@ def retrieve_spatial(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     limit_value: Any = config.get("limit")
     if limit_value is None:
-        limit_value = state.get("params", {}).get("top_k", 8)
+        limit_value = state.get("params", {}).get("top_k", default_top_k())
 
     element_type = config.get("element_type")
 

@@ -30,7 +30,7 @@ LangChain toolkit, plus "saved workflows", which the code peer cannot run.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,11 @@ class Toolset:
     factory: str
     #: A clause, not a sentence — these are joined into a list the model reads at speed.
     summary: str
+    #: Appended to `summary` only while the extraction bundle is on (agent_runtime/extraction_flag.py).
+    extraction_summary: str = ""
+    #: The whole toolset is part of the extraction bundle: not described while it is off, because
+    #: its factory then binds nothing and the supervisor must not route work to it.
+    requires_extraction: bool = False
     #: The factory binds nothing unless skill discovery finds a skill (``make_skill_tools`` returns
     #: ``[]`` for an empty registry), so the clause is true only then. The deployed image shipped
     #: no skill roots at all while the decider was told the code peer had skills.
@@ -48,6 +53,54 @@ class Toolset:
     #: only then. A gated capability the decider is told about while it is off sends work to a
     #: tool that is not there.
     requires_flag: str = ""
+
+
+# The knowledge-base tools the code-WRITING peers hold, defined ONCE. The peer binding
+# (`supervisor/graph.py:_CODE_PEER_KB_TOOLS`) and the evidence allowlist (`_RETRIEVAL_TOOLS`) both
+# read this tuple. The 2026-10-01 integration found the same names hardcoded in three places that
+# had drifted apart: the code peer's binding dropped the method tools, and the evidence allowlist
+# never had them, so a method the peer found could not be cited.
+KB_CODE_PEER_TOOLS: Tuple[str, ...] = (
+    "agent_kb_search", "get_kb_block", "kb_method_search", "get_method_contract",
+)
+
+# What each EVIDENCE CONSUMER can do with an extracted method, declared rather than inferred from a
+# peer's name, so the evidence a consumer reads describes only what it can act on
+# (evidence_subgraph._render_extracted and _doc_block). A consumer that gains a capability gets
+# the view that uses it by changing its row here; rag_pipeline/tests/test_evidence_consumers.py
+# holds each peer's row to the tools its builder actually binds.
+RUN_LIBRARY = "run_library"          # imports `iguide_methods`: execute_code, library mounted
+STAGE_INPUTS = "stage_inputs"        # calls stage_element / stage_url
+SEARCH_METHODS = "search_methods"    # calls kb_method_search / get_method_contract
+OFFER_LIBRARY = "offer_library"      # tells a HUMAN which library methods this agent can run
+
+EVIDENCE_CONSUMERS: Dict[str, FrozenSet[str]] = {
+    # The answerer and the evidence subgraph write for a HUMAN, who can neither import the
+    # library nor call the agent's tools. So methods arrive as references this agent can run,
+    # not as import lines to paste. The map UI, 2026-10-01: an answer told the user to write
+    # `from iguide_methods ...`, which works only inside the agent's sandbox. This is a
+    # rendering change, not an evidence cut (B3's question is untouched).
+    "answer": frozenset({OFFER_LIBRARY}),
+    # default_code_fn: execute_code (network-none sandbox, library mounted), staging, method tools.
+    "code_peer": frozenset({RUN_LIBRARY, STAGE_INPUTS, SEARCH_METHODS}),
+    # default_analyze_fn: execute_code and the method tools, but NOT the staging tools.
+    "analyze_peer": frozenset({RUN_LIBRARY, SEARCH_METHODS}),
+    # claude_peer / opencode_peer: none, deliberately. Their container keeps network access and the
+    # model credential, a trust tier below the execute_code sandbox, so submitter-authored library
+    # code does not run there (extraction review, D1). They hold none of the agent's tools either.
+    "cli_peer": frozenset(),
+}
+
+
+def consumer_capabilities(consumer: str = "answer") -> FrozenSet[str]:
+    """What *consumer* can do with an extracted method right now: its row, or nothing while the
+    extraction bundle is off. An unknown consumer gets nothing: a view that under-describes costs a
+    reuse, while one that over-describes costs a failed import."""
+    from agent_runtime.extraction_flag import extraction_enabled
+
+    if not extraction_enabled():
+        return frozenset()
+    return EVIDENCE_CONSUMERS.get(consumer, frozenset())
 
 
 # Both peers bind nearly the same spatial toolkit; the split below records which ones actually get
@@ -79,7 +132,9 @@ _SHARED: Tuple[Toolset, ...] = (
     Toolset("make_rs_embed_zonal_tools",
             "segmenting a region into look-alike zones from those embeddings"),
     Toolset("make_langchain_granular_tools",
-            "retrieving datasets, publications and notebooks"),
+            "retrieving datasets, publications and notebooks",
+            extraction_summary=("the extracted method library — callable functions from platform "
+                                "elements with their contracts and pinned import lines")),
     Toolset("make_conversation_file_tools",
             "listing the files this conversation has produced"),
     Toolset("make_code_execution_tools",
@@ -113,9 +168,13 @@ _ANALYZE_ONLY: Tuple[Toolset, ...] = (
     Toolset("make_langchain_mcp_tools", "external MCP tools, including a live QGIS instance"),
 )
 
-# Nothing is code-only today. A toolset only the LangChain code peer binds belongs here, and
-# reaches the decider through describe_code_peer.
-_CODE_ONLY: Tuple[Toolset, ...] = ()
+# The one code-only toolset: only default_code_fn binds the staging tools. It reaches the decider
+# through describe_code_peer, and only while the extraction bundle is on.
+_CODE_ONLY: Tuple[Toolset, ...] = (
+    Toolset("make_langchain_staging_tools",
+            "staging a platform dataset into the code sandbox (by element id or URL) so extracted "
+            "loaders and methods can read it", requires_extraction=True),
+)
 
 CAPABILITIES: Dict[str, Tuple[Toolset, ...]] = {
     "analyze": _SHARED + _ANALYZE_ONLY,
@@ -156,9 +215,14 @@ def describe(capability: str, *, skill_roots: Optional[Sequence[str]] = None) ->
     toolset is described only when discovery there finds at least one skill, and a
     ``requires_flag`` toolset only when its switch is on.
     """
+    from agent_runtime.extraction_flag import extraction_enabled
+
+    on = extraction_enabled()
     seen, out = set(), []
     skills: Optional[bool] = None  # discovered once, and only if a toolset needs the answer
     for tool in CAPABILITIES.get(capability, ()):  # declared order is the reading order
+        if tool.requires_extraction and not on:
+            continue
         if tool.requires_flag and not flag_on(tool.requires_flag):
             continue
         if tool.requires_skills:
@@ -166,10 +230,12 @@ def describe(capability: str, *, skill_roots: Optional[Sequence[str]] = None) ->
                 skills = skills_available(skill_roots)
             if not skills:
                 continue
-        if tool.summary in seen:
+        clause = (f"{tool.summary}, and {tool.extraction_summary}"
+                  if (on and tool.extraction_summary) else tool.summary)
+        if clause in seen:
             continue
-        seen.add(tool.summary)
-        out.append(tool.summary)
+        seen.add(clause)
+        out.append(clause)
     return "; ".join(out)
 
 

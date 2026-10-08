@@ -1,0 +1,265 @@
+"""Emit a run as a reproducible artifact, and pin everything it depended on.
+
+The deliverable of this system is meant to be a *runnable, verified artifact* — the answer is
+a byproduct of running it. That claim needs four things recorded, and each was absent:
+
+  the code        the exact source that ran, not a reconstruction from the answer
+  the environment the container's OWN account of its interpreter and packages, captured
+                  in-sandbox, plus the image by **digest** rather than by tag
+  the inputs      every staged file with a sha256, so a re-run can prove it read the same bytes
+  the outputs     the numbers the answer quoted, with their declared units, plus the gate's
+                  verdict — so a re-run has something to *compare*, not just repeat
+
+A tag is not a pin. ``python:3.11-slim`` resolves to different bytes next month, so an artifact
+recording the tag records nothing about the environment; ``image_digest`` is what makes the
+re-run meaningful.
+
+Pure and I/O-light: builds a dict and writes files. ``scripts/rerun_artifact.py`` consumes it.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import hashlib
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from agent_runtime import fork_safe
+
+logger = logging.getLogger(__name__)
+
+MANIFEST_FILENAME = "manifest.json"
+RUN_FILENAME = "run.py"
+INPUTS_FILENAME = "inputs.jsonl"
+ARTIFACT_SCHEMA = 1
+
+
+def artifacts_enabled() -> bool:
+    """Whether to emit an artifact bundle per substantive run. On whenever the extraction bundle is.
+
+    Unset, ``AGENT_ARTIFACT_EMIT`` follows ``AGENT_EXTRACTION`` (off by default), so integrating
+    the bundle changes no deployed run until it is switched on. Inside the bundle it defaults on:
+    it is cheap — a few small files beside a workspace that already exists — and the thing it buys
+    (a re-runnable record) cannot be reconstructed after the fact, so defaulting it off would mean
+    the artifact is missing exactly when someone wants it. An explicit value wins either way.
+    """
+    raw = (os.getenv("AGENT_ARTIFACT_EMIT") or "").strip().lower()
+    if not raw:
+        # Unset: follow the extraction bundle, OFF by default (agent_runtime/extraction_flag.py).
+        from agent_runtime.extraction_flag import extraction_enabled
+
+        return extraction_enabled()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def resolve_image_digest(image: str) -> Optional[str]:
+    """``repo@sha256:…`` for a local image tag, or None.
+
+    Prefers a RepoDigest (what the registry serves, so another machine can pull the same
+    bytes) and falls back to the local image Id. Returns None rather than guessing when
+    neither is available — a manifest claiming a digest it did not verify is worse than one
+    that admits the image was unpinned.
+    """
+    image = (image or "").strip()
+    if not image:
+        return None
+    if "@sha256:" in image:
+        return image
+    try:
+        proc = fork_safe.run(
+            ["docker", "image", "inspect", image,
+             "--format", "{{json .RepoDigests}}|{{.Id}}"],
+            capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        logger.debug("could not inspect %s: %s", image, exc)
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = (proc.stdout or "").strip()
+    digests_json, _, image_id = raw.partition("|")
+    try:
+        digests = json.loads(digests_json) or []
+    except ValueError:
+        digests = []
+    if digests:
+        return str(digests[0])
+    return image_id.strip() or None
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def library_units_used(code: str) -> List[Dict[str, str]]:
+    """Method-library units the code imports, with their version-pinned module path.
+
+    Parsed with ``ast``, not a regex. The regex form matched only
+    ``from iguide_methods.X.v_sha import name[, name]`` on one physical line, so THREE spellings
+    the system itself produces resolved zero units — and therefore installed zero contract
+    guards, leaving the run reporting clean:
+
+      * ``import calculate_buffers as buffer_frame`` — an alias
+      * ``from iguide_methods.X.v_sha import (a,\n    b)`` — a parenthesised/wrapped list, and
+        every advertised import line exceeds 79 characters, so wrapping is the expected case
+      * ``from iguide_methods.ke_x import symbol`` — the element-package alias, which
+        ``import_line``'s own docstring concedes "keeps working"
+
+    ``alias`` is recorded so a caller can map the local name back to the unit; the guard patches
+    the module attribute, so an alias is guarded either way once the unit is found.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return []
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level:
+            continue
+        module = node.module or ""
+        if module != "iguide_methods" and not module.startswith("iguide_methods."):
+            continue
+        sha = next((part[2:] for part in module.split(".") if part.startswith("v_")), "")
+        for alias in node.names:
+            symbol = alias.name
+            if not symbol or symbol == "*":
+                continue
+            key = (module, symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            row = {"symbol": symbol, "module": module, "slice_sha": sha}
+            if alias.asname:
+                row["alias"] = alias.asname
+            out.append(row)
+    return out
+
+
+def build_manifest(*, code: str, work: Path, image: str, backend: str,
+                   dependencies: Optional[List[str]] = None,
+                   tier: Optional[str] = None,
+                   inputs: Optional[List[Dict[str, Any]]] = None,
+                   verification: Optional[Dict[str, Any]] = None,
+                   environment: Optional[Dict[str, Any]] = None,
+                   declared_outputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Everything needed to re-run this and compare the result."""
+    return {
+        "schema": ARTIFACT_SCHEMA,
+        "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "backend": backend,
+        "image": image,
+        # None is recorded explicitly: "we could not pin this" is information a re-run needs.
+        "image_digest": resolve_image_digest(image) if backend == "docker" else None,
+        "tier": tier,
+        "dependencies": list(dependencies or []),
+        "code_sha256": hashlib.sha256((code or "").encode("utf-8")).hexdigest(),
+        "library_units": library_units_used(code),
+        "inputs": list(inputs or []),
+        "environment": environment or {},
+        "declared_outputs": declared_outputs or {},
+        "verification": verification or {},
+        # The single field a reader should branch on before quoting any number from this run.
+        "verified": bool((verification or {}).get("verdict") == "pass"),
+    }
+
+
+def read_json(work: Path, name: str) -> Dict[str, Any]:
+    path = Path(work) / name
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def collect_inputs(work: Path, staged: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Staged input files with a sha256 each, merged with any provenance already recorded.
+
+    A re-run must be able to assert it read the *same bytes*, not merely a file with the same
+    name — which is why the hash matters more than the path.
+    """
+    work = Path(work)
+    recorded: Dict[str, Dict[str, Any]] = {}
+    existing = work / INPUTS_FILENAME
+    if existing.is_file():
+        try:
+            for line in existing.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if isinstance(row, dict) and row.get("name"):
+                    recorded[str(row["name"])] = row
+        except (OSError, ValueError):
+            pass
+
+    out: List[Dict[str, Any]] = []
+    for name in sorted(set(staged or ())):
+        path = work / name
+        row: Dict[str, Any] = dict(recorded.get(name) or {})
+        row["name"] = name
+        if path.is_file():
+            try:
+                row["sha256"] = _sha256_file(path)
+                row["bytes"] = path.stat().st_size
+            except OSError:
+                pass
+        out.append(row)
+    # Inputs staged by a tool that recorded provenance but whose file is gone still belong in
+    # the record: dropping them would make the artifact look self-contained when it is not.
+    for name, row in recorded.items():
+        if name not in {r["name"] for r in out}:
+            out.append(row)
+    return out
+
+
+def emit(*, code: str, work: Path, image: str, backend: str,
+         dependencies: Optional[List[str]] = None, tier: Optional[str] = None,
+         staged: Optional[List[str]] = None,
+         verification: Optional[Dict[str, Any]] = None,
+         dest: Optional[Path] = None) -> Dict[str, Any]:
+    """Write ``run.py``, ``manifest.json`` and ``inputs.jsonl`` into *dest* (default: work).
+
+    Never raises: an artifact-emission failure must not fail a successful analysis.
+    """
+    work = Path(work)
+    target = Path(dest or work)
+    try:
+        environment = read_json(work, "environment.json")
+        checks = read_json(work, "checks.json")
+        # The VALUES the run published, not the gate's findings about them. A manifest holding
+        # "unit is null" instead of 25000 records the complaint and loses the measurement, so a
+        # re-run would have nothing to compare against.
+        declared = read_json(work, "declared_outputs.json")
+        manifest = build_manifest(
+            code=code, work=work, image=image, backend=backend,
+            dependencies=dependencies, tier=tier,
+            inputs=collect_inputs(work, staged),
+            verification=verification or {"verdict": checks.get("verdict")} if checks else {},
+            environment=environment, declared_outputs=declared)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / RUN_FILENAME).write_text(code or "", encoding="utf-8")
+        (target / MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, default=str),
+                                                encoding="utf-8")
+        with open(target / INPUTS_FILENAME, "w", encoding="utf-8") as fh:
+            for row in manifest["inputs"]:
+                fh.write(json.dumps(row, default=str) + "\n")
+        return manifest
+    except Exception as exc:
+        logger.warning("artifact emission failed: %s", exc)
+        return {}
+
+
+__all__ = ["emit", "build_manifest", "resolve_image_digest", "library_units_used",
+           "collect_inputs", "artifacts_enabled", "MANIFEST_FILENAME", "RUN_FILENAME",
+           "INPUTS_FILENAME", "ARTIFACT_SCHEMA"]

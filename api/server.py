@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
@@ -28,13 +29,43 @@ app = Flask(__name__)
 # Load environment variables
 load_dotenv()
 
-CORS(app)
-
-swagger = Swagger(app)
-
-# Configure logging
+# Configure logging (before _cors_origins, which warns)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _cors_origins() -> list:
+    """Cross-origin allowlist.
+
+    ``AGENT_CORS_ORIGINS`` (comma-separated) wins; otherwise fall back to the
+    existing ``ALLOWED_DOMAIN_LIST`` (a JSON array) so deployments already
+    carrying that value keep working. Empty means no cross-origin access —
+    same-origin callers, including the bundled dashboard, are unaffected.
+    """
+    raw = str(os.getenv("AGENT_CORS_ORIGINS") or "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    legacy = str(os.getenv("ALLOWED_DOMAIN_LIST") or "").strip()
+    if legacy:
+        try:
+            parsed = json.loads(legacy)
+            if isinstance(parsed, list):
+                return [str(o).strip() for o in parsed if str(o).strip()]
+        except ValueError:
+            logger.warning("ALLOWED_DOMAIN_LIST is not valid JSON; ignoring it.")
+
+    logger.warning(
+        "No AGENT_CORS_ORIGINS (or ALLOWED_DOMAIN_LIST) configured; cross-origin "
+        "requests are refused. Set AGENT_CORS_ORIGINS if a browser on another "
+        "origin must call this API."
+    )
+    return []
+
+
+CORS(app, origins=_cors_origins())
+
+swagger = Swagger(app)
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +311,49 @@ def _identity_error_response(exc: Exception):
                     "reason": "token_invalid"}), 403
 
 
+def require_api_key(view):
+    """Gate a route on the same credentials /agent/chat accepts.
+
+    The decorator is backend_swap's (M0): /query and /query/batch had no check of any kind, so
+    the RAG pipeline answered anonymous callers even in token mode. The CHECK is prototype's —
+    `_require_user()` then `_require_agent_chat_api_key(user)` — so these routes and the agent
+    routes cannot disagree about who may call them: a verified platform user, the service key,
+    or demo mode. That includes prototype's documented choice that an unset service key leaves
+    the key check open outside token mode; tightening that is a separate decision.
+    """
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        try:
+            _require_agent_chat_api_key(user)
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        return view(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Request / response normalization
 # ---------------------------------------------------------------------------
+
+PERSISTENT_MEMORY_ENV = "AGENT_PERSISTENT_MEMORY"
+
+
+def _persistent_memory_allowed() -> bool:
+    """Whether this server may write conversations to the conversation store at all.
+
+    The request's ``usePersistentMemory`` was the only switch, and the map UI always sends true.
+    So a server run against a deployment-shaped ``.env``, which names the production cluster,
+    wrote every test turn into production's chat_memory and chat_traces. ``AGENT_PERSISTENT_MEMORY=0``
+    keeps conversations in-process for every request (session memory still carries context
+    within a conversation). Unset honours the request, exactly as before.
+    """
+    return (os.getenv(PERSISTENT_MEMORY_ENV) or "").strip().lower() not in {"0", "false", "no", "off"}
+
 
 def _normalize_agent_chat_request(data: dict) -> dict:
     """Normalize camelCase frontend fields to internal snake_case, accepting both."""
@@ -301,9 +372,12 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
     # Local mode overrides the REQUEST: the map UI hard-codes usePersistentMemory=true, so a flag
     # the client controls cannot be the thing that keeps a laptop off a shared store.
+    # AGENT_PERSISTENT_MEMORY=0 (the extraction work's switch, M8.66) does the same for one
+    # server without changing its mode; either one is enough to keep the store untouched.
     use_persistent_memory = (
         bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
-        and deployment_mode.persistent_memory_allowed())
+        and deployment_mode.persistent_memory_allowed()
+        and _persistent_memory_allowed())
     smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
@@ -708,6 +782,48 @@ def _parse_enabled_search_methods(value):
     return normalize_search_methods(value)
 
 
+# --------------------------------------------------------------------------- #
+# Turning an exception into something a user can act on
+# --------------------------------------------------------------------------- #
+
+def _classify_stream_error(exc: BaseException) -> dict:
+    """A stable user-facing message plus a machine-readable class, from a raw exception.
+
+    The stream used to emit ``{"error": str(e)}`` verbatim, so a user could be shown
+    ``claude CLI was killed by signal 11 (model=sonnet) with no diagnostic output after 3
+    attempt(s)`` — accurate, and useless to them. It names an internal tool, gives no action,
+    and reads like a crash report because it is one.
+
+    The raw text is kept under ``detail`` rather than dropped: whoever is debugging still needs
+    it, and the prototype renders it below the message.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = str(exc).lower()
+
+    if type(exc).__name__ == "ClaudeCliUnavailable" or "re-authenticate" in low or (
+            "401" in low and "auth" in low):
+        return {"code": "llm_unauthenticated", "retryable": False,
+                "error": "The language-model backend is not authenticated, so this request "
+                         "could not be answered. This needs an operator to restore "
+                         "credentials — retrying will not help.",
+                "detail": text}
+    if any(m in low for m in ("killed by signal", "timed out", "429", "529",
+                             "transient", "overloaded", "503", "502")):
+        return {"code": "llm_transient", "retryable": True,
+                "error": "The language-model backend failed partway through this request. "
+                         "This is usually temporary — please try again.",
+                "detail": text}
+    if "connection" in low or "unreachable" in low or "refused" in low:
+        return {"code": "backend_unreachable", "retryable": True,
+                "error": "A backend service could not be reached while answering this "
+                         "request. Please try again shortly.",
+                "detail": text}
+    return {"code": "internal_error", "retryable": True,
+            "error": "Something went wrong while answering this request. Please try again; "
+                     "if it keeps happening, report the detail below.",
+            "detail": text}
+
+
 def _sse_event(name, data):
     payload = json.dumps(data or {}, ensure_ascii=True, default=str)
     return f"event: {name}\ndata: {payload}\n\n"
@@ -1058,6 +1174,12 @@ def agent_conversation(memory_id):
                     return jsonify({"error": "No conversation found for that id."}), 404
                 return jsonify(snapshot)
 
+            if not _persistent_memory_allowed():
+                # The other write path. Refused rather than silently dropped, so a client that
+                # thinks it saved a conversation is told it did not.
+                return jsonify({"error": "This server keeps conversations in-process only "
+                                         f"({PERSISTENT_MEMORY_ENV}=0); nothing was saved.",
+                                "reason": "persistence_disabled"}), 409
             body = request.get_json(silent=True)
             if not isinstance(body, dict):
                 return jsonify({"error": "Body must be a conversation object."}), 400
@@ -1408,6 +1530,7 @@ def download_agent_file(file_id):
 
 
 @app.route('/query', methods=['POST'])
+@require_api_key
 def query():
     """
 Main RAG pipeline endpoint with LLM routing and optional reranking.
@@ -2810,13 +2933,16 @@ def agent_chat_stream():
                         continue
 
             except ValueError as e:
+                # A validation error IS actionable as written — it describes the caller's own
+                # malformed request — so it is passed through rather than genericised.
                 logger.error(f"Agent chat stream validation error: {str(e)}")
-                yield _sse_event("error", {"error": str(e)})
+                yield _sse_event("error", {"error": str(e), "code": "invalid_request",
+                                           "retryable": False})
             except Exception as e:
                 logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
                 if error_emitted:
                     return
-                error_payload = {"error": str(e)}
+                error_payload = _classify_stream_error(e)
                 diagnostics = getattr(e, "diagnostics", None)
                 if diagnostics:
                     error_payload["diagnostics"] = diagnostics
@@ -2851,6 +2977,7 @@ def agent_chat_stream():
 
 
 @app.route('/query/batch', methods=['POST'])
+@require_api_key
 def batch_query():
     """
     Batch query endpoint for processing multiple queries in one call.

@@ -6,6 +6,8 @@ for consistent generation across keyword, semantic, and spatial results.
 
 import os
 import sys
+
+import pytest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -70,6 +72,12 @@ def validate_evidence_entry(entry, source_name):
     return errors
 
 
+# Live-service test: needs a reachable OpenSearch cluster, the embedding server and
+# Neo4j. Marked `integration` so a clean `pytest` on a fresh clone is GREEN — these
+# three were the only red in the suite, and a suite that is red by default trains
+# everyone to ignore it, which is how a real regression gets through.
+# Run them with: pytest -m integration
+@pytest.mark.integration
 def test_mixed_sources_generation():
     """Test that generation works with mixed sources (keyword + semantic + spatial)"""
     
@@ -184,6 +192,12 @@ def test_mixed_sources_generation():
     return all_valid and bool(final_answer)
 
 
+# Live-service test: needs a reachable OpenSearch cluster, the embedding server and
+# Neo4j. Marked `integration` so a clean `pytest` on a fresh clone is GREEN — these
+# three were the only red in the suite, and a suite that is red by default trains
+# everyone to ignore it, which is how a real regression gets through.
+# Run them with: pytest -m integration
+@pytest.mark.integration
 def test_individual_source_structures():
     """Test each source individually to verify they all conform to the same structure"""
     

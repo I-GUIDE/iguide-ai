@@ -228,7 +228,7 @@
         <div class="grid">
           <div><label>Chat endpoint</label><input id="endpoint" value="https://iguide-agent-dev.cis220065.projects.jetstream-cloud.org/agent/chat/stream"></div>
           <div><label>Upload endpoint</label><input id="upload_endpoint" value="https://iguide-agent-dev.cis220065.projects.jetstream-cloud.org/agent/files/upload"></div>
-          <div><label>API key (optional)</label><input id="api_key" type="password" placeholder="X-API-KEY"></div>
+          <div><label>API key <span class="hint" title="Required unless the server sets AGENT_CHAT_AUTH_OPTIONAL=1">(required by default)</span></label><input id="api_key" type="password" placeholder="X-API-KEY"></div>
           <div><label>Conversation</label><input id="conversation_name" value="I-GUIDE chat"></div>
           <div><label>Detailed reasoning log</label>
             <label class="chk"><input id="agent_dev" type="checkbox" checked> show each search, its query and its results</label>
@@ -260,8 +260,19 @@ const CONFIG = {
   // Socrata) for open-geodata discovery — it complements the KB (see SearchAgent rule 9), it does
   // not replace it. NOTE: send the method names, NOT `[]` — server-side a non-null empty list means
   // "none match" and strips ALL search tools; `null`/omit means "all".
-  // `web_search` brings its `web_fetch` companion along automatically (server-side rule).
-  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search", "opengeodata_search", "web_search"],
+  // `web_search` brings its `web_fetch` companion along automatically (server-side rule), as do
+  // `agent_kb_search` -> `get_kb_block` and `kb_method_search` -> `get_method_contract`.
+  //
+  // `agent_kb_search` and `kb_method_search` were missing here, and this list is a HARD filter:
+  // the tools were registered, allowed by tool_policy, and still never offered to the search
+  // peer. Observed directly — asked for reusable Chicago-crime mapping code, the agent listed
+  // "keyword_search, semantic_search, neo4j_search, spatial_search" as everything it had and
+  // answered "go adapt this notebook", when `plot_choropleth_map` was sitting in the method
+  // library with a working import line. Sub-document evidence and the method library are the
+  // whole point of the system; leaving them out of the default made both invisible.
+  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search",
+                           "agent_kb_search", "kb_method_search",
+                           "opengeodata_search", "web_search"],
   recent_k: 8,
 };
 function newSessionId(){
@@ -298,6 +309,27 @@ function authHeaders(json){
   const k = document.getElementById("api_key").value.trim();
   if (k) h["X-API-KEY"]=k;
   return h;
+}
+
+/* Auth fails CLOSED on the server: a blank key against a key-protected server is a
+   403, and a server with no AGENT_CHAT_API_KEY configured is a 500. Both used to
+   surface as a raw JSON body, which reads like a bug rather than a setting. */
+async function describeHttpError(resp){
+  const raw = await resp.text().catch(()=> "");
+  let detail = raw;
+  try { const j = JSON.parse(raw); detail = j.error || j.message || raw; } catch(_){}
+  const keyed = !!document.getElementById("api_key").value.trim();
+  if (resp.status===403)
+    return keyed
+      ? "403 — the API key was rejected. Check the key matches AGENT_CHAT_API_KEY on the server."
+      : "403 — this server requires an API key. Enter it in the API key field above.";
+  if (resp.status===500 && /misconfigur|api key not set/i.test(detail))
+    return "500 — the server has no AGENT_CHAT_API_KEY configured, so it refuses requests. "
+         + "Set it server-side, or set AGENT_CHAT_AUTH_OPTIONAL=1 for local development.";
+  if (resp.status===0 || !resp.status)
+    return "Request blocked before reaching the server — likely CORS. The server now uses an "
+         + "AGENT_CORS_ORIGINS allowlist; add this page's origin to it.";
+  return detail || ("HTTP " + resp.status);
 }
 
 /* png/jpg/… detection for rendering image artifacts inline */
@@ -519,9 +551,14 @@ function renderFiles(ui,map){
    abstracts is well past that, so JSON.parse FAILS on most search results. Every reader below
    therefore falls back to scraping the fields out of the truncated text — which is also why the
    Sources block under the answer is built from the final evidence instead of from these lines. */
+/* Must list EVERY retrieval tool: a name absent here is not merely unlabelled, it is dropped
+   from the reasoning log entirely, so the user cannot tell whether the agent consulted the
+   method library or ignored it. kb_method_search / get_method_contract were missing, which
+   made the whole feature invisible in the one place a user looks to check the agent's work. */
 const RETRIEVAL_TOOLS=new Set(["keyword_search","semantic_search","neo4j_search","spatial_search",
   "opengeodata_search","web_search","agent_kb_search","neo4j_get_element_by_id",
-  "neo4j_explore_related_nodes","get_kb_block"]);
+  "neo4j_explore_related_nodes","get_kb_block",
+  "kb_method_search","get_method_contract","mcp_fetch_element_source"]);
 
 /* A tool_result's `content` is the repr of a LangChain ToolMessage, not bare JSON:
    content='{"source": "keyword", ...}' name='keyword_search' tool_call_id='call_x'
@@ -570,7 +607,9 @@ function looseJson(text){
   // Truncated payload: pull out what we can without a parser.
   const num=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*(-?\\d+)')); return m?Number(m[1]):null; };
   const str=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); return m?decodeJsonEscapes(m[1]):null; };
-  const titles=[]; const re=/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
+  // `symbol` as well as `title`: a kb_method_search row has no title, so a truncated method
+  // search salvaged zero rows and rendered as "no results".
+  const titles=[]; const re=/"(?:title|symbol)"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
   while((m=re.exec(s))&&titles.length<40) titles.push(decodeJsonEscapes(m[1]));
   const urls=[]; const ru=/"url"\s*:\s*"(https?:(?:[^"\\]|\\.)*)"/g;
   while((m=ru.exec(s))&&urls.length<40) urls.push(decodeJsonEscapes(m[1]));
@@ -600,7 +639,10 @@ function toolArgSummary(name,args){
 /* Documents/results carried by a tool payload, normalized to {title,url}. */
 function payloadItems(obj){
   const rows=[];
-  const push=(d)=>{ if(!d) return; const t=d.title||d.name||d.doc_id||d.id; if(t||d.url) rows.push({title:t,url:d.url}); };
+  // `symbol` is here because a kb_method_search row has no title/name/doc_id/url at all, so
+  // every one was skipped and the line rendered as "no results" for real hits.
+  const push=(d)=>{ if(!d) return; const t=d.title||d.name||d.doc_id||d.id||d.symbol;
+                    if(t||d.url) rows.push({title:t,url:d.url}); };
   if(Array.isArray(obj.documents)) obj.documents.forEach(push);
   if(Array.isArray(obj.results)) obj.results.forEach(push);
   if(!rows.length && Array.isArray(obj.__titles)){
@@ -907,7 +949,7 @@ async function streamTurn(text, ui, fileIds){
   const url=reqUrl("endpoint","/agent/chat/stream");
   pushLine(ui,"Sending request");
   const resp=await fetch(url,{method:"POST",headers:authHeaders(true),body:JSON.stringify(buildPayload(text, fileIds)),signal:aborter.signal});
-  if(!resp.ok||!resp.body){ const tx=await resp.text().catch(()=> ""); throw new Error(tx||("HTTP "+resp.status)); }
+  if(!resp.ok||!resp.body){ throw new Error(await describeHttpError(resp)); }
   const reader=resp.body.getReader(), dec=new TextDecoder(); let buf="";
   while(true){
     const {done,value}=await reader.read(); if(done) break;
@@ -986,7 +1028,10 @@ async function uploadFiles(fileList){
   try{
     const url=reqUrl("upload_endpoint","/agent/files/upload");
     const r=await fetch(url,{method:"POST",headers:authHeaders(false),body:fd});
-    const p=await r.json(); if(!r.ok) throw new Error(p.error||("HTTP "+r.status));
+    // /agent/files/upload is now API-key protected too, so check status BEFORE parsing:
+    // an auth failure body is JSON but the useful message is the actionable one.
+    if(!r.ok) throw new Error(await describeHttpError(r));
+    const p=await r.json();
     tmp.forEach(t=>pendingFiles.delete("tmp:"+t.filename));
     for(const f of (p.files||[])) pendingFiles.set(String(f.file_id),{file_id:f.file_id,filename:f.filename});
     renderAttbar();

@@ -1,8 +1,7 @@
 ---
 name: ai-agent-for-chicago-crime-analysis
 description: Run the AI Agent for Chicago Crime Analysis workflow extracted from cca9b545-8416-45a3-9267-122ce6ce9991.ipynb.
-allowed-tools:
-- mcp_run_nbwf_d01e717421c1b0ff
+allowed-tools: []
 tags:
 - AI Agent
 - LLM
@@ -28,4 +27,6 @@ Run the AI Agent for Chicago Crime Analysis workflow extracted from cca9b545-841
 
 ## Run
 
-Invoke `mcp_run_nbwf_d01e717421c1b0ff` (the extracted workflow) to reproduce this pipeline.
+There is no single tool that runs this pipeline. Reproduce it by reusing the functions
+extracted from this element and composing them in `execute_code`; the steps above give
+the order.

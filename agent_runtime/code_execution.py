@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_runtime.extraction_flag import extraction_enabled
 # Children are started through fork_safe, never subprocess directly: on macOS a fork of this
 # process after its first reprojection kills the child before exec (see fork_safe).
 from agent_runtime import fork_safe
@@ -104,6 +105,12 @@ _last_sweep = 0.0
 # absolute location on the host (a shared bind mount), so the `docker run -v <work>:/work`
 # the agent issues resolves to a real host directory the daemon can mount.
 WORK_ROOT_ENV = "AGENT_CODE_EXEC_WORK_ROOT"
+# The extracted method library is mounted READ-ONLY so the agent can
+# `from iguide_methods import ...` and compose validated units in Python instead of chaining
+# tool calls. Read-only because the library is generated from ingested elements: a run must
+# never be able to edit the thing later runs will trust.
+METHOD_LIBRARY_DIRNAME = "method_library"
+METHOD_LIBRARY_MOUNT = "/opt/iguide_methods"
 
 # A conservative pip requirement spec: name[extras]version-specifiers. No flags,
 # no whitespace, no shell/path characters — deps are passed as argv (never a shell).
@@ -300,6 +307,181 @@ def _clip(text: Any, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s if len(s) <= limit else (s[:limit] + f"\n…[truncated {len(s) - limit} chars]")
 
 
+def method_library_root() -> Optional[Path]:
+    """Where the generated method library lives, built or not: the ONE answer for its reader and
+    its writers.
+
+    They used to disagree. The reader (below) honoured ``AGENT_METHOD_LIBRARY_DIR`` while both
+    writers — ``extractors/emitters/library_emitter.py`` and ``scripts/build_method_library.py``
+    — wrote to ``storage_root()/method_library`` regardless. Setting the variable, which
+    Docker-out-of-Docker requires (docker-compose.extraction.yml), therefore built the library in
+    one place and read it from another, empty one.
+    """
+    override = (os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    try:
+        from agent_runtime.file_store import storage_root
+        return Path(storage_root()) / METHOD_LIBRARY_DIRNAME
+    except Exception:
+        return None
+
+
+def method_library_dir() -> Optional[Path]:
+    """Path of the generated method library, or None when nothing is ingested yet.
+
+    Under Docker-out-of-Docker this path is also the bind SOURCE of the sandbox's library mount,
+    which the host's daemon resolves, so it must exist at the same absolute path on the host.
+    """
+    p = method_library_root()
+    # "Ingested" means the package exists, not merely the directory. An empty directory used to
+    # count, so it was mounted and put first on the sandbox PYTHONPATH with nothing in it.
+    return p if (p is not None and (p / "iguide_methods").is_dir()) else None
+
+
+def artifacts_enabled() -> bool:
+    from agent_runtime.artifacts import artifacts_enabled as _enabled
+    return _enabled()
+
+
+def invariant_gate_enabled() -> bool:
+    """Whether to append the in-sandbox invariant checks. **On whenever the extraction bundle is.**
+
+    Unset, ``AGENT_INVARIANT_GATE`` follows ``AGENT_EXTRACTION`` (agent_runtime/extraction_flag.py),
+    which is off by default, so a deployment that has not opted into the bundle runs exactly the
+    code it ran before. Inside the bundle, on-by-default is deliberate: the failure it catches — a
+    distance computed in a geographic CRS — produces a plausible number and no error, so a gate
+    that has to be remembered protects nobody. An explicit value wins either way. The epilogue
+    cannot fail a run (every check is guarded and the writer swallows OSError), so the cost of
+    leaving it on is one JSON file.
+    """
+    raw = (os.getenv("AGENT_INVARIANT_GATE") or "").strip().lower()
+    if not raw:
+        # Unset: follow the extraction bundle (agent_runtime/extraction_flag.py), OFF by default,
+        # so integrating it changes no deployed run until it is switched on.
+        return extraction_enabled()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def contracts_for_code(code: str) -> Dict[str, Any]:
+    """Declared invariants for every library unit this code imports.
+
+    Resolved AGENT-side from the registry, then injected into the run as a literal. The sandbox
+    has no network and the library mount is optional, so a guard that tried to read the registry
+    itself could silently fail to install — and a guard that does not install reads exactly like
+    a contract that passed.
+    """
+    try:
+        from agent_runtime.artifacts import library_units_used
+        from agent_runtime.method_library import load_registry
+    except Exception:
+        return {}
+    used = library_units_used(code or "")
+    if not used:
+        return {}
+    registry = load_registry()
+    if not registry:
+        return {}
+    out: Dict[str, Any] = {}
+    for ref in used:
+        module, symbol = ref.get("module"), ref.get("symbol")
+        if not (module and symbol):
+            continue
+        # Match on the ELEMENT PACKAGE plus symbol, not on the exact `v_<sha>` module string.
+        # Exact-string equality meant the element-package alias
+        # (`from iguide_methods.ke_x import symbol`) resolved nothing, so importing a unit the
+        # documented friendly way turned enforcement off silently.
+        element_pkg = module.split(".")[1] if module.count(".") >= 1 else ""
+        entry = next((v for v in registry.values()
+                      if isinstance(v, dict) and v.get("module") == module
+                      and v.get("library_symbol") == symbol), None)
+        if entry is None and element_pkg:
+            entry = next((v for v in registry.values()
+                          if isinstance(v, dict) and not v.get("ambiguous")
+                          and v.get("library_symbol") == symbol
+                          and v.get("element_package") == element_pkg), None)
+        invariants = [i for i in ((entry or {}).get("invariants") or []) if isinstance(i, dict)]
+        if invariants:
+            # Keyed and patched on the REGISTRY's module, which is the one that actually holds
+            # the function object — the alias path resolves to the same unit.
+            out[symbol] = {"module": (entry or {}).get("module") or module,
+                           "symbol": symbol, "invariants": invariants}
+    return out
+
+
+def _note_printed_outputs(verification: Dict[str, Any], stdout: Any, work: Path) -> Dict[str, Any]:
+    """Name the near-miss: ``print('IGUIDE_OUTPUTS =', {...})`` declares nothing.
+
+    The gate reads the module-level VARIABLE, so a run that printed its numbers instead declared
+    none, and none of them was checked. Seen in the map UI on 2026-10-01: ``declared_outputs.json``
+    was ``{}`` on a run whose stdout carried the dict. Only the agent side sees stdout, so it is
+    detected here and stated as a cannot_determine that says what to do. Never raises.
+    """
+    try:
+        from agent_runtime.sandbox_verify import DECLARED_FILENAME, DECLARED_OUTPUTS, UNKNOWN
+
+        if not verification or DECLARED_OUTPUTS not in str(stdout or ""):
+            return verification
+        path = work / DECLARED_FILENAME
+        declared = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        if declared:
+            return verification
+        finding = {"check": "declared_outputs", "status": UNKNOWN, "target": DECLARED_OUTPUTS,
+                   "message": (f"{DECLARED_OUTPUTS} was printed, not assigned: the gate reads a "
+                               f"module-level variable, so none of the printed numbers was "
+                               f"checked. Assign {DECLARED_OUTPUTS} = {{...}} at module scope.")}
+        counts = dict(verification.get("counts") or {})
+        counts[UNKNOWN] = counts.get(UNKNOWN, 0) + 1
+        verdict = verification.get("verdict")
+        return {**verification, "findings": [*(verification.get("findings") or []), finding],
+                "counts": counts, "verdict": verdict if verdict == "fail" else UNKNOWN}
+    except Exception:
+        return verification
+
+
+def _read_checks(work: Path) -> Dict[str, Any]:
+    """Load the invariant gate's report, if it wrote one.
+
+    Absent is not a failure: the gate may be disabled, or the run may have died before the
+    epilogue. Absent and "checked, all fine" must stay distinguishable, so this returns {} for
+    absent rather than a synthetic pass.
+    """
+    from agent_runtime.sandbox_verify import CHECKS_FILENAME
+
+    path = work / CHECKS_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # Keep the payload small, but never at the cost of the evidence for the verdict. The cap
+    # used to slice an unsorted list, so a report with 12 cannot_determine findings ahead of a
+    # single `fail` shipped verdict="fail" with no fail finding — and the gate keyed on
+    # findings, so nothing reacted.
+    order = {"fail": 0, "cannot_determine": 1}
+    findings = sorted((f for f in (data.get("findings") or [])
+                       if isinstance(f, dict) and f.get("status") != "pass"),
+                      key=lambda f: order.get(f.get("status"), 2))
+    truncated = max(0, len(findings) - 12)
+    return {"verdict": data.get("verdict"), "counts": data.get("counts") or {},
+            "inspected": data.get("inspected") or [], "findings": findings[:12],
+            **({"findings_truncated": truncated} if truncated else {}),
+            **({"error": data["error"]} if data.get("error") else {})}
+
+
+def session_workspace_dir(session: Optional[str]) -> Optional[Path]:
+    """The durable workspace for *session*, or None without a work root.
+
+    Public so agent-side staging writes into the SAME directory the next run carries into /work:
+    a file staged anywhere else would exist on the host and be missing in the container, which
+    surfaces inside a sandbox with no network as a bare "file not found".
+    """
+    return _session_workspace(session)
+
+
 @dataclass
 class ExecResult:
     exit_code: Optional[int]
@@ -311,6 +493,8 @@ class ExecResult:
     backend: str = ""
     code: str = ""   # the executed source (also saved as a downloadable artifact)
     installed: List[str] = field(default_factory=list)  # pip deps installed before the run
+    # Findings from the in-sandbox invariant gate. Empty dict = the gate did not run.
+    verification: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -328,6 +512,9 @@ class ExecResult:
             "installed": self.installed,
             "artifacts": self.artifacts,
             "backend": self.backend,
+            # Surfaced INSIDE the tool result, not appended to the answer afterwards, so the
+            # model can react in-loop: reproject and re-run rather than caveat a wrong number.
+            "verification": self.verification,
         }
 
 
@@ -410,6 +597,42 @@ def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Option
     if not (stderr or "").strip():
         detail += " No stderr was produced, so nothing was written and no output files exist."
     return detail
+
+
+# The top-level package only. `No module named 'iguide_methods.ke_x'` names a wrong element
+# module, which the traceback already explains; it is not a missing library.
+_LIBRARY_MISSING = "No module named 'iguide_methods'"
+_library_warned: set = set()
+
+
+def _diagnose_library_import(stderr: str, backend: str) -> Optional[str]:
+    """Say WHY ``iguide_methods`` would not import, which the traceback cannot.
+
+    Three causes raise the same ModuleNotFoundError and call for different responses. The one
+    that matters is a library that is built but invisible to the sandbox. Under
+    Docker-out-of-Docker the host's daemon resolves the bind source, and the default location
+    (storage_root()/method_library) sits on a named volume the host does not have at that path,
+    so the daemon creates an empty directory and mounts THAT. Meanwhile the agent side lists the
+    methods, with import lines, and every one of them fails here.
+    """
+    if _LIBRARY_MISSING not in (stderr or ""):
+        return None
+    if not extraction_enabled():
+        return "[`iguide_methods` does not exist in this deployment; write the function inline.]"
+    lib = method_library_dir()
+    if lib is None:
+        return ("[no method library has been built in this deployment, so `iguide_methods` does "
+                "not exist yet; write the function inline.]")
+    if str(lib) not in _library_warned:
+        _library_warned.add(str(lib))
+        _LOG.warning(
+            "method library at %s is built but a %s sandbox could not import it.%s", lib, backend,
+            " Under Docker-out-of-Docker the daemon resolves that path on the HOST, so it must "
+            "exist at the same absolute path there (docker-compose.extraction.yml); otherwise an "
+            "empty directory is mounted." if backend == "docker" else "")
+    return ("[the method library is built in this deployment but is not visible inside the "
+            "sandbox: a mount problem on the server, logged for its operator. No library method "
+            "can be imported until it is fixed; write the function inline.]")
 
 
 def _describe_code(code: str) -> Optional[str]:
@@ -951,11 +1174,25 @@ class CodeExecutor:
                                "Write it first with write_workspace_file, or pass the program "
                                "inline as `code`."))
             else:
-                (work / "script.py").write_text(code or "", encoding="utf-8")
+                # The invariant gate runs on the SAME interpreter, so it inspects the live frames
+                # the code produced rather than its source text. Wrapped into the written
+                # script but NOT into `code`, so the persisted source stays what the model wrote.
+                # PROLOGUE first: it patches imported library units so the contract is enforced.
+                script = code or ""
+                if invariant_gate_enabled():
+                    from agent_runtime.sandbox_verify import epilogue_source, prologue_source
+                    script = prologue_source(contracts_for_code(code or "")) + script + epilogue_source()
+                (work / "script.py").write_text(script, encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors, shadowed = _stage_inputs(work, input_files)
             try:
                 os.chmod(work, 0o777)  # let a non-root container user write outputs
+            except OSError:
+                pass
+            from agent_runtime.sandbox_verify import (CHECKS_FILENAME, DECLARED_FILENAME,
+                                                      ENVIRONMENT_FILENAME)
+            try:
+                (work / CHECKS_FILENAME).unlink()
             except OSError:
                 pass
             exit_code, stdout, stderr, timed_out, error = self._run(
@@ -965,10 +1202,26 @@ class CodeExecutor:
             unchanged = {rel for rel, sig in _stat_map(work).items()
                          if carried.get(rel) == sig}  # carried in and untouched -> not an output
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
+            # The gate's own record (environment.json, declared_outputs.json) is provenance, not a
+            # result. It stays in the workspace and the run record, beside checks.json, but is not
+            # offered as a download: the map UI listed both again after every run.
             artifacts = [*source_artifacts,
-                         *_persist_artifacts(work, {"script.py", *staged, *unchanged})]
+                         *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, ENVIRONMENT_FILENAME,
+                                                    DECLARED_FILENAME, *staged, *unchanged})]
+            verification = _note_printed_outputs(_read_checks(work), stdout, work)
+            # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
+            # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
+            # run dir before it is carried back, so it lands in the durable workspace beside the
+            # files it describes; guarded inside emit() so provenance can never fail an analysis.
+            # This call existed (M2.8) and the 2026-08-27 merge dropped it without a test noticing.
+            if artifacts_enabled():
+                from agent_runtime import artifacts as _artifacts
+                _artifacts.emit(code=(code or ""), work=work,
+                                image=getattr(self, "image", ""), backend=self.backend,
+                                dependencies=deps, staged=sorted(staged),
+                                verification=verification)
             if workspace:
-                _copy_tree(work, workspace, skip={"script.py", *staged})
+                _copy_tree(work, workspace, skip={"script.py", CHECKS_FILENAME, *staged})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if auto:
@@ -983,10 +1236,16 @@ class CodeExecutor:
                 stderr = (str(stderr or "") + f"\n[an attached upload was used for {shadowed} "
                           "rather than the file of that name in the working directory; write "
                           "your version under a different name to read it back]").strip()
+            # FIRST rather than appended like the notes above: `_clip` keeps the head, and this
+            # note is the explanation of the failure, not a footnote to it.
+            library_note = _diagnose_library_import(stderr, self.backend)
+            if library_note:
+                stderr = (library_note + "\n" + str(stderr or "")).strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.
             error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
-                              artifacts, self.backend, code=(code or ""), installed=deps)
+                              artifacts, self.backend, code=(code or ""), installed=deps,
+                              verification=verification)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -1101,9 +1360,15 @@ class DockerCodeExecutor(CodeExecutor):
             "--workdir", "/work",
             "--tmpfs", "/tmp:rw,size=64m,exec",
             "--env", "HOME=/tmp",
-            "--env", f"PYTHONPATH=/work/{DEPS_DIRNAME}",
             "-v", f"{work}:/work:rw",       # only writable mount
         ]
+        # The library mount is part of the extraction bundle: no mount while it is off.
+        lib = method_library_dir() if extraction_enabled() else None
+        pythonpath = f"/work/{DEPS_DIRNAME}"
+        if lib:
+            argv += ["-v", f"{lib}:{METHOD_LIBRARY_MOUNT}:ro"]
+            pythonpath = f"{METHOD_LIBRARY_MOUNT}:{pythonpath}"
+        argv += ["--env", f"PYTHONPATH={pythonpath}"]
         if deps_cache is not None:
             # READ-ONLY on purpose. The cache outlives the run, so code that could write to it
             # could leave a poisoned `numpy.py` for the NEXT turn of the conversation to
@@ -1243,8 +1508,14 @@ class LocalSubprocessExecutor(CodeExecutor):
                 return None, inst.stdout, _clip(inst.stderr), False, "dependency install failed"
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(work)}
         # Also when this run installed nothing: an earlier run in the conversation may have.
+        paths = []
+        lib = method_library_dir() if extraction_enabled() else None
+        if lib:
+            paths.append(str(lib))
         if dependencies or deps_cache is not None:
-            env["PYTHONPATH"] = str(deps_dir)
+            paths.append(str(deps_dir))
+        if paths:
+            env["PYTHONPATH"] = os.pathsep.join(paths)
         try:
             proc = fork_safe.run(
                 [sys.executable or "python", entrypoint or "script.py"],

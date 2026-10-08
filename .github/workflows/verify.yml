@@ -93,3 +93,102 @@ jobs:
         # also puts the repo root on sys.path. -rfEs adds skip reasons to the summary, so a test
         # that skips here for want of something the image has is visible as a skip.
         run: python3 -m pytest rag_pipeline/tests/ -q -rfEs
+
+  deployment-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # python-dotenv because pytest imports rag_pipeline/tests/conftest.py as part of the
+      # `rag_pipeline` package, and rag_pipeline/__init__.py imports dotenv at module scope.
+      # Without it the job dies collecting conftest, before a single assertion runs.
+      # networkx because three contract tests pin the graph stack, one of them asserting the
+      # INSTALLED version equals constraints.txt — so it is installed through the lock, not loose.
+      - run: pip install pytest pyyaml python-dotenv networkx -c constraints.txt
+      - name: Assert the deployed configuration is safe
+        # These are security boundaries, not preferences:
+        #   - LLM_PROVIDER=claude-cli routes through a personal subscription
+        #   - AGENT_ALLOW_WORKFLOW_EXEC exec()s ingested notebook source in a credentialed process
+        run: pytest rag_pipeline/tests/test_deployment_contract.py -q
+
+  artifact-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build the sandbox image
+        run: docker build -t iguide-codeexec:ci sandbox/
+
+      - name: Resolve the image DIGEST
+        # A tag is not a pin. `python:3.11-slim` resolves to different bytes next month, so an
+        # artifact recording a tag records nothing about the environment that produced its number.
+        id: digest
+        run: |
+          DIGEST=$(docker image inspect iguide-codeexec:ci --format '{{.Id}}')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "pinned to $DIGEST"
+
+      - name: The image must import its geospatial stack with NO network
+        # The sandbox runs --network none. A wheel that installs cleanly and then fails at import
+        # makes a successful build prove nothing — this is exactly how a missing libexpat.so.1
+        # shipped past a green build once already.
+        run: |
+          docker run --rm --network none iguide-codeexec:ci python -c "
+          import geopandas, rasterio, pyproj
+          from shapely.geometry import Point
+          g = geopandas.GeoDataFrame({'a': [1]}, geometry=[Point(-87.6, 41.9)],
+                                     crs='EPSG:4326').to_crs(32616)
+          assert g.crs.axis_info[0].unit_name == 'metre'
+          assert pyproj.CRS.from_epsg(3435).axis_info[0].unit_name == 'US survey foot'
+          area = g.buffer(25000).area.iloc[0] / 1e6
+          assert 1955 < area < 1965, area
+          print('geospatial stack OK offline; 25km buffer =', round(area, 2), 'km2')
+          "
+
+      - name: The invariant gate must catch a geographic-CRS measurement
+        # The gate's whole purpose. If this passes silently, every downstream 'verified' claim is
+        # worthless, and nothing else in CI would notice.
+        run: |
+          pip install -r requirements.txt -c constraints.txt
+          python - <<'PY'
+          import json, subprocess, sys, tempfile
+          from pathlib import Path
+          from agent_runtime.sandbox_verify import prologue_source, epilogue_source
+
+          WRONG = """
+          import geopandas as gpd
+          from shapely.geometry import Point
+          gdf = gpd.GeoDataFrame({'a': [1]}, geometry=[Point(-87.6, 41.9)], crs='EPSG:4326')
+          gdf['area_km2'] = gdf.buffer(25000).area / 1e6     # 25000 DEGREES
+          """
+          RIGHT = WRONG.replace("crs='EPSG:4326')", "crs='EPSG:4326').to_crs(32616)")
+
+          for label, body, expected in (("degrees buffer", WRONG, "fail"),
+                                        ("reprojected", RIGHT, "pass")):
+              with tempfile.TemporaryDirectory() as d:
+                  Path(d, "run.py").write_text(
+                      prologue_source(None) + body + epilogue_source(), encoding="utf-8")
+                  subprocess.run([sys.executable, "run.py"], cwd=d, capture_output=True)
+                  report = json.loads(Path(d, "checks.json").read_text())
+                  assert "error" not in report, report["error"]
+                  assert report["verdict"] == expected, f"{label}: {report['verdict']}"
+                  print(f"  {label}: {report['verdict']}")
+          PY
+
+      - name: Replay a recorded artifact, if one is committed
+        # Skipped rather than failed when there is no fixture: a missing artifact is not a
+        # regression, and a job that fails for being empty gets disabled.
+        run: |
+          if [ -d outputs ] && ls outputs/*/artifact/manifest.json >/dev/null 2>&1; then
+            for a in outputs/*/artifact; do
+              echo "replaying $a"
+              python scripts/rerun_artifact.py "$a"
+            done
+          else
+            echo "no committed artifact fixture; skipping replay"
+          fi

@@ -1,0 +1,985 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extraction Browser</title>
+<style>
+  :root {
+    --paper:#F6F8F9; --panel:#FFFFFF; --panel-alt:#EDF1F3; --rail:#E9EEF1;
+    --ink:#17212B; --ink-soft:#43555F; --muted:#6A7B87;
+    --rule:#D4DCE1; --rule-soft:#E4EAEE;
+    --survey:#1B6560; --survey-bg:#E2EFED;
+    --contour:#9A4C22; --contour-bg:#F5E7DE;
+    --slate:#55707F; --slate-bg:#E6EDF1;
+    --code-bg:#EEF2F4; --focus:#1B6560;
+    --shadow:0 1px 2px rgba(23,33,43,.06), 0 10px 28px -20px rgba(23,33,43,.28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:#0E161D; --panel:#16212A; --panel-alt:#1D2A34; --rail:#131E26;
+      --ink:#DFE7EB; --ink-soft:#AEBDC6; --muted:#8397A3;
+      --rule:#2C3B46; --rule-soft:#223038;
+      --survey:#55ADA6; --survey-bg:#12312F;
+      --contour:#D18C60; --contour-bg:#33221A;
+      --slate:#9DB4C1; --slate-bg:#1C2A33;
+      --code-bg:#101A21; --focus:#55ADA6;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -20px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:#0E161D; --panel:#16212A; --panel-alt:#1D2A34; --rail:#131E26;
+    --ink:#DFE7EB; --ink-soft:#AEBDC6; --muted:#8397A3;
+    --rule:#2C3B46; --rule-soft:#223038;
+    --survey:#55ADA6; --survey-bg:#12312F;
+    --contour:#D18C60; --contour-bg:#33221A;
+    --slate:#9DB4C1; --slate-bg:#1C2A33;
+    --code-bg:#101A21; --focus:#55ADA6;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -20px rgba(0,0,0,.8);
+  }
+
+  * { box-sizing:border-box; }
+  /* An app shell, not a document: the two panes scroll independently so reading down the list
+     never pushes the detail off screen. `min-height:0` on the flex/grid children is what actually
+     allows them to shrink and scroll — without it they size to their content and the whole page
+     scrolls again. */
+  html, body { height:100%; }
+  body {
+    /* `100dvh` first, `100%` as the fallback for browsers without dynamic viewport units.
+       Viewport-relative on purpose: an Artifact renders inside a frame whose host RESIZES it to
+       fit the content, so a height that resolves against the parent is circular — the frame sizes
+       to the content while the content sizes to the frame. A viewport unit breaks that loop. */
+    height:100%; height:100dvh;
+    margin:0; background:var(--paper); color:var(--ink);
+    font:14px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  header, .controls, .missing { flex:0 0 auto; }
+  .mono { font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; }
+
+  /* ---------- masthead ---------- */
+  header {
+    padding:20px 24px 16px; border-bottom:1px solid var(--rule);
+    background:var(--panel); display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 22px;
+  }
+  header h1 { margin:0; font-size:17px; font-weight:640; letter-spacing:-.01em; }
+  .tally {
+    display:flex; flex-wrap:wrap; gap:4px 16px; margin:0;
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11.5px; color:var(--muted);
+  }
+  .tally b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+  .stamp { margin-left:auto; font-size:11.5px; color:var(--muted); }
+
+  /* ---------- controls ---------- */
+  .controls {
+    padding:14px 24px; border-bottom:1px solid var(--rule); background:var(--rail);
+    display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center;
+  }
+  input[type=search] {
+    flex:1 1 260px; min-width:200px; padding:8px 11px;
+    border:1px solid var(--rule); border-radius:4px;
+    background:var(--panel); color:var(--ink); font:inherit;
+  }
+  input[type=search]::placeholder { color:var(--muted); }
+  input[type=search]:focus-visible, button:focus-visible, .row:focus-visible {
+    outline:2px solid var(--focus); outline-offset:1px;
+  }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  button.chip {
+    font:inherit; font-size:12px; padding:5px 11px; cursor:pointer;
+    border:1px solid var(--rule); border-radius:20px;
+    background:var(--panel); color:var(--ink-soft);
+  }
+  button.chip:hover { border-color:var(--survey); color:var(--ink); }
+  button.chip[aria-pressed="true"] {
+    background:var(--survey); border-color:var(--survey); color:var(--panel); font-weight:600;
+  }
+  :root[data-theme="dark"] button.chip[aria-pressed="true"],
+  .darkfix button.chip[aria-pressed="true"] { color:#08131A; }
+  button.chip .n { opacity:.62; margin-left:5px; font-variant-numeric:tabular-nums; }
+  .sep { width:1px; align-self:stretch; background:var(--rule); }
+
+  /* ---------- layout ---------- */
+  main {
+    flex:1 1 auto; min-height:0; overflow:hidden;
+    display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);
+  }
+  #list { border-right:1px solid var(--rule); min-height:0; overflow-y:auto; }
+  #detail { min-height:0; overflow-y:auto; }
+  .count-line {
+    padding:9px 24px; font-size:11.5px; color:var(--muted);
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    border-bottom:1px solid var(--rule-soft);
+    position:sticky; top:0; z-index:2; background:var(--paper);
+  }
+  /* Narrow screens cannot show both panes, so the shell relaxes back into a scrolling page and
+     the detail replaces the list once a record is picked. */
+  @media (max-width:900px) {
+    body { height:auto; overflow:visible; }
+    main { grid-template-columns:1fr; overflow:visible; }
+    #list, #detail { overflow:visible; }
+    #detail { display:none; }
+    main.showing-detail #list { display:none; }
+    main.showing-detail #detail { display:block; }
+  }
+  .row {
+    display:block; width:100%; text-align:left; background:none; border:0;
+    border-bottom:1px solid var(--rule-soft); padding:11px 24px; cursor:pointer;
+    font:inherit; color:var(--ink);
+  }
+  .row:hover { background:var(--panel-alt); }
+  .row[aria-current="true"] { background:var(--survey-bg); box-shadow:inset 3px 0 0 var(--survey); }
+  .row-top { display:flex; align-items:baseline; gap:9px; }
+  .row-name {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:13px; font-weight:600; overflow-wrap:anywhere;
+  }
+  .row-meta { margin-left:auto; font-size:11px; color:var(--muted); white-space:nowrap; }
+  .row-sub {
+    font-size:12.5px; color:var(--ink-soft); margin-top:3px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  }
+  .row-flags { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+
+  .tag {
+    font-size:10px; font-weight:650; letter-spacing:.05em; text-transform:uppercase;
+    padding:2px 6px; border-radius:3px; background:var(--slate-bg); color:var(--slate);
+    white-space:nowrap;
+  }
+  .tag.good { background:var(--survey-bg); color:var(--survey); }
+  .tag.warn { background:var(--contour-bg); color:var(--contour); }
+  .kind {
+    font-size:10px; font-weight:650; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--muted);
+  }
+
+  /* ---------- detail ---------- */
+  #detail { padding:22px 26px 60px; min-width:0; }
+  #back { display:none; }
+  @media (max-width:900px) {
+    #back {
+      display:inline-block; margin:0 0 14px; padding:6px 12px; cursor:pointer;
+      font:inherit; font-size:12px; border:1px solid var(--rule); border-radius:4px;
+      background:var(--panel); color:var(--ink);
+    }
+  }
+  #detail .empty { color:var(--muted); font-size:13.5px; max-width:44ch; }
+  #detail h2 {
+    margin:0 0 2px; font-size:19px; font-weight:640; letter-spacing:-.012em;
+    overflow-wrap:anywhere;
+  }
+  #detail .crumb {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11.5px; color:var(--muted); margin:0 0 16px; overflow-wrap:anywhere;
+  }
+  dl { margin:0; display:grid; grid-template-columns:minmax(96px,140px) 1fr; }
+  dl dt {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); padding:8px 12px 8px 0;
+    border-top:1px solid var(--rule-soft);
+  }
+  dl dd {
+    margin:0; padding:8px 0; border-top:1px solid var(--rule-soft);
+    font-size:12.5px; overflow-wrap:anywhere;
+  }
+  dl dt:first-of-type, dl dd:first-of-type { border-top:none; }
+  pre {
+    margin:6px 0 0; padding:10px 12px; background:var(--code-bg);
+    border:1px solid var(--rule-soft); border-radius:3px; overflow-x:auto;
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:12px; line-height:1.5;
+  }
+  .sub {
+    margin:20px 0 0; font-size:11px; font-weight:650; letter-spacing:.09em;
+    text-transform:uppercase; color:var(--survey);
+  }
+  table { border-collapse:collapse; width:100%; margin-top:6px; }
+  th, td {
+    text-align:left; font-size:12px; padding:6px 12px 6px 0;
+    border-bottom:1px solid var(--rule-soft); vertical-align:top;
+  }
+  th { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); }
+  td.mono, th.mono { font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; }
+  .ev { color:var(--muted); font-size:11.5px; }
+  .chiprow { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .unitlist { display:flex; flex-direction:column; margin-top:6px; }
+  button.unitrow {
+    display:grid; grid-template-columns:auto auto 1fr; gap:2px 10px; align-items:baseline;
+    width:100%; text-align:left; cursor:pointer; font:inherit; color:var(--ink);
+    background:none; border:0; border-top:1px solid var(--rule-soft); padding:9px 0;
+  }
+  button.unitrow:hover { background:var(--panel-alt); }
+  .unitrow .unit-src {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); text-align:right;
+  }
+  .unitrow .unit-sig, .unitrow .unit-doc {
+    grid-column:1 / -1; font-size:12px; overflow-wrap:anywhere;
+  }
+  .unitrow .unit-sig {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace; color:var(--ink-soft);
+  }
+  .unitrow .unit-doc { color:var(--muted); }
+  /* One extracted cell. `<details>` so a 40-cell notebook opens as a readable outline of its
+     steps rather than as forty walls of code — the title tiers exist to make that outline work. */
+  details.blk { border-top:1px solid var(--rule-soft); }
+  details.blk > summary {
+    display:grid; grid-template-columns:auto 1fr auto; gap:2px 10px; align-items:baseline;
+    padding:9px 0; cursor:pointer; list-style:none; font-size:12.5px;
+  }
+  details.blk > summary::-webkit-details-marker { display:none; }
+  details.blk > summary:hover { background:var(--panel-alt); }
+  .blk-ord {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); min-width:3.2em;
+  }
+  .blk-name { color:var(--ink); overflow-wrap:anywhere; }
+  .blk-name.unnamed { color:var(--muted); font-style:italic; }
+  .blk-tools {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted); text-align:right;
+  }
+  .blk-md {
+    margin:6px 0 0; padding:8px 12px; border-left:3px solid var(--rule);
+    color:var(--ink-soft); font-size:12.5px; white-space:pre-wrap;
+  }
+  details.blk > div { padding-bottom:10px; }
+
+  /* Grouped list: artifacts under the knowledge element they were extracted from. */
+  .grp { border-bottom:1px solid var(--rule-soft); }
+  button.grp-head {
+    display:grid; grid-template-columns:1fr auto; gap:2px 10px; align-items:baseline;
+    width:100%; text-align:left; cursor:pointer; font:inherit; color:var(--ink);
+    background:var(--panel-alt); border:0; padding:8px 24px;
+    position:sticky; top:0; z-index:1;
+  }
+  button.grp-head:hover { filter:brightness(.97); }
+  .grp-title { font-size:12.5px; font-weight:600; overflow-wrap:anywhere; }
+  .grp-meta {
+    font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:11px; color:var(--muted);
+  }
+  .grp-sub { grid-column:1 / -1; font-size:11px; color:var(--muted); }
+  .grp .row { padding-left:38px; }
+
+  button.link {
+    font:inherit; font-family: ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    font-size:12.5px; padding:0; border:0; background:none; cursor:pointer;
+    color:var(--survey); text-decoration:underline; text-underline-offset:2px;
+  }
+  #detail ol.steps li { margin-bottom:7px; }
+  #detail p { margin:8px 0 0; font-size:13px; }
+  .scroller { overflow-x:auto; }
+  .note {
+    margin-top:16px; padding:11px 14px; border-left:3px solid var(--contour);
+    background:var(--contour-bg); border-radius:0 3px 3px 0; font-size:12.5px;
+  }
+  .missing {
+    margin:0; padding:9px 24px; background:var(--contour-bg); color:var(--contour);
+    font-size:12px; border-bottom:1px solid var(--rule);
+  }
+</style>
+
+<script type="application/json" id="payload">__DATA__</script>
+
+<header>
+  <h1>Extraction Browser</h1>
+  <p class="tally" id="tally"></p>
+  <span class="stamp mono" id="stamp"></span>
+</header>
+
+<p class="missing" id="missing" hidden></p>
+
+<div class="controls">
+  <input type="search" id="q" placeholder="Search names, titles, signatures, schemas, reasons…"
+         autocomplete="off" spellcheck="false" aria-label="Search extracted records">
+  <div class="chips" id="kinds" role="group" aria-label="Record type"></div>
+  <div class="sep" aria-hidden="true"></div>
+  <div class="chips" id="grouping" role="group" aria-label="Grouping"></div>
+  <div class="sep" aria-hidden="true"></div>
+  <div class="chips" id="facets" role="group" aria-label="Filters"></div>
+</div>
+
+<main id="main">
+  <div id="list">
+    <p class="count-line" id="countline"></p>
+    <div id="rows"></div>
+  </div>
+  <div id="detail"><p class="empty">Pick a record to see everything extraction recorded for
+    it — the full contract for a unit, the schema and CRS for a dataset, the read outcome and its
+    reason for a publication.</p></div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  const DATA = JSON.parse(document.getElementById("payload").textContent);
+  const RECORDS = DATA.records || [];
+  const KIND_LABEL = { unit: "method unit", dataset: "dataset", publication: "publication",
+                       code: "code element", notebook: "notebook" };
+  const GOOD = new Set(["has-invariants", "documented", "readable", "has-schema", "has-crs",
+                        "has-variables", "has-loader", "produced-units", "cc-by", "cc-by-nc-nd",
+                        "cc-by-sa", "cc0", "pdf-from-best", "pdf-from-alternate",
+                        "has-workflow", "fully-named"]);
+  const WARN = new Set(["naked", "zero-arg", "off-domain", "no-local-file",
+                        "unparsed-cells", "no-blocks", "extract-error"]);
+
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const num = (n) => (n == null ? "" : Number(n).toLocaleString());
+  const bytes = (n) => {
+    if (n == null) return "";
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + " kB";
+    return n + " B";
+  };
+  const tagClass = (f) => GOOD.has(f) ? "tag good" : (WARN.has(f) ? "tag warn" : "tag");
+
+  // One haystack per record, built once. Everything the search box should reach.
+  //
+  // Defensive on purpose. This loop runs before anything renders, so ONE record of an unexpected
+  // shape takes the entire page down to blank — which is exactly what happened when a
+  // publication's declared parameters (an object) landed on the same `params` key a unit uses for
+  // its parameter list (an array), and `.map` threw. The shape bug is fixed at its source; this
+  // makes the blast radius of the next one a missing search term rather than an empty page.
+  const list_ = (v) => (Array.isArray(v) ? v : []);
+  const joinText = (v) => list_(v).map((x) =>
+    (x && typeof x === "object") ? Object.values(x).filter(
+      (y) => typeof y === "string" || typeof y === "number").join(" ") : String(x)).join(" ");
+
+  // Every field the page iterates, coerced to an array once. The search index was made
+  // defensive after a shape mismatch blanked the page; the DETAIL views were not, because
+  // nothing had ever opened one under test — so `requires: 42` still threw on `.map`, one
+  // click later. Normalising here fixes every consumer at once, and a malformed field costs
+  // its own row rather than the page.
+  const ARRAY_FIELDS = ["flags", "schema", "variables", "requires", "params", "invariants",
+                        "steps", "datasets_referenced", "tools_referenced", "units_in_library",
+                        "blocks", "notebook_units", "tags", "authors", "imports", "off_domain",
+                        "dtypes", "bounds", "resolution"];
+  RECORDS.forEach((r) => {
+    ARRAY_FIELDS.forEach((k) => {
+      if (k in r && !Array.isArray(r[k])) r[k] = [];
+    });
+  });
+
+  RECORDS.forEach((r) => {
+    try {
+      r._hay = [r.name, r.title, r.id, r.element, r.source, r.signature, r.summary, r.import,
+                r.doi, r.reason, r.outcome, r.stage, r.format, r.crs, r.error, r.note,
+                r.spec_status, r.primary_member, r.geometry_type, r.unit_kind, r.extractor,
+                joinText(r.schema), joinText(r.variables), joinText(r.requires),
+                joinText(r.flags), joinText(r.steps), joinText(r.datasets_referenced),
+                joinText(r.tools_referenced),
+                list_(r.invariants).map((i) => (i && i.check) || "").join(" "),
+                joinText(r.params),
+                Object.keys(r.declared_params || {}).join(" "),
+                // A notebook's substance is its cells, so searching has to reach INTO them —
+                // otherwise the type with the most extracted content is the least findable.
+                list_(r.blocks).map((b) => [b.title, b.code, b.markdown,
+                                            list_(b.tools).join(" ")].join(" ")).join(" "),
+                list_(r.notebook_units).map((u) => [u.symbol, u.signature, u.summary,
+                                                    u.reason].join(" ")).join(" "),
+                joinText(r.tags), joinText(r.authors), r.repo,
+               ].filter(Boolean).join(" ").toLowerCase();
+    } catch (err) {
+      r._hay = String(r.name || r.id || "").toLowerCase();
+    }
+  });
+
+  const state = { kind: "all", facets: new Set(), q: "", selected: null,
+                  grouped: false, open: new Set() };
+
+  // ---------- parent knowledge element ----------
+  //
+  // Every record traces back to one platform element: an element record IS its element, and a
+  // method unit was extracted FROM one. Flat, the 840 units drown the 500-odd elements they came
+  // from and nothing shows which artifacts share a parent — which is the question "what did we
+  // get out of this element" actually asks.
+  const ELEMENT_KINDS = new Set(["notebook", "dataset", "publication", "code"]);
+  const parentOf = (r) => String((r.kind === "unit" ? r.element : r.id) || "");
+  // The element record is the authority on a parent's title; a unit only knows its own name.
+  const PARENT = new Map();
+  RECORDS.forEach((r) => {
+    if (ELEMENT_KINDS.has(r.kind) && r.id) {
+      PARENT.set(String(r.id), { title: r.title || r.name, kind: r.kind });
+    }
+  });
+
+  // ---------- header ----------
+  const counts = DATA.counts || {};
+  document.getElementById("tally").innerHTML = Object.keys(counts).sort()
+    .map((k) => `<span><b>${counts[k]}</b> ${esc(KIND_LABEL[k] || k)}s</span>`).join("");
+  document.getElementById("stamp").textContent = DATA.generated || "";
+  if ((DATA.missing || []).length) {
+    const m = document.getElementById("missing");
+    m.hidden = false;
+    m.textContent = "Not found, so its rows are absent: " + DATA.missing.join(", ")
+      + ". Re-run the matching extraction pass, then rebuild this page.";
+  }
+
+  // ---------- chips ----------
+  const kindsBox = document.getElementById("kinds");
+  const facetBox = document.getElementById("facets");
+
+  function chip(label, n, pressed) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip";
+    b.setAttribute("aria-pressed", pressed ? "true" : "false");
+    b.innerHTML = esc(label) + (n == null ? "" : `<span class="n">${n}</span>`);
+    return b;
+  }
+
+  function buildKinds() {
+    kindsBox.textContent = "";
+    const all = chip("All", RECORDS.length, state.kind === "all");
+    all.onclick = () => { state.kind = "all"; state.facets.clear(); render(); };
+    kindsBox.appendChild(all);
+    Object.keys(counts).sort().forEach((k) => {
+      const b = chip(KIND_LABEL[k] || k, counts[k], state.kind === k);
+      b.onclick = () => { state.kind = k; state.facets.clear(); render(); };
+      kindsBox.appendChild(b);
+    });
+  }
+
+  const groupBox = document.getElementById("grouping");
+
+  function buildGrouping() {
+    groupBox.textContent = "";
+    [["Flat list", false], ["By element", true]].forEach(([label, on]) => {
+      const b = chip(label, null, state.grouped === on);
+      b.onclick = () => { state.grouped = on; state.open.clear(); render(); list.scrollTop = 0; };
+      groupBox.appendChild(b);
+    });
+  }
+
+  function buildFacets() {
+    // Facets are derived from the records currently in scope, so a filter that would match
+    // nothing is never offered.
+    const scope = RECORDS.filter((r) => state.kind === "all" || r.kind === state.kind);
+    const tally = new Map();
+    scope.forEach((r) => (r.flags || []).forEach(
+      (f) => tally.set(f, (tally.get(f) || 0) + 1)));
+    if (state.kind === "publication" || state.kind === "all") {
+      scope.forEach((r) => {
+        if (r.kind === "publication" && r.outcome) {
+          const key = "outcome:" + r.outcome;
+          tally.set(key, (tally.get(key) || 0) + 1);
+        }
+      });
+    }
+    if (state.kind === "dataset" || state.kind === "all") {
+      scope.forEach((r) => {
+        if (r.kind === "dataset" && r.stage) {
+          const key = "stage:" + r.stage;
+          tally.set(key, (tally.get(key) || 0) + 1);
+        }
+      });
+    }
+    facetBox.textContent = "";
+    [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 14).forEach(([f, n]) => {
+        const b = chip(f.replace(/^(outcome|stage):/, ""), n, state.facets.has(f));
+        b.title = f;
+        b.onclick = () => {
+          state.facets.has(f) ? state.facets.delete(f) : state.facets.add(f);
+          render();
+        };
+        facetBox.appendChild(b);
+      });
+  }
+
+  function matches(r) {
+    if (state.kind !== "all" && r.kind !== state.kind) return false;
+    for (const f of state.facets) {
+      if (f.startsWith("outcome:")) { if (r.outcome !== f.slice(8)) return false; }
+      else if (f.startsWith("stage:")) { if (r.stage !== f.slice(6)) return false; }
+      else if (!(r.flags || []).includes(f)) return false;
+    }
+    if (state.q && !r._hay.includes(state.q)) return false;
+    return true;
+  }
+
+  // ---------- list ----------
+  const rowsBox = document.getElementById("rows");
+  const countLine = document.getElementById("countline");
+  const detail = document.getElementById("detail");
+  const main = document.getElementById("main");
+  const list = document.getElementById("list");
+
+  function rowMeta(r) {
+    if (r.kind === "unit") return esc(r.extractor || "");
+    if (r.kind === "dataset") return esc(r.format || r.stage || "");
+    if (r.kind === "publication") return esc(r.sniffed || r.stage || "");
+    return esc(r.stage || "");
+  }
+  function rowSub(r) {
+    if (r.kind === "unit") return esc(r.summary || r.signature || "");
+    if (r.kind === "dataset") {
+      const bits = [];
+      if (r.row_count) bits.push(num(r.row_count) + " rows");
+      if ((r.schema || []).length) bits.push(r.schema.length + " fields");
+      if ((r.variables || []).length) bits.push(r.variables.length + " variables");
+      if (r.crs) bits.push(r.crs);
+      if (r.note) bits.push(r.note);
+      if (r.error) bits.push(r.error);
+      return esc(bits.join(" · ") || r.title);
+    }
+    if (r.kind === "publication") {
+      return esc(r.reason || (r.chars ? num(r.chars) + " chars read" : r.title));
+    }
+    return esc(r.error || r.title);
+  }
+
+  function rowButton(r) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "row";
+    if (state.selected === r) b.setAttribute("aria-current", "true");
+    b.innerHTML =
+      `<span class="row-top"><span class="row-name">${esc(r.name)}</span>`
+      + `<span class="kind">${esc(KIND_LABEL[r.kind] || r.kind)}</span>`
+      + `<span class="row-meta">${rowMeta(r)}</span></span>`
+      + `<span class="row-sub">${rowSub(r)}</span>`
+      + ((r.flags || []).length
+          ? `<span class="row-flags">${r.flags.map(
+              (f) => `<span class="${tagClass(f)}">${esc(f)}</span>`).join("")}</span>`
+          : "");
+    b.onclick = () => {
+      // Re-rendering the list replaces its rows, which resets scrollTop. Restoring it is what
+      // keeps the reader where they were after picking a record forty rows down.
+      const keep = list.scrollTop;
+      state.selected = r;
+      render();
+      list.scrollTop = keep;
+      show(r);
+    };
+    return b;
+  }
+
+  function note(text) {
+    const p = document.createElement("p");
+    p.className = "count-line";
+    p.textContent = text;
+    return p;
+  }
+
+  function renderFlat(shown, frag) {
+    shown.slice(0, 800).forEach((r) => frag.appendChild(rowButton(r)));
+    if (shown.length > 800) {
+      frag.appendChild(note(
+        `showing the first 800 of ${shown.length} — narrow the search to see the rest`));
+    }
+  }
+
+  function renderGrouped(shown, frag) {
+    const groups = new Map();
+    shown.forEach((r) => {
+      const key = parentOf(r) || "(no parent element)";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    });
+    // The element record leads its own group; the artifacts extracted from it follow.
+    const order = (r) => (ELEMENT_KINDS.has(r.kind) ? 0 : 1);
+    const entries = [...groups.entries()].sort(
+      (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+    // Expanded when the reader has already narrowed to a handful; collapsed when they are
+    // looking at the whole corpus, where 500 open groups would just be the flat list again.
+    const autoOpen = entries.length <= 12;
+
+    entries.slice(0, 400).forEach(([key, members]) => {
+      members.sort((a, b) => order(a) - order(b)
+        || String(a.name).localeCompare(String(b.name)));
+      const meta = PARENT.get(key) || {};
+      const wrap = document.createElement("div");
+      wrap.className = "grp";
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "grp-head";
+      const open = state.open.has(key) || (autoOpen && !state.open.has("!" + key));
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+      const kinds = [...new Set(members.map((m) => KIND_LABEL[m.kind] || m.kind))];
+      head.innerHTML =
+        `<span class="grp-title">${open ? "▾" : "▸"} ${esc(meta.title || key)}</span>`
+        + `<span class="grp-meta">${members.length}</span>`
+        + `<span class="grp-sub">${esc(key)}${meta.kind ? " · " + esc(meta.kind) : ""}`
+        + ` · ${esc(kinds.join(", "))}</span>`;
+      head.onclick = () => {
+        const keep = list.scrollTop;
+        // Two marks, because a group can start open OR closed depending on `autoOpen`, and one
+        // set cannot express "explicitly closed" and "explicitly opened" at once.
+        if (open) { state.open.delete(key); state.open.add("!" + key); }
+        else { state.open.add(key); state.open.delete("!" + key); }
+        render();
+        list.scrollTop = keep;
+      };
+      wrap.appendChild(head);
+      if (open) members.slice(0, 200).forEach((r) => wrap.appendChild(rowButton(r)));
+      frag.appendChild(wrap);
+    });
+    if (entries.length > 400) {
+      frag.appendChild(note(
+        `showing the first 400 of ${entries.length} elements — narrow the search for the rest`));
+    }
+  }
+
+  function render() {
+    buildKinds(); buildGrouping(); buildFacets();
+    const shown = RECORDS.filter(matches);
+    const parents = state.grouped
+      ? new Set(shown.map((r) => parentOf(r) || "(no parent element)")).size : 0;
+    countLine.textContent = `${shown.length} of ${RECORDS.length} record(s)`
+      + (state.grouped ? ` across ${parents} element(s)` : "")
+      + (state.q ? ` matching "${state.q}"` : "");
+    rowsBox.textContent = "";
+    const frag = document.createDocumentFragment();
+    (state.grouped ? renderGrouped : renderFlat)(shown, frag);
+    rowsBox.appendChild(frag);
+    if (!shown.length) {
+      rowsBox.appendChild(note("nothing matches. Clear a filter or the search box."));
+    }
+  }
+
+  // ---------- detail ----------
+  function dl(pairs) {
+    const rows = pairs.filter(([, v]) => v !== "" && v != null && !(Array.isArray(v) && !v.length))
+      .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+    return rows ? `<dl>${rows}</dl>` : "";
+  }
+  const code = (s) => `<pre>${esc(s)}</pre>`;
+  const chips = (arr) => `<div class="chiprow">${list_(arr).map(
+    (x) => `<span class="${tagClass(x)}">${esc(x)}</span>`).join("")}</div>`;
+
+  const BY_ID = new Map(RECORDS.map((r) => [r.id, r]));
+
+  function unitsSection(r) {
+    const units = r.units_in_library || [];
+    if (!units.length) return "";
+    // The library holds only units that shipped, so these ARE the reachable ones. Where the run's
+    // `callable` count is higher, the difference is a real gap and saying so beats hiding it.
+    const claimed = typeof r.callable === "number" ? r.callable : null;
+    const gap = claimed === null ? 0 : claimed - units.length;
+    let h = `<p class="sub">Callable units from this element — ${units.length}</p>`;
+    h += `<div class="unitlist">` + units.map((u) =>
+      `<button type="button" class="unitrow" data-goto="${esc(u.id)}">`
+      + `<span class="row-name">${esc(u.name)}</span>`
+      + (u.unit_kind ? `<span class="kind">${esc(u.unit_kind)}</span>` : "")
+      + `<span class="unit-src">${esc(u.source)}</span>`
+      + `<span class="unit-sig">${esc(u.signature)}</span>`
+      + (u.summary ? `<span class="unit-doc">${esc(u.summary)}</span>` : "")
+      + `</button>`).join("") + `</div>`;
+    if (gap > 0) {
+      h += `<p class="note">${gap} more unit(s) were verdicted callable by the extraction run but
+        are not in the library. That gap is a defect, not a filter.</p>`;
+    }
+    return h;
+  }
+
+  function specSection(r) {
+    const steps = r.steps || [];
+    const hasAny = steps.length || (r.datasets_referenced || []).length
+      || (r.tools_referenced || []).length || Object.keys(r.declared_params || {}).length;
+    if (!hasAny) {
+      if (r.spec_status === "no_method_described") {
+        return `<p class="note">Read in full, and it describes no computational method — an
+          editorial, an opinion piece or a publisher cover page. Not an extraction failure.</p>`;
+      }
+      return r.spec_status
+        ? `<p class="note">No method spec: <span class="mono">${esc(r.spec_status)}</span></p>`
+        : "";
+    }
+    let h = "";
+    if (r.spec_summary) h += `<p class="sub">What the paper does</p><p>${esc(r.spec_summary)}</p>`;
+    if (steps.length) {
+      h += `<p class="sub">Method — ${steps.length} step(s)</p><ol class="steps">`
+        + steps.map((x) => `<li>${esc(x)}</li>`).join("") + `</ol>`;
+    }
+    if ((r.datasets_referenced || []).length) {
+      h += `<p class="sub">Datasets the paper names</p><ul class="plain">`
+        + r.datasets_referenced.map((x) => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+    }
+    if ((r.tools_referenced || []).length) {
+      h += `<p class="sub">Tools the paper names</p><ul class="plain">`
+        + r.tools_referenced.map((x) => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+    }
+    const params = r.declared_params || {};
+    if (Object.keys(params).length) {
+      h += `<p class="sub">Declared parameters</p><div class="scroller"><table><tbody>`
+        + Object.keys(params).map((k) =>
+            `<tr><td class="mono">${esc(k)}</td><td class="mono">`
+            + esc(typeof params[k] === "object"
+                  ? JSON.stringify(params[k]) : String(params[k])) + `</td></tr>`).join("")
+        + `</tbody></table></div>`;
+    }
+    if (r.chunks_parsed && r.chunks_total && r.chunks_parsed < r.chunks_total) {
+      h += `<p class="note">Built from ${r.chunks_parsed} of ${r.chunks_total} sections`
+        + (r.chars_seen && r.chars_total
+            ? ` (${num(r.chars_seen)} of ${num(r.chars_total)} characters)` : "")
+        + `, so steps described elsewhere in the paper may be missing.</p>`;
+    }
+    return h;
+  }
+
+  function unitDetail(r) {
+    let h = "";
+    if (r.signature) h += `<p class="sub">Signature</p>${code(r.signature)}`;
+    if (r.import) h += `<p class="sub">Import — pinned to this slice</p>${code(r.import)}`;
+    h += dl([
+      ["kind", esc(r.unit_kind)],
+      ["summary", esc(r.summary)],
+      ["returns", `<span class="mono">${esc(r.returns)}</span>`],
+      ["requires", chips(r.requires)],
+      ["element", r.element
+        ? (BY_ID.has(r.element)
+            ? `<button type="button" class="link" data-goto="${esc(r.element)}">`
+              + `${esc(r.element)}</button>`
+            : `<span class="mono">${esc(r.element)}</span>`)
+        : ""],
+      ["source", `<span class="mono">${esc(r.source)}</span>`],
+      ["slice_sha", `<span class="mono">${esc(r.slice_sha)}</span>`],
+    ]);
+    if ((r.params || []).length) {
+      h += `<p class="sub">Parameters</p><div class="scroller"><table><thead><tr>`
+        + `<th>name</th><th>annotation</th><th>inferred</th><th>unit</th><th>crs</th>`
+        + `<th>required</th></tr></thead><tbody>`
+        + r.params.map((p) => `<tr><td class="mono">${esc(p.name)}</td>`
+            + `<td class="mono">${esc(p.annotation)}</td><td>${esc(p.type)}</td>`
+            + `<td>${esc(p.unit)}</td><td>${esc(p.crs)}</td>`
+            + `<td>${p.required ? "yes" : esc(p.default || "no")}</td></tr>`
+            + (p.evidence
+                ? `<tr><td></td><td colspan="5" class="ev">${esc(p.evidence)}</td></tr>` : "")
+          ).join("")
+        + `</tbody></table></div>`;
+    }
+    if ((r.invariants || []).length) {
+      h += `<p class="sub">Invariants the sandbox enforces</p><div class="scroller"><table>`
+        + `<thead><tr><th>check</th><th>target</th><th>args</th></tr></thead><tbody>`
+        + r.invariants.map((i) => `<tr><td class="mono">${esc(i.check)}</td>`
+            + `<td class="mono">${esc(i.target)}</td>`
+            + `<td class="mono">${esc(JSON.stringify(i.args || {}))}</td></tr>`
+            + (i.evidence
+                ? `<tr><td></td><td colspan="2" class="ev">${esc(i.evidence)}</td></tr>` : "")
+          ).join("")
+        + `</tbody></table></div>`;
+    }
+    if ((r.flags || []).includes("naked")) {
+      h += `<p class="note">No docstring, no annotation and no declared return type — the
+        contract adds nothing beyond the symbol name. Callability was the promotion gate;
+        usefulness is a separate question.</p>`;
+    }
+    return h;
+  }
+
+  function datasetDetail(r) {
+    let h = dl([
+      ["title", esc(r.title)],
+      ["file", `<span class="mono">${esc(r.name)}</span>`],
+      ["size", esc(bytes(r.bytes) || (r.size_mb ? r.size_mb + " MB" : ""))],
+      ["format", esc([r.format, r.family].filter(Boolean).join(" / "))],
+      ["stage", esc(r.stage)],
+      ["rows", esc(num(r.row_count))],
+      ["crs", `<span class="mono">${esc(r.crs)}</span>`],
+      ["geometry", esc(r.geometry_type)],
+      ["bounds", r.bounds && r.bounds.length
+        ? `<span class="mono">${esc(JSON.stringify(r.bounds))}</span>` : ""],
+      ["resolution", r.resolution && r.resolution.length
+        ? `<span class="mono">${esc(JSON.stringify(r.resolution))}</span>` : ""],
+      ["bands", esc(r.bands)],
+      ["dtypes", r.dtypes && r.dtypes.length ? chips(r.dtypes) : ""],
+      ["dims", Object.keys(r.dims || {}).length
+        ? `<span class="mono">${esc(JSON.stringify(r.dims))}</span>` : ""],
+      ["coords from", Object.keys(r.geometry_from || {}).length
+        ? `<span class="mono">${esc(JSON.stringify(r.geometry_from))}</span>` : ""],
+      ["primary member", `<span class="mono">${esc(r.primary_member)}</span>`],
+      ["members", Object.keys(r.member_families || {}).length
+        ? `<span class="mono">${esc(JSON.stringify(r.member_families))}</span>`
+        : esc(num(r.members))],
+      ["files listed", esc(num(r.files_listed))],
+      ["listed bytes", esc(bytes(r.listed_bytes))],
+      ["link kind", esc(r.link_kind)],
+      ["archive note", esc(r.archive_note)],
+    ]);
+    if ((r.variables || []).length) {
+      h += `<p class="sub">Variables — for a NetCDF this <em>is</em> the schema</p>`
+        + chips(r.variables);
+    }
+    if ((r.schema || []).length) {
+      h += `<p class="sub">Schema — ${r.schema.length} field(s)</p>` + chips(r.schema);
+    }
+    if (r.loader) {
+      h += `<p class="sub">Generated loader</p>${code(r.loader.signature || "")}`
+        + dl([["summary", esc(r.loader.summary)],
+              ["returns", esc(r.loader.returns)],
+              ["invariants", chips(r.loader.invariants || [])],
+              ["requires", chips(r.loader.requires || [])]]);
+    }
+    if (r.envelope) {
+      h += `<p class="sub">Bounding box, reprojected to WGS84</p>`
+        + code(JSON.stringify(r.envelope));
+    }
+    if (r.note) h += `<p class="note">${esc(r.note)}</p>`;
+    if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
+    return h + unitsSection(r);
+  }
+
+  function publicationDetail(r) {
+    let h = dl([
+      ["title", esc(r.title)],
+      ["outcome", esc(r.outcome)],
+      ["doi", `<span class="mono">${esc(r.doi)}</span>`],
+      ["licence", esc(r.licence)],
+      ["sniffed as", esc(r.sniffed)],
+      ["size", esc(bytes(r.bytes))],
+      ["characters read", esc(num(r.chars))],
+      ["sha256", `<span class="mono">${esc(r.sha256)}</span>`],
+    ]);
+    if (r.reason) {
+      h += `<p class="note">${esc(r.reason)}</p>`;
+    }
+    if (r.outcome && r.outcome.indexOf("wall") === 0) {
+      h += `<p class="note">A publisher wall is a refusal. It is recorded, never worked
+        around — an institutional proxy or a publisher bulk-access programme is the legitimate
+        route.</p>`;
+    }
+    return h + specSection(r);
+  }
+
+  function codeDetail(r) {
+    let h = dl([
+      ["title", esc(r.title)],
+      ["stage", esc(r.stage)],
+      ["relevance", esc(r.relevance)],
+      ["files", esc(num(r.files))],
+      ["units", esc(num(r.units))],
+      ["callable", esc(num(r.callable))],
+    ]);
+    if ((r.off_domain || []).length) {
+      h += `<p class="sub">Off-domain signals that refused this repository</p>`
+        + chips(r.off_domain);
+    }
+    if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
+    return h + unitsSection(r);
+  }
+
+  function notebookDetail(r) {
+    const blocks = r.blocks || [];
+    const units = r.notebook_units || [];
+    let h = dl([
+      ["file", `<span class="mono">${esc(r.file)}</span>`],
+      ["source", esc(r.repo)],
+      ["size", esc(bytes(r.bytes))],
+      ["cells extracted", esc(num(blocks.length))],
+      ["named by the author", blocks.length
+        ? esc(`${blocks.length - (r.unnamed_blocks || 0)} of ${blocks.length}`) : ""],
+      ["cells that did not parse", r.unparsed_cells ? esc(num(r.unparsed_cells)) : ""],
+      ["units promoted", esc(num(units.length))],
+      ["of those, callable", esc(num(r.callable))],
+      ["whole-notebook workflow", r.workflow
+        ? `<span class="mono">${esc(r.workflow.entrypoint || r.workflow.mode)}</span>` : ""],
+    ]);
+    if ((r.tags || []).length) h += chips(r.tags);
+    if (r.error) h += `<p class="note">${esc(r.error)}</p>`;
+    if (!blocks.length) {
+      h += `<p class="note">No cells were extracted. An empty notebook, or every cell was
+        markdown — either way nothing from here reaches the agent.</p>`;
+    }
+
+    // Units first: they are what an agent can CALL, and a reader looking for reusable method
+    // wants them before thirty cells of narrative.
+    if (units.length) {
+      h += `<p class="sub">Units promoted from this notebook — ${units.length}`
+        + (r.callable < units.length ? `, ${r.callable} callable` : "") + `</p>`;
+      h += `<div class="unitlist">` + units.map((u) => {
+        const blockers = [...list_(u.global_reads), ...list_(u.free_names)];
+        const why = u.verdict === "callable" ? ""
+          : (blockers.length ? "needs " + blockers.slice(0, 6).join(", ")
+                             : (u.reason || u.verdict || ""));
+        // Only a unit that reached the library has a record to navigate to; a refused one is
+        // rendered as plain text rather than as a link that goes nowhere.
+        const tag = u.registry_id ? `button type="button" class="unitrow"
+          data-goto="${esc(u.registry_id)}"` : `div class="unitrow"`;
+        const close = u.registry_id ? "button" : "div";
+        return `<${tag}>`
+          + `<span class="row-name">${esc(String(u.symbol).split(".").pop())}</span>`
+          + `<span class="${u.verdict === "callable" ? "tag good" : "tag warn"}">`
+          + `${esc(u.verdict || "?")}</span>`
+          + `<span class="unit-src">${esc(u.slice_sha ? u.slice_sha.slice(0, 8) : "")}</span>`
+          + `<span class="unit-sig">${esc(u.signature)}</span>`
+          + (u.summary ? `<span class="unit-doc">${esc(u.summary)}</span>` : "")
+          + (why ? `<span class="unit-doc">${esc(why)}</span>` : "")
+          + `</${close}>`;
+      }).join("") + `</div>`;
+    }
+
+    if (blocks.length) {
+      h += `<p class="sub">Extracted cells, in notebook order</p>`;
+      h += blocks.map((b) => {
+        const unnamed = String(b.title || "").startsWith("cell ");
+        const tools = list_(b.tools).slice(0, 3).join(" ");
+        return `<details class="blk">`
+          + `<summary><span class="blk-ord">${b.order == null ? "" : esc(b.order)}</span>`
+          + `<span class="blk-name${unnamed ? " unnamed" : ""}">${esc(b.title)}</span>`
+          + `<span class="blk-tools">${esc(tools)}</span></summary><div>`
+          + (b.markdown ? `<p class="blk-md">${esc(b.markdown)}</p>` : "")
+          + code(b.code)
+          + (list_(b.imports).length ? chips(b.imports) : "")
+          + (list_(b.file_refs).length
+              ? `<p class="ev">files: ${esc(list_(b.file_refs).join(", "))}</p>` : "")
+          + (b.parse_ok === false
+              ? `<p class="note">This cell did not parse, so nothing from it was promoted.</p>`
+              : "")
+          + `</div></details>`;
+      }).join("");
+    }
+    // No `unitsSection` here: the units list above already covers this element and shows the
+    // refused units too, so appending the library-only view would list the same names twice.
+    return h;
+  }
+
+  function show(r) {
+    main.classList.add("showing-detail");
+    const body = r.kind === "unit" ? unitDetail(r)
+      : r.kind === "dataset" ? datasetDetail(r)
+      : r.kind === "publication" ? publicationDetail(r)
+      : r.kind === "notebook" ? notebookDetail(r) : codeDetail(r);
+    detail.innerHTML = `<button type="button" id="back">&larr; All records</button>`
+      + `<h2>${esc(r.title || r.name)}</h2>`
+      + `<p class="crumb">${esc(KIND_LABEL[r.kind] || r.kind)} · ${esc(r.id)}</p>` + body;
+    // The detail pane scrolls on its own, so a new record starts at ITS top rather than leaving
+    // the reader wherever the previous record happened to end.
+    detail.scrollTop = 0;
+    const back = document.getElementById("back");
+    if (back) {
+      back.onclick = () => {
+        main.classList.remove("showing-detail");
+        window.scrollTo({ top: 0 });
+      };
+    }
+    // Navigating between linked records leaves the list and its filters exactly as they were —
+    // silently clearing someone's filter to reveal the target would be a worse surprise than a
+    // detail pane showing a record the list is not currently listing.
+    detail.querySelectorAll("[data-goto]").forEach((el) => {
+      el.onclick = () => {
+        const target = BY_ID.get(el.getAttribute("data-goto"));
+        if (!target) return;
+        state.selected = target;
+        const keep = list.scrollTop;
+        render();
+        list.scrollTop = keep;
+        show(target);
+      };
+    });
+  }
+
+  // ---------- search ----------
+  let timer = null;
+  document.getElementById("q").addEventListener("input", (e) => {
+    clearTimeout(timer);
+    const v = e.target.value.trim().toLowerCase();
+    timer = setTimeout(() => { state.q = v; render(); list.scrollTop = 0; }, 110);
+  });
+
+  render();
+})();
+</script>

@@ -21,17 +21,30 @@ if str(REPO_ROOT) not in sys.path:
     description=(
         "Ingest a GitHub repository: extract notebook code blocks (searchable), "
         "runnable functions/workflows (MCP manifests), and the overall pipeline (a SKILL). "
-        "targets is a comma-separated subset of opensearch,mcp,skill. Returns a manifest summary."
+        "element_id is the platform element the extracted docs belong to and is REQUIRED "
+        "unless dry_run is true. targets is a comma-separated subset of "
+        "opensearch,mcp,skill. Returns a manifest summary."
     ),
 )
 def ingest_github_repo(
     url: str,
+    element_id: str = "",
     targets: str = "opensearch,mcp,skill",
     ref: str = "",
+    dry_run: bool = False,
     reingest: bool = False,
 ) -> Dict[str, Any]:
     from extractors.ingest import ingest_from_github
 
     target_list = [t.strip() for t in (targets or "").split(",") if t.strip()]
-    manifest = ingest_from_github(url, ref=ref, targets=target_list, reingest=reingest)
-    return manifest.to_dict()
+    try:
+        manifest = ingest_from_github(url, ref=ref, targets=target_list,
+                                      element_id=element_id, dry_run=dry_run,
+                                      reingest=reingest)
+    except ValueError as exc:
+        # Surface as data, not an exception: MCP tools in this repo return errors so the
+        # agent can correct itself rather than losing the turn.
+        return {"ok": False, "error": str(exc)}
+    out = manifest.to_dict()
+    out["emitted"] = [] if dry_run else target_list
+    return out

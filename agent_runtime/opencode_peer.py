@@ -383,14 +383,21 @@ def _build_peer_prompt(
         try:
             from agent_runtime.supervisor.evidence_subgraph import _format_documents
 
-            parts.append(f"Evidence:\n{_format_documents(evidence)[:MAX_EVIDENCE_CHARS]}")
+            # The CLI peers' row: no library, no staging, no method tools (D1), so the
+            # extracted methods arrive as references.
+            evidence_text = _format_documents(evidence, consumer="cli_peer")
+            parts.append(f"Evidence:\n{evidence_text[:MAX_EVIDENCE_CHARS]}")
         except Exception:
             pass
     if analysis_results:
-        parts.append(
-            "Analysis results:\n"
-            + json.dumps(analysis_results, ensure_ascii=True, default=str)[:MAX_ANALYSIS_CHARS]
-        )
+        analysis = json.dumps(analysis_results, ensure_ascii=True, default=str)[:MAX_ANALYSIS_CHARS]
+        parts.append("Analysis results:\n" + analysis)
+        # The second route by which library code reaches a CLI peer: the analyse peer's own tool
+        # calls, which may import it. Said plainly, because this container cannot.
+        if "iguide_methods" in analysis:
+            parts.append("Some code in the analysis results imports `iguide_methods`; that package "
+                         "is not available in this container, so write that function inline "
+                         "instead of importing it.")
     if staged_names:
         parts.append("Input files already in the working directory: " + ", ".join(staged_names))
     return "\n\n".join(parts)

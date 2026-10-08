@@ -46,6 +46,10 @@ def _services() -> dict:
     return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
 
 
+_DEFAULTED = re.compile(r"\$\{\w+:?-([^}]*)\}")
+_BARE_VARIABLE = re.compile(r"\$\{\w+\}")
+
+
 def _host_address(entry) -> str:
     """The host address a ``ports:`` entry binds, or ``""`` for every interface.
 
@@ -57,7 +61,12 @@ def _host_address(entry) -> str:
     """
     if isinstance(entry, dict):
         return str(entry.get("host_ip") or "")
-    fields = str(entry).split("/", 1)[0].rsplit(":", 2)
+    # Compose interpolates before it parses, and ``${AGENT_DB_PORT:-5544}`` has a colon of its own.
+    # A default stands in for its variable; a variable with none (``${BIND}``) is read as empty, so
+    # an interpolated ADDRESS can never pass for loopback.
+    text = _DEFAULTED.sub(r"\1", str(entry))
+    text = _BARE_VARIABLE.sub("", text)
+    fields = text.split("/", 1)[0].rsplit(":", 2)
     return fields[0].strip("[]") if len(fields) == 3 else ""
 
 
@@ -141,6 +150,7 @@ def test_each_health_check_calls_its_own_container():
         pytest.param("[::1]:8000:8000", id="ipv6-in-brackets"),
         pytest.param("::1:8000:8000", id="ipv6-without-brackets"),
         pytest.param({"target": 8000, "published": "8000", "host_ip": "127.0.0.1"}, id="long-syntax"),
+        pytest.param("127.0.0.1:${AGENT_DB_PORT:-5544}:5432", id="interpolated-port"),
     ],
 )
 def test_the_reader_accepts_each_loopback_form(entry):
@@ -160,6 +170,8 @@ def test_the_reader_accepts_each_loopback_form(entry):
         pytest.param("10.0.0.5:8000:8000", id="one-real-interface"),
         pytest.param({"target": 8000, "published": "8000"}, id="long-syntax-without-host_ip"),
         pytest.param({"target": 8000, "published": "8000", "host_ip": "0.0.0.0"}, id="long-syntax-everywhere"),
+        pytest.param("${AGENT_DB_PORT:-5544}:5432", id="interpolated-port-no-address"),
+        pytest.param("${BIND}:5544:5432", id="interpolated-address"),
     ],
 )
 def test_the_reader_rejects_each_form_that_leaves_loopback(entry):

@@ -121,6 +121,8 @@ class SupervisorState(TypedDict, total=False):
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
     searched_queries: List[str]    # every query string actually searched (incl. refinements)
+    peer_failures: List[Dict[str, Any]]   # peers that raised; see _run_peer
+    checkpoint_thread_id: str             # this RUN's checkpoint namespace; see run_supervisor
     action_rows: List[Dict[str, Any]]  # ledger rows the peers produced THIS turn (see
                                        # _record_actions); cleared by synthesize so the
                                        # client payload never carries them
@@ -1293,6 +1295,86 @@ def _heuristic_decision(distilled: Dict[str, Any]) -> str:
     return "done"
 
 
+def _peer_error_budget() -> int:
+    """Peer failures tolerated before the run stops trying and answers with what it has.
+
+    Without a budget a failing peer is re-routed to until ``max_steps``, paying its full
+    latency each time to fail identically — 8 steps of it in the default configuration. The
+    loop already tolerates 8 *unproductive* steps; it should not also tolerate 8 *broken* ones.
+    """
+    raw = (os.getenv("AGENT_PEER_ERROR_BUDGET") or "2").strip()
+    try:
+        return max(1, min(8, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _is_fatal_peer_error(exc: BaseException) -> bool:
+    """Whether retrying any peer is pointless because the model itself is unreachable."""
+    try:
+        from rag_pipeline.llm_claude_cli import ClaudeCliUnavailable
+    except Exception:
+        return False
+    return isinstance(exc, ClaudeCliUnavailable)
+
+
+def _run_peer(name: str, call, state: SupervisorState):
+    """Run a peer, returning ``(result, failure)``. Never raises.
+
+    A peer raising used to abort the whole ``graph.invoke``. Reproduced: a search that had
+    already merged 20 documents into state, then raised on its second sweep, left
+    ``synthesize`` unreached and the user with a raw exception string — while
+    ``synthesize_node`` already knows how to answer from partial evidence, from history, or
+    from neither. The capability existed; the exception simply prevented it being reached.
+
+    The sibling orchestration arm has done this since it was written
+    (``legacy/graph_nodes.py:265-283``, which returns a tool-result describing the failure
+    rather than raising), so this is the supervisor catching up rather than a new idea.
+    """
+    try:
+        return call(), None
+    except BaseException as exc:                      # noqa: BLE001 - deliberately total
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        failure = {"peer": name, "error": f"{type(exc).__name__}: {exc}"[:300],
+                   "fatal": _is_fatal_peer_error(exc)}
+        try:
+            import logging
+            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
+        except Exception:
+            pass
+        emit_trace_event(
+            "node_completed",
+            {"stage": name, "status": "error",
+             "message": f"{name} peer failed: {failure['error'][:160]}"},
+            node=name,
+        )
+        return None, failure
+
+
+def _with_failure(update: Dict[str, Any], state: SupervisorState,
+                  failure: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Append a peer failure to the accumulated list without dropping the node's own update."""
+    if failure is None:
+        return update
+    update["peer_failures"] = [*(state.get("peer_failures") or []), failure]
+    return update
+
+
+def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
+    """The user-visible statement that part of the turn did not run."""
+    names = []
+    for f in failures:
+        name = str(f.get("peer") or "a step")
+        if name not in names:
+            names.append(name)
+    label = {"search": "search", "analyze": "analysis", "code": "code execution",
+             "synthesize": "answer composition"}
+    pretty = [label.get(n, n) for n in names]
+    joined = pretty[0] if len(pretty) == 1 else ", ".join(pretty[:-1]) + f" and {pretty[-1]}"
+    return (f"⚠️ Partial answer: {joined} failed during this turn, so this reply is based on "
+            f"what completed before the failure. Re-running may produce a fuller answer.")
+
 def _available_actions(state: SupervisorState) -> List[str]:
     """The actions that are legal RIGHT NOW, in decider-menu order.
 
@@ -1361,6 +1443,15 @@ def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
     """
     if not audit:
         return False
+    # The DETERMINISTIC gate always flags, at any severity. `cannot_determine` is recorded as
+    # medium on purpose -- an unverifiable number is not a detected error, and calling it high
+    # would train the reader to ignore the label -- but this function passed only `high`, so
+    # every cannot_determine verdict was computed, reconciled, and then dropped before it
+    # reached the answer. The plan's requirement is that it be reported, never swallowed.
+    #
+    # The severity floor still applies to the LLM auditor, whose medium is soft over-reach.
+    if str(audit.get("invariant_gate") or "").strip():
+        return True
     severity = str(audit.get("severity") or "").strip().lower()
     return severity in _AUDIT_FLAG_SEVERITIES
 
@@ -1375,13 +1466,44 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
         return answer
     severity = str((audit or {}).get("severity") or "").strip().lower()
     summary = str((audit or {}).get("summary") or "").strip()
-    note = (
-        "⚠️ Grounding check: parts of this answer may not be fully supported by the "
-        "retrieved evidence"
-    )
-    if severity:
-        note += f" (severity: {severity})"
-    note += f". {summary}" if summary else "."
+    gate = str((audit or {}).get("invariant_gate") or "").strip()
+
+    # A deterministic gate failure is NOT an evidence-support problem, and describing it as one
+    # understates it: a geographic-CRS buffer is a wrong number, not a claim that is merely
+    # under-cited. The two get different headlines.
+    if gate in {"fail", "cannot_determine"}:
+        # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
+        # rather than restating it -- two headlines in a row read as a template, not a warning.
+        icon = "⛔" if gate == "fail" else "⚠️"
+        note = f"{icon} {summary}" if summary else (
+            f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
+            f"on this run, so its numeric results are not verified.")
+    else:
+        note = ("⚠️ Grounding check: parts of this answer may not be fully supported by "
+                "the retrieved evidence")
+        if severity:
+            note += f" (severity: {severity})"
+        note += f". {summary}" if summary else "."
+
+    # The specific findings, WITH their remedies. Only the summary was appended before, so the
+    # user was told a check failed and never told what failed or what to do -- and it is the
+    # gate's own message that carries "reproject to a local projected CRS (a UTM or state-plane
+    # zone in metres) before calling". Producing a remedy and then discarding it is worse than
+    # not computing one.
+    lines: List[str] = []
+    for issue in ((audit or {}).get("issues") or [])[:4]:
+        if not isinstance(issue, dict):
+            continue
+        claim = str(issue.get("claim") or "").strip()
+        reason = str(issue.get("reason") or "").strip()
+        if not reason:
+            continue
+        lines.append(f"- {claim}: {reason}" if claim else f"- {reason}")
+    extra = len([i for i in ((audit or {}).get("issues") or []) if isinstance(i, dict)]) - len(lines)
+    if lines:
+        note += "\n\n" + "\n".join(lines)
+        if extra > 0:
+            note += f"\n- …and {extra} more"
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
 
 
@@ -1420,9 +1542,24 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
             "copy of the file."
         )
 
+    # A library import handed to the user as theirs to run. The line is correct code, but only
+    # inside this agent's sandbox, where the method library is mounted; `iguide_methods` is not a
+    # package anyone can install. Rendering now offers methods as things the agent can run, so
+    # this catches only a model that pastes the raw line anyway. Appended, never rewritten: the
+    # model's text stays the model's, and the correction is visible as one.
+    if (_SANDBOX_IMPORT_RE.search(text) and "sandbox" not in text.lower()
+            and extraction_enabled()):
+        notes.append(
+            "The `from iguide_methods ...` import above runs only inside this agent's sandbox, "
+            "not on your machine. Ask me to run it."
+        )
+
     if not notes:
         return answer
     return text + "\n\n---\n\n" + "\n\n".join(f"⚠️ Correction: {n}" for n in notes)
+
+
+_SANDBOX_IMPORT_RE = re.compile(r"\bfrom\s+iguide_methods\b|\bimport\s+iguide_methods\b")
 
 
 _ARTIFACT_CLAIM_MARKERS = (
@@ -1448,6 +1585,93 @@ def _claim_numbers(text: str) -> List[str]:
     """Significant (3+ digit) numbers in a claim, comma-normalized for record matching."""
     return [m.replace(",", "") for m in re.findall(r"\d[\d,]{2,}", text or "")]
 
+
+def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
+    """Every invariant-gate FAILURE recorded anywhere in the execution context.
+
+    The gate's report is nested inside each ``execute_code`` tool result, which arrives as a
+    JSON *string* inside a ToolMessage, so this walks rather than indexes.
+
+    Two defects fixed here, both of which let a wrong number reach the answer unflagged:
+
+    **id() reuse.** The visited set held ``id(node)`` for every node across the whole
+    traversal, while ``json.loads`` builds a graph reachable only from its call frame. That
+    graph is freed when the branch returns, CPython reallocates a later result's dict at the
+    same address, and the walk returns before reading its ``verification``. Reproduced with
+    real ``ExecResult`` payloads: **14 of 21** (N results x fail position) combinations
+    returned zero gate findings. Multiple ``execute_code`` calls per turn is the NORMAL case —
+    the tool description tells the model to fix and re-run — so this fired on the most natural
+    sequence of all: a passing load followed by a failing measurement.
+
+    Fixed by keeping a reference to each parsed graph for the walk's lifetime, so no address is
+    recycled while its ids are still in the set.
+
+    **Keyed on findings, not the verdict.** A report can carry ``verdict="fail"`` with no
+    ``status=="fail"`` finding surviving — ``_read_checks`` caps the list at 12 — and
+    ``cannot_determine`` never gated anything at all, so an unverifiable run was relabelled
+    "Grounded". Now the VERDICT decides, and a fail with no surviving finding still yields an
+    issue.
+    """
+    found: List[Dict[str, Any]] = []
+    seen: set = set()
+    keep: List[Any] = []          # anchors parsed graphs so their ids cannot be recycled
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 12 or len(found) >= 24 or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, dict):
+            report = node.get("verification")
+            if isinstance(report, dict):
+                found.extend(_gate_issues_from(report))
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value, depth + 1)
+        elif isinstance(node, str) and '"verification"' in node:
+            try:
+                parsed = json.loads(node)
+            except ValueError:
+                return
+            keep.append(parsed)   # must outlive the recursive walk; see the docstring
+            walk(parsed, depth + 1)
+
+    walk(execution_context)
+    return found
+
+
+def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Gate findings for one verification report, keyed on the VERDICT.
+
+    ``cannot_determine`` counts. An unverifiable number and a verified one must not reach the
+    answer the same way — that asymmetry is the whole point of the gate, and keying on fail
+    findings alone meant an all-unknown run was actively relabelled "Grounded: flagged claims
+    are supported by the execution record."
+    """
+    verdict = str(report.get("verdict") or "")
+    if verdict not in {"fail", "cannot_determine"}:
+        return []
+    blocking = [f for f in (report.get("findings") or [])
+                if isinstance(f, dict) and f.get("status") in {"fail", "cannot_determine"}]
+    if blocking:
+        return blocking
+    # A verdict with no surviving finding is still a verdict: `_read_checks` truncates, so the
+    # evidence can be gone while the judgement stands. Synthesise rather than fall silent.
+    counts = report.get("counts") or {}
+    if not any(counts.values()):
+        # All-zero counts mean the gate produced NO findings, so nothing was lost in transit —
+        # there was nothing to lose. Saying "findings were not retained" sent a reader looking for
+        # missing evidence when the honest report is that this run made no checkable claim.
+        return [{"check": "invariant_gate", "status": verdict, "target": "this run",
+                 "message": ("the invariant gate checked nothing in this run — no frame-like "
+                             "binding and no declared outputs — so its numbers are unverified "
+                             "rather than verified-and-failed. Publish IGUIDE_OUTPUTS to have "
+                             "quoted numbers checked.")}]
+    return [{"check": "invariant_gate", "status": verdict, "target": "this run",
+             "message": (f"the invariant gate returned {verdict!r} "
+                         f"(counts {counts}) but its findings were not retained; "
+                         f"treat the numbers from this run as unverified")}]
 
 # The auditor compares an answer against retrieved DOCUMENTS, and no document ever says
 # "a layer is on the user's map" — so a correct map claim looks unsupported to it. Observed:
@@ -1611,7 +1835,21 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     actually delivered to it. The verdict is cleared if no substantive issues remain. Genuine
     unsupported claims (a wrong statistic, an invented finding, a map that never got a layer)
     are preserved."""
-    if not _audit_flagged(audit):
+    # The invariant gate is DETERMINISTIC and therefore authoritative here. Two consequences,
+    # and the second is the one the plan asks for: an unverified number must not be presented
+    # as verified.
+    #
+    #   * it flags even when the LLM auditor found nothing. The gate knows a distance was
+    #     computed in degrees; the auditor reading prose has no way to.
+    #   * it DISABLES rule (2) below. That rule drops a disputed number when the number appears
+    #     in the execution record — but a wrong number appears in the record too. `AREA: 0.196`
+    #     is right there in stdout, so without this the gate would say "degrees squared" and
+    #     the reconciliation would answer "it is in the record, so it is grounded."
+    gate = _gate_failures(execution_context)
+    gate_verdict = ("fail" if any(g.get("status") == "fail" for g in gate)
+                    else ("cannot_determine" if gate else ""))
+
+    if not _audit_flagged(audit) and not gate:
         return audit
     issues = (audit or {}).get("issues") or []
     blob = ""
@@ -1638,9 +1876,29 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             continue  # (3) the auditor's own reason concedes grounding
         nums = _claim_numbers(claim)
-        if nums and blob and all(n in blob for n in nums):
-            continue  # (2) every disputed number is present in the execution record
+        if nums and blob and not gate and all(n in blob for n in nums):
+            continue  # (2) every disputed number is present in a VERIFIED execution record
         kept.append(it)
+
+    if gate:
+        # Prepended: the deterministic finding is the one the reader must see first, and it
+        # carries the remedy ("reproject before measuring"), not just a complaint.
+        gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
+                        "reason": f"invariant gate ({f.get('check')}): {f.get('message')}"}
+                       for f in gate]
+        headline = ("A deterministic invariant check FAILED on this run, so its numeric results "
+                    "are not verified."
+                    if gate_verdict == "fail" else
+                    "A deterministic invariant check COULD NOT VERIFY this run, so its numeric "
+                    "results are unconfirmed — this is not the same as them being wrong.")
+        return {**(audit or {}), "hallucination_detected": True,
+                # cannot_determine is a real caveat but not a detected error; calling it high
+                # would train the reader to ignore the label.
+                "severity": "high" if gate_verdict == "fail" else "medium",
+                "issues": gate_issues + kept,
+                "summary": (headline + " " + str((audit or {}).get("summary") or "")).strip(),
+                "invariant_gate": gate_verdict}
+
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],
                 "summary": "Grounded: flagged claims are supported by the produced artifact(s), the "
@@ -2452,13 +2710,118 @@ def _wants_external_data(query: str) -> bool:
     return bool(_EXTERNAL_DATA_RE.search(query or ""))
 
 
+# KB tools given to the peers that WRITE AND RUN code. Hoisted to module scope because both
+# the code peer and the analyze peer need the same set, and the analyze peer also holds
+# `execute_code` — a peer that can run analysis but cannot discover an existing callable method
+# will re-implement it. Deliberately independent of the request's enabled_search_methods: this
+# is a capability of those peers, not a per-request search preference.
+from agent_runtime.capability_registry import KB_CODE_PEER_TOOLS  # noqa: E402 - pure module
+from agent_runtime.extraction_flag import extraction_enabled  # noqa: E402 - pure module
+
+_CODE_PEER_KB_TOOLS = set(KB_CODE_PEER_TOOLS)
+
+
+def kb_ablated() -> bool:
+    """Is the extracted knowledge base switched OFF for this process?
+
+    An EXPERIMENT control, not a feature flag — the deployed answer is always "no". It exists
+    because there was no way to run the corpus without the KB and get a trustworthy result:
+    `enabled_search_methods` filters the SEARCH peer only, while the code and analyze peers hold
+    `_CODE_PEER_KB_TOOLS` regardless and `_direct_search_sweep` unions the KB in deterministically.
+    All three are right for serving, and all three mean an ablation built on
+    `enabled_search_methods` measures nothing while reporting numbers.
+
+    Read at call time rather than captured at import, so a harness can set it per run.
+    """
+    import os
+
+    return (os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _peer_kb_tools() -> set:
+    """The KB tools a code/analyze peer gets. Empty under ablation."""
+    return set() if kb_ablated() else set(_CODE_PEER_KB_TOOLS)
+
+
+def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
+    """Library methods rendered as evidence documents.
+
+    The contents field carries the signature, summary AND the exact import line, because the
+    import line is the part that makes the answer actionable — an answer that names a method
+    without saying how to import it is barely better than naming a notebook.
+    """
+    from agent_runtime.method_library import search_methods
+
+    hits = [h for h in search_methods(query, limit=max(1, min(int(k), 8)))
+            if not h.get("ambiguous")]
+    # A relevance floor RELATIVE to the best hit. Unlike the tool — where the model can judge a
+    # ranked list for itself — this path spends evidence slots without being asked, so it takes
+    # only the clear matches. Measured on "choropleth map of Chicago crime": plot_choropleth_map
+    # 23.0 and load_chicago_crime_data 21.0 are the answer, while display_code_txt and
+    # process_weather_file_to_24h score 6.5 purely on the generic words "code", "data" and "map".
+    if hits:
+        floor = 0.4 * float(hits[0].get("score") or 0.0)
+        hits = [h for h in hits if float(h.get("score") or 0.0) >= floor][:4]
+
+    return [_method_hit_as_document(hit) for hit in hits]
+
+
+def _method_hit_as_document(hit: Dict[str, Any]) -> Dict[str, Any]:
+    """One library method rendered as an evidence document. Shared by the sweep and by
+    `_evidence_from_artifacts`, so a method reaches the answerer the same way by either path.
+    """
+    requirements = hit.get("requirements") or []
+    if isinstance(requirements, dict):          # a contract carries {"pip": [...], ...}
+        requirements = requirements.get("pip") or []
+    hit = {**hit, "requirements": list(requirements),
+           "symbol": hit.get("symbol") or hit.get("library_symbol") or ""}
+    symbol = str(hit.get("symbol") or "")
+    contents = "\n".join(filter(None, [
+        str(hit.get("signature") or ""),
+        str(hit.get("doc_summary") or ""),
+        f"import: {hit['import_line']}" if hit.get("import_line") else "",
+        # The refusal, in the contents the model actually reads.
+        #
+        # This renderer builds `contents` from four fields chosen when it was written, so a
+        # fact added to the record later does not reach the model however carefully it is
+        # carried. Demonstrated three times in one pass: `error`, `import_line_candidates`
+        # and `disambiguate_with` were all on the row and none appeared here, so an agent
+        # that had been given the ambiguity reported instead that "the entries only give
+        # signature and dependency list — they don't include an import: path".
+        (f"AMBIGUOUS: {hit['error']} candidates: "
+         + ", ".join(f"{c.get('qualified_name')} (element {c.get('element_id')})"
+                     for c in (hit.get("import_line_candidates") or [])))
+        if hit.get("error") and hit.get("import_line_candidates") else "",
+        f"requires: {', '.join(hit.get('requirements') or [])}"
+        if hit.get("requirements") else "",
+    ]))
+    return {
+        "doc_id": f"method::{symbol}",
+        "title": f"{symbol.split('.')[-1]} — callable method",
+        "contents": contents,
+        "source": "method_library",
+        "resource_type": "MethodUnit",
+        # Cite the SOURCE ELEMENT, not the synthetic method id: a unit is evidence about
+        # the element it came from, and that is the id a reader can open.
+        "citation_ids": [hit["element_id"]] if hit.get("element_id") else [],
+        "element_id": hit.get("element_id"),
+        "import_line": hit.get("import_line"),
+        "score": hit.get("score"),
+    }
+
+
 def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
-                         *, k: int = 8) -> List[Dict[str, Any]]:
+                         *, k: Optional[int] = None) -> List[Dict[str, Any]]:
     """Deterministic multi-method retrieval sweep: run keyword AND semantic search directly
     (cheap OpenSearch calls, no LLM) so every search turn has baseline coverage from BOTH
     core methods regardless of which tools the LLM SearchAgent chose to call — it frequently
     stops after a single tool, leaving results incomplete. Respects the request's
     enabled_search_methods allowlist. Never raises; each method degrades independently."""
+    # Resolved here, not as a default argument: a default binds at import and would freeze
+    # the window regardless of AGENT_SEARCH_TOP_K.
+    if k is None:
+        from rag_pipeline.search.utils import default_top_k
+        k = default_top_k()
     allow = ({str(m).strip() for m in enabled_search_methods}
              if enabled_search_methods is not None else None)
 
@@ -2512,12 +2875,71 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
                                         source="opengeodata"))
         except Exception:
             pass
+    if permitted("agent_kb_search") and not kb_ablated():
+        try:
+            from rag_pipeline.search.agent_kb import agent_kb_search
+
+            payload = agent_kb_search(query, size=k) or {}
+            # `documents`, NOT `results` — and they are ALREADY normalized (doc_id, title,
+            # contents, parent_doc_id), so they must not be run through _normalize_hits, which
+            # expects raw OpenSearch hits. The first version of this block read `results` and
+            # re-normalized: no exception, no log, just a permanently empty arm. The `except`
+            # below could never have caught it, which is exactly why the wrong key survived.
+            for d in payload.get("documents") or []:
+                if not isinstance(d, dict):
+                    continue
+                parent = d.get("parent_doc_id")
+                docs.append({**d, "source": "agent_kb",
+                             # Cite the ELEMENT, not the block: a block id is not something a
+                             # reader can open, and the other sweep arms cite elements.
+                             "citation_ids": [parent] if parent else []})
+        except Exception:
+            pass
+    if permitted("kb_method_search") and extraction_enabled():
+        # Local registry read — no network, no cluster, sub-millisecond. Unioned rather than
+        # left to tool choice for the reason stated at the top of default_search_fn: the model
+        # does not reliably reach for a tool it was merely offered. Measured across three runs
+        # of the same question ("is there code I can reuse for a Chicago crime choropleth?"),
+        # with the tool registered, policy-allowed, request-enabled and named in the persona's
+        # COVERAGE and REUSE rules, the peer called it ZERO times and answered "adapt this
+        # notebook" while `plot_choropleth_map` sat in the library with a working import line.
+        try:
+            if not kb_ablated():
+                docs.extend(_method_units_as_documents(query, k))
+        except Exception:
+            pass
     # web_search is deliberately NOT part of this sweep. Every other method here is a cheap call to
     # infrastructure we own; the open web is a live third-party network hop, so unioning it in would
     # put every single turn on the internet. It stays LLM-elected (and budget-capped) — plus the
     # last-resort fallback in _web_fallback_evidence, which fires only when the platform found
     # NOTHING.
-    return [d for d in docs if isinstance(d, dict)]
+    docs = [d for d in docs if isinstance(d, dict)]
+
+    # Join the agent KB to what the other arms found, BY ELEMENT ID. The KB arm above matches on
+    # text, which leaves a hole: a hit found by SPATIAL search (a bounding box) or by GRAPH search
+    # (a relation) can never text-match its own extracted content, so its units, schema and method
+    # spec stayed invisible however good they were. The id is right there on both sides.
+    #
+    # It also folds away KB rows whose parent element is already in the result set — they were
+    # competing with their own element for an evidence slot.
+    #
+    # Part of the extraction bundle (agent_runtime/extraction_flag.py): one more agent-KB read on
+    # EVERY turn, through a client that is not yet tier-routed, so it waits for the switch.
+    if not extraction_enabled():
+        return docs
+    try:
+        from rag_pipeline.search.agent_kb import attach_kb_to_documents
+
+        joined = attach_kb_to_documents(docs)
+        docs = joined["documents"]
+        if joined.get("attached") or joined.get("folded"):
+            logger.info("agent KB join: enriched %d element(s), folded %d duplicate row(s), "
+                        "%d actionable import line(s)", joined["attached"], joined["folded"],
+                        len(joined.get("actionable") or []))
+    except Exception:
+        # Enrichment is additive. A turn must still answer from the documents it already has.
+        pass
+    return docs
 
 
 # Sources that are NOT the platform: external catalogs and the open web. Everything else counts as
@@ -3160,10 +3582,13 @@ UNIFIED_PEER_ENV = "AGENT_UNIFIED_PEER"
 # carrying "results"/"items"/"hits", so in a merged agent geocode_places({"results": [...]})
 # and overpass_search would silently become retrieved "documents" the answer then cites.
 _RETRIEVAL_TOOLS = frozenset({
-    "agent_kb_search", "get_kb_block", "keyword_search", "semantic_search", "spatial_search",
+    "keyword_search", "semantic_search", "spatial_search",
     "opengeodata_search", "neo4j_search", "neo4j_explore_related_nodes",
-    "neo4j_get_element_by_id", "web_search",
+    "neo4j_get_element_by_id", "web_search", *KB_CODE_PEER_TOOLS,
 })
+# Method tools return rows (symbol / signature / import line), not documents. Harvested raw they
+# would reach the answerer as untitled, contentless "documents"; they are rendered instead.
+_METHOD_TOOLS = frozenset({"kb_method_search", "get_method_contract"})
 
 
 def _decision_sentence(nxt: str, why: str) -> Optional[str]:
@@ -3232,17 +3657,27 @@ def _evidence_from_artifacts(artifacts: Dict[str, Any]) -> List[Any]:
     """
     from agent_runtime.supervisor.evidence_subgraph import extract_documents_from_search_evidence
 
-    rows = [
-        {"name": str(r.get("name") or ""), "content": r.get("content")}
-        for r in (artifacts.get("tool_results") or [])
-        if isinstance(r, dict) and str(r.get("name") or "") in _RETRIEVAL_TOOLS
-    ]
-    if not rows:
-        return []
-    try:
-        return extract_documents_from_search_evidence({"search_agent_tool_results": rows}) or []
-    except Exception:  # noqa: BLE001 - evidence is a bonus here, never the run
-        return []
+    rows, methods = [], []
+    for r in (artifacts.get("tool_results") or []):
+        name = str(r.get("name") or "") if isinstance(r, dict) else ""
+        if name in _METHOD_TOOLS:
+            try:
+                payload = json.loads(r.get("content") or "{}")
+            except (TypeError, ValueError):
+                continue
+            hits = payload.get("results") if name == "kb_method_search" else [payload]
+            methods.extend(_method_hit_as_document(h) for h in (hits or [])
+                           if isinstance(h, dict) and (h.get("symbol") or h.get("library_symbol"))
+                           and not h.get("error"))
+        elif name in _RETRIEVAL_TOOLS:
+            rows.append({"name": name, "content": r.get("content")})
+    docs: List[Any] = []
+    if rows:
+        try:
+            docs = extract_documents_from_search_evidence({"search_agent_tool_results": rows}) or []
+        except Exception:  # noqa: BLE001 - evidence is a bonus here, never the run
+            docs = []
+    return [*docs, *methods]
 
 
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
@@ -3290,6 +3725,17 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         thread_id = state.get("thread_id")
         request_tool, requests = _make_request_tool()
         tools = list(make_langchain_qgis_tools(session_id=child_thread_id(thread_id, "analysis_qgis")))
+        # Same KB set the code peer gets. This peer also holds `execute_code`, so without these
+        # it can RUN analysis code while being unable to discover that the platform already has
+        # a callable method for the step it is about to re-implement — the exact gap fixed for
+        # the code peer in M2.7, one peer over.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+            tools.extend(t for t in make_langchain_granular_tools(
+                enabled_search_methods=sorted(_peer_kb_tools()))
+                if getattr(t, "name", "") in _peer_kb_tools())
+        except Exception:
+            pass
         if include_mcp_tools:
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
@@ -3439,6 +3885,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
+            # session_id makes the sandbox workspace persist across calls WITHIN this turn,
+            # so a multi-step analysis can build state. Keyed on the conversation thread so
+            # two conversations never share a workspace.
+            #
+            # The suffix is load-bearing: the code peer's `make_langchain_staging_tools` and both
+            # peers' execute_code key on this exact string ("codeexec", prototype's, which
+            # deployed conversations already use), so changing it in one place silently
+            # separates staged files from the sandbox that is supposed to read them.
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
@@ -3471,7 +3925,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         )
         q = query
         if evidence:
-            q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
+            q = f"{query}\n\nContext evidence:\n{_format_documents(evidence, consumer='analyze_peer')}"
         # The ledger has to reach the peer that CALLS TOOLS, not only the router and the
         # synthesizer. Measured: with the boundary already fetched and its file_id sitting in
         # the ledger, "now embed those zones" still went geocode_places -> embed_region (a
@@ -3791,7 +4245,16 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         request_tool, requests = _make_request_tool()
         tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
         # KB read tools so the code peer can pull the FULL source of referenced blocks
-        # (get_kb_block) and reuse it verbatim instead of stubbing loaders.
+        # (get_kb_block) and reuse it verbatim instead of stubbing loaders, PLUS the method
+        # library, which matters most exactly here: this is the peer that writes and runs the
+        # code, and the library is mounted in its sandbox.
+        #
+        # This allowlist is hardcoded — it does NOT follow the request's
+        # enabled_search_methods — so it is a fifth independent gate on the same names.
+        # Observed with the method tools absent: the peer was told by its own prompt to call
+        # kb_method_search, did not have it, and guessed the package name from the directory
+        # instead — `from method_library import ...`, which fails. The package is
+        # `iguide_methods`.
         #
         # web_search/web_fetch join them because the KB covers I-GUIDE's OWN content and not
         # library documentation, and the failure this peer actually has is plausible code
@@ -3802,10 +4265,10 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # a capability). Four names out of the family's twenty-two.
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+            wanted = _peer_kb_tools() | {"web_search", "web_fetch"}
             tools.extend(t for t in make_langchain_granular_tools(
-                enabled_search_methods=["agent_kb_search", "get_kb_block", "web_search"])
-                if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block",
-                                              "web_search", "web_fetch"})
+                enabled_search_methods=sorted(_peer_kb_tools() | {"web_search"}))
+                if getattr(t, "name", "") in wanted)
         except Exception:
             pass
         # Geocoding runs agent-side (the sandbox has NO network): lets the peer turn named
@@ -3814,6 +4277,18 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
             tools.extend(make_langchain_geocode_tools())
+        except Exception:
+            pass
+        # Staging, for the same reason and with the same boundary: the fetch happens HERE, where
+        # the MinIO and cluster credentials live, and only the bytes cross into the container.
+        # This is the peer that calls a generated `load_*` method, and those take a staged path.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_staging_tools
+            # The SAME workspace key the execution tools use below. Staging into a different
+            # one would put the bytes in a directory the sandbox never mounts, and the failure
+            # would surface inside a container with no network as "file not found".
+            tools.extend(make_langchain_staging_tools(
+                session_id=child_thread_id(state.get("thread_id"), "codeexec")))
         except Exception:
             pass
         # QGIS tools run in the AGENT environment (where QGIS is installed) — the code sandbox
@@ -3944,6 +4419,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
+            # session_id makes the sandbox workspace persist across calls WITHIN this turn,
+            # so a multi-step analysis can build state. Keyed on the conversation thread so
+            # two conversations never share a workspace.
+            #
+            # The suffix is load-bearing: the code peer's `make_langchain_staging_tools` and both
+            # peers' execute_code key on this exact string ("codeexec", prototype's, which
+            # deployed conversations already use), so changing it in one place silently
+            # separates staged files from the sandbox that is supposed to read them.
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
@@ -3962,7 +4445,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         )
         parts = [query]
         if evidence:
-            parts.append(f"Evidence:\n{_format_documents(evidence)}")
+            parts.append(f"Evidence:\n{_format_documents(evidence, consumer='code_peer')}")
         if state.get("analysis_results"):
             parts.append(
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
@@ -4193,6 +4676,7 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
 
 def build_supervisor_graph(
     *,
+    checkpointer: Optional[Any] = None,
     decide_fn: Optional[DecideFn] = None,
     search_fn: Optional[SearchFn] = None,
     analyze_fn: Optional[AnalyzeFn] = None,
@@ -4235,7 +4719,14 @@ def build_supervisor_graph(
             return actions.count(cap) >= _max_peer_runs()
         needs = [n for n in needs if not _dead(n)]
 
-        if step >= state.get("max_steps", DEFAULT_MAX_STEPS):
+        failures = state.get("peer_failures") or []
+        if any(f.get("fatal") for f in failures):
+            # The model backend itself is unreachable. Every remaining peer would pay its full
+            # latency to fail the same way, and so would a re-route.
+            nxt, remaining, why = "done", [], "model backend unavailable"
+        elif len(failures) >= _peer_error_budget():
+            nxt, remaining, why = "done", [], f"peer error budget ({len(failures)} failures)"
+        elif step >= state.get("max_steps", DEFAULT_MAX_STEPS):
             nxt, remaining, why = "done", [], "max_steps"
         elif needs:
             # Fulfill the oldest peer request first (FIFO), then continue the loop.
@@ -4244,8 +4735,21 @@ def build_supervisor_graph(
             nxt = cap if cap in _CAPABILITIES else "done"
             remaining, why = needs[1:], f"request by {req.get('by')}"
         else:
+            # The decider calls the model too, so it is the FIRST thing that fails when the
+            # backend is down — before any peer has run, which made peer containment moot in
+            # exactly the case it exists for. Falling back to a deterministic route keeps the
+            # turn moving: search if nothing has been retrieved yet, otherwise answer with what
+            # there is.
             _decision_payload = _distill(state, for_decision=True)
-            nxt = decide(state, _decision_payload)
+            decided, decide_failure = _run_peer(
+                "decide", lambda: decide(state, _decision_payload), state)
+            if decide_failure is not None:
+                nxt = "search" if not (state.get("evidence") or []) else "done"
+                remaining, why = needs, f"decider unavailable → {nxt}"
+                failures = [*failures, decide_failure]
+            else:
+                nxt = decided
+                remaining, why = needs, "decision"
             _LEDGER_LOG.info(
                 "supervisor step=%s prior_actions=%d -> %s",
                 state.get("step"),
@@ -4253,7 +4757,6 @@ def build_supervisor_graph(
                 nxt)
             if nxt not in ALLOWED_ACTIONS:
                 nxt = "done"
-            remaining, why = needs, "decision"
             # Backstop: a peer that just ran and already produced its result should
             # not be re-run back-to-back (it self-iterates internally). Prevents the
             # decider from looping on the same action until max_steps.
@@ -4292,36 +4795,34 @@ def build_supervisor_graph(
                  "message": _reason},
                 node="supervisor",
             )
-        return {
+        update: Dict[str, Any] = {
             "next_action": nxt,
             "actions": [*(state.get("actions") or []), nxt],
             "step": step + 1,
             "needs": remaining,
         }
+        if len(failures) != len(state.get("peer_failures") or []):
+            update["peer_failures"] = failures
+        return update
 
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        try:
-            raw = do_search(q, state) or []
-        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
-            # The third node with the same gap. Search is usually the FIRST peer to run, so a
-            # raise here loses the turn before any other peer has contributed anything.
-            logger.exception("search peer failed; continuing the turn without it")
-            emit_trace_event(
-                "node_failed",
-                {"stage": "search", "message": f"search peer failed: {type(exc).__name__}"},
-                node="search",
-            )
-            # Only DECLARED state keys: SupervisorState has no search_error channel, and an
-            # unknown key would make this handler raise the very error it exists to absorb.
-            # The attempt is counted and the streak advanced, so the exhaustion logic stops
-            # routing to a peer that keeps dying instead of looping on it.
-            return {
-                "evidence": state.get("evidence") or [],
-                "search_attempts": state.get("search_attempts", 0) + 1,
-                "search_empty_streak": state.get("search_empty_streak", 0) + 1,
-            }
+        raw, failure = _run_peer("search", lambda: do_search(q, state), state)
+        if failure is not None:
+            # Return the state we still have. `evidence` already in state survives because a
+            # node update MERGES; returning early simply adds nothing to it. The attempt is
+            # counted and the empty streak advanced, so the exhaustion logic stops routing to a
+            # peer that keeps dying instead of looping on it.
+            emit_trace_event("node_completed",
+                             {"stage": "search", "message": "Search failed; continuing with "
+                                                            "the evidence already gathered"},
+                             node="search")
+            return _with_failure({"searched_queries": list(state.get("searched_queries") or []),
+                                  "search_attempts": state.get("search_attempts", 0) + 1,
+                                  "search_empty_streak": state.get("search_empty_streak", 0) + 1},
+                                 state, failure)
+        raw = raw or []
         # A search_fn may return a plain list (every test double does, and so may a custom one)
         # or a dict carrying documents + the ledger rows for what it actually did. Both stay
         # supported; only the dict form contributes rows.
@@ -4418,24 +4919,17 @@ def build_supervisor_graph(
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
-        try:
-            clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
-        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
-            # Same reason code_node has one, and more pressing: this is the peer the router
-            # actually sends code-shaped work to (measured: 7 of 7 turns reported
-            # peer=analysis), and it invokes the model up to five times per turn — the initial
-            # run plus the stuck, map-not-delivered, model-mismatch and execution-honesty
-            # retries. Any of them can hit the recursion limit, and without a handler that
-            # raised straight out of the graph: SSE error, no synthesized answer, even when
-            # search had already found something worth saying.
-            logger.exception("analyze peer failed; continuing the turn without it")
-            emit_trace_event(
-                "node_failed",
-                {"stage": "analyze", "message": f"analyze peer failed: {type(exc).__name__}"},
-                node="analyze",
-            )
-            return {"analysis_results": {"summary": "", "tool_calls": [], "tool_results": [],
-                                         "error": f"{type(exc).__name__}: {exc}"[:300]}}
+        raw, failure = _run_peer(
+            "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
+        if failure is not None:
+            # Degrade to an analysis_results that STATES the failure: this is the peer the
+            # router sends code-shaped work to, and synthesis should answer from what the other
+            # peers found rather than read silence as "nothing to report".
+            return _with_failure({"analysis_results": {"summary": "", "tool_calls": [],
+                                                       "tool_results": [],
+                                                       "error": failure["error"]}},
+                                 state, failure)
+        clean, needs = _extract_needs(raw)
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         update: Dict[str, Any] = {"analysis_results": clean}
         if unified_peer_enabled(state) and isinstance(clean, dict):
@@ -4458,23 +4952,16 @@ def build_supervisor_graph(
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        try:
-            clean, needs = _extract_needs(do_code(q, state.get("evidence") or [], state))
-        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
-            # This node had no handler, so a peer that hit the recursion limit raised straight
-            # out of the supervisor graph and the whole turn died: the user got an SSE error
-            # and no synthesized answer, even when search and analyze had already produced
-            # something worth saying. Degrade to a code_result that states the failure and let
-            # synthesis answer from what the other peers found.
-            logger.exception("code peer failed; continuing the turn without it")
-            emit_trace_event(
-                "node_failed",
-                {"stage": "code", "message": f"code peer failed: {type(exc).__name__}"},
-                node="code",
-            )
-            return {"code_result": {"answer": "", "executed": False, "tool_calls": [],
-                                    "tool_results": [],
-                                    "error": f"{type(exc).__name__}: {exc}"[:300]}}
+        raw, failure = _run_peer(
+            "code", lambda: do_code(q, state.get("evidence") or [], state), state)
+        if failure is not None:
+            # Degrade to a code_result that states the failure (executed=False), and let
+            # synthesis answer from what search and analyze already produced.
+            return _with_failure({"code_result": {"answer": "", "executed": False,
+                                                  "tool_calls": [], "tool_results": [],
+                                                  "error": failure["error"]}},
+                                 state, failure)
+        clean, needs = _extract_needs(raw)
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
         update: Dict[str, Any] = {"code_result": clean}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
@@ -4482,7 +4969,85 @@ def build_supervisor_graph(
             update["needs"] = enq
         return update
 
+    def _deterministic_answer(state: SupervisorState, reason: str) -> str:
+        """An answer composed WITHOUT the model, for when the model is what failed.
+
+        Retrieval is the expensive half of a turn and it usually survives — so hand it back
+        rather than throwing it away. Naming the failure matters as much as listing the
+        documents: the existing no-grounding fallback says the knowledge base has nothing on
+        the topic, and saying that when the MODEL broke is a factual claim the system is not
+        entitled to make. Evidence found and evidence unreachable are different answers.
+        """
+        evidence = state.get("evidence") or []
+        lines = [f"I could not compose an answer: {reason}"]
+        if evidence:
+            lines.append("")
+            lines.append(f"The search did complete — {len(evidence)} relevant "
+                         f"{'item was' if len(evidence) == 1 else 'items were'} retrieved "
+                         f"before the failure:")
+            for doc in evidence[:8]:
+                if not isinstance(doc, dict):
+                    continue
+                title = str(doc.get("title") or doc.get("doc_id") or "untitled").strip()
+                url = str(doc.get("url") or doc.get("link") or "").strip()
+                lines.append(f"- [{title}]({url})" if url.startswith("http") else f"- {title}")
+            if len(evidence) > 8:
+                lines.append(f"- …and {len(evidence) - 8} more")
+            lines.append("")
+            lines.append("Re-running the question should compose these into an answer.")
+        else:
+            lines.append("")
+            lines.append("No search results were retrieved either, so this is not evidence "
+                         "that the platform has nothing on the topic — the request did not "
+                         "get far enough to find out.")
+        return "\n".join(lines)
+
     def synthesize_node(state: SupervisorState) -> Dict[str, Any]:
+        """Containment wrapper. The body is `_synthesize_core`.
+
+        Guarded because the failure this whole path exists to survive is *the model being
+        unreachable*, and `_synthesize_core` calls the model. Containing the peers and leaving
+        synthesis exposed moves the crash one node later and buys nothing — verified by
+        reproducing exactly that.
+        """
+        failures = state.get("peer_failures") or []
+        try:
+            update = _synthesize_core(state)
+        except BaseException as exc:                  # noqa: BLE001 - deliberately total
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+            try:
+                import logging
+                logging.getLogger(__name__).warning("synthesis failed: %s", reason)
+            except Exception:
+                pass
+            emit_trace_event("node_completed",
+                             {"stage": "synthesize", "status": "error",
+                              "message": f"Synthesis failed: {reason[:160]}"},
+                             node="synthesize")
+            final = _deterministic_answer(state, reason)
+            merged = {**state, "answer": final, "audit": {}}
+            return {"answer": final, "final_answer": final,
+                    "audit": {"hallucination_detected": False, "severity": "none", "issues": [],
+                              "summary": "Composed without the model; synthesis failed."},
+                    "peer_failures": [*failures,
+                                      {"peer": "synthesize", "error": reason, "fatal": False}],
+                    "distilled": {**_distill(merged), "answer": final}}
+
+        # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
+        # and presenting it as a normal answer hides that a capability the user asked for did
+        # not run.
+        if failures:
+            note = _peer_failure_note(failures)
+            for key in ("answer", "final_answer"):
+                if isinstance(update.get(key), str) and update[key].strip():
+                    update[key] = f"{update[key]}\n\n---\n\n{note}"
+            if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
+                update["distilled"]["answer"] = update["final_answer"]
+        return update
+
+    def _synthesize_core(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         evidence = state.get("evidence") or []
         ar, cr = state.get("analysis_results"), state.get("code_result")
@@ -4515,15 +5080,31 @@ def build_supervisor_graph(
                 return {"answer": general, "final_answer": general, "audit": {},
                         "distilled": {**_distill(merged_g), "answer": general}}
         if not has_grounding and not has_history:
-            # Nothing was retrieved or produced AND there's no conversation to draw on (e.g. a
-            # cold first-turn query whose search backend is down or the KB has no match). Compose
-            # an honest, query-specific "no supporting evidence" reply with the LLM — the prompt
-            # forbids answering the question or inventing facts, so this acknowledges the gap
-            # without fabricating. Fall back to a deterministic (env-overridable) constant if the
-            # model is unavailable or returns nothing, so we never ship an empty answer.
-            final = (_compose_insufficiency_reply(llm, q)
-                     or os.getenv("AGENT_NO_GROUNDING_MESSAGE")
-                     or NO_GROUNDING_FALLBACK)
+            # Nothing was retrieved or produced AND there's no conversation to draw on. TWO very
+            # different situations reach this branch and they must not produce the same answer:
+            #
+            #   * the search ran and the corpus genuinely has nothing — "no matching content" is
+            #     a true statement;
+            #   * the search RAISED, so nothing was retrieved because the lookup never completed
+            #     — and saying "the knowledge base has no matching content" is then a factual
+            #     claim the system has no basis for. Reproduced: a search peer killed by a
+            #     transient crash produced exactly that sentence.
+            #
+            # The second case reports the failure instead of inventing a fact about the corpus.
+            if state.get("peer_failures"):
+                final = _deterministic_answer(
+                    state,
+                    "; ".join(str(f.get("error") or "a step failed")
+                              for f in (state.get("peer_failures") or [])[:2])[:200])
+            else:
+                # Compose an honest, query-specific "no supporting evidence" reply with the LLM
+                # — the prompt forbids answering the question or inventing facts, so this
+                # acknowledges the gap without fabricating. Fall back to a deterministic
+                # (env-overridable) constant if the model is unavailable or returns nothing, so
+                # we never ship an empty answer.
+                final = (_compose_insufficiency_reply(llm, q)
+                         or os.getenv("AGENT_NO_GROUNDING_MESSAGE")
+                         or NO_GROUNDING_FALLBACK)
             audit = {}
         else:
             # We have retrieval/execution grounding OR a conversation to work from. The latter
@@ -4693,7 +5274,23 @@ def build_supervisor_graph(
         lambda s: "supervisor" if s.get("reground") else "done",
         {"supervisor": "supervisor", "done": END},
     )
-    return builder.compile()
+    # Compiled WITH a checkpointer so a run's partial state survives the process that produced
+    # it. Previously bare, which made `evidence`/`analysis_results`/`code_result` exist only
+    # inside the in-flight `invoke` — not merely unused on failure but unrecoverable in
+    # principle.
+    #
+    # `run_supervisor` gives every run its OWN thread id (see there). That is deliberate: binding
+    # the caller's conversation thread would make a second turn RESUME the first — inheriting its
+    # `step`, `actions` and `evidence`, so a follow-up question would start at step 8 and route
+    # straight to `done`. Recoverability was the goal; cross-turn resumption is a different
+    # feature with a different design.
+    #
+    # Opt-in HERE, supplied by `run_supervisor`. A graph built directly — prototype's tests and
+    # harnesses call `graph.invoke(state)` with no config — must keep working: a checkpointer
+    # demands a thread_id in `configurable`, and defaulting one in made every such caller raise.
+    if checkpointer is None:
+        return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 def run_supervisor(
@@ -4707,8 +5304,20 @@ def run_supervisor(
     **graph_kwargs: Any,
 ) -> Dict[str, Any]:
     """Build + run the supervisor graph; return the full final state."""
+    import uuid
+
+    if graph_kwargs.get("checkpointer") is None:
+        from agent_runtime.executor_factory import DEFAULT_CHECKPOINTER
+
+        graph_kwargs["checkpointer"] = DEFAULT_CHECKPOINTER
     graph = build_supervisor_graph(llm=llm, **graph_kwargs)
-    return graph.invoke(
+    # A checkpoint namespace PER RUN, not per conversation. The caller's `thread_id` still
+    # travels in the state (peers use it for their own nested threads); it must not become the
+    # checkpoint key, or a second turn would resume the first — inheriting its `step`, `actions`
+    # and `evidence`, so a follow-up would start at step 8 and route straight to `done`.
+    run_thread = f"{thread_id or 'auto'}::run::{uuid.uuid4().hex[:12]}"
+    config = {"configurable": {"thread_id": run_thread}}
+    state = graph.invoke(
         {
             "query": query,
             "chat_history": chat_history or [],
@@ -4719,8 +5328,14 @@ def run_supervisor(
             "actions": [],
             "step": 0,
             "max_steps": max_steps,
-        }
+        },
+        config,
     )
+    # Handed back so a caller that wants the partial state after an unexpected failure has a
+    # key to read it with. Recording it is the difference between "unused" and "unrecoverable".
+    if isinstance(state, dict):
+        state.setdefault("checkpoint_thread_id", run_thread)
+    return state
 
 
 __all__ = [

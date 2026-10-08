@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
+    EMIT_LIBRARY,
     EMIT_MCP,
     EMIT_OPENSEARCH,
     KIND_CODE_BLOCK,
+    KIND_METHOD_UNIT,
     AssetRecord,
     ExtractContext,
     Extractor,
@@ -111,10 +113,14 @@ def _entry_point(tree: ast.AST) -> Tuple[bool, Optional[str], List[str]]:
     has_main_block = any(
         isinstance(n, ast.If) and "__main__" in ast.dump(n.test) for n in tree.body
     )
-    uses_argparse = any(
-        isinstance(n, (ast.Import, ast.ImportFrom)) and "argparse" in ast.dump(n)
-        for n in ast.walk(tree)
-    )
+    # Merely IMPORTING argparse is not an entry point. Any module that imports it was being
+    # promoted, which ships the whole file as `module_source` — a library module with an
+    # argparse import for one optional helper looked exactly like a CLI. Require the full
+    # pattern: the import PLUS a parser PLUS a parse_args() call.
+    dumped = ast.dump(tree)
+    uses_argparse = ("argparse" in dumped
+                     and "ArgumentParser" in dumped
+                     and "parse_args" in dumped)
     if has_main_block or uses_argparse:
         return True, None, []   # script mode
     return False, None, []
@@ -122,6 +128,87 @@ def _entry_point(tree: ast.AST) -> Tuple[bool, Optional[str], List[str]]:
 
 class CodeExtractor:
     name = "code"
+
+    def _promote_units(self, assets: List[AssetRecord], source: str, *, rel_path: str,
+                       ctx: ExtractContext, tags: Any, source_fields: Dict[str, Any]) -> Dict[str, Any]:
+        """One MethodUnit per independently-callable top-level function in this module.
+
+        A .py module is a *better* source of units than a notebook: it has no cell state, so
+        far fewer functions are blocked by a runtime global. The verdicts still decide — only
+        `callable` units get EMIT_LIBRARY — so a module-level `df = pd.read_csv(...)` blocks its
+        readers here exactly as it does in a notebook.
+        """
+        from .analysis import analyze_module, build_unit_slice, iter_units, slice_sha
+        from .analysis.signatures import (contract_invariants, contract_params,
+                                  signature_of)
+        from .contracts import ANALYZER_VERSION, CALLABLE, UnitContract
+        from .doc_ids import method_unit_doc_id
+        from .pkgmap import requirements_from_source
+
+        import dataclasses
+
+        verdicts, scope, summary = analyze_module(source)
+        if summary.get("unparseable"):
+            return summary
+        try:
+            nodes = dict(iter_units(ast.parse(source)))
+        except SyntaxError:
+            return summary
+
+        parent_doc_id = code_asset_doc_id(ctx.anchor() or "repo", rel_path, "__module__")
+        for qualname, callability in verdicts.items():
+            node = nodes.get(qualname)
+            if node is None:
+                continue
+            doc = ast.get_docstring(node) or ""
+            _params = contract_params(node, doc, nodes)
+            provenance = {"element_id": ctx.anchor(), "parent_doc_id": parent_doc_id,
+                          "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
+                          "extractor": self.name, "analyzer_version": ANALYZER_VERSION}
+            slice_src = build_unit_slice(source, qualname, scope=scope, verdicts=verdicts,
+                                         provenance=provenance)
+            contract = UnitContract(
+                qualified_name=qualname,
+                # A ClassDef was labelled "function" here, so the contract said `def X()`
+                # for 35 units in the live registry. The caller CONSTRUCTS a class; being
+                # told to call it as a function is a different action.
+                unit_kind=("class" if isinstance(node, ast.ClassDef)
+                           else "method" if "." in qualname else "function"),
+                signature=signature_of(node),
+                params=_params,
+                # Enforceable form of what the params declare. Without this the expectation was
+                # shown to the model and checked by nothing.
+                invariants=[dataclasses.asdict(i) for i in contract_invariants(_params, node)],
+                returns=(ast.unparse(node.returns) if getattr(node, "returns", None) else ""),
+                docstring=doc,
+                doc_summary=(doc.strip().splitlines() or [""])[0][:200],
+                callability=callability,
+                slice_sha=slice_sha(slice_src) if slice_src else "",
+                library_symbol=qualname.split(".")[-1],
+                requirements=requirements_from_source(slice_src) if slice_src else {},
+                provenance=provenance,
+            )
+            is_callable = callability.verdict == CALLABLE
+            targets = [EMIT_OPENSEARCH]
+            if is_callable and EMIT_LIBRARY in (ctx.targets or ()):
+                targets.append(EMIT_LIBRARY)
+            unit_doc_id = method_unit_doc_id(parent_doc_id, qualname)
+            contents = f"{contract.signature}\n\n{contract.doc_summary}".strip()
+            if not is_callable:
+                contents += f"\n\n[not independently callable: {callability.reason}]"
+            assets.append(AssetRecord(
+                asset_id=unit_doc_id, kind=KIND_METHOD_UNIT,
+                resource_type=resource_type_for(KIND_METHOD_UNIT), doc_id=unit_doc_id,
+                emit_targets=targets, source_rel_path=rel_path,
+                title=f"{qualname} — {rel_path}",
+                contents=contents,
+                unit=dataclasses.asdict(contract),
+                slice_source=slice_src if is_callable else "",
+                source_fields={**source_fields, "tags": sorted(set(tags or ()))},
+                extracted={"parent_doc_id": parent_doc_id, "parent_type": "Code",
+                           "callable": is_callable, "unit_name": qualname},
+            ))
+        return summary
 
     def extract(self, path: str, *, ctx: ExtractContext) -> ExtractionResult:
         rel_path = _rel_path(ctx, path)
@@ -136,6 +223,13 @@ class CodeExtractor:
         imports = _module_imports(tree)
         assets: List[AssetRecord] = []
         edges: List[ProvenanceEdge] = []
+
+        # Callable units, through the SAME analyzer/slicer/library path the notebook extractor
+        # uses. Code assets previously produced API-surface descriptions only, so `code` was an
+        # element type the system claimed to extract methods from and did not: the corpus
+        # library was 203 units, all of them `notebook`.
+        unit_summary = self._promote_units(assets, source, rel_path=rel_path, ctx=ctx,
+                                           tags=tags, source_fields=source_fields)
 
         for qualname, kind, node in _api_surface(tree):
             doc_id = code_asset_doc_id(anchor, rel_path, qualname)
@@ -176,8 +270,11 @@ class CodeExtractor:
                 emit_targets=([EMIT_OPENSEARCH, EMIT_MCP] if EMIT_MCP in ctx.targets else [EMIT_OPENSEARCH]),
                 source_rel_path=rel_path,
                 title=f"{rel_path}  (runnable)",
-                contents=f"[runnable: {runnable_tool}] Entry point in {rel_path} "
-                         f"({'function:' + entrypoint if entrypoint else 'script'} mode).",
+                # Identify, do not advertise a callable tool — see
+                # doc_ids.mcp_tool_name_for and notebook_extractor's matching marker.
+                contents=f"[workflow {wid}] Entry point in {rel_path} "
+                         f"({'function:' + entrypoint if entrypoint else 'script'} mode). "
+                         f"Not directly callable; reuse the extracted functions.",
                 source_fields={**source_fields, "tags": tags},
                 runnable={
                     "workflow_id": wid, "runnable_tool": runnable_tool,

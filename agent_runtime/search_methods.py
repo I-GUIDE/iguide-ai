@@ -36,6 +36,8 @@ KNOWN_SEARCH_METHODS: tuple = (
     "web_fetch",
     "agent_kb_search",
     "get_kb_block",
+    "kb_method_search",
+    "get_method_contract",
 )
 
 # Forgiving spellings that unambiguously mean one of the above.
@@ -73,6 +75,14 @@ _ALIASES = {
     "agentkbsearch": "agent_kb_search",
     "kbblock": "get_kb_block",
     "getkbblock": "get_kb_block",
+    "kbmethod": "kb_method_search",
+    "kbmethodsearch": "kb_method_search",
+    "methodsearch": "kb_method_search",
+    "method_library": "kb_method_search",
+    "methodlibrary": "kb_method_search",
+    "methods": "kb_method_search",
+    "methodcontract": "get_method_contract",
+    "getmethodcontract": "get_method_contract",
 }
 
 

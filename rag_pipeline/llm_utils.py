@@ -45,16 +45,35 @@ def call_llm(prompt: str) -> str:
     """
     # Allow test override via register_llm_callable
     if _llm_callable is not None:
-        try:
-            result = _llm_callable(prompt)
-            if isinstance(result, str):
-                return result
-            logger.warning("LLM callable returned non-string result; coercing to string.")
-            return str(result)
-        except Exception as exc:
-            logger.error("LLM call failed: %s", exc)
-            return "I could not compose an answer due to a generation error."
+        result = _llm_callable(prompt)
+        if isinstance(result, str):
+            return result
+        logger.warning("LLM callable returned non-string result; coercing to string.")
+        return str(result)
+        # An exception from the injected callable PROPAGATES, exactly as one from the real
+        # provider does. It used to be caught here and returned as
+        # "I could not compose an answer due to a generation error." — so the test seam behaved
+        # differently from production in the one respect a failure test cares about.
+        #
+        # The consequence: `publication_extractor` distinguishes `llm_unavailable` (the call
+        # raised) from `llm_unparseable` (it answered with something unusable), and through this
+        # seam the first was UNREACHABLE — a raising double always arrived as an unparseable
+        # string. The degradation path the plan wanted exercisable offline could not be exercised
+        # at all, and a test that "covered" it was testing the canned string.
+        #
+        # The canned strings further down are a different case and stay: an empty or malformed
+        # response from a reachable provider should degrade to text rather than crash the
+        # answer path.
     
+    # LLM_PROVIDER=claude-cli routes through the local `claude` executable so extraction
+    # batches and eval sweeps cost nothing during development. Dev-only by contract; the
+    # backend itself refuses to run where a deployment marker is present.
+    from . import llm_claude_cli
+
+    if llm_claude_cli.is_selected():
+        llm_claude_cli.check_not_deployed()
+        return llm_claude_cli.call(prompt)
+
     # Production path: OpenAI-compatible call
     url = _completion_url()
     key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")

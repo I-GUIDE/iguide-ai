@@ -31,6 +31,7 @@ from ..state import (
     summarize_evidence,
 )
 from .utils import get_logger
+from .utils import default_top_k  # shared retrieval window
 
 logger = get_logger("search_core")
 
@@ -54,7 +55,7 @@ def _record_decision(decisions: List[RoutingDecision], source: str, reason: str)
 def _limit_for(state: MutableMapping[str, Any]) -> int:
     params = state.get("params") or {}
     try:
-        return max(1, int(params.get("top_k", 8)))
+        return max(1, int(params.get("top_k", default_top_k())))
     except (TypeError, ValueError):
         return 8
 

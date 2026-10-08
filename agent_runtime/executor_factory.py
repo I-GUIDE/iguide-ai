@@ -36,6 +36,8 @@ from agent_runtime.prompts import (  # noqa: E402  (kept here for back-compat re
     CODE_AGENT_PROMPT,
     DEFAULT_AGENT_PROMPT,
     SEARCH_AGENT_PROMPT,
+    code_agent_prompt,
+    search_agent_prompt,
 )
 
 class BoundedInMemorySaver(InMemorySaver):
@@ -261,10 +263,23 @@ def _reasoning_preserving_chat_openai() -> Any:
 
 
 def build_default_llm() -> Any:
-    """Build a ``ChatOpenAI`` instance from environment variables.
+    """Build the agent's chat model from environment variables.
 
-    Priority: AGENT_LLM_PROVIDER=anvilgpt or lumen → VLLM_* → OPENAI_* → defaults.
+    Priority, in the order the body checks them:
+
+    1. ``LLM_PROVIDER=claude-cli`` → the `claude` CLI (development and experiments only; see
+       ``agent_runtime/chat_claude_cli.py``). It is a developer's deliberate override of
+       everything else, and ``check_not_deployed()`` refuses it in anything that looks like a
+       deployment.
+    2. ``AGENT_LLM_PROVIDER=anvilgpt`` or ``lumen``.
+    3. Otherwise a ``ChatOpenAI``: VLLM_* → OPENAI_* → defaults.
     """
+    from rag_pipeline import llm_claude_cli
+
+    if llm_claude_cli.is_selected():
+        from agent_runtime.chat_claude_cli import build as build_claude_cli
+        return build_claude_cli()
+
     try:
         ChatOpenAI = _reasoning_preserving_chat_openai()
     except Exception as exc:
@@ -1837,7 +1852,7 @@ def build_search_agent_executor(
         enabled_search_methods=enabled_search_methods,
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=preloaded_tools,
-        system_prompt_override=SEARCH_AGENT_PROMPT,
+        system_prompt_override=search_agent_prompt(),
         agent_name="search_agent",
         checkpointer=checkpointer,
         session_id=session_id,
@@ -1862,7 +1877,7 @@ def build_code_agent_executor(
         include_mcp_tools=False,
         mcp_modules=None,
         preloaded_tools=tools or [],
-        system_prompt_override=CODE_AGENT_PROMPT,
+        system_prompt_override=code_agent_prompt(),
         agent_name="code_agent",
         checkpointer=checkpointer,
         skill_roots=skill_roots,

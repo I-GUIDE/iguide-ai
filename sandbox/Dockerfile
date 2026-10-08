@@ -54,6 +54,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
     geopandas \
+    pyogrio \
     fiona \
     rasterio \
     pyproj \
@@ -86,6 +87,11 @@ ENV HOME=/tmp \
 # EVERY run. That noise lands in the stderr the agent reads back and reasons about, which is
 # worth more than the ~0.5 s the cache would have saved.
 ENV MPLCONFIGDIR=/tmp/mpl
+
+# Warm the pyproj CRS database so the FIRST reprojection in a --network none container does not
+# try to fetch a grid. The invariant gate reads `crs.axis_info` on every geometry frame, so this
+# is on the hot path of every geospatial run, not an optimisation for a rare case.
+RUN python -c "import pyproj; [pyproj.CRS.from_epsg(e) for e in (4326, 3857, 32616, 3435)]"
 
 # Assert the image is actually usable, not merely installed — see verify_imports.py for why
 # `pip install` succeeding is not evidence of that, and why the executor's probe depends on it.

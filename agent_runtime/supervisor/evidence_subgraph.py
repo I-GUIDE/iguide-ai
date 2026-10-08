@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
+from agent_runtime.capability_registry import (OFFER_LIBRARY, RUN_LIBRARY, SEARCH_METHODS,
+                                               STAGE_INPUTS, consumer_capabilities)
 from agent_runtime.streaming_trace import emit_trace_event
 
 # (query, state) -> list of document dicts
@@ -102,18 +104,169 @@ def _element_url(doc: Any) -> str:
     return f"{base}/{plural}/{doc_id}"
 
 
-def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
+# How much extracted detail one element may add to the evidence view. Bounded because this rides
+# on TOP of the document's own contents, and an element with 200 blocks would otherwise crowd out
+# every other result.
+EXTRACTED_MAX_CHARS = 900
+
+
+def _render_extracted(extracted: Any, element_hint: str = "<element id>", *,
+                      consumer: str = "answer") -> str:
+    """What extraction produced from this element, as REFERENCES and ACTIONABLE items.
+
+    The distinction is the point. A block or a method spec is a reference — it tells the model what
+    the element contains and lets it answer accurately. An import line is actionable: the method
+    library is mounted read-only inside ``execute_code``, so that exact line runs there without an
+    install, a download or a network hop. Rendering both as undifferentiated prose was how the
+    agent kept saying "adapt this notebook" while an importable function sat one field away.
+
+    Actionable for WHOM is the consumer's row in ``capability_registry.EVIDENCE_CONSUMERS``: an
+    import line only for a consumer that can run the library, a staging instruction only for one
+    that can stage, a pointer at ``kb_method_search`` only for one that holds it.
+    """
+    if not isinstance(extracted, dict) or not extracted:
+        return ""
+    parts: List[str] = []
+
+    units = [u for u in (extracted.get("units") or []) if isinstance(u, dict)]
+    # Rendered for what THIS consumer can do, which is nothing while the extraction bundle is off
+    # (agent_runtime/extraction_flag.py): a model handed an import line writes the import, and a
+    # model told to call a tool it lacks guesses around it.
+    caps = consumer_capabilities(consumer)
+    runnable = [u for u in units if u.get("import_line")] if RUN_LIBRARY in caps else []
+    # A reader writing for a human gets the same methods as things THIS AGENT can run, with the
+    # import line kept as a labelled detail rather than a snippet to paste.
+    offered = ([u for u in units if u.get("import_line")]
+               if (OFFER_LIBRARY in caps and not runnable) else [])
+    if runnable:
+        lines = ["RUNNABLE METHODS extracted from this element — the import line works verbatim "
+                 "inside execute_code (the library is mounted read-only); prefer it over "
+                 "re-implementing:"]
+        for unit in runnable:
+            lines.append(f"  - {unit.get('signature') or unit.get('symbol')}")
+            if unit.get("doc_summary"):
+                lines.append(f"      {unit['doc_summary']}")
+            lines.append(f"      import: {unit['import_line']}")
+            if unit.get("requirements"):
+                lines.append(f"      requires: {', '.join(map(str, unit['requirements']))}")
+            if unit.get("invariants"):
+                lines.append(f"      enforced: {', '.join(map(str, unit['invariants']))}")
+            # A loader advertises `load_x(staged_path)` and nothing said where a staged_path comes
+            # from. Measured on a live turn: the agent read this signature, called the loader
+            # without staging, got "block not found", and fell back to a different tool over a
+            # different subset of the data (49,789 geocoded incidents instead of 128,886 records)
+            # -- reporting THEFT as 9,993 where the file says 27,824. The parameter has to carry
+            # its own instructions, at the point of use, because a generic prompt rule did not
+            # survive the moment of choice.
+            if STAGE_INPUTS in caps and "staged_path" in str(unit.get("signature") or ""):
+                lines.append(f"      FIRST call stage_element(\"{element_hint}\") to obtain "
+                             f"staged_path — this file is not in the sandbox until you do.")
+        parts.append("\n".join(lines))
+    if offered:
+        lines = ["METHODS THIS AGENT CAN RUN for the user, in its own sandbox. The import lines "
+                 "work ONLY there, not in the user's environment: offer to run a method rather "
+                 "than telling the user to import it."]
+        for unit in offered:
+            lines.append(f"  - {unit.get('signature') or unit.get('symbol')}")
+            if unit.get("doc_summary"):
+                lines.append(f"      {unit['doc_summary']}")
+            lines.append(f"      agent-sandbox import: {unit['import_line']}")
+            if unit.get("requirements"):
+                lines.append(f"      requires: {', '.join(map(str, unit['requirements']))}")
+        parts.append("\n".join(lines))
+
+    named_only = [u for u in units if u not in runnable and u not in offered]
+    if named_only:
+        label = ("METHODS PRESENT but not importable (reference only): "
+                 if (RUN_LIBRARY in caps or OFFER_LIBRARY in caps)
+                 else "METHODS IN THIS ELEMENT (reference only): ")
+        parts.append(label + ", ".join(str(u.get("symbol")) for u in named_only if u.get("symbol")))
+    if extracted.get("unit_count") and len(units) < int(extracted["unit_count"]):
+        parts.append(f"({extracted['unit_count']} methods in total; {len(units)} shown"
+                     + (" — call kb_method_search for the rest)" if SEARCH_METHODS in caps
+                        else ")"))
+
+    dataset = extracted.get("dataset")
+    if isinstance(dataset, dict) and dataset:
+        bits = []
+        for key in ("format", "family", "row_count", "crs", "geometry_type"):
+            if dataset.get(key):
+                bits.append(f"{key}={dataset[key]}")
+        if dataset.get("schema"):
+            bits.append("fields=" + ", ".join(map(str, dataset["schema"][:14])))
+        if dataset.get("variables"):
+            bits.append("variables=" + ", ".join(map(str, dataset["variables"][:14])))
+        if bits:
+            parts.append("DATASET STRUCTURE (extracted from the file itself): " + "; ".join(bits))
+
+    publication = extracted.get("publication")
+    if isinstance(publication, dict) and publication.get("steps"):
+        steps = "\n".join(f"  {i}. {s}" for i, s in enumerate(publication["steps"][:8], 1))
+        parts.append("METHOD THIS PAPER DESCRIBES (extracted from its full text):\n" + steps)
+
+    blocks = [b for b in (extracted.get("blocks") or []) if isinstance(b, dict)]
+    if blocks:
+        summary = "; ".join(str(b.get("context") or "").replace("\n", " ")[:70]
+                            for b in blocks if b.get("context"))
+        if summary:
+            parts.append(f"NOTEBOOK SECTIONS ({extracted.get('block_count', len(blocks))} cells): "
+                         + summary)
+
+    return ("\n".join(parts))[:EXTRACTED_MAX_CHARS]
+
+
+def _doc_block(doc: Any, *, max_chars: int = 2500, consumer: str = "answer") -> str:
     # One evidence item as title + url + contents. We deliberately do NOT lead with the raw
     # [doc_id]: showing it trained the synthesizer to cite "[<uuid>]" instead of the hyperlink
     # Rule 2 asks for. Title + url are the only citation handles the model sees.
     title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
     contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
     url = _element_url(doc)
+    caps = consumer_capabilities(consumer)
+    if (isinstance(doc, dict) and doc.get("resource_type") == "MethodUnit"
+            and RUN_LIBRARY not in caps):
+        # A method document carries its import line in `contents`
+        # (graph._method_hit_as_document). A reader writing for a human keeps it, labelled as
+        # what it is; any other reader that cannot run the library gets a reference: the same
+        # text, minus the one line that would fail if used.
+        if OFFER_LIBRARY in caps:
+            contents = "\n".join(
+                ("agent-sandbox import (works only in this agent's sandbox, not the user's "
+                 "environment): " + line[len("import: "):]) if line.startswith("import: ") else line
+                for line in str(contents).splitlines())
+            title = str(title).replace("— callable method", "— method this agent can run")
+        else:
+            contents = "\n".join(line for line in str(contents).splitlines()
+                                 if not line.startswith("import: "))
+            title = str(title).replace("— callable method", "— method (reference only)")
     head = f"title: {title}" + (f"\nurl: {url}" if url else "")
-    return f"{head}\n{contents[:max_chars]}"
+
+    # An extracted METHOD SPEC is exempt from the generic budget, because it is not a document
+    # excerpt — it is the whole method in numbered steps, and its parameters live in the middle
+    # of the list.
+    #
+    # This is the fourth budget between the record and the model. `kb_db` carries a spec whole at
+    # 6,000 characters; `agent_kb.normalize_hit` re-trimmed it to 1,800 with the CELL budget;
+    # this line cut what survived to 2,500; and `EXTRACTED_MAX_CHARS` caps the enrichment at 900.
+    # Each was reasonable where it was written and none knew about the others, so the producer's
+    # budget meant nothing and nobody could predict what the model actually saw. Measured: asked
+    # for a paper's distance-decay weights, the agent answered "the retrieved evidence does not
+    # state the actual numeric weight values" while the record held "Apply distance-decay weights
+    # (1, 0.68, 0.22)" — cut, twice, between the two.
+    is_spec = (isinstance(doc, dict)
+               and doc.get("resource_type") == "PublicationMethodSpec")
+    body = f"{head}\n{contents if is_spec else contents[:max_chars]}"
+    # Everything extraction produced for this element, joined on by id in _direct_search_sweep.
+    # Without this the join enriched a document the model never saw the enrichment of.
+    extracted = doc.get("extracted") if isinstance(doc, dict) else None
+    rendered = _render_extracted(
+        extracted, str((doc.get("doc_id") if isinstance(doc, dict) else "") or "<element id>"),
+        consumer=consumer)
+    return f"{body}\n{rendered}" if rendered else body
 
 
-def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) -> str:
+def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500,
+                                consumer: str = "answer") -> str:
     """Render a related-element result as two clearly-separated buckets so the synthesizer
     presents contributor-specified links apart from similarity hits (and the grounding auditor
     can tell them apart). Triggered whenever any doc carries a ``provenance`` tag."""
@@ -125,26 +278,28 @@ def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) 
         parts.append("[QUERIED ELEMENT — the resource whose related elements were requested. Use "
                      "THIS title/link when naming the resource in the answer; do not infer its "
                      "identity from the other items.]")
-        parts.append("\n\n".join(_doc_block(d, max_chars=max_chars) for d in seed))
+        parts.append("\n\n".join(_doc_block(d, max_chars=max_chars, consumer=consumer) for d in seed))
     parts.extend([
         "\n[CURATED related elements — specified by the contributor. Authoritative: present "
         "THESE as the element's related elements.]",
-        "\n\n".join(_doc_block(d, max_chars=max_chars) for d in curated) if curated
+        "\n\n".join(_doc_block(d, max_chars=max_chars, consumer=consumer) for d in curated) if curated
         else "(none — the contributor has not specified any related elements for this element)",
         "\n[CONTENT-RELATED elements — found by similarity search. These are NOT contributor-"
         "specified relationships; present them in a SEPARATE section as topically similar, not "
         "as curated links.]",
-        "\n\n".join(_doc_block(d, max_chars=max_chars) for d in content) if content
+        "\n\n".join(_doc_block(d, max_chars=max_chars, consumer=consumer) for d in content) if content
         else "(no content-similar elements found)",
     ])
     return "\n".join(parts)
 
 
-def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
+def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500,
+                      consumer: str = "answer") -> str:
+    # `consumer` is a row in capability_registry.EVIDENCE_CONSUMERS: what the reader can act on.
     # A related-element result carries provenance tags -> render two labeled buckets.
     if any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in documents):
-        return _format_related_two_buckets(documents, max_chars=max_chars)
-    blocks = [_doc_block(doc, max_chars=max_chars) for doc in documents[:limit]]
+        return _format_related_two_buckets(documents, max_chars=max_chars, consumer=consumer)
+    blocks = [_doc_block(doc, max_chars=max_chars, consumer=consumer) for doc in documents[:limit]]
     return "\n\n".join(blocks) if blocks else "(no evidence)"
 
 

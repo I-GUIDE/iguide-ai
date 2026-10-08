@@ -86,16 +86,36 @@ def ingest_from_github(
     *,
     ref: str = "",
     targets: Sequence[str] = VALID_TARGETS,
+    element_id: str = "",
+    dry_run: bool = False,
     reingest: bool = False,
 ) -> UnifiedManifest:
-    """Clone ``url`` (or use a local path), run notebook + code extractors, return a
-    dry-run UnifiedManifest (emitter fan-out is design-doc §10 step 2)."""
+    """Clone ``url`` (or use a local path), run notebook + code extractors, and emit.
+
+    Previously this returned the manifest WITHOUT calling ``_fan_out``, so both callers
+    that reach it -- ``extractors.cli`` and the MCP ``ingest_github_repo`` tool -- extracted
+    and then silently discarded everything, while accepting a ``--targets`` argument that
+    implied otherwise. ``ingest_submission`` (the webhook) was the only path that persisted.
+
+    ``element_id`` anchors every derived doc_id on the platform element. Without it ids
+    anchor on ``repo_id`` instead, which seeds unanchored docs into the agent KB that no
+    element can ever claim -- so emitting requires either an ``element_id`` or an explicit
+    ``dry_run``.
+    """
     from .notebook_extractor import NotebookExtractor
     from .code_extractor import CodeExtractor
+
+    if not dry_run and not element_id:
+        raise ValueError(
+            "ingest_from_github would emit docs anchored on repo_id, which no platform "
+            "element can claim. Pass element_id=... to anchor them, or dry_run=True to "
+            "inspect the manifest without emitting."
+        )
 
     rid = repo_id(url)
     repo_dir, commit_sha, cleanup = _materialize_source(url, ref)
     ctx = ExtractContext(source_url=url, repo_id=rid, commit_sha=commit_sha,
+                         element_id=element_id,
                          targets=tuple(targets), reingest=reingest, extra={"repo_dir": repo_dir})
     manifest = UnifiedManifest(repo_id=rid, source_url=url, commit_sha=commit_sha, cloned_at=_now_iso())
     try:
@@ -104,6 +124,8 @@ def ingest_from_github(
             _run_extractor(NotebookExtractor(), buckets[KIND_NOTEBOOK_BLOCK], ctx, manifest)
         if buckets.get(KIND_CODE_BLOCK):
             _run_extractor(CodeExtractor(), buckets[KIND_CODE_BLOCK], ctx, manifest)
+        if not dry_run:
+            _fan_out(manifest, ctx.targets)
     finally:
         cleanup()
     return manifest
@@ -168,18 +190,31 @@ def ingest_submission(submission) -> UnifiedManifest:
 
 
 def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
-    """Route the manifest to emitters. Only the OpenSearch emitter is live; mcp/skill
-    emitters are still stubs (design-doc §10 step 2 continues). Failures are recorded
-    as warnings, never raised — extraction already succeeded."""
-    if "opensearch" in targets:
+    """Route the manifest to emitters. Failures are recorded as warnings, never raised —
+    extraction already succeeded.
+
+    **The order is load-bearing, and it used to be wrong.** ``library_emitter`` is what assigns
+    each unit its ``library_module`` (``library_emitter.py:304``, mutating the live unit dict),
+    and the OpenSearch document advertises that module as the unit's import line. With OpenSearch
+    emitting first, every indexed unit was built before its module path existed, so no document
+    could ever carry an importable line — measured 0 of 130 on the corpus.
+
+    That was invisible until the document started carrying the contract at all: before then it
+    held neither the module nor anything else, so there was no field to notice was empty. Library
+    first, then the index that describes it.
+    """
+    if "library" in targets:
         try:
-            from .emitters import opensearch_emitter
-            summary = opensearch_emitter.emit(manifest)
-            manifest.warnings.append(
-                f"[kb:{summary.get('backend')}] indexed {summary.get('indexed')} docs "
-                f"into {list(summary.get('indices', {}))}")
+            from .emitters import library_emitter
+            summary = library_emitter.emit(manifest)
+            if summary.get("written"):
+                manifest.warnings.append(
+                    f"[library] wrote {len(summary['written'])} unit module(s); "
+                    f"registry now {summary.get('registry_size')} symbol(s)")
+            if summary.get("skipped"):
+                manifest.warnings.append(f"[library] skipped {len(summary['skipped'])} unit(s)")
         except Exception as exc:
-            manifest.warnings.append(f"[kb] emit failed: {type(exc).__name__}: {exc}")
+            manifest.warnings.append(f"[library] emit failed: {type(exc).__name__}: {exc}")
 
     if "mcp" in targets:
         try:
@@ -190,12 +225,30 @@ def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
         except Exception as exc:
             manifest.warnings.append(f"[mcp] emit failed: {type(exc).__name__}: {exc}")
 
+    # Last, because it mirrors what the emitters above produced — including the library module
+    # path each unit's import line is built from.
+    if "opensearch" in targets:
+        try:
+            from .emitters import opensearch_emitter
+            summary = opensearch_emitter.emit(manifest)
+            manifest.warnings.append(
+                f"[kb:{summary.get('backend')}] indexed {summary.get('indexed')} docs "
+                f"into {list(summary.get('indices', {}))}")
+        except Exception as exc:
+            manifest.warnings.append(f"[kb] emit failed: {type(exc).__name__}: {exc}")
+
     if "skill" in targets:
         try:
             from .emitters import skill_emitter
             summary = skill_emitter.emit(manifest)
-            if summary.get("written"):
-                manifest.warnings.append(f"[skill] wrote {summary['written']} (discoverable={summary.get('discoverable')})")
+            if summary.get("error"):
+                # Not a footnote on a success. The file exists and the registry will never
+                # load it, which is indistinguishable from never having written it.
+                manifest.warnings.append(f"[skill] {summary['error']} — {summary['written']}")
+            elif summary.get("written"):
+                manifest.warnings.append(
+                    f"[skill] wrote {summary['written']} "
+                    f"(discoverable={summary.get('discoverable')})")
         except Exception as exc:
             manifest.warnings.append(f"[skill] emit failed: {type(exc).__name__}: {exc}")
 

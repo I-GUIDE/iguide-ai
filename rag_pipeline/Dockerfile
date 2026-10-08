@@ -101,6 +101,12 @@ COPY extractors/ ./extractors/
 # test_image_skill_roots.py fails if either line is dropped or sends a root elsewhere.
 COPY skills/ ./skills/
 COPY .agents/ ./.agents/
+# The two scripts a deployer runs INSIDE this container when turning the extraction bundle on
+# (docker-compose.extraction.yml). The build writes where AGENT_METHOD_LIBRARY_DIR points, and the
+# smoke test drives the real executor, so it sees the sandbox's library mount exactly as a turn
+# does. Run from the host instead, it mounted the library from a host path and passed while every
+# turn in the container got an empty one.
+COPY scripts/build_method_library.py scripts/smoke_end_to_end.py ./scripts/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request
@@ -108,7 +114,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 
 # Create writable upload directory and non-root user
 RUN useradd -m -u 1000 appuser \
-    && mkdir -p /app/agent_chat_files/uploads \
+    && mkdir -p /app/agent_chat_files/uploads /app/agent_chat_files/skills \
     && chown -R appuser:appuser /app
 USER appuser
 

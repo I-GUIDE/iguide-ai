@@ -189,7 +189,25 @@ def _neo4j_driver() -> Driver:
         or _getenv("NEO4J_USER")
     )
     password = _getenv("NEO4J_PASSWORD")
+    if not neo4j_enabled():
+        return None
     return GraphDatabase.driver(uri, auth=(user, password), max_connection_lifetime=300)
+
+
+def neo4j_enabled() -> bool:
+    """Whether the Neo4j-backed tools should be attempted at all.
+
+    ``NEO4J_ENABLED=0`` short-circuits BEFORE the driver connects. Without it every turn on a
+    machine that cannot reach the graph pays a full connect/auth round trip before falling
+    back — observed both as "Unable to retrieve routing information" (host unreachable) and
+    as an AuthError (host reachable, stale credentials). Both degrade correctly but cost
+    latency on every single turn, which is exactly what a dev machine should be able to opt
+    out of.
+
+    Default ON: a deployment must not silently lose the graph because a variable is unset.
+    """
+    import os as _os
+    return (_os.getenv("NEO4J_ENABLED", "1") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _neo4j_db() -> Optional[str]:

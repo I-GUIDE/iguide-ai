@@ -174,7 +174,8 @@ def test_execute_code_tool_with_stub_executor():
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["dependencies"] = dependencies
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="captured-out", stderr="", backend="stub")
@@ -224,7 +225,8 @@ def test_execute_code_tool_resolves_and_stages_file_specs(monkeypatch, tmp_path)
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
@@ -317,7 +319,8 @@ def test_default_and_explicit_union_deduped(monkeypatch, tmp_path):
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
@@ -340,7 +343,8 @@ def test_input_file_count_cap_skips_extras(monkeypatch, tmp_path):
     b = create_output_file("b.csv", "y\n")["file_id"]
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
     tools = make_code_execution_tools(executor=_Stub(), default_input_file_ids=[a, b])
@@ -429,6 +433,17 @@ def test_signal_deaths_are_diagnosed_in_both_conventions():
 
 
 # --- a conversation's code keeps its workspace between runs -----------------------
+#
+# Both branches grew this independently: prototype copied a durable directory forward into a
+# throwaway work dir each run, this one bind-mounts the durable directory as /work. The merge kept
+# the mount — no per-run copy, and staged inputs and the gate's report live with the files instead
+# of being copied around. These two tests are prototype's, retargeted: the properties it was
+# protecting are real and the surviving design has to hold them too.
+
+# The durable per-conversation workspace is prototype's design (copy-in / copy-out, read-only
+# .deps cache). backend_swap retargeted these two tests onto its run-in-place design at the
+# 2026-08-27 merge; with prototype's design surviving the 2026-10-01 integration, its originals
+# are restored verbatim.
 
 def test_session_workspace_is_per_conversation_and_opt_in(tmp_path, monkeypatch):
     from agent_runtime.code_execution import _session_workspace

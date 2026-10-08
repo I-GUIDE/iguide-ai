@@ -339,7 +339,14 @@ def normalize(rec, tid):
     cov = [p for p in primary if p in grounded]
     full_exp = TASKS[tid][1] if tid in TASKS else primary
     full_cov = [e for e in full_exp if e in grounded]
-    retr = "yes" if len(cov) == len(primary) and primary else ("partial" if cov else "no")
+    # retrieval_success scores against the FULL expected set. It previously scored
+    # against meta["primary_ids"] -- a hand-picked subset -- which pinned the metric at
+    # 10/10 across every recorded run and made it structurally incapable of registering
+    # a retrieval improvement. full_exp/full_cov were already computed here and unused.
+    # The old number is retained as primary_retrieval_success so the 11 records written
+    # before this change stay comparable.
+    retr = "yes" if full_exp and len(full_cov) == len(full_exp) else ("partial" if full_cov else "no")
+    primary_retr = "yes" if len(cov) == len(primary) and primary else ("partial" if cov else "no")
     gcode = generated_code_used(rec)
     hall = bool((rec.get("grounding_audit") or {}).get("hallucination_detected"))
     art_exp = bool(meta["artifact_expected"])
@@ -365,7 +372,10 @@ def normalize(rec, tid):
     else:
         exe = "no"
 
-    outcome = {"task_status": status, "retrieval_success": retr, "execution_success": exe,
+    outcome = {"task_status": status, "retrieval_success": retr,
+               "retrieval_recall": f"{len(full_cov)}/{len(full_exp)}" if full_exp else "n/a",
+               "primary_retrieval_success": primary_retr,
+               "execution_success": exe,
                "artifact_expected": art_exp, "artifact_produced": produced,
                "verification_status": meta["verification"]}
 

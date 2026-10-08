@@ -1,4 +1,6 @@
-"""Pin the deployment-shaped environment before anything imports it.
+"""Shared test setup. Two jobs, both about keeping the suite hermetic.
+
+1. Pin the deployment-shaped environment before anything imports it (from prototype).
 
 Four modules call a bare ``load_dotenv()`` (``memory_module``, ``search/semantic``,
 ``search/spatial``, ``api/server``). A bare call does not read "the repo's .env" — it walks
@@ -21,6 +23,30 @@ so no ``.env`` is read from then on (the one ``rag_pipeline/__init__.py`` has al
 taken back, below); and the deployment-shaped variables are given test values, so a process
 that already inherited them from a shell does not carry them in either. A test that
 wants different values still uses ``monkeypatch.setenv`` as usual.
+
+2. Isolate generated state (from backend_swap's extraction work).
+
+Extraction writes to two places under ``storage_root()`` — the generated method library and the
+file-backed agent KB — and the agent's deterministic sweep reads BOTH. So any test that fakes the
+other retrieval arms and asserts on the result set is really asserting "and nothing has been
+ingested on this machine", which is not a property of the code.
+
+This is not hypothetical. It has now happened twice, to five tests, from the same cause:
+
+* ``test_sweep_adds_implied_methods`` and ``test_search_fn_unions_sweep_with_llm_harvest`` passed
+  for months, then failed the moment a developer built the method library. That is what
+  ``AGENT_METHOD_LIBRARY_DIR`` below is for.
+* ``test_sweep_adds_implied_methods`` (again), ``test_direct_search_sweep_drops_unlisted`` and
+  ``test_the_every_turn_sweep_still_never_touches_the_web`` failed the moment 45 documents landed
+  in the local **KB store** — the half the first fix did not cover. Since indexing the corpus is
+  the whole point of the extraction work, leaving it uncovered means the suite is scheduled to
+  break on success.
+
+Both halves are pointed at empty directories by default, so the suite depends only on the repo. A
+test that WANTS either one opts in explicitly: monkeypatch
+``agent_runtime.method_library.load_registry`` (see ``test_method_library_tools.py``), or set
+``AGENT_METHOD_LIBRARY_DIR`` / ``AGENT_KB_STORE_DIR`` to a directory it populated itself (see
+``test_fanout_order.py``).
 """
 from __future__ import annotations
 
@@ -101,11 +127,22 @@ if not _LIVE:
 # answering patches over it as usual. `RUN_LIVE_BACKEND_TESTS=1` leaves this in place: the live
 # tests above use none of the three. The imports are inside the fixture so that the lines above
 # and below still run before anything imports the code under test.
+#
+# CI's `deployment-contract` job runs this directory with only pytest, pyyaml, python-dotenv and
+# networkx installed, on purpose: it reads Dockerfiles and compose, not the agent. There the
+# imports below fail on a missing THIRD-PARTY package (`requests`), and code that cannot be
+# imported cannot reach a service either, so there is nothing to stub. A missing module of our
+# own is a real breakage and still raises.
 @pytest.fixture(autouse=True)
 def _no_live_services(monkeypatch):
-    from agent_runtime import langchain_mcp_tools
-    from agent_runtime.supervisor import graph
-    from rag_pipeline.search import web
+    try:
+        from agent_runtime import langchain_mcp_tools
+        from agent_runtime.supervisor import graph
+        from rag_pipeline.search import web
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").split(".")[0] in {"agent_runtime", "rag_pipeline", "extractors", "api"}:
+            raise
+        return
 
     def _no_search_engine(query, **_kwargs):
         raise ConnectionError("rag_pipeline/tests reaches no search engine")
@@ -124,6 +161,10 @@ def _no_live_services(monkeypatch):
 _TEST_ENV = {
     "AGENT_TOKEN_VERIFY": "local",
     "JWT_ACCESS_TOKEN_NAME": "jwt-access-token-dev",
+    # The extraction bundle is OFF by default in every deployment (agent_runtime/extraction_flag.py)
+    # and ON here, so the suite exercises it. What OFF means is pinned separately, with the flag
+    # monkeypatched off, in test_extraction_flag.py.
+    "AGENT_EXTRACTION": "1",
 }
 
 # Variables with no safe default: a test that needs one sets it. Cleared rather than pinned,
@@ -149,3 +190,24 @@ for _name in ([] if _LIVE else _CLEARED):
 
 if not _LIVE:
     os.environ.update(_TEST_ENV)
+
+
+
+
+@pytest.fixture(autouse=True)
+def _restore_warnings_warn(monkeypatch):
+    """The invariant gate's prologue wraps ``warnings.warn`` to see geographic metric operations
+    (sandbox_verify.install_operation_tracker). In the sandbox that lasts one process; a test
+    that execs the prologue in-process must not hand the wrapper to every later test."""
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_generated_state(tmp_path_factory, monkeypatch):
+    """Point the method library and the local agent KB at empty per-test directories."""
+    monkeypatch.setenv("AGENT_METHOD_LIBRARY_DIR",
+                       str(tmp_path_factory.mktemp("empty_method_library")))
+    monkeypatch.setenv("AGENT_KB_STORE_DIR", str(tmp_path_factory.mktemp("empty_agent_kb")))
+    yield

@@ -11,12 +11,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# override=False: an explicitly exported variable must WIN over the file. With
+# override=True a stale .env value (e.g. a decommissioned FLASK_EMBEDDING_URL)
+# silently replaced whatever the caller set, making a per-run override impossible
+# and the reason invisible.
 from dotenv import load_dotenv
 _repo = Path(__file__).resolve().parents[1]
 # .env (root) has stale creds; rag_pipeline/.env + .env.bak authenticate.
 for _cand in (_repo / "rag_pipeline" / ".env", _repo / ".env.bak", _repo / ".env"):
     if _cand.exists():
-        load_dotenv(dotenv_path=_cand, override=True)
+        load_dotenv(dotenv_path=_cand)
         break
 
 import os

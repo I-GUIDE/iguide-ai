@@ -228,3 +228,7 @@ wrapt==2.4.1
 xxhash==4.0.1
 yarl==1.25.1
 zstandard==0.25.0
+
+# The extraction bundle's Postgres client (extractors/kb_db.py); not yet in the deployed image.
+psycopg==3.3.4
+psycopg-binary==3.3.4

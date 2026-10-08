@@ -9,7 +9,7 @@ from opensearchpy import OpenSearch
 
 from dotenv import load_dotenv
 
-from .utils import get_logger, getenv
+from .utils import default_top_k, get_logger, getenv
 
 load_dotenv()
 
@@ -40,8 +40,28 @@ def _os_index() -> str:
     return getenv("OPENSEARCH_INDEX")
 
 
+_LOGGED_EMBED_URL: Optional[str] = None
+
+
+def _embedding_url() -> str:
+    """The resolved embedding endpoint, logged ONCE at first use.
+
+    Only the *unset* case was ever reported. A URL that is set but wrong — the state this
+    repo shipped in, pointing at a decommissioned host — produced a connection error per
+    query, buried among other logs, and semantic search silently returned nothing. "No
+    semantic results" and "the embedder is unreachable" then look identical from the outside,
+    and every recall number measured in that state understates the system.
+    """
+    global _LOGGED_EMBED_URL
+    url = (os.getenv("FLASK_EMBEDDING_URL") or "").rstrip("/")
+    if url != _LOGGED_EMBED_URL:
+        logger.info("Embedding endpoint resolved to %s", url or "(unset)")
+        _LOGGED_EMBED_URL = url
+    return url
+
+
 def _fetch_embedding_from_service(user_query: str) -> Optional[List[float]]:
-    flask_url = (os.getenv("FLASK_EMBEDDING_URL") or "").rstrip("/")
+    flask_url = _embedding_url()
     if not flask_url:
         logger.error("FLASK_EMBEDDING_URL environment variable not set.")
         return None
@@ -82,7 +102,10 @@ def get_embedding_endpoint():
         return jsonify({"error": "embedding service unavailable"}), 503
     return jsonify({"embedding": embedding})
 
-def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
+def semantic_search(query: str, size: Optional[int] = None) -> List[Dict[str, Any]]:
+    # None -> the shared retrieval window, resolved at call time (a literal default here
+    # was a third independent window alongside the wrapper's 8 and the tools' 8).
+    size = max(1, min(int(size or default_top_k()), 100))
     start_time = time.time()
     logger.info(f"Starting semantic search for query: {query}")
 
@@ -151,9 +174,9 @@ def retrieve_semantic(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     params = state.get("params") or {}
     try:
-        size = int(params.get("top_k", 8))
+        size = int(params.get("top_k", default_top_k()))
     except (TypeError, ValueError):
-        size = 8
+        size = default_top_k()
 
     return semantic_search(query, size=size)
 

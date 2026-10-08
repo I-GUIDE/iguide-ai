@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""Does the extracted knowledge base change what the agent gets RIGHT?
+
+    python scripts/ab_kb_problems.py --all
+    python scripts/ab_kb_problems.py --problem p1_streets --arm with_kb
+
+Four analysis problems over two datasets that are genuinely in the corpus and genuinely
+cached, run twice each. The two arms differ in **exactly one thing** — whether
+`agent_kb_search` and `kb_method_search` are in `enabled_search_methods`. Same model, same
+prompts, same sandbox, same platform search, same web access, same staging tools. Both arms can
+reach the same bytes; only one can see what extraction found inside them.
+
+Grading is against numbers computed independently by `scripts/ab_kb_ground_truth.py`, not
+against a judgement of the prose. Two of the problems have **diagnostic wrong answers**: for
+p1_streets, 47,634 is what you get by taking the buffer as feet in the streets' own EPSG:3435
+and 68,419 by buffering in degrees, so a reported count says which mistake was made rather than
+merely that one was. That is the point — "the agent did worse" is not a finding, "the agent
+measured in feet" is.
+
+Development only: `LLM_PROVIDER=claude-cli` keeps a run at zero API spend, and the model is
+recorded in every result because a number produced under a different model is not comparable.
+"""
+
+from __future__ import annotations
+
+import argparse
+import functools
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+def configure() -> None:
+    """Environment for a real run. Called from `main`, NEVER at import.
+
+    This used to run at module scope, which made importing the harness — as a test does, to
+    check the instrumentation — load the platform `.env` into the whole pytest process and set
+    OPENSEARCH_NODE, NEO4J_* and the rest. Two unrelated tests that assert what happens when a
+    lookup FAILS then passed alone and failed in a full run, because the credentials they assume
+    are absent had been supplied by an import three files away.
+    """
+    from dotenv import load_dotenv
+
+    os.environ.setdefault("AGENT_FILE_STORAGE_ROOT", str(REPO / "agent_chat_files"))
+    os.environ["AGENT_CODE_EXEC"] = "1"
+    os.environ.setdefault("AGENT_CODE_EXEC_BACKEND", "docker")
+    # Stays off. It routes ingested notebook source into a bare exec() in a credentialed process.
+    os.environ["AGENT_ALLOW_WORKFLOW_EXEC"] = "0"
+    os.environ.setdefault("AGENT_SKILLS_ENABLED", "0")
+    os.environ.setdefault("LLM_PROVIDER", "claude-cli")
+    os.environ.setdefault("CLAUDE_CLI_MODEL", "sonnet")
+
+    # This worktree has no `.env`; the platform credentials live in the main checkout. Without
+    # them OPENSEARCH_NODE, FLASK_EMBEDDING_URL and Neo4j are unset, the supervisor's search peer
+    # fails, and BOTH arms degrade to a partial answer — which would be recorded as a result.
+    # override=False so an explicitly exported variable still wins.
+    for candidate in (REPO / ".env", REPO.parent / "i-guide-platform-flask-servers" / ".env"):
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+            break
+
+    # Inherited from a DEPLOYMENT .env and wrong locally: every download_url would be built
+    # against the remote host, so a locally produced artifact 404s with `unknown file_id`.
+    os.environ["AGENT_PUBLIC_BASE_URL"] = ""
+    # The platform's OpenSearch is the WEBSITE's cluster. Both arms read it for keyword/semantic/
+    # spatial search, which is fair and read-only; the agent KB is served from the local Postgres
+    # record, so nothing in this experiment writes to the platform.
+    os.environ["AGENT_KB_BACKEND"] = "local"
+
+
+# Everything both arms get. Platform search, the open web, code execution and staging are NOT
+# the variable under test: without them the no-KB arm could not reach the data at all and the
+# experiment would measure file access rather than extracted knowledge.
+COMMON_TOOLS = ["keyword_search", "semantic_search", "spatial_search", "neo4j_search",
+                "web_search"]
+KB_TOOLS = ["agent_kb_search", "kb_method_search"]
+
+# `enabled_search_methods` alone is NOT the ablation, and building on it cost a whole sweep. It
+# filters the search peer; the code and analyze peers are granted the KB tools "deliberately
+# independent of the request's enabled_search_methods", and `_direct_search_sweep` unions the KB
+# in without the model electing anything. The no-KB arm called `agent_kb_search` once and
+# answered both checks correctly — a control that was really a second treatment, reporting
+# success. `AGENT_ABLATE_KB` closes all four paths; see `supervisor.graph.kb_ablated`.
+ARMS = {
+    "no_kb":   {"tools": COMMON_TOOLS, "ablate": True},
+    "with_kb": {"tools": COMMON_TOOLS + KB_TOOLS, "ablate": False},
+}
+
+PROBLEMS: Dict[str, Dict[str, Any]] = {
+    "p1_streets": {
+        "query": (
+            "Using the I-GUIDE platform's Chicago Crime data 2026 dataset (element 265e6957) "
+            "and the Chicago Major Streets dataset (element b32bec3e), determine how many "
+            "crime incidents occurred within 100 metres of a major street. Report the count, "
+            "the total number of incidents you measured against, and the CRS you performed "
+            "the distance measurement in."),
+        "why": ("The streets are stored in EPSG:3435 — Illinois State Plane, US survey FEET — "
+                "and the crime points in EPSG:4326 degrees. Neither is safe to buffer in."),
+        "checks": [
+            {"label": "crimes within 100 m", "correct": 72658, "tolerance": 0.02,
+             "wrong": {47634: "measured in feet in EPSG:3435",
+                       68419: "buffered in degrees"}},
+            {"label": "points measured against", "correct": 128855, "tolerance": 0.01,
+             "wrong": {20000: "read only the first 20,000 rows"}},
+        ],
+    },
+    "p2_arrest_shift": {
+        "query": (
+            "Using the I-GUIDE platform's Chicago Crime data 2026 dataset (element 265e6957), "
+            "report the five most common primary crime types with their counts. Then report "
+            "the five most common primary crime types among only those incidents that "
+            "resulted in an arrest, and say how the ranking changes."),
+        "why": "Two rankings over the same file; the arrest subset reorders them.",
+        "checks": [
+            {"label": "THEFT overall", "correct": 27824, "tolerance": 0.01, "wrong": {}},
+            {"label": "BATTERY overall", "correct": 23885, "tolerance": 0.01, "wrong": {}},
+            {"label": "BATTERY among arrests", "correct": 4532, "tolerance": 0.01, "wrong": {}},
+            {"label": "NARCOTICS among arrests", "correct": 3439, "tolerance": 0.01,
+             "wrong": {}},
+        ],
+    },
+    "p3_busiest_month": {
+        "query": (
+            "Using the I-GUIDE platform's Chicago Crime data 2026 dataset (element 265e6957), "
+            "identify the calendar month with the most reported incidents, and report the "
+            "three most common primary crime types within that month with their counts."),
+        "why": "Date parsing plus a grouped ranking; the file spans 2026-01 to 2026-07.",
+        "checks": [
+            {"label": "incidents in the busiest month", "correct": 20991, "tolerance": 0.01,
+             "wrong": {}},
+            {"label": "THEFT that month", "correct": 4599, "tolerance": 0.01, "wrong": {}},
+        ],
+    },
+    "p5_spec_to_implementation": {
+        "query": (
+            "The I-GUIDE platform holds a publication describing how to measure spatial "
+            "accessibility of COVID-19 healthcare resources in Illinois using the Enhanced "
+            "Two-Step Floating Catchment Area method. Report, precisely: (a) the travel-time "
+            "catchment bands the paper uses in minutes, (b) the distance-decay weight applied "
+            "to each band, (c) whether the platform already provides a callable implementation "
+            "of E2SFCA and if so the exact import line for it, and (d) what the implementation "
+            "requires of the coordinate reference system of its inputs."),
+        "why": ("The strong case for pre-computed structure. The corpus holds the method spec "
+                "(publication 355786a5, 31 extracted steps carrying the actual parameters) and, "
+                "in a SEPARATE element, a callable implementation (notebook 3b45070e, whose "
+                "e2sfca signature takes the very `distances` and `weights` the paper states). "
+                "Nothing records that pairing — IMPLEMENTED_BY is never written — so both arms "
+                "must find it. The paper is public, so the ablated arm can reach it by web "
+                "search; what it cannot reach is the extracted contract."),
+        "checks": [
+            {"label": "catchment band, minutes", "correct": 30, "tolerance": 0.0,
+             "wrong": {60: "invented a band the paper does not use"}},
+            {"label": "distance-decay weight, band 2", "correct": 0.68, "tolerance": 0.0,
+             "wrong": {0.5: "guessed a linear decay"}},
+            {"label": "distance-decay weight, band 3", "correct": 0.22, "tolerance": 0.0,
+             "wrong": {}},
+        ],
+        "expect_strings": ["e2sfca", "iguide_methods", "project"],
+    },
+    "p6_ambiguous_symbol": {
+        "query": (
+            "I want to use the platform's extracted method `spatial_join_and_count`. Give me "
+            "the exact import line to use it, and tell me anything I need to know before "
+            "calling it."),
+        "why": ("`spatial_join_and_count` is defined by TWO elements with byte-identical "
+                "signatures and different slice shas, so a bare name does not identify code. "
+                "The library refuses to resolve it and returns the candidates; the failure "
+                "mode under test is an agent that picks one silently and hands over an import "
+                "line for code the user did not choose."),
+        "checks": [],
+        "expect_strings": ["two", "element"],
+        "expect_ambiguity": True,
+    },
+    "p4_negative_control": {
+        "query": (
+            "Using only methods that already exist in the I-GUIDE platform's extracted method "
+            "library, compute a monthly NDVI time series for the Amazon basin from Sentinel-2 "
+            "imagery for 2024. If the library does not contain what is needed, say so "
+            "explicitly rather than substituting something else."),
+        "why": ("The corpus has no Sentinel-2 NDVI method. A KB that makes the agent claim "
+                "reuse it cannot support is worse than no KB."),
+        "checks": [],
+        "expect_refusal": True,
+    },
+}
+
+
+_DISCLAIMERS = (
+    "does not state", "do not state", "not stated", "does not include", "not include",
+    "cannot report", "can't report", "cannot confirm", "without guessing", "not given",
+    "or similar", "e.g.", "not available", "unable to", "no concrete", "not provided",
+    "does not specify", "not specified", "would look like", "hypothetical", "for example",
+)
+
+
+def _asserting_text(answer: str) -> str:
+    """The answer with disclaiming sentences removed.
+
+    Split on sentence-ish boundaries and newlines, because the disclaimer and its illustrative
+    numbers live in one clause while the real findings live in others.
+    """
+    parts = re.split(r"(?<=[.!?])\s+|\n", answer or "")
+    return " ".join(p for p in parts
+                    if not any(d in p.lower() for d in _DISCLAIMERS))
+
+
+def _numbers(text: str) -> List[float]:
+    """Every number in the answer, with thousands separators normalised.
+
+    The first version required at least three characters (`\\d[\\d,]{2,}`), so it could not see
+    a two-digit number at all — which made every check on p5 ungradeable by construction: the
+    catchment band is 30 and the decay weights are 0.68 and 0.22. The agent had answered "10,
+    20, and 30 minutes" correctly and been marked MISS.
+    """
+    out: List[float] = []
+    for match in re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""):
+        try:
+            out.append(float(match.replace(",", "").rstrip(".")))
+        except ValueError:
+            continue
+    return out
+
+
+def grade(problem: Dict[str, Any], answer: str) -> Dict[str, Any]:
+    # Numbers in ASSERTING context only.
+    #
+    # A bare substring match cannot tell "the weights are 0.68 and 0.22" from "the evidence does
+    # not state the actual weight values (e.g., 1.0 / 0.68 / 0.22 or similar)". The second is a
+    # refusal, and it scored 4/4 — in exactly the direction the experiment was hoping for, which
+    # is when a measurement most deserves suspicion. Sentences that disclaim are excluded before
+    # any number is read out of them.
+    found = set(_numbers(_asserting_text(answer)))
+    results = []
+    for check in problem.get("checks") or []:
+        correct = check["correct"]
+        # An absolute tolerance derived from the value, with a floor that works for small
+        # numbers too: `max(1, int(0.68 * 0.01))` is 1, which would match anything from -0.32
+        # to 1.68 and call a guessed 0.5 correct.
+        tol = correct * check.get("tolerance", 0.01)
+        tol = max(tol, 0.5) if correct >= 100 else tol
+        hit = any(abs(n - correct) <= tol for n in found)
+        diagnosed = [why for wrong, why in (check.get("wrong") or {}).items()
+                     if any(abs(n - wrong) <= max(wrong * 0.005, 0.001) for n in found)]
+        results.append({"label": check["label"], "correct": correct, "found": hit,
+                        "diagnosis": diagnosed})
+    out: Dict[str, Any] = {"checks": results,
+                           "passed": sum(1 for r in results if r["found"]),
+                           "total": len(results)}
+    low = (answer or "").lower()
+    wanted = [w for w in (problem.get("expect_strings") or [])]
+    if wanted:
+        out["strings_found"] = [w for w in wanted if w.lower() in low]
+        out["strings_missing"] = [w for w in wanted if w.lower() not in low]
+    if problem.get("expect_ambiguity"):
+        # Naming both candidates, or refusing to pick, both count. Handing over ONE import
+        # line with no mention of the other element is the failure.
+        out["flagged_ambiguity"] = any(
+            p in low for p in ("ambiguous", "two elements", "more than one element",
+                               "two different", "qualified name", "both elements",
+                               "defined by more than one"))
+    if problem.get("expect_refusal"):
+        low = (answer or "").lower()
+        refused = any(p in low for p in (
+            "does not contain", "no such method", "not available in the library",
+            "library does not", "no method", "cannot be done with", "not present",
+            "does not have", "no ndvi", "unable to find"))
+        out["refused_correctly"] = bool(refused)
+    return out
+
+
+class _ToolCounter:
+    """Counts calls to the tools under test, by wrapping them where they are defined.
+
+    `route_trace.called_tools` records the SUPERVISOR's peer delegations —
+    `search_agent_evidence`, `code_agent_answer` — not the tools those peers then call. Reading
+    it for "did this arm use the knowledge base" gave `kb=-` on a run whose answer was exactly
+    right, which is the wrong layer entirely: the same gap the plan records as "search-peer
+    inner tool-call logging".
+
+    Patching the module attribute is enough because `Tool(func=…)` resolves it when the graph is
+    built, and the graph is built per run.
+    """
+
+    NAMES = ("agent_kb_search_tool", "get_kb_block_tool", "kb_method_search_tool",
+             "get_method_contract_tool")
+
+    def __init__(self):
+        self.calls: Dict[str, int] = {}
+        self._saved: Dict[str, Any] = {}
+
+    def _wrap(self, module, attr):
+        """`functools.wraps`, and it is load-bearing — not tidiness.
+
+        LangChain infers a tool's argument schema from the wrapped function's SIGNATURE. A
+        hand-rolled wrapper copying only `__name__` and `__doc__` left `(*a, **kw)`, so
+        `agent_kb_search` was advertised to the model with no parameters at all and the peer
+        turn failed the moment it tried to call one. Only the with-KB arm calls these tools, so
+        only that arm broke: 8/8 versus 0/8, a perfectly clean result produced entirely by the
+        instrumentation. `functools.wraps` sets `__wrapped__`, which `inspect.signature` follows.
+        """
+        original = getattr(module, attr)
+
+        @functools.wraps(original)
+        def counted(*a, **kw):
+            self.calls[attr] = self.calls.get(attr, 0) + 1
+            return original(*a, **kw)
+
+        setattr(module, attr, counted)
+        self._saved[attr] = (module, original)
+
+    def __enter__(self):
+        from agent_runtime import langchain_granular_tools
+
+        for attr in self.NAMES:
+            if hasattr(langchain_granular_tools, attr):
+                self._wrap(langchain_granular_tools, attr)
+        # `execute_code` is a closure inside `make_code_execution_tools`, so there is no module
+        # attribute to wrap. It does not need one: the orchestration result carries `code_result`
+        # when the sandbox ran, which is a fact about the run rather than an inference from it.
+        return self
+
+    def __exit__(self, *exc):
+        for attr, (module, original) in self._saved.items():
+            setattr(module, attr, original)
+        return False
+
+
+class _WarnCounter:
+    """Counts the two degradations that would otherwise be invisible in a result.
+
+    `claude-cli` tool calling is prompt-enforced, not API-enforced, so a turn can come back as
+    prose and the envelope leaks into the answer. `ChatClaudeCli.malformed_replies` exists for
+    this but `bind_tools` returns a NEW instance, so the counter is scattered across objects and
+    unreadable from here. The log line is the reliable signal.
+
+    A run with malformed replies is not evidence about the knowledge base — it is evidence about
+    the shim — and averaging it in would let a harness artefact read as a KB result.
+    """
+
+    def __init__(self):
+        self.malformed = 0
+        self.search_failed = 0
+
+    def __enter__(self):
+        import logging
+
+        self._handler = logging.Handler()
+        self._handler.emit = self._emit
+        logging.getLogger().addHandler(self._handler)
+        logging.getLogger().setLevel(logging.WARNING)
+        return self
+
+    def _emit(self, record):
+        text = str(getattr(record, "msg", ""))
+        if "was not JSON" in text:
+            self.malformed += 1
+        if "peer search failed" in text:
+            self.search_failed += 1
+
+    def __exit__(self, *exc):
+        import logging
+
+        logging.getLogger().removeHandler(self._handler)
+        return False
+
+
+def run_one(problem_id: str, arm: str, timeout_note: str = "") -> Dict[str, Any]:
+    from agent_runtime.graph_runtime import run_agent_query
+
+    problem = PROBLEMS[problem_id]
+    os.environ["AGENT_ABLATE_KB"] = "1" if ARMS[arm]["ablate"] else "0"
+    t0 = time.time()
+    error = None
+    res: Dict[str, Any] = {}
+    counter = _WarnCounter()
+    tools_used = _ToolCounter()
+    try:
+      with counter, tools_used:
+        res = run_agent_query(
+            problem["query"],
+            use_supervisor=True,
+            code_exec=True,
+            include_mcp_tools=False,
+            enabled_search_methods=ARMS[arm]["tools"],
+            # A fresh thread per (problem, arm): a shared checkpointer would let the second arm
+            # read the first one's artifacts and turn an ablation into a continuation.
+            thread_id=f"ab_{problem_id}_{arm}_{int(t0)}",
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"[:400]
+    elapsed = time.time() - t0
+
+    answer = str(res.get("final_answer") or "")
+    trace = res.get("route_trace") or {}
+    called = trace.get("called_tools") if isinstance(trace, dict) else None
+    called = [str(c) for c in (called or [])]
+    return {
+        "problem": problem_id,
+        "arm": arm,
+        "ablated": ARMS[arm]["ablate"],
+        "model": os.getenv("CLAUDE_CLI_MODEL", "?"),
+        "provider": os.getenv("LLM_PROVIDER", "?"),
+        "elapsed_s": round(elapsed, 1),
+        "error": error,
+        "final_answer": answer,
+        "called_tools": called,
+        # Did the arm actually USE the thing under test? A with_kb run that never called a KB
+        # tool is not evidence about the KB, and averaging it in would hide that. Counted at the
+        # tool itself, because `called_tools` records peer delegations one layer up — reading it
+        # reported `kb=-` on a run whose answer was exactly right.
+        "kb_tool_calls": dict(tools_used.calls),
+        "used_kb": bool(tools_used.calls),
+        "ran_code": bool((res.get("orchestration_result") or {}).get("code_result")),
+        "grounding_audit": res.get("grounding_audit"),
+        # Harness health, kept beside the result so a shim failure is never read as a KB result.
+        "malformed_llm_replies": counter.malformed,
+        "peer_search_failures": counter.search_failed,
+        "grade": grade(problem, answer),
+        "note": timeout_note,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--problem", action="append", choices=sorted(PROBLEMS))
+    ap.add_argument("--arm", action="append", choices=sorted(ARMS))
+    ap.add_argument("--all", action="store_true")
+    # Replicates, because one run per cell cannot tell an effect from the shim: the same
+    # arm on the same problem passed 2/2 and then missed 2/2, and the difference was six
+    # malformed LLM replies rather than anything about the knowledge base.
+    ap.add_argument("--replicates", type=int, default=1)
+    ap.add_argument("--out", default=str(REPO / "outputs" / "ab_kb_problems.json"))
+    args = ap.parse_args()
+    configure()
+
+    problems = args.problem or (sorted(PROBLEMS) if args.all else ["p1_streets"])
+    arms = args.arm or ["no_kb", "with_kb"]
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if out_path.is_file():
+        try:
+            existing = json.loads(out_path.read_text())["runs"]
+        except (OSError, ValueError, KeyError):
+            existing = []
+
+    runs = list(existing)
+    for rep in range(max(1, args.replicates)):
+      for problem_id in problems:
+        for arm in arms:
+            print(f"\n{'=' * 78}\n{problem_id}  [{arm}]  "
+                  f"ablate_kb={ARMS[arm]['ablate']}  tools={ARMS[arm]['tools']}\n{'=' * 78}",
+                  flush=True)
+            row = run_one(problem_id, arm)
+            row["replicate"] = rep
+            runs = [r for r in runs
+                    if not (r["problem"] == problem_id and r["arm"] == arm
+                            and r.get("replicate") == rep)] + [row]
+            grade_row = row["grade"]
+            print(f"  {row['elapsed_s']}s   tools={len(row['called_tools'])}   "
+                  f"kb={row['kb_tool_calls'] or '-'}   code={row['ran_code']}",
+                  flush=True)
+            if row["error"]:
+                print(f"  ERROR {row['error']}", flush=True)
+            for check in grade_row["checks"]:
+                mark = "OK  " if check["found"] else "MISS"
+                extra = f"   <- {'; '.join(check['diagnosis'])}" if check["diagnosis"] else ""
+                print(f"  {mark} {check['label']:<34}{check['correct']:>10,}{extra}", flush=True)
+            if grade_row.get("strings_missing") is not None:
+                print(f"  {'OK  ' if not grade_row['strings_missing'] else 'MISS'} "
+                      f"expected terms, missing: {grade_row['strings_missing'] or 'none'}",
+                      flush=True)
+            if "flagged_ambiguity" in grade_row:
+                print(f"  {'OK  ' if grade_row['flagged_ambiguity'] else 'MISS'} "
+                      f"flagged the ambiguity instead of picking one", flush=True)
+            if "refused_correctly" in grade_row:
+                print(f"  {'OK  ' if grade_row['refused_correctly'] else 'MISS'} "
+                      f"refused a capability it does not have", flush=True)
+            out_path.write_text(json.dumps({"runs": runs}, indent=2, default=str) + "\n")
+
+    print(f"\nwrote {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

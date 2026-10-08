@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover
 
 from .utils import get_logger
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from .utils import default_top_k  # shared retrieval window
 
 logger = get_logger("opengeodata_search")
 
@@ -815,9 +816,13 @@ def wants_external_data(query: str) -> bool:
 def get_opengeodata_results(
     query: str,
     *,
-    limit: int = 8,
+    limit: Optional[int] = None,
     session_ctx: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
+    # Resolve the shared window HERE. _payload_from_context does `int(limit or 1)`, so a
+    # None reaching it would silently become a single result rather than the window.
+    if limit is None:
+        limit = default_top_k()
     query = (query or "").strip()
     if not query:
         logger.info("OpenGeoData get_opengeodata_results: empty query, returning empty list")
@@ -866,7 +871,7 @@ def retrieve_opengeodata(state: MutableMapping[str, Any]) -> List[Dict[str, Any]
 
     params = state.get("params") or {}
     try:
-        limit = max(1, int(params.get("top_k", 8)))
+        limit = max(1, int(params.get("top_k", default_top_k())))
     except (TypeError, ValueError):
         limit = 8
 
@@ -882,7 +887,7 @@ def run_opengeodata_search(
     state: MutableMapping[str, Any],
     *,
     query: Optional[str] = None,
-    limit: int = 8,
+    limit: Optional[int] = None,
     max_total: Optional[int] = None,
     dedupe: bool = True,
     source: str = "opengeodata",

@@ -66,6 +66,12 @@ _MISSING = [v for v in _LIVE_VARS if not (os.getenv(v) or "").strip()]
 # than say why. Its own docstring already listed these as requirements.
 @pytest.mark.skipif(bool(_MISSING),
                     reason="live backend not configured: " + ", ".join(_MISSING) + " unset")
+# Live-service test: needs a reachable OpenSearch cluster, the embedding server and
+# Neo4j. Marked `integration` so a clean `pytest` on a fresh clone is GREEN — these
+# three were the only red in the suite, and a suite that is red by default trains
+# everyone to ignore it, which is how a real regression gets through.
+# Run them with: pytest -m integration
+@pytest.mark.integration
 def test_spatial_routing_to_generation_e2e(monkeypatch):
     """
     Validate that spatial routing flows correctly through retrieval and generation.

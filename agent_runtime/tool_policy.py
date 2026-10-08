@@ -29,7 +29,19 @@ def select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> Li
     selected: List[str] = []
 
     if intent == "analysis_task":
-        selected = [name for name in ANALYSIS_TOOL_NAMES if name in available]
+        # Retrieval belongs here too. This branch used to select ANALYSIS_TOOL_NAMES ALONE —
+        # 5 crime-MCP + 5 QGIS tools — which on the legacy path is applied to the SearchAgent
+        # itself (legacy/graph_nodes.py passes the orchestrator's intent straight through), so
+        # "Analyze flood risk in Illinois and map the results" built the evidence-gathering
+        # agent with ZERO retrieval tools and the question was answered ungrounded.
+        #
+        # The `if not selected` safety net below never fired, because file/skill/quality tools
+        # had already been appended — so the stripping was silent. An analysis still has to be
+        # grounded in evidence; this makes analysis_task a superset of hybrid rather than a
+        # disjoint set.
+        preferred = (DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES
+                     | ANALYSIS_TOOL_NAMES | FILE_TOOL_NAMES)
+        selected = [name for name in available_tool_names if name in preferred]
     elif intent == "code_task":
         preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | FILE_TOOL_NAMES
         selected = [name for name in available_tool_names if name in preferred]

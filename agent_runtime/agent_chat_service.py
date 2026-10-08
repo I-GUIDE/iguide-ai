@@ -374,6 +374,22 @@ def run_agent_chat(
     return response
 
 
+def _guard_stream(source):
+    """Yield from *source*, then yield the exception instead of propagating it.
+
+    A generator that raises unwinds its consumer's `for` loop, so everything after the loop is
+    skipped — which is where this module records the turn. Handing the exception back as a value
+    lets the recording run first; the caller re-raises once it has.
+    """
+    try:
+        for item in source:
+            yield item
+    except BaseException as exc:                       # noqa: BLE001 - deliberately total
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+            raise
+        yield exc
+
+
 def _trace_event_cap() -> int:
     """How many raw events one turn may record, from ``AGENT_TRACE_MAX_EVENTS``.
 
@@ -497,7 +513,8 @@ def stream_agent_chat_events(
         if len(trace_events) < trace_cap:
             trace_events.append(event)
 
-    for event in stream_agent_query_events(
+    stream_error: Optional[BaseException] = None
+    for event in _guard_stream(stream_agent_query_events(
         effective_input,
         llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
         chat_history=chat_history,
@@ -518,12 +535,25 @@ def stream_agent_chat_events(
         unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
         trace_recorder=_record,
-    ):
+    )):
+        if isinstance(event, BaseException):
+            # `_guard_stream` hands the exception back instead of letting it unwind, so the
+            # recording below still runs. It is re-raised at the very end, after the turn has
+            # been persisted, so the caller's error handling is unchanged.
+            stream_error = event
+            break
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
         yield event
 
     answer = sanitize_answer_links(_extract_agent_answer(completed_response or {}))
+    if stream_error is not None and not answer.strip():
+        # A failed turn used to be erased: `update_memory` sits after this loop, so an exception
+        # skipped it entirely and the user's own question vanished from the conversation. The
+        # next turn was then built from a history with a hole in it, and a follow-up like "why?"
+        # referred to something no longer there.
+        answer = (f"[This request could not be completed: "
+                  f"{type(stream_error).__name__}: {stream_error}]"[:400])
     message_id = str(uuid4())
     effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
     # Track this turn's uploads in the session so later turns can still use them.
@@ -600,6 +630,11 @@ def stream_agent_chat_events(
     }
     if memory_warning:
         final_response["warning"] = memory_warning
+    if stream_error is not None:
+        # Persisted first, re-raised now. The caller's handling is unchanged — it still sees the
+        # original exception with its original traceback — but the turn is no longer erased from
+        # history on the way out.
+        raise stream_error
     yield {"event": "response", "data": final_response}
 
 

@@ -25,6 +25,9 @@ mcp[cli]>=1.2
 # Search backends
 opensearch-py
 neo4j
+# Postgres record for extracted content (extractors/kb_db.py). Imported lazily inside
+# connect(), so the package stays importable without it.
+psycopg[binary]
 ddgs
 
 # Open-web page extraction (web_fetch): boilerplate removal + HTML -> markdown.
@@ -44,6 +47,9 @@ spacy
 geopandas
 shapely
 fiona
+# GeoPandas 1.x reads vectors through pyogrio by default; fiona alone left every
+# shapefile reporting "vector reader unavailable" in an environment that had one.
+pyogrio
 rasterio
 # GeoParquet. REQUIRED although nothing imports it by name: pandas and geopandas load it on
 # demand inside to_parquet/read_parquet, so an import grep never finds it. reproject_vector
@@ -92,6 +98,10 @@ pypdf==6.6.2
 python-docx==1.2.0
 xarray==2026.7.0
 ipython==8.30.0
+
+# Graph analysis over the extracted corpus. Declared rather than inherited: present only as a
+# transitive dependency of torch, which a CPU-only variant or dropping torch would remove.
+networkx
 
 # Storage / cloud
 boto3

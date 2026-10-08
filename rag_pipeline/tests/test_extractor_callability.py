@@ -1,0 +1,515 @@
+"""Callability analysis: can an extracted function be called on its own?
+
+The problem: a function lifted from notebook cell 12 that reads ``gdf`` defined in cell 4
+imports fine and then fails at call time, or worse uses a stale global. That is why
+``notebook_extractor`` promotes at most one whole-notebook entry point today rather than
+per-function units.
+
+The distinction that matters is not "reads a global" but *what kind of binding* the global is:
+imports, sibling defs and literal consts can all be copied into a slice; a value produced by
+executing something (``gpd.read_file(...)``) cannot.
+
+Pure ast/symtable — no cluster, no LLM, no execution.
+"""
+
+from __future__ import annotations
+
+import ast
+
+import pytest
+
+from extractors.analysis import analyze_module, analyze_unit, iter_units, module_scope
+from extractors.analysis.signatures import contract_params, params_of, signature_of
+from extractors.contracts import CALLABLE, NEEDS_GLOBALS, UNPARSEABLE
+
+CANONICAL = '''
+import geopandas as gpd
+from pathlib import Path
+THRESH = 0.5
+LABELS = ["a", "b"]
+gdf_missing = gpd.read_file("x.shp")
+
+def helper(x):
+    return x * THRESH
+
+def good(path, k=3):
+    """Self-contained."""
+    return helper(gpd.read_file(path).head(k))
+
+def bad(k):
+    return gdf_missing.head(k)
+
+def depends_on_bad(k):
+    return bad(k) + 1
+
+def unbound(k):
+    return mystery_name + k
+'''
+
+
+# --------------------------------------------------------------- module scope
+
+def test_module_bindings_are_classified_by_kind():
+    tree = ast.parse(CANONICAL)
+    scope = module_scope(tree, CANONICAL)
+    assert set(scope.imports) == {"gpd", "Path"}
+    assert set(scope.consts) == {"THRESH", "LABELS"}, "a literal list must be a const"
+    assert set(scope.runtime) == {"gdf_missing"}, "a call result must be runtime, not const"
+    assert set(scope.defs) >= {"helper", "good", "bad"}
+
+
+def test_a_computed_value_is_never_treated_as_a_const():
+    """This is the whole distinction: inlining a const is safe, inlining a call is not."""
+    src = "import geopandas as gpd\nA = 1 + 2\nB = gpd.read_file('x')\n"
+    scope = module_scope(ast.parse(src), src)
+    assert "A" in scope.consts
+    assert "B" in scope.runtime
+
+
+# --------------------------------------------------------------- verdicts
+
+def test_const_and_import_reads_stay_callable():
+    verdicts, _, _ = analyze_module(CANONICAL)
+    assert verdicts["helper"].verdict == CALLABLE      # reads THRESH (a const)
+    assert verdicts["good"].verdict == CALLABLE        # reads gpd (import) + helper (def)
+    assert "THRESH" in verdicts["helper"].requires_consts
+    assert "gpd" in verdicts["good"].requires_imports
+    assert "helper" in verdicts["good"].requires_units
+
+
+def test_a_runtime_global_blocks_and_is_named():
+    verdicts, _, _ = analyze_module(CANONICAL)
+    c = verdicts["bad"]
+    assert c.verdict == NEEDS_GLOBALS
+    assert c.blocked_by == ["gdf_missing"]
+    assert "gdf_missing" in c.reason, "the reason must name the offending binding"
+
+
+def test_an_unbound_name_blocks():
+    verdicts, _, _ = analyze_module(CANONICAL)
+    c = verdicts["unbound"]
+    assert c.verdict == NEEDS_GLOBALS
+    assert "mystery_name" in c.blocked_by
+
+
+def test_transitive_demotion():
+    """Copying a unit into a slice is only safe if everything it calls is safe too."""
+    verdicts, _, _ = analyze_module(CANONICAL)
+    c = verdicts["depends_on_bad"]
+    assert c.verdict == NEEDS_GLOBALS
+    assert "bad" in c.reason
+
+
+def test_headline_metric_and_blocked_by_histogram():
+    _, _, summary = analyze_module(CANONICAL)
+    assert summary["total"] == 5
+    assert summary["callable"] == 2                     # helper, good
+    assert set(summary["needs_globals"]) == {"bad", "depends_on_bad", "unbound"}
+    assert summary["blocked_by"]["gdf_missing"] == 1
+
+
+# --------------------------------------------------------------- robustness
+
+def test_a_syntax_error_degrades_instead_of_raising():
+    """One bad extracted module must not fail a whole ingest."""
+    verdicts, _, summary = analyze_module("def broken(:\n  pass")
+    assert verdicts == {}
+    assert summary["unparseable"] is True
+    assert summary["callable"] == 0
+
+
+def test_analyze_unit_reports_a_missing_name():
+    c = analyze_unit(CANONICAL, "nope")
+    assert c.verdict == UNPARSEABLE
+
+
+def test_closure_variables_are_not_globals():
+    """symtable reports closure vars as free, not global — the main reason for using it."""
+    src = "def outer():\n    v = 1\n    def inner():\n        return v\n    return inner()\n"
+    verdicts, _, _ = analyze_module(src)
+    assert verdicts["outer"].verdict == CALLABLE, "a closure was misread as a hidden global"
+
+
+def test_comprehension_scope_is_handled():
+    src = "ITEMS = [1, 2]\ndef f():\n    return [x * 2 for x in ITEMS]\n"
+    verdicts, _, _ = analyze_module(src)
+    assert verdicts["f"].verdict == CALLABLE
+
+
+def test_builtins_are_not_blockers():
+    src = "def f(xs):\n    return len(sorted(xs))\n"
+    verdicts, _, _ = analyze_module(src)
+    assert verdicts["f"].verdict == CALLABLE
+    assert verdicts["f"].blocked_by == []
+
+
+def test_public_methods_are_units_but_private_ones_are_not():
+    src = ("class Loader:\n"
+           "    def load(self, p):\n        return p\n"
+           "    def _hidden(self):\n        return 1\n")
+    names = [n for n, _ in iter_units(ast.parse(src))]
+    assert "Loader.load" in names
+    assert "Loader._hidden" not in names
+
+
+def test_a_module_level_write_is_impurity_not_a_blocker():
+    src = "COUNT = 0\ndef bump():\n    global COUNT\n    COUNT += 1\n    return COUNT\n"
+    verdicts, _, _ = analyze_module(src)
+    c = verdicts["bump"]
+    assert "COUNT" in c.global_writes
+    assert c.verdict == CALLABLE, "a write is contained in the slice; it must not block"
+
+
+# --------------------------------------------------------------- signatures
+
+def test_signature_keeps_everything_the_old_impl_dropped():
+    src = "def f(p, /, a: int = 3, *args: str, k: float = 1.0, **kw) -> 'gpd.GeoDataFrame': pass"
+    sig = signature_of(ast.parse(src).body[0])
+    for fragment in ("p", "/", "a: int=3", "*args: str", "k: float=1.0", "**kw",
+                     "gpd.GeoDataFrame"):
+        assert fragment in sig, f"{fragment!r} missing from {sig!r}"
+
+
+def test_params_cover_all_five_categories():
+    src = "def f(p, /, a, b=1, *args, c, d=2, **kw): pass"
+    kinds = {x.name: x.kind for x in params_of(ast.parse(src).body[0])}
+    assert kinds["p"] == "positional_only"
+    assert kinds["a"] == "positional_or_keyword"
+    assert kinds["args"] == "var_positional"
+    assert kinds["c"] == "keyword_only"
+    assert kinds["kw"] == "var_keyword"
+
+
+def test_required_vs_optional_is_recorded():
+    src = "def f(a, b=1, *, c, d=2): pass"
+    req = {x.name: x.required for x in params_of(ast.parse(src).body[0])}
+    assert req == {"a": True, "b": False, "c": True, "d": False}
+
+
+def test_async_functions_are_supported():
+    src = "async def fetch(url: str) -> dict: pass"
+    assert signature_of(ast.parse(src).body[0]).startswith("async def fetch(url: str)")
+
+
+# --------------------------------------------------------------- CRS / unit inference
+
+def test_a_metric_operation_implies_a_projected_crs():
+    """The degrees-vs-metres class: a wrong CRS yields a plausible number, not an error."""
+    src = "def buf(gdf, radius_m=25000):\n    return gdf.buffer(radius_m)\n"
+    node = ast.parse(src).body[0]
+    params = {p.name: p for p in contract_params(node)}
+    assert params["gdf"].inferred_type == "geodataframe"
+    assert params["gdf"].crs_expectation == "projected"
+    assert params["gdf"].declared_unit == "metres"
+    assert "buffer" in params["gdf"].evidence, "an inference must record its evidence"
+
+
+def test_no_metric_operation_means_no_crs_claim():
+    """An undetermined expectation stays empty; a wrong guess is worse than none."""
+    src = "def head(gdf, k=5):\n    return gdf.head(k)\n"
+    params = {p.name: p for p in contract_params(ast.parse(src).body[0])}
+    assert params["gdf"].crs_expectation == ""
+    assert params["gdf"].declared_unit == ""
+
+
+def test_annotation_beats_the_name_heuristic():
+    src = "def f(df: int):\n    return df\n"
+    p = contract_params(ast.parse(src).body[0])[0]
+    assert p.inferred_type == "number", "a declared annotation must win over a name guess"
+
+
+# --------------------------------------------------------------- bound methods
+
+def test_a_public_method_is_not_callable_on_its_own():
+    """The false-callable that broke the real library.
+
+    A method reads no globals — ``self`` is a parameter — so every blocker check passes and
+    it was verdicted ``callable``. On the 14-notebook corpus that was 24 of 40 units, and the
+    emitted slice defines the CLASS, so the advertised
+    ``from <module> import build_api_url`` raised ImportError.
+    """
+    from extractors.contracts import NEEDS_INSTANCE
+
+    src = (
+        "import requests\n"
+        "\n"
+        "class Downloader:\n"
+        "    def __init__(self, base):\n"
+        "        self.base = base\n"
+        "\n"
+        "    def build_url(self, lat, lon):\n"
+        "        return f'{self.base}?lat={lat}&lon={lon}'\n"
+    )
+    verdicts, _scope, summary = analyze_module(src)
+    v = verdicts["Downloader.build_url"]
+    assert v.verdict == NEEDS_INSTANCE
+    assert not v.is_callable
+    assert "class" in v.reason, "the reason should point at the class as the way in"
+    assert "Downloader.build_url" in summary["needs_instance"]
+    # The CLASS is promotable here (its __init__ only assigns), so the method is reachable
+    # through it. That is the point of promoting classes: refusing them left 50 corpus units
+    # with no route at all.
+    assert verdicts["Downloader"].is_callable
+
+
+def test_a_module_level_function_is_unaffected_by_a_sibling_class():
+    src = (
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "\n"
+        "def free(x):\n"
+        "    return x + 1\n"
+    )
+    verdicts, _scope, summary = analyze_module(src)
+    assert verdicts["free"].is_callable
+    assert not verdicts["C.m"].is_callable
+    # `free` and `C` are both callable units; `C.m` is reached through `C`.
+    assert summary["callable"] == 2
+
+
+def test_a_staticmethod_is_still_reported_as_needing_an_instance():
+    """Conservative on purpose: a @staticmethod IS importable via its class, but not by the
+    bare name the registry would advertise. Promoting it needs a qualified export path, which
+    is a feature, not something to infer silently."""
+    src = (
+        "class C:\n"
+        "    @staticmethod\n"
+        "    def helper(x):\n"
+        "        return x\n"
+    )
+    verdicts, _scope, _s = analyze_module(src)
+    assert not verdicts["C.helper"].is_callable
+
+
+def test_private_methods_are_not_offered_at_all():
+    src = "class C:\n    def _hidden(self):\n        return 1\n"
+    verdicts, _scope, _s = analyze_module(src)
+    assert "C._hidden" not in verdicts
+
+
+# --------------------------------------------------------------- def-time evaluation
+
+def _executes(src, qualname):
+    """A slice is only correct if it EXECUTES; static checks passed on all of these."""
+    from extractors.analysis import build_unit_slice
+    verdicts, scope, _ = analyze_module(src)
+    sliced = build_unit_slice(src, qualname, scope=scope, verdicts=verdicts)
+    ns = {}
+    exec(compile(sliced, "<slice>", "exec"), ns)
+    return ns
+
+
+def test_a_parameter_default_naming_a_constant_is_carried_into_the_slice():
+    """`def evaluate(..., feats=FEATS)` -> NameError: FEATS. Defaults are evaluated at DEF
+    TIME in the enclosing scope, so they are a requirement like an annotation."""
+    src = "FEATS = ['a', 'b']\n\ndef evaluate(data, feats=FEATS):\n    return len(feats)\n"
+    verdicts, _s, _ = analyze_module(src)
+    assert verdicts["evaluate"].is_callable
+    assert "FEATS" in verdicts["evaluate"].requires_consts
+    assert "evaluate" in _executes(src, "evaluate")
+
+
+def test_a_parameter_default_naming_a_runtime_value_blocks_the_unit():
+    """The dangerous case, and a FALSE CALLABLE before this fix: `X_train` comes from
+    executing something, so the unit was never independently callable."""
+    src = ("import pandas as pd\n"
+           "X_train = pd.read_csv('train.csv')\n\n"
+           "def plot_predictions(train_data=X_train):\n    return train_data\n")
+    verdicts, _s, _ = analyze_module(src)
+    assert not verdicts["plot_predictions"].is_callable
+    assert "X_train" in verdicts["plot_predictions"].global_reads
+
+
+def test_a_keyword_only_default_counts_too():
+    src = "LIMIT = 10\n\ndef f(x, *, cap=LIMIT):\n    return min(x, cap)\n"
+    verdicts, _s, _ = analyze_module(src)
+    assert "LIMIT" in verdicts["f"].requires_consts
+
+
+def test_a_class_base_is_carried_into_the_slice():
+    """`class AgentState(TypedDict)` -> NameError: TypedDict at import."""
+    src = ("from typing import TypedDict\n\n"
+           "class AgentState(TypedDict):\n    n: int\n\n"
+           "def make_workflow():\n    return AgentState\n")
+    assert "make_workflow" in _executes(src, "make_workflow")
+
+
+def test_a_class_body_annotation_is_carried_into_the_slice():
+    """The class SCOPE holds these names, and the class table is not in the function map —
+    looking it up there silently found nothing and the slice raised NameError: operator."""
+    src = ("import operator\nfrom typing import Annotated, TypedDict\n\n"
+           "class AgentState(TypedDict):\n    messages: Annotated[list, operator.add]\n\n"
+           "def make_workflow():\n    return AgentState\n")
+    assert "make_workflow" in _executes(src, "make_workflow")
+
+
+def test_a_class_reading_a_runtime_global_blocks_its_dependents():
+    src = ("import pandas as pd\n"
+           "CFG = pd.read_csv('c.csv')\n\n"
+           "class Model:\n    cfg = CFG\n\n"
+           "def build():\n    return Model\n")
+    verdicts, _s, _ = analyze_module(src)
+    assert not verdicts["build"].is_callable
+
+
+def test_a_safely_constructible_class_is_a_unit():
+    """This test previously asserted the opposite — that classes are dependencies only. The
+    design changed on measurement: 50 corpus units were `needs_instance` methods whose class
+    was never promoted, so there was no route to any of them. A class whose construction is
+    safe is a legitimate unit of reuse."""
+    src = "from typing import TypedDict\n\nclass S(TypedDict):\n    n: int\n\ndef f():\n    return S\n"
+    v, _s, summary = analyze_module(src)
+    assert summary["total"] == 2 and summary["callable"] == 2
+    assert v["S"].is_callable
+
+
+def test_a_class_whose_construction_does_io_is_refused():
+    """The object-shaped hidden global: importing the slice into a sandbox with no network
+    fails, so `callable` would be a false promise."""
+    src = ("class Loader:\n"
+           "    def __init__(self, path):\n"
+           "        self.data = open(path).read()\n"
+           "    def get(self):\n        return self.data\n")
+    from extractors.contracts import NEEDS_INSTANCE
+
+    v, _s, _summary = analyze_module(src)
+    assert v["Loader"].verdict == NEEDS_INSTANCE
+    assert "I/O" in v["Loader"].reason
+
+
+def test_a_class_whose_init_reads_a_runtime_global_is_blocked():
+    src = ("import pandas as pd\n"
+           "CFG = pd.read_csv('c.csv')\n\n"
+           "class M:\n"
+           "    def __init__(self):\n        self.cfg = CFG\n"
+           "    def go(self):\n        return 1\n")
+    v, _s, _summary = analyze_module(src)
+    assert v["M"].verdict == "needs_globals"
+
+
+def test_a_promoted_class_slice_executes():
+    src = "class Calc:\n    def __init__(self, k=2):\n        self.k = k\n    def scale(self, x):\n        return x * self.k\n"
+    ns = _executes(src, "Calc")
+    assert "Calc" in ns and ns["Calc"](3).scale(2) == 6
+
+
+# ------------------------------------------------------------------ constructing a class
+
+def _verdict(src, name):
+    from extractors.analysis import analyze_module
+
+    verdicts, _scope, _summary = analyze_module(src)
+    return verdicts[name]
+
+
+def test_filesystem_inspection_in_init_is_not_callable():
+    """The vocabulary listed readers and network calls but no filesystem INSPECTION, and that is
+    the case that actually bit. ``TIFDataset.__init__`` calls ``os.listdir(images_dir)`` and then
+    raises ``ValueError`` when the directory holds no ``.tif`` files, so in a fresh sandbox it
+    fails with ``FileNotFoundError`` before it can even get to the raise — and it shipped
+    verdicted ``callable``.
+
+    A false-callable ships a broken unit; a false-not-callable only costs coverage. That
+    asymmetry is why this errs toward refusing."""
+    c = _verdict('''
+import os
+class TIFDataset:
+    def __init__(self, images_dir):
+        self.files = sorted(f for f in os.listdir(images_dir) if f.endswith(".tif"))
+        if not self.files:
+            raise ValueError("none")
+''', "TIFDataset")
+    assert c.verdict == "needs_instance"
+    assert "os.listdir()" in c.reason, "the reason must name the disqualifying call"
+
+
+def test_io_reached_through_a_method_init_calls_is_found():
+    """``OptimizedWeatherDownloader.__init__`` calls ``self.setup_logging()``, and it is
+    ``setup_logging`` that calls ``os.makedirs``. The construction is exactly as unsafe, and the
+    indirection is one line."""
+    c = _verdict('''
+import os
+class Downloader:
+    def __init__(self, out):
+        self.setup_logging()
+    def setup_logging(self):
+        os.makedirs("/data/logs", exist_ok=True)
+''', "Downloader")
+    assert c.verdict == "needs_instance"
+    assert "via setup_logging()" in c.reason
+
+
+def test_pure_path_arithmetic_is_not_io():
+    """``os.path.join`` and ``os.path.dirname`` are string manipulation. Refusing them would
+    demote most constructors that touch a filename at all, and a check that over-refuses gets
+    the whole promotion gate turned off."""
+    c = _verdict('''
+import os
+class Paths:
+    def __init__(self, root):
+        self.p = os.path.join(os.path.dirname(root), "a")
+''', "Paths")
+    assert c.verdict == "callable", c.reason
+
+
+def test_a_class_body_read_runs_at_import_and_is_refused():
+    """Worse than an unsafe ``__init__``: a class-body statement executes when the SLICE IS
+    IMPORTED, so it takes down every sibling unit in the module, not just this one."""
+    c = _verdict('''
+import pandas as pd
+class Config:
+    table = pd.read_csv("cfg.csv")
+    def __init__(self):
+        pass
+''', "Config")
+    assert c.verdict == "needs_instance"
+    assert "import time" in c.reason
+
+
+def test_io_in_new_is_refused():
+    """``__new__`` runs before ``__init__``; checking only ``__init__`` misses it entirely."""
+    c = _verdict('''
+import requests
+class Remote:
+    def __new__(cls):
+        requests.get("http://x")
+        return super().__new__(cls)
+''', "Remote")
+    assert c.verdict == "needs_instance" and "__new__" in c.reason
+
+
+def test_two_classes_are_judged_separately():
+    """The runtime-global check read ``by_name["__init__"]``, keyed by SIMPLE name across the
+    whole module — so with more than one class defining ``__init__`` (4 of 26 promoted slices) it
+    answered about whichever table won the dict. Now resolved from the class's own table."""
+    src = '''
+import os
+class Safe:
+    def __init__(self, a):
+        self.a = a
+class Unsafe:
+    def __init__(self, p):
+        self.f = os.listdir(p)
+'''
+    assert _verdict(src, "Safe").verdict == "callable"
+    assert _verdict(src, "Unsafe").verdict == "needs_instance"
+
+
+def test_a_runtime_global_read_in_init_is_attributed_to_the_right_class():
+    src = '''
+import geopandas as gpd
+LOADED = gpd.read_file("x.shp")
+
+class Clean:
+    def __init__(self, frame):
+        self.frame = frame
+
+class Hidden:
+    def __init__(self):
+        self.frame = LOADED
+'''
+    assert _verdict(src, "Clean").verdict == "callable"
+    hidden = _verdict(src, "Hidden")
+    assert hidden.verdict in ("needs_instance", "needs_globals")
+    assert "LOADED" in hidden.reason

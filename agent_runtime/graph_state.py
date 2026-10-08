@@ -76,6 +76,21 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "web_fetch",
     "agent_kb_search",
     "get_kb_block",
+    # The method library. Same filter caveat as the web tools above: absent from this set, both
+    # are registered, described and unreachable for every intent.
+    "kb_method_search",
+    "get_method_contract",
+    # Staging is what turns a dataset element from readable into runnable: the generated loaders
+    # take a staged path and, before these, nothing could produce one.
+    "stage_element",
+    "stage_url",
+    "list_staged_inputs",
+    # Reading one element's source file, by id. The live MCP server exposes this as
+    # `mcp_fetch_element_source`; SEARCH_AGENT_PROMPT rule 8 has always told the model to call
+    # it, under the wrong (unprefixed) name AND with the real name absent from every set here,
+    # so it was stripped for every intent except analysis_task — where it survived only because
+    # the empty-selection fallback at tool_policy.py fires and returns everything.
+    "mcp_fetch_element_source",
 }
 
 FILE_TOOL_NAMES: set[str] = {

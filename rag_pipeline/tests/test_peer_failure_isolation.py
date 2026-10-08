@@ -64,7 +64,10 @@ def test_a_dead_analyze_peer_still_lets_the_others_answer():
     out = _run(["search", "analyze", "done"], search_fn=_some_evidence, analyze_fn=_boom,
                synthesize_fn=lambda *a, **k: "answered from search")
     assert out["actions"] == ["search", "analyze", "done"]
-    assert out["final_answer"] == "answered from search"
+    # The integration keeps backend_swap's deterministic disclosure (`_peer_failure_note`): when a
+    # peer failed, the answer says so. The synthesizer's own text must still LEAD it.
+    assert out["final_answer"].startswith("answered from search")
+    assert "Partial answer" in out["final_answer"], "the dead analyze peer went unmentioned"
     assert {d["title"] for d in out["evidence"]} == {"doc"}, "search's work was lost too"
 
 

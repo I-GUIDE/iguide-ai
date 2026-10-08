@@ -14,13 +14,16 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checka
 EMIT_OPENSEARCH = "opensearch"
 EMIT_MCP = "mcp"
 EMIT_SKILL = "skill"
-VALID_TARGETS = (EMIT_OPENSEARCH, EMIT_MCP, EMIT_SKILL)
+# Callable units emitted as an importable method library (see extractors/analysis/slices.py).
+EMIT_LIBRARY = "library"
+VALID_TARGETS = (EMIT_OPENSEARCH, EMIT_MCP, EMIT_SKILL, EMIT_LIBRARY)
 
 # Asset kinds produced by the four extractors.
 KIND_NOTEBOOK_BLOCK = "notebook_block"
 KIND_CODE_BLOCK = "code_block"          # function/class API surface
 KIND_DATASET = "dataset"
 KIND_PUBLICATION = "publication"        # method-spec / provenance
+KIND_METHOD_UNIT = "method_unit"        # ONE callable function + its contract
 
 
 @dataclass
@@ -44,6 +47,13 @@ class AssetRecord:
     block: Optional[Dict[str, Any]] = None   # {code, markdown_context, constructs, resolved_tools, file_io, imports}
     spatial: Optional[Dict[str, Any]] = None # {crs, bounds, resolution, schema, spatial-bounding-box-geojson, ...}
     runnable: Optional[Dict[str, Any]] = None  # {workflow_id, mode, entrypoint, entrypoint_parameters, source_path, manifest_path, runnable_tool}
+    # A serialized contracts.UnitContract. Mirrors how block/runnable/spatial already ride
+    # along, so opensearch_emitter needs no structural change to carry it.
+    unit: Optional[Dict[str, Any]] = None
+    # Emitted slice source for EMIT_LIBRARY units. Deliberately a separate field rather than
+    # part of `unit`: `unit` is mirrored into the OpenSearch document, and putting a whole
+    # module's source there would bloat every index doc for no retrieval benefit.
+    slice_source: str = ""
     extracted: Dict[str, Any] = field(default_factory=dict)  # additive metadata mirrored into the OpenSearch `extracted` object
     source_fields: Dict[str, Any] = field(default_factory=dict)  # platform form fields inherited into _source (authors, tags, contributor, abstract, ...)
 
@@ -53,8 +63,15 @@ class ProvenanceEdge:
     """A cross-link between assets (Neo4j edge + OpenSearch provenance entry)."""
 
     src: str                                 # source doc_id / asset_id
-    rel: str                                 # INCLUDES | DEFINES | IMPLEMENTED_BY | USES | HAS_WORKFLOW | DESCRIBES_METHOD
-    dst: str                                 # target doc_id / workflow_id
+    # INCLUDES | DEFINES | IMPLEMENTED_BY | USES | HAS_WORKFLOW | DESCRIBES_METHOD | CITES
+    #
+    # All but the last two are parent-to-child WITHIN one element. Measured over the 174 cached
+    # corpus notebooks: 4,071 of 4,212 emitted edges satisfy `dst.startswith(src + "::")`, and
+    # `cross_element` is 0 — so this vocabulary described a forest of stars, not a graph.
+    # CITES (and the storage-host form of USES) are the exception: their dst is another
+    # element's platform id, which is not derivable from src by any rule.
+    rel: str
+    dst: str                                 # target doc_id / workflow_id / platform element id
     detail: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -67,6 +84,11 @@ class SkillSpec:
     allowed_tools: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
     ordered_steps: List[Dict[str, Any]] = field(default_factory=list)
+    # The callable units this element promoted: symbol, signature and the version-pinned import
+    # line. Without them the rendered skill can only say "reuse the functions extracted from this
+    # element" — which is a table of contents, not a procedure, and leaves the code agent to
+    # rediscover by search what extraction already knows.
+    methods: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

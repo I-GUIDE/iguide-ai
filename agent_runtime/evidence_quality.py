@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 LLMLike = Union[Any, Callable[[str], str]]
@@ -291,6 +292,21 @@ _AUDIT_PROMPT = (
     'points" AND a row for "GeoBench-Pro", each needing its own verbatim span. Measured failure this\n'
     'prevents: an invented figure and benchmark embedded in an otherwise-supported sentence were\n'
     'summarised into one "supported" row and passed clean 3 times out of 3.\n'
+    'AGGREGATE AND ROLL-UP CLAIMS ARE NOT SEPARATE FACTS. A sentence whose only content is to\n'
+    'introduce, count loosely, or summarise items that the answer itself then lists - "the platform\n'
+    'offers several notebooks that do X", "there are a number of relevant datasets", "these\n'
+    'resources cover a range of methods" - is NOT an independently checkable claim. Its truth is\n'
+    'carried by the ROWS FOR THE LISTED ITEMS, not by any single span, and no document will ever\n'
+    'say "the platform offers several". Do not open a row for such a sentence, and never mark one\n'
+    '"absent" because you could not copy a span for it. If the listed items are supported, the\n'
+    'roll-up is supported by construction.\n'
+    'This does NOT excuse a hard count. "three notebooks", "12 datasets", "the only notebook" ARE\n'
+    'checkable and each gets a row: verify the number against what the evidence actually contains.\n'
+    'Measured failure this rule prevents: a correct answer that listed four real notebooks, every\n'
+    'one present in the evidence, was flagged high-severity 5 times out of 5 solely because its\n'
+    'opening sentence ("The platform offers several notebooks that compute spatial accessibility to\n'
+    'hospitals") had no verbatim span of its own - so a fully-grounded answer reached the user\n'
+    'carrying a hallucination warning.\n'
     'Emit one row per claim:\n'
     '  {{"claim": "<short quote of the claim>",\n'
     '    "evidence_quote": "<[doc_id] + a VERBATIM span of 5-25 words copied from the evidence or\n'
@@ -631,6 +647,97 @@ def audit_answer_grounding(
     parsed.setdefault("severity", "none")
     parsed.setdefault("issues", [])
     parsed.setdefault("summary", "")
+    return _recompute_verdict(parsed)
+
+
+# --- deterministic verdict, derived from the ledger ------------------------------------
+# The prompt asks the auditor to derive its verdict strictly from the claim ledger, and to
+# skip roll-up sentences. Measured: it does neither reliably. Telling gpt-4o not to open a
+# row for "The platform offers several notebooks that ..." moved the false-positive rate
+# only 5/5 -> 4/5, because the instruction competes with the model's own judgement.
+#
+# So the verdict is computed in code instead. Same principle the rest of this system runs
+# on: where an invariant is checkable, check it rather than asking a model to respect it.
+
+# Vague quantifiers whose truth is carried by the items an answer lists, not by any single
+# span. A HARD count ("three notebooks", "12 datasets", "the only one") is deliberately NOT
+# here -- those are checkable and must stay auditable.
+_ROLLUP_QUANTIFIERS = (
+    "several", "a number of", "a range of", "a variety of", "various", "multiple",
+    "many", "some ", "these resources", "these notebooks", "these datasets",
+    "a few", "numerous", "range of methods",
+)
+_HARD_COUNT_RE = re.compile(
+    r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|only|exactly|all\s+of)\b", re.I)
+
+
+def _is_rollup_claim(claim: str) -> bool:
+    """True for an introduce/summarise sentence with no independently checkable content."""
+    text = (claim or "").strip().lower()
+    if not text or _HARD_COUNT_RE.search(text):
+        return False
+    return any(q in text for q in _ROLLUP_QUANTIFIERS)
+
+
+def _recompute_verdict(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute hallucination_detected / severity / issues from the claim ledger.
+
+    Two corrections, both measured rather than theorised:
+
+    1. Roll-up rows are reclassified as supported when at least one real claim IS supported.
+       "The platform offers several notebooks that compute X" cannot have a verbatim span and
+       was being marked absent, which flagged fully-grounded answers as high severity 5 times
+       out of 5 -- the caveat then reached the user and undermined a correct answer.
+    2. issues/severity are re-derived from the surviving rows. The prompt already specifies
+       "issues = exactly the contradicted or absent rows", but nothing enforced it, so a
+       model could and did raise an issue for a row it had marked supported.
+
+    When there is no usable ledger the model's own verdict is left untouched -- this must
+    never *invent* a clean verdict for an audit that did not produce one.
+    """
+    ledger = parsed.get("claim_ledger")
+    if not isinstance(ledger, list) or not ledger:
+        return parsed
+
+    rows = [r for r in ledger if isinstance(r, dict)]
+    if not rows:
+        return parsed
+
+    real_supported = any(
+        str(r.get("status", "")).lower() == "supported" and not _is_rollup_claim(str(r.get("claim") or ""))
+        for r in rows
+    )
+
+    reclassified: List[str] = []
+    for row in rows:
+        status = str(row.get("status", "")).lower()
+        claim = str(row.get("claim") or "")
+        if status in {"absent", "contradicted"} and _is_rollup_claim(claim) and real_supported:
+            row["status"] = "supported"
+            row["evidence_quote"] = (
+                "(roll-up of the items listed in this answer, which are individually supported)"
+            )
+            reclassified.append(claim)
+
+    bad = [r for r in rows if str(r.get("status", "")).lower() in {"absent", "contradicted"}]
+    parsed["claim_ledger"] = rows
+    parsed["hallucination_detected"] = bool(bad)
+    parsed["issues"] = [
+        {"claim": str(r.get("claim") or ""),
+         "reason": (f"evidence contradicts this claim: {r.get('evidence_quote')}"
+                    if str(r.get("status", "")).lower() == "contradicted"
+                    else "no span in the evidence or execution record covers this claim")}
+        for r in bad
+    ]
+    if not bad:
+        parsed["severity"] = "none"
+        if reclassified:
+            parsed["summary"] = "All claims are supported by the retrieved evidence."
+    elif str(parsed.get("severity", "")).lower() in {"none", ""}:
+        # The model said clean while leaving unsupported rows: trust the ledger, not the label.
+        parsed["severity"] = "high"
+    if reclassified:
+        parsed["rollup_claims_reclassified"] = reclassified
     return parsed
 
 

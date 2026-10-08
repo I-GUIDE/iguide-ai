@@ -149,10 +149,7 @@ _BARE_READ = re.compile(
 # per-variable fallback. Pointing them at ``tiered_env`` now would be a second answer to the same
 # question for that branch to unpick. Each entry expires itself: the moment the file stops
 # reading bare names, the second assertion below names it for deletion.
-_STILL_BARE = {
-    "rag_pipeline/search/agent_kb.py",            # _os_client, and the "is a cluster set?" guard
-    "extractors/emitters/opensearch_emitter.py",  # _os_client
-}
+_STILL_BARE: set = set()  # both former entries moved onto search_cluster() in M8.65
 
 
 def test_no_search_client_reads_the_bare_cluster_names():

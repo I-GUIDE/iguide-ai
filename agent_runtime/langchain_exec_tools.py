@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.extraction_flag import extraction_enabled
 
 # Bounds on how much gets auto-staged into a sandbox run (conversation files +
 # explicitly requested files). Keeps a large session from blowing up disk/time.
@@ -160,6 +161,33 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     return staging, staged_info, errors, skipped
 
 
+# Appended to execute_code's description only while the extraction bundle is on
+# (agent_runtime/extraction_flag.py): it describes the gate and the mounted library, and a
+# model told about a library that is not mounted guesses at it.
+_EXTRACTION_NOTE = (
+    # Stated here because a peer that skips kb_method_search will otherwise GUESS the
+    # package name: one run guessed `from method_library import ...` (the host
+    # directory name) and failed with ModuleNotFoundError. The importable package is
+    # `iguide_methods`, whatever the mount is called.
+    # The gate can only check a UNIT if the run declares one; nothing in a frame
+    # distinguishes 21500 metres from 21500 feet.
+    "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
+    "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
+    "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
+    "failed gate means the reported numbers are not verified and the answer will say "
+    "so. For any number your answer will quote, ASSIGN a module-level dict "
+    "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\"}} "
+    "(optional \"min\"/\"max\" get range-checked); the gate reads the variable, so "
+    "printing it checks nothing, and a null unit blocks verification. "
+    "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
+    "`iguide_methods` — extracted, independently callable functions from platform "
+    "elements, already present with NO install and NO network. Get an exact, "
+    "version-pinned import line from `kb_method_search` / `get_method_contract` "
+    "rather than guessing a module path, and still declare the method's own "
+    "`dependencies` (e.g. geopandas), which are NOT preinstalled."
+)
+
+
 def make_code_execution_tools(
     executor: Optional[Any] = None,
     default_input_file_ids: Optional[List[str]] = None,
@@ -170,17 +198,21 @@ def make_code_execution_tools(
     ``default_input_file_ids`` are the files attached to the current conversation;
     they are auto-staged into EVERY run so the model can read them without naming
     them, and are unioned (deduped) with any explicit ``input_files`` it passes.
+
+    ``session_id`` makes the sandbox workspace PERSIST across calls within a turn, so a
+    multi-step workflow can build state (step 2 reads what step 1 wrote). Without it every
+    call gets a throwaway directory, which is what made multi-step analysis impossible.
     """
     from langchain_core.tools import StructuredTool
 
-    from agent_runtime.code_execution import DEFAULT_TIMEOUT, get_code_executor
+    from agent_runtime.code_execution import get_code_executor
 
     default_ids = [str(x).strip() for x in (default_input_file_ids or []) if str(x).strip()]
 
     def execute_code(
         code: str = "",
         language: str = "python",
-        timeout_seconds: int = DEFAULT_TIMEOUT,
+        timeout_seconds: Optional[int] = None,
         dependencies: Optional[List[str]] = None,
         input_files: Optional[List[str]] = None,
         label: Optional[str] = None,
@@ -216,6 +248,14 @@ def make_code_execution_tools(
             payload["input_file_errors"] = input_errors
         if skipped:
             payload["input_files_skipped"] = skipped
+        if session_id:
+            # Tell the model the workspace persists; otherwise it will not use it and will
+            # keep re-deriving state it already computed.
+            payload["workspace"] = {
+                "persistent": True,
+                "note": "Files you write persist for the rest of this conversation; a later "
+                        "execute_code call can read them from the working directory.",
+            }
         return json.dumps(payload, ensure_ascii=True, default=str)
 
     # ---------------------------------------------------------------- workspace edits
@@ -341,7 +381,8 @@ def make_code_execution_tools(
             "reason. To change one part of a program you already wrote, do NOT re-send the "
             "whole thing: write it to a named file with write_workspace_file, then run it with "
             "`entrypoint` (e.g. entrypoint=\"main.py\", no `code`), and fix it with "
-            "edit_workspace_file between runs."
+            "edit_workspace_file between runs. "
+            + (_EXTRACTION_NOTE if extraction_enabled() else "")
         ),
     )
     tools = [tool]

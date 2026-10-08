@@ -397,8 +397,20 @@
               Spatial Search
             </label>
             <label class="checkbox">
+              <input class="search-method" type="checkbox" value="agent_kb_search" checked>
+              Agent KB (inside elements)
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="kb_method_search" checked>
+              Method Library (callable units)
+            </label>
+            <label class="checkbox">
               <input class="search-method" type="checkbox" value="opengeodata_search" checked>
               OpenGeoData Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="web_search">
+              Open Web (search + fetch)
             </label>
           </div>
 
@@ -625,6 +637,26 @@
       toolTraceEl.scrollTop = toolTraceEl.scrollHeight;
     }
 
+    /* Auth fails CLOSED server-side: a blank key against a protected server is a 403,
+       and a server with no AGENT_CHAT_API_KEY configured is a 500. Both previously
+       surfaced as a raw response body, which reads like a bug rather than a setting. */
+    async function describeHttpError(resp) {
+      const raw = await resp.text().catch(() => "");
+      let detail = raw;
+      try { const j = JSON.parse(raw); detail = j.error || j.message || raw; } catch (_) {}
+      const keyed = !!document.getElementById("api_key").value.trim();
+      if (resp.status === 403) {
+        return keyed
+          ? "403 — the API key was rejected. Check it matches AGENT_CHAT_API_KEY on the server."
+          : "403 — this server requires an API key. Enter it in the API key field.";
+      }
+      if (resp.status === 500 && /misconfigur|api key not set/i.test(detail)) {
+        return "500 — the server has no AGENT_CHAT_API_KEY configured, so it refuses requests. "
+             + "Set it server-side, or set AGENT_CHAT_AUTH_OPTIONAL=1 for local development.";
+      }
+      return detail || `Request failed with status ${resp.status}`;
+    }
+
     function apiKeyHeaders(includeJson = false) {
       const headers = {};
       if (includeJson) headers["Content-Type"] = "application/json";
@@ -849,8 +881,7 @@
       }, !response.ok);
 
       if (!response.ok || !response.body) {
-        const text = await response.text();
-        throw new Error(text || `Request failed with status ${response.status}`);
+        throw new Error(await describeHttpError(response));
       }
 
       const reader = response.body.getReader();

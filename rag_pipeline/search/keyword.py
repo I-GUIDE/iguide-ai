@@ -5,7 +5,7 @@ from typing import Any, Dict, List, MutableMapping, Optional
 
 from opensearchpy import OpenSearch
 
-from .utils import get_logger, getenv, normalize_source_fields, safe_score
+from .utils import default_top_k, get_logger, getenv, normalize_source_fields, safe_score
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 log = get_logger("search_keyword")
@@ -38,7 +38,7 @@ def _os_index(default: Optional[str] = None) -> str:
 
 def get_keyword_search_results(
     user_query: str,
-    size: int = 12,
+    size: Optional[int] = None,
     *,
     client: Optional[OpenSearch] = None,
     index: Optional[str] = None,
@@ -57,7 +57,10 @@ def get_keyword_search_results(
     if not query:
         return []
 
-    size = max(1, min(int(size or 0), 100))
+    # None (or 0) -> the shared retrieval window, resolved at call time. This signature
+    # default used to be a hardcoded 12, a third independent window alongside the
+    # wrapper's 8 and the tools' 8.
+    size = max(1, min(int(size or default_top_k()), 100))
     body = {"size": size, "query": {"match": {"contents": query}}}
 
     os_client = client or _os_client()
@@ -97,9 +100,9 @@ def retrieve_keyword(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     params = state.get("params") or {}
     try:
-        size = int(params.get("top_k", 8))
+        size = int(params.get("top_k", default_top_k()))
     except (TypeError, ValueError):
-        size = 8
+        size = default_top_k()
 
     return get_keyword_search_results(query, size=size)
 

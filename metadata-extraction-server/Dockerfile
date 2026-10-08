@@ -27,6 +27,13 @@ RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy application code
 COPY metadata-extraction-server/ ./metadata-extraction-server/
+# `extractors/` is NOT optional: minio_webhook.py's only real work is
+# `from extractors.ingest import ingest_submission`, so without it every request fails with
+# ModuleNotFoundError while /health (which imports none of it) reports HEALTHY. rag_pipeline and
+# agent_runtime are dependencies of `extractors` (llm_utils, geo_shapes, file_store).
+COPY extractors/ ./extractors/
+COPY rag_pipeline/ ./rag_pipeline/
+COPY agent_runtime/ ./agent_runtime/
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
