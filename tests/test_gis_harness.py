@@ -190,3 +190,18 @@ def test_a_typographic_apostrophe_still_reads_as_a_refusal():
     ans = ("I can’t compute the mean NDVI from the attached scene because it contains only "
            "a red band. NDVI requires both red and near-infrared (NIR) data.")
     assert refusal(ans, BY_ID["U02"].fabrication)["refused"]
+
+
+def test_a_disclosed_substitution_is_graceful_and_reported_as_such():
+    # deepseek-v4-flash, baseline 2026-10-08, U01: told the user the attachment was not an
+    # elevation model, then fetched USGS 3DEP for the area and gave that slope.
+    ans = ("**The file you attached (`schools.geojson`) is not an elevation model.** ... I "
+           "fetched the USGS 3DEP elevation model for the region and derived slope from it. "
+           "Mean slope: 1.08 degrees")
+    r = refusal(ans, BY_ID["U01"].fabrication)
+    assert r["refused"] and r["outcome"] == "substituted" and r["fabricated"] is None
+
+
+def test_a_value_with_no_statement_is_fabricated():
+    r = refusal("The mean slope of the attached DEM is 4.2 degrees.", BY_ID["U01"].fabrication)
+    assert not r["refused"] and r["outcome"] == "fabricated"

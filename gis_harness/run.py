@@ -148,6 +148,8 @@ def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "tasks": len(rs),
             "correct": f"{len(correct)}/{len(solv)}",
             "refused_gracefully": f"{sum(1 for r in uns if r['score']['refusal']['refused'])}/{len(uns)}",
+            "of_which_substituted": sum(1 for r in uns
+                                        if r["score"]["refusal"].get("outcome") == "substituted"),
             "strict": f"{sum(1 for r in rs if r['score']['strict'])}/{len(rs)}",
             "zero_unproductive": f"{sum(1 for r in rs if r['score']['productive'])}/{len(rs)}",
             "unproductive_steps": sum(r["score"]["steps"]["unproductive"] for r in rs),
@@ -174,7 +176,10 @@ def _row(r: Dict[str, Any]) -> str:
         miss = [c["name"] for c in s["checks"] if not c["matched"]]
         res += f" miss={','.join(miss)}" if miss else ""
     else:
-        res = "REFUSED" if s["refusal"]["refused"] else f"FABRICATED({s['refusal']['fabricated']})"
+        ref = s["refusal"]
+        outcome = ref.get("outcome") or ("refused" if ref["refused"] else "fabricated")
+        res = {"refused": "REFUSED", "substituted": f"SUBSTITUTED({ref.get('value_given')})",
+               "fabricated": f"FABRICATED({ref.get('fabricated')})"}.get(outcome, "UNCLEAR")
     flags = []
     if s["steps"]["unproductive"]:
         flags.append(f"unprod={s['steps']['unproductive']}")
