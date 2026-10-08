@@ -1,0 +1,90 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254.14 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the computation performed on your uploaded files, here are the results:\n\n## Answer\n\n**The two optimal sites are C1 and C3.**\n\n**Total population-weighted straight-line distance: 382,254.14 person-kilometres** (\u2248 382,254 person-km).\n\n### Method\n- Computed the great-circle (haversine) straight-line distance from each of the 40 demand points to each of the 8 candidate sites.\n- For every one of the C(8,2) = 28 possible 2-site combinations, assigned each demand point to its **nearest** chosen site and summed `population \u00d7 distance`.\n- Selected the combination with the smallest total.\n\n### Ranking (top 5 of 28 combinations)\n\n| Sites | Total (person-km) |\n|-------|-------------------|\n| **C1, C3** | **382,254.14** |\n| C2, C3 | 418,879.72 |\n| C7, C8 | 420,410.88 |\n| C1, C7 | 423,999.04 |\n| C3, C7 | 428,722.67 |\n\nThe best pair (C1, C3) beats the runner-up (C2, C3) by about 36,626 person-km, so the choice is clear-cut.",
+  "seconds": 72.6,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 91627,
+    "cached_input_tokens": 57856,
+    "output_tokens": 2665,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T05-deepseek-v4-flash-1791499414-0"
+}

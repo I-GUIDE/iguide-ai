@@ -1,0 +1,83 @@
+{
+  "task": "T01",
+  "title": "CRS-aware area + great-circle distance",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "What is the area of Champaign County, Illinois, in square kilometres? And what is the great-circle distance in km between Trafalgar Square, London (51.5080 N, 0.1281 W) and Notre-Dame de Paris (48.8530 N, 2.3499 E)?",
+  "files": [],
+  "expected": {
+    "area_km2": 2586.008557,
+    "distance_km": 344.2529934224686
+  },
+  "expected_why": {
+    "area_km2": "Census TIGERweb AREALAND+AREAWATER, GEOID 17019",
+    "distance_km": "pyproj Geod(WGS84).inv; a spherical haversine is within 0.3%"
+  },
+  "score": {
+    "task": "T01",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "area_km2",
+        "kind": "number",
+        "expected": 2586.008557,
+        "matched": true,
+        "found": "2,586.01 km\u00b2"
+      },
+      {
+        "name": "distance_km",
+        "kind": "number",
+        "expected": 344.2529934224686,
+        "matched": true,
+        "found": "343.89 km"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "- **Champaign County, Illinois:** **2,586.01 km\u00b2**, calculated from its county boundary using an equal-area projection (EPSG:5070).\n- **Great-circle distance:** **343.89 km** between Trafalgar Square, London (51.5080\u00b0 N, 0.1281\u00b0 W) and Notre-Dame de Paris (48.8530\u00b0 N, 2.3499\u00b0 E), using the haversine formula with an Earth radius of 6,371.0088 km.",
+  "seconds": 56.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "admin_boundary",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 54939,
+    "cached_input_tokens": 0,
+    "output_tokens": 1342,
+    "usage_absent": 0,
+    "cost_usd": 0.0126,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T01-gpt-5.6-luna-1791500865-0"
+}

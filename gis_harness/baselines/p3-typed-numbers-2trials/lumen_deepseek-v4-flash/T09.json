@@ -1,0 +1,91 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "lattice.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on your `lattice.geojson` file (100 grid cells in a 10\u00d710 layout, EPSG:4326), here are the results:\n\n## 1. Global Moran's I (Queen Contiguity, Row-Standardised Weights)\n\n- **Moran's I = 0.2252** (expected under randomness: \u22120.0101)\n- **z-score = 4.259, p < 0.01**\n- **Verdict:** Significant positive spatial autocorrelation \u2014 similar values are clustered together, not randomly distributed. (Geary's C = 0.7772 and Getis-Ord G also confirm clustering.)\n\n## 2. Getis-Ord Gi* Hot Spot Analysis (Binary Queen Weights, `star=True`)\n\nUsing the strict **z > 1.96** threshold you specified:\n\n- **Exactly 1 cell** qualifies as a hot spot \u2014 **cell 38** (value 75.48, z = 2.080, p = 0.001).\n\n**Important distinction:** The tool's p-value-based classification flags **15 cells** as hot spots (9 at p<0.01, 6 at p<0.05), because permutation p-values are very small even for moderate z-scores. However, under the strict **z > 1.96** criterion you requested, only **1 cell** qualifies.\n\n## Deliverables\n\n- **Hot spot map layer** (Gi* classified by confidence band): `lattice_value_hotspots.geojson` \u2014 [download](/agent/files/file_6acee14a1587/download), available on your interactive map.\n- **Per-cell z-scores CSV**: `lattice_value_hotspots.csv` \u2014 [download](/agent/files/file_318ed582295e/download).\n\n**Answer to your question:** **1 cell** is a hot spot with Gi* z > 1.96 (cell 38).",
+  "seconds": 121.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 97581,
+    "cached_input_tokens": 62464,
+    "output_tokens": 2897,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T09-deepseek-v4-flash-1791499497-0"
+}

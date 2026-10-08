@@ -1,0 +1,81 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://z.overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "20"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 4, in <module>\\\\n gdf = gpd.read_file(\\'file_75811d159b02.geojson"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed, **OpenStreetMap has 20 schools within 1 mile of the point (41.9231 N, 87.7093 W)**.\n\nThe analysis fetched all OSM `amenity=school` features in the surrounding area (63 total in the search box) and measured the true metric distance from each school's geometry to the target point using a projected CRS (UTM zone 16N, EPSG:26916), counting those within 1 mile = 1,609.344 m.\n\nThe 20 schools within 1 mile include:\n\n| School | Distance |\n|---|---|\n| Darwin Elementary School | 0.17 mi (266 m) |\n| Saint Sylvester School | 0.33 mi (538 m) |\n| Funston Elementary School | 0.48 mi (777 m) |\n| Jehovah School | 0.61 mi (975 m) |\n| Our Lady of Grace School | 0.61 mi (978 m) |\n| (unnamed school on N Ridgeway) | 0.62 mi (996 m) |\n| Logan Square Elementary School | 0.63 mi (1015 m) |\n| Mozart Elementary School | 0.66 mi (1055 m) |\n| Stowe Elementary School | 0.68 mi (1093 m) |\n| Yates Elementary School | 0.70 mi (1122 m) |\n| Marine Leadership Academy | 0.76 mi (1224 m) |\n| Avondale-Logandale Elementary School | 0.75 mi (1205 m) |\n| Chase Elementary School | 0.80 mi (1283 m) |\n| Goethe Elementary School | 0.81 mi (1301 m) |\n| St. Hyacinth Catholic School | 0.83 mi (partially listed) |\n\nThe closest school is Darwin Elementary at 266 m (0.17 mi), and the farthest within range is St. John Berchmans at 1601 m (0.99 mi). All 20 are within the 1609.344 m (1 mile) threshold.",
+  "seconds": 172.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 156023,
+    "cached_input_tokens": 100864,
+    "output_tokens": 3909,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791500149-1"
+}

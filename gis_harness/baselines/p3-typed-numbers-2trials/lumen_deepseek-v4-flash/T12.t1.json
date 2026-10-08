@@ -1,0 +1,91 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog:\n\n**Largest event's magnitude:** **7.1** (Mw) \u2014 the mainshock of the Ridgecrest earthquake sequence, occurring on **2019-07-06 03:19:53 UTC** at 35.7695\u00b0N, -117.5993\u00b0W (event id `ci38457511`).\n\n**Events within 7 days after it and within 25 km of its epicentre:** **673 events**\n\n**Of those, magnitude 4 or greater:** **63 events**\n\n### Method\n- The largest event was identified as the row with the maximum `mag` value (7.1).\n- \"Within 7 days after\" = events with `time` strictly after the mainshock's time and up to 7 days later (window ending 2019-07-13 03:19:53 UTC).\n- \"Within 25 km\" = events whose great-circle (haversine) distance from the mainshock epicentre was \u2264 25 km. The maximum qualifying distance was ~24.85 km, confirming the 25 km cutoff was applied correctly.\n- The mainshock itself was excluded (only events *after* it count).\n\nNote: the catalog covers July 2019, so the full 7-day window (through July 13) is captured within the file.",
+  "seconds": 97.5,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 89425,
+    "cached_input_tokens": 58624,
+    "output_tokens": 2314,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791500687-1"
+}
