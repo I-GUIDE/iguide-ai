@@ -20,12 +20,20 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Primary + community mirrors. The public instances are frequently overloaded (504),
-# so we try them in order. Override/extend with OVERPASS_API_URL (comma-separated).
+# Public mirrors, tried in order until one answers. Override with OVERPASS_API_URL
+# (comma-separated). The order comes from probes on 2026-10-08 (stage 40): the most reliable
+# first, then two that fail in under a second (cheap to try), then the slower ones, and mail.ru
+# last because it can hang for the full timeout. There are only four servers behind these six
+# names: overpass-api.de is DNS round-robin over lz4 and z (it stays as a retry), and
+# overpass.kumi.systems is a CNAME of overpass.private.coffee (yet each has answered while the
+# other returned 500). maps.mail.ru is the one operator independent of both.
 _DEFAULT_ENDPOINTS = (
-    "https://overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 )
 OVERPASS_ENDPOINTS = [
     e.strip() for e in os.getenv("OVERPASS_API_URL", ",".join(_DEFAULT_ENDPOINTS)).split(",") if e.strip()
