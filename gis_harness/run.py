@@ -125,8 +125,15 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
               "audit_severity": turn["audit_severity"], "map_layers": turn["map_layers"],
               "tool_calls": [{"name": c["name"], "agent": c.get("agent")} for c in turn["tool_calls"]],
               "usage": cost_usd(turn["usage"]), "error": turn["error"], "thread_id": thread}
-    (out / f"{stem}.json").write_text(json.dumps(record, indent=2, default=str))
+    (out / f"{stem}.json").write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
+
+
+def _scrub(text: str) -> str:
+    """Records are committed to a public repository as baselines: no local paths in them."""
+    for path, mark in ((str(REPO), "<repo>"), (os.path.expanduser("~"), "<home>")):
+        text = text.replace(path, mark)
+    return text
 
 
 def rescore(path: Path) -> Dict[str, Any]:
@@ -150,7 +157,7 @@ def rescore(path: Path) -> Dict[str, Any]:
     turn["error"] = record.get("error") or turn["error"]
     record["score"] = score(BY_ID[record["task"]], record["expected"], turn).to_dict()
     record["usage"] = cost_usd(turn["usage"])
-    path.write_text(json.dumps(record, indent=2, default=str))
+    path.write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
 
 

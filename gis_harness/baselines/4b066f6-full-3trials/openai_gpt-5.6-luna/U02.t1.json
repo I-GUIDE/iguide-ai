@@ -21,7 +21,7 @@
       "failed": [
         {
           "name": "inspect_vector",
-          "excerpt": "content='{\"ok\": false, \"error\": \"DataSourceError: \\'/Users/yfkang/i-guide-platform-flask-servers/.claude/worktrees/admiring-mirzakhani-63101b/agent_chat_files/uploads/file_ce35539a8b83__scene_red_only"
+          "excerpt": "content='{\"ok\": false, \"error\": \"DataSourceError: \\'<repo>/agent_chat_files/uploads/file_ce35539a8b83__scene_red_only"
         }
       ],
       "unproductive": 1
