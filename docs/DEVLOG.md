@@ -5180,3 +5180,23 @@ rather than from the previous one.
   proposes it. Audited for the same pattern: `chat_traces` (fitted since M8.74), and
   `chat_history[].elements` and `ratings` (latent, since no live caller sends a non-empty one).
   The file metadata store is on the Docker volume, not this cluster.
+## 2026-10-08 · M8.78 · Whole GIS tasks, re-run after every change (architecture stage 41)
+
+**Change** New `gis_harness/`: 12 classic GIS problems, 1 live-data variant and 4 unsolvable
+  questions. They run through a local server's `/agent/chat/stream` (`AGENT_MODE=local`) and are
+  scored mechanistically per model: correct within tolerance, no repeated or failed calls, no
+  banner, source named, graceful refusal. New `llm_usage` trace event from
+  `streaming_trace.UsageCallbackHandler`, installed through LangChain's configure hook so that
+  the supervisor's own model calls report tokens too; `api/server.py` forwards it.
+
+**Why** Stages 36–39 were five patches in one day, each checked only against the turn that
+  prompted it. Nothing re-ran whole tasks, so there was no way to tell whether a patch
+  generalised or broke another task. The cost of a turn counted only the peers' calls.
+
+**Measured** 4-task sample on `81fd7c8`: deepseek-v4-flash 3/3 correct, 1/1 refused, strict
+  3/4; gpt-5.6-luna 3/3, 1/1, strict 1/4 (no source named on 3; one failed call). Luna: $0.062
+  for the 4. Usage tests: 3 of 5 fail on the base. Harness tests: 19, including Moran's I and
+  Gi* against esda.
+
+**Not fixed** The harness measures; it changes no behaviour. The live-OSM task's reference can
+  move between runs. The number matcher accepts the right value anywhere in the answer.

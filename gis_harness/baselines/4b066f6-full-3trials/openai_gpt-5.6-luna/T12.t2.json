@@ -1,0 +1,89 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 2,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "The largest event in the catalog had a magnitude of **7.1** (2019-07-06 03:19:53 UTC).\n\n- **673 events** occurred within the following 7 days and within **25 km** of its epicentre.\n- **63 of those events** had a magnitude of **4.0 or greater**.\n\nThe 7-day window was defined strictly after the magnitude-7.1 event through 2019-07-13 03:19:53 UTC, using haversine distances.",
+  "seconds": 53.9,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 68476,
+    "cached_input_tokens": 0,
+    "output_tokens": 1323,
+    "usage_absent": 0,
+    "cost_usd": 0.0153,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T12-gpt-5.6-luna-1791496431-2"
+}

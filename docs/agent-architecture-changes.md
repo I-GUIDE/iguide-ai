@@ -54,6 +54,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 38 | [A peer that can find what it measures, and stops when it repeats itself](#stage-38) | 2026-10-08 | `overpass_search` bound to both measuring peers with a file; an identical repeated call is answered, then ends the run; a delivered answer drops the partial banner; a feature list names its source |
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
+| 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6827,3 +6828,154 @@ mirrors in list order, that the first answer ends the search, and that all faili
 - **No memory between calls.** Every call starts again at z, even when z failed a moment ago.
 - **Not tested from the VM.** All of this was measured from one Mac on one afternoon. The VM's
   network may rank the mirrors differently.
+## Stage 41 — Whole tasks, re-run after every change {#stage-41}
+
+*2026-10-08. Branch `claude/gis-task-harness`, built on `prototype` at `81fd7c8` and rebased onto
+`4b066f6` once #88 (stage 38) and #87 (stage 39) merged, then onto `5b5e7ef` after #89 (stage 40)
+and #92 (M8.77). 41 was the next free number on every branch and worktree. The baseline below
+was measured on `4b066f6`; #89 changes only the Overpass mirror order and #92 only how a
+conversation record is stored. DEVLOG M8.78. Phase 1 of the eight-flaws program: it changes no agent
+behaviour, and every later phase is measured against it.*
+
+**Why.** On 2026-10-08 two live turns on agent.i-guide.io got every GIS number right (2,584.6 km²
+and 340 km; 18 schools to within 4 m) and still showed the user false COULD NOT VERIFY banners, a
+lost turn record, memorised road and rail figures, a 27-call geocoding loop and a false "Partial
+answer". Each was fixed by a patch written for that turn: stages 36–39, PRs #84–#88, five in one
+day. `sandbox_verify.py` and `supervisor/graph.py` together carry 22 comments of the form "a live
+run found X", most of which added one more entry to a list. Nothing re-ran whole tasks after a
+change, so each patch could be checked only against the turn that prompted it, and a patch that
+broke a different task would surface only when a user hit it.
+
+**What.** `gis_harness/`: twelve classic GIS problems, a live-data variant and four unsolvable
+questions (README there). The data are generated from fixed seeds or pinned (USGS ComCat snapshot
+committed; Meuse by SHA-256). Each expected value is computed from the same bytes by a route
+independent of the agent: brute force (2-median over all 28 pairs, geodesic point counts), a
+closed form (a watershed exactly 120 of 200 rows by construction), or a second library (Moran's I
+and Gi* checked against esda in `tests/test_gis_harness.py`). Most datasets carry a trap with its
+wrong answer named: Web Mercator at 42 N is 1.34x long, NoData counted as flooded adds 1 ha, a
+uint16 NIR−red wraps around, the shortest street path is not the fastest.
+
+Design choices and why:
+
+- **Through the HTTP API, not in-process.** The failures this program targets live in the
+  supervisor, the audit and the banners: the layers a user sees through `/agent/chat/stream`.
+  The request sets only the model, a thread id and `agentDev` (so the stream carries tool calls
+  and usage); everything else is the server's default, the path a user takes. `claude/benchmark`'s
+  EarthVerse harness made the opposite choice (in-process `run_supervisor`) for reproducibility;
+  here the point is to see what the user would see.
+- **Mechanistic scores, no LLM judge.** Correct (every expected value within tolerance, in any unit
+  of the right dimension), productive (no repeated identical call, no failed call), clean (no
+  banner), sourced (the answer names where its data came from), refused (unsolvable: says so and
+  states no value). `strict` is all at once. GeoNatureAgent and GISAgentBench avoid a judge for
+  the same reason: a judge shares the agent's premises.
+- **Per-model, never pooled.** The 2026-10-08 failures were model-shaped (deepseek-v4-flash
+  repeating a call that gpt-5.6-luna does not), so a pooled score would hide the regressions that
+  matter.
+- **Local only.** `--start-server` runs `api/server.py` with `AGENT_MODE=local` (stage 24) and
+  blanks `GOOGLE_MAPS_API_KEY`: KB spatial search geocodes through Google, a metered call no task
+  needs.
+
+**Every model call now reports its tokens.** The first sample turn streamed 2 model calls for a
+turn that made at least 4: `turn_instrumentation` is middleware on the peers' `create_agent`, so
+the supervisor's decider, synthesis and audit, which call the model directly, never reported.
+`streaming_trace.UsageCallbackHandler` is registered through LangChain's configure hook on a
+context variable that `trace_context` sets, so every runnable configured inside a traced turn, on
+any thread that copied the context, gets it without being wired. It emits `llm_usage` (detail
+tier, forwarded by `api/server.py`) with the provider's input, output, cached and reasoning
+tokens, or `usage: "absent"`, which is a different fact from zero. On the sample, deepseek's
+first call is the decider's 1,446-token request: before this it was invisible.
+`rag_pipeline/tests/test_llm_usage_events.py`: 3 of 5 fail on `81fd7c8`; the 2 that pass are guards.
+
+**Measured: the 4-task sample on `81fd7c8`** (T01 fetch + measure, T02 vector upload, T08 raster,
+U02 refusal; one trial each):
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct | 3/3 | 3/3 |
+| refused gracefully | 1/1 | 1/1 |
+| strict | 3/4 | 1/4 |
+| unproductive steps | 0 | 1 (T01: first `execute_code` could not open the boundary, the S37 symptom) |
+| banners | 0 | 0 |
+| source named | 3/4 | 1/4 |
+| wall time | 320 s | 222 s |
+| model calls / input tokens | 35 / 595k | 29 / 287k |
+| cost | Lumen coins (no $ rate) | $0.062 |
+
+The sample already shows two of the eight flaws without any live turn: an answer that does not say
+where its data came from (flaw 6), and a failed first call that a correct answer hides (flaw 3's
+"unproductive step").
+
+**The full baseline, `4b066f6`** (after #87 and #88): 17 tasks × 3 trials × 2 models, 101 of 102
+runs. The 102nd, T02L trial 2 on deepseek, has no reference: every Overpass mirror refused the
+harness's own query three times, and a task without a reference is not scored.
+`gis_harness/baselines/4b066f6-full-3trials/` keeps every run's score, answer and usage.
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct (solvable) | 33/38 | 30/39 |
+| refused gracefully (unsolvable) | 11/12 (1 a disclosed substitution) | 7/12 |
+| **strict** | **23/50** | **7/51** |
+| runs with zero unproductive steps | 40/50 | 37/51 |
+| unproductive steps: duplicates / failed calls | 0 / 25 | 3 / 14 |
+| banners | 2 (0 on correct answers) | 1 (on a correct answer) |
+| source named | 33/50 | 18/51 |
+| wall time | 105 min | 48 min |
+| model calls / input / output tokens | 536 / 11.7M / 0.24M | 407 / 4.2M / 0.08M |
+| cost | Lumen coins | **$0.94** |
+
+Per task, three trials (C correct, x wrong, R refused, S substituted, F fabricated; u unproductive
+steps, b banner, n source not named):
+
+| task | deepseek | luna |
+|---|---|---|
+| T01 area + distance | C C C | C Cn Cn |
+| T02 schools (upload) | C C C | Cn Cn Cn |
+| T02L schools (live OSM) | C C | xu xu xu |
+| T03 join + rates | Cn Cn Cn | Cn Cn Cn |
+| T04 network | C C C | Cn Cun xu |
+| T05 2-median | Cn Cn Cun | Cn Cn Cun |
+| T06 slope + watershed | Cu Cun Cun | C C Cn |
+| T07 inundation | C C Cu | Cun Cun Cun |
+| T08 NDVI change | Cn Cn Cn | Cn Cn Cn |
+| T09 Moran's I + Gi* | xb xbn xn | xn xn xun |
+| T10 IDW + kriging | Cu x x | C x x |
+| T11 suitability | Cn Cn Cn | Cbn Cn Cn |
+| T12 aftershocks | C C Cu | Cn Cn Cn |
+| U01 no DEM | R R S | F Fn R |
+| U02 no NIR | R R R | ?u R Rn |
+| U03 no mercury | R Ru Run | R Ru Ru |
+| U04 off-network | F R Ru | Fn Fn Ru |
+
+What the baseline says, checked against the runs themselves:
+
+- **The GIS is mostly right, and the failures are not where the 10-08 patches were.** 63 of 77
+  solvable runs are correct. Banners, the 10-08 headline failure, appear on only 3 runs here.
+  Strict scores are low mainly because of unnamed sources (flaw 6) and unproductive steps
+  (flaws 3 and 4).
+- **The two systematic misses are method errors, and the answer key holds.**
+  - **T09:** 0 of 6 runs report the 13 hot spots. The expected value is esda's
+    `G_Local(transform="B", star=True).Zs > 1.96`. The two wrong answers are each another
+    method, reproduced exactly with esda:
+    - 3 runs report **1**: the z-score under row-standardised weights, although the prompt
+      asks for binary;
+    - 3 report **15**: cells with permutation p < 0.05, although the prompt asks for z > 1.96.
+  - **T10:** both models' hand-written kriging put the nugget on the matrix diagonal (γ(0) =
+    nugget) and got 295.06 ppm. PyKrige 1.7.3 gives 309.53 with `exact_values` either True or
+    False, which is the harness's value.
+- **gpt-5.6-luna on T02L, 0 of 3.** Its first `execute_code` passed a file_id as a path, the
+  same failure as live turns on 10-08 (a fix is in progress in another session). It then
+  answered "39 schools", a number no tool produced. deepseek's 19 and 20 match the reference
+  of 20.
+- **Fabrication on unsolvable tasks is model-shaped.** luna stated a slope for a DEM that was
+  never attached (U01, 2 of 3) and a travel time to a point off the network (U04, 2 of 3).
+  deepseek fabricated once (U04). Its one U01 value was a disclosed substitution: it said no DEM
+  was attached and gave the slope of a 3DEP DEM it fetched.
+- **luna names its data source on 18 of 51 runs, deepseek on 33 of 50.** That is model habit,
+  which phase 5 makes irrelevant.
+
+The harness's own scorer was corrected twice during the baseline:
+- once for a typographic apostrophe;
+- once to tell a disclosed substitution from a fabrication.
+
+`--summarise` re-scored every run from its stored events, so the table above uses the final
+scorer throughout.

@@ -504,6 +504,86 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
 
+class UsageCallbackHandler(BaseCallbackHandler):
+    """One `llm_usage` trace event per model call: the provider's own token counts.
+
+    `turn_instrumentation` records tokens only for the peers' agent loops, because it is
+    middleware on `create_agent`. The supervisor's decider, the synthesis and the grounding
+    audit call the model directly and never pass through it. On a 2026-10-08 probe turn the
+    stream showed 2 model calls while the turn made at least 4. A cost that counts only the
+    peers is an undercount whose size depends on the route.
+
+    So this handler is NOT attached per call site. `trace_context` puts it in a context
+    variable that LangChain's configure hook reads, and every runnable configured in that
+    context, at any depth and on any thread that copied the context, gets it. A model call
+    that nobody remembered to wire still reports.
+    """
+
+    raise_error = False
+    run_inline = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._models: Dict[str, str] = {}
+        self._lock = Lock()
+
+    def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
+        with self._lock:
+            self._models[str(kwargs.get("run_id"))] = StreamingTraceCallbackHandler._model_label(
+                serialized, kwargs)
+
+    def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
+        self.on_chat_model_start(serialized, prompts, **kwargs)
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        with self._lock:
+            model = self._models.pop(str(kwargs.get("run_id")), None)
+        usage: Dict[str, Any] = {}
+        for group in getattr(response, "generations", None) or []:
+            for generation in group or []:
+                um = getattr(getattr(generation, "message", None), "usage_metadata", None)
+                if isinstance(um, dict) and um:
+                    usage = um
+                    break
+            if usage:
+                break
+        if not usage:
+            # Providers that report only on the legacy field (llm_output.token_usage).
+            legacy = (getattr(response, "llm_output", None) or {}).get("token_usage") or {}
+            if legacy:
+                usage = {"input_tokens": legacy.get("prompt_tokens"),
+                         "output_tokens": legacy.get("completion_tokens")}
+        payload: Dict[str, Any] = {"kind": "llm_usage", "label": "LLM usage", "model": model}
+        if usage:
+            payload["input_tokens"] = usage.get("input_tokens")
+            payload["output_tokens"] = usage.get("output_tokens")
+            details_in = usage.get("input_token_details") or {}
+            details_out = usage.get("output_token_details") or {}
+            if details_in.get("cache_read"):
+                payload["cached_input_tokens"] = details_in.get("cache_read")
+            if details_out.get("reasoning"):
+                payload["reasoning_tokens"] = details_out.get("reasoning")
+        else:
+            # "The provider sent no usage" is a different fact from "the call used nothing".
+            payload["usage"] = "absent"
+        emit_trace_event("llm_usage", payload)
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        with self._lock:
+            self._models.pop(str(kwargs.get("run_id")), None)
+
+
+_USAGE_HANDLER: ContextVar[Optional[UsageCallbackHandler]] = ContextVar(
+    "agent_stream_usage_handler", default=None)
+
+try:  # pragma: no cover - exercised by the import itself
+    from langchain_core.tracers.context import register_configure_hook
+
+    register_configure_hook(_USAGE_HANDLER, inheritable=True)
+except Exception:  # noqa: BLE001 - usage accounting must never break the agent
+    logger.warning("llm_usage events disabled: configure hook unavailable", exc_info=True)
+
+
 def active_callback_handler() -> Optional[StreamingTraceCallbackHandler]:
     state = _TRACE_STATE.get()
     return state.handler if state is not None else None
@@ -542,9 +622,11 @@ def trace_context(
     handler._state = state
     state_token = _TRACE_STATE.set(state)
     agent_token = _TRACE_AGENT.set(agent_role)
+    usage_token = _USAGE_HANDLER.set(UsageCallbackHandler())
     try:
         yield
     finally:
+        _USAGE_HANDLER.reset(usage_token)
         _TRACE_AGENT.reset(agent_token)
         _TRACE_STATE.reset(state_token)
 

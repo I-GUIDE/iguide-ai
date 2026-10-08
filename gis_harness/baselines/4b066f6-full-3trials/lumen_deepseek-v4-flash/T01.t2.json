@@ -1,0 +1,85 @@
+{
+  "task": "T01",
+  "title": "CRS-aware area + great-circle distance",
+  "trial": 2,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "What is the area of Champaign County, Illinois, in square kilometres? And what is the great-circle distance in km between Trafalgar Square, London (51.5080 N, 0.1281 W) and Notre-Dame de Paris (48.8530 N, 2.3499 E)?",
+  "files": [],
+  "expected": {
+    "area_km2": 2586.008557,
+    "distance_km": 344.2529934224686
+  },
+  "expected_why": {
+    "area_km2": "Census TIGERweb AREALAND+AREAWATER, GEOID 17019",
+    "distance_km": "pyproj Geod(WGS84).inv; a spherical haversine is within 0.3%"
+  },
+  "score": {
+    "task": "T01",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "area_km2",
+        "kind": "number",
+        "expected": 2586.008557,
+        "matched": true,
+        "found": "2,586.01 km\u00b2"
+      },
+      {
+        "name": "distance_km",
+        "kind": "number",
+        "expected": 344.2529934224686,
+        "matched": true,
+        "found": "343.89 km"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "Census",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "**1. Area of Champaign County, Illinois**  \nThe area of Champaign County, Illinois, is **2,586.01 km\u00b2** (approximately 2,586 km\u00b2, or about 998 square miles). This was computed from the US Census TIGER/Line boundary (GEOID 17019), reprojected to the equal-area Albers projection (EPSG:5070) for accuracy.\n\n**2. Great-circle distance between Trafalgar Square and Notre-Dame de Paris**  \nThe great-circle distance is **343.89 km** (approximately 344 km). This was calculated using the haversine formula with Earth's radius of 6,371 km, from Trafalgar Square (51.5080\u00b0 N, 0.1281\u00b0 W) to Notre-Dame de Paris (48.8530\u00b0 N, 2.3499\u00b0 E).\n\nThe Champaign County boundary was also placed on your interactive map as a layer, with a downloadable GeoJSON file available at: `/agent/files/file_1e0e651a9998/download`.",
+  "seconds": 76.9,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "admin_boundary",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 55196,
+    "cached_input_tokens": 38656,
+    "output_tokens": 1965,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T01-deepseek-v4-flash-1791495290-2"
+}

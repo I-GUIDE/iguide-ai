@@ -1,0 +1,91 @@
+{
+  "task": "T11",
+  "title": "Multi-criteria suitability",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?",
+  "files": [
+    "landcover.tif",
+    "road_distance_m.tif",
+    "slope_deg.tif"
+  ],
+  "expected": {
+    "suitable_ha": 103.85,
+    "best_cell_utm": [
+      390305.0,
+      4439325.0
+    ],
+    "best_cell_lonlat": [
+      -88.28689672461265,
+      40.097073108688406
+    ],
+    "best_score": 0.9812499992549419
+  },
+  "expected_why": {
+    "suitable_ha": "boolean overlay on the stored float32 values"
+  },
+  "score": {
+    "task": "T11",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "suitable_ha",
+        "kind": "number",
+        "expected": 103.85,
+        "matched": true,
+        "found": "103.85 hectares"
+      },
+      {
+        "name": "best_cell_lonlat",
+        "kind": "point",
+        "expected": [
+          -88.28689672461265,
+          40.097073108688406
+        ],
+        "matched": true,
+        "found": "390310.0 / 4439320.0"
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the completed analysis of your three aligned 10 m rasters, here are the results:\n\n**Total suitable area: 103.85 hectares**\n\n**Highest-scoring cell center coordinates: (390310.0 E, 4439320.0 N)** in EPSG:32616 (UTM zone 16N)\n\n### Analysis summary\n\n**Data verification:** All three rasters are perfectly aligned \u2014 120\u00d7120 cells, 10 m resolution, identical bounds and CRS (EPSG:32616, UTM zone 16N), with no nodata values.\n\n**Suitability conditions applied:**\n- Slope < 8\u00b0\n- Road distance \u2264 500 m\n- Land cover \u2260 1 (water) and \u2260 2 (wetland)\n\n**Results:**\n- **Suitable cells:** 10,385 out of 14,400 total cells\n- **Cell area:** 10 m \u00d7 10 m = 100 m\u00b2 = 0.01 ha\n- **Total suitable area:** 10,385 \u00d7 0.01 = **103.85 hectares**\n\n**Highest-scoring cell:**\n- **Score:** 0.9812 (out of a possible 1.0)\n- **Location:** row 67, column 30\n- **Center coordinates (UTM zone 16N):** **(390310.0 E, 4439320.0 N)**\n- **Attributes at that cell:** slope = 0.30\u00b0, road distance = 0.00 m (directly on a road), land cover = 5 (not water/wetland)\n\nThe score formula `0.5*(1 - slope/8) + 0.5*(1 - distance/500)` rewards low slope and short road distance. The best cell sits essentially on a road (0 m away) with near-flat terrain (0.3\u00b0), giving it a near-maximum score. The score range across all suitable cells was 0.064 to 0.981.\n\nNote: the coordinates are in the raster's native projected CRS (UTM zone 16N, EPSG:32616), not geographic lon/lat. If you need them in WGS84 degrees, let me know and I can reproject.",
+  "seconds": 69.7,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 65653,
+    "cached_input_tokens": 57344,
+    "output_tokens": 2862,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T11-deepseek-v4-flash-1791495066-1"
+}

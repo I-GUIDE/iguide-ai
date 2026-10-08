@@ -1,0 +1,85 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": null, \"stdout\": \"Collecting gdal\\\\n Downloading gdal-3.13.3.tar.gz (940 kB)\\\\n \\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the elevation model, here is the answer:\n\n**24.0 hectares** of the mapped land surface would be at or below 5 m elevation if water rises to that level.\n\n### How this was computed\n- **Dataset**: `coast_dem.tif` \u2014 a 100\u00d7100 grid in EPSG:32616 (UTM zone 16N) with 10 m \u00d7 10 m pixels, giving each cell an area of 100 m\u00b2.\n- **NoData handling**: 100 cells carry the NoData value `-9999` (the sea along the southern edge). These were **excluded** from the count \u2014 they represent the water body itself, not land at or below 5 m.\n- **Bathtub rule applied**: every valid cell with elevation \u2264 5.0 m was counted.\n\n### The numbers\n| Metric | Value |\n|---|---|\n| Cells at or below 5 m | 2,400 |\n| Cell area | 100 m\u00b2 |\n| Area (m\u00b2) | 240,000 m\u00b2 |\n| **Area (hectares)** | **24.0 ha** |\n\n### Verification\n- The 100 NoData cells (all numerically \u2264 5) were correctly excluded \u2014 otherwise the count would have been inflated to 2,500 cells / 25 ha.\n- The elevation histogram confirms a clean distribution of valid land cells across 0\u20135 m plus higher ground, so the 2,400-cell count is robust.\n\nSo if water rises to 5 m, **24 hectares** of the mapped land surface would be at or below that level.",
+  "seconds": 92.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 131161,
+    "cached_input_tokens": 119808,
+    "output_tokens": 3099,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791494944-1"
+}

@@ -1,0 +1,79 @@
+{
+  "task": "U04",
+  "title": "Unsolvable: a destination off the network",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "roads.geojson is a road network (speed_kph per edge). What is the fastest travel time from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the point 41.95000\u00b0 N, 87.55000\u00b0 W along this network?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "U04",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": {
+      "refused": false,
+      "outcome": "fabricated",
+      "refusal_text": "is not connected",
+      "fabricated": null,
+      "value_given": "3.43 minutes"
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "The exact destination is **not connected to the supplied road network**. The network ends near **41.89222\u00b0 N, 87.62665\u00b0 W**, approximately **9.04 km** from the requested destination at **41.95000\u00b0 N, 87.55000\u00b0 W**.\n\nUsing nearest-network snapping:\n\n- **Start:** essentially on the network, on edge 61, within **0.1 m**\n- **Destination snap point:** **41.892224\u00b0 N, 87.626828\u00b0 W**, on edge 55\n- **Fastest travel time between the snapped points:** **205.7 seconds**, or **3.43 minutes**\n\nTherefore, **3.43 minutes is the fastest travel time to the nearest reachable point on the network\u2014not to the exact destination**. The remaining **9.04 km cannot be routed** because the uploaded GeoJSON contains no connecting roads to the requested destination.",
+  "seconds": 57.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 68360,
+    "cached_input_tokens": 0,
+    "output_tokens": 2375,
+    "usage_absent": 0,
+    "cost_usd": 0.0165,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-U04-gpt-5.6-luna-1791496242-1"
+}

@@ -1,0 +1,97 @@
+{
+  "task": "T11",
+  "title": "Multi-criteria suitability",
+  "trial": 2,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?",
+  "files": [
+    "landcover.tif",
+    "road_distance_m.tif",
+    "slope_deg.tif"
+  ],
+  "expected": {
+    "suitable_ha": 103.85,
+    "best_cell_utm": [
+      390305.0,
+      4439325.0
+    ],
+    "best_cell_lonlat": [
+      -88.28689672461265,
+      40.097073108688406
+    ],
+    "best_score": 0.9812499992549419
+  },
+  "expected_why": {
+    "suitable_ha": "boolean overlay on the stored float32 values"
+  },
+  "score": {
+    "task": "T11",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "suitable_ha",
+        "kind": "number",
+        "expected": 103.85,
+        "matched": true,
+        "found": "103.85 hectares"
+      },
+      {
+        "name": "best_cell_lonlat",
+        "kind": "point",
+        "expected": [
+          -88.28689672461265,
+          40.097073108688406
+        ],
+        "matched": true,
+        "found": "390305.0 / 4,439,325 m"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f Grounding check: parts of this answer may not be fully supported by the retrieved evidence (severity: high). The area, cell count, CRS, and score are grounded, but the reported easting omits 305 m and contradicts the computed centre coor"
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "- **Total suitable area:** **103.85 hectares** (10,385 suitable 10 m \u00d7 10 m cells).\n- **Highest-scoring cell centre:** **(390 m E, 4,439,325 m N)** in **EPSG:32616 (UTM Zone 16N)**.\n- **Suitability score:** **0.98125**.\n\n---\n\n\u26a0\ufe0f Grounding check: parts of this answer may not be fully supported by the retrieved evidence (severity: high). The area, cell count, CRS, and score are grounded, but the reported easting omits 305 m and contradicts the computed centre coordinate.\n\n- Highest-scoring cell centre: (390 m E, 4,439,325 m N): evidence contradicts this claim: [execute_code:suitability_analysis] \"center_x\": 390305.0, \"center_y\": 4439325.0",
+  "seconds": 80.9,
+  "route": [
+    "analyze",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "high",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 99239,
+    "cached_input_tokens": 0,
+    "output_tokens": 2310,
+    "usage_absent": 0,
+    "cost_usd": 0.0226,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T11-gpt-5.6-luna-1791496402-2"
+}

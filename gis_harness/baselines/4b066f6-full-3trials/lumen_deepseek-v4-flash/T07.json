@@ -1,0 +1,76 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the DEM file, here are the results:\n\n**24.0 hectares** of the coast_dem.tif would be at or below 5 m elevation if water rises to that level.\n\nHere's the breakdown of the calculation:\n\n- **DEM properties:** The raster is in EPSG:32616 (UTM zone 16N) with a 100\u00d7100 grid of 10 m \u00d7 10 m pixels, so each pixel covers **100 m\u00b2**.\n- **Valid cells:** 9,900 of 10,000 cells contain elevation data (100 cells are NoData).\n- **Cells at or below 5 m:** 2,400 cells (elevations in the valid data range from 0.1 m to 19.9 m).\n- **Area calculation:** 2,400 cells \u00d7 100 m\u00b2 = 240,000 m\u00b2 = **24.0 hectares**.\n\nSo treating this as a simple bathtub model where every cell at or below 5 m counts, **24 hectares** of the DEM would be submerged.",
+  "seconds": 74.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 91381,
+    "cached_input_tokens": 84992,
+    "output_tokens": 1808,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791494353-0"
+}

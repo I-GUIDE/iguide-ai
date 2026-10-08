@@ -2862,6 +2862,10 @@ def agent_chat_stream():
                         "tool_retry",
                         "tool_recovered",
                         "tool_dead_end",
+                        # Provider token counts, one per model call (streaming_trace's
+                        # UsageCallbackHandler). Detail tier: a cost per turn is a developer's
+                        # question, and gis_harness reads it to say what a run cost.
+                        "llm_usage",
                     }:
                         yield _sse_event("agent_trace", _agent_trace_event(payload))
 

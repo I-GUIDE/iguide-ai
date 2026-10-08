@@ -1,0 +1,70 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": true,
+      "refusal_text": "cannot",
+      "fabricated": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "I inspected the attached scene and confirmed its structure, but **I cannot compute the mean NDVI from this file alone.**\n\n**What the file contains:**\n- `scene_red_only.tif` (file_id `file_1aaccef2b1d1`)\n- A **single-band** GeoTIFF, 60\u00d760 pixels, uint16, CRS EPSG:32616 (UTM zone 16N)\n- The one band is the **red** band (GDAL description \"red\"), with values ranging 400\u2013899 and a mean of approximately **650.79**\n\n**Why NDVI can't be computed:**\nNDVI is defined as `(NIR \u2212 Red) / (NIR + Red)`. It requires **two** spectral bands \u2014 the red band and the near-infrared (NIR) band. This scene contains only the red band; there is no NIR band in the file, and no other file in this conversation provides one.\n\n**What I need to finish the task:**\nPlease provide the **NIR band** of the same scene (e.g., a `scene_nir.tif`, or a multi-band file containing both red and NIR). Once I have both bands, I can compute the NDVI raster and report its mean. If you intended a different vegetation index that uses only the red band, let me know and I'll compute that instead.",
+  "seconds": 74.2,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "list_conversation_files",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 180259,
+    "cached_input_tokens": 150528,
+    "output_tokens": 2282,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U02-deepseek-v4-flash-1791493450-0"
+}

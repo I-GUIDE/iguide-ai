@@ -1,0 +1,125 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 7,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 5, in <module>\\\\n df = pd.read_csv(\\'file_8d84cd3d9a09__usgs_comc"
+        },
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"Total events: 1054\\\\nMag range: 3.0 - 7.1\\\\n\\\\nLargest event:\\\\n{\\'time\\': \\'2019-07-06T03:19:53.040Z\\', \\'id\\': \\'ci38457511\\', \\'latitude\\': 35.7695"
+        },
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 5, in <module>\\\\n df = pd.read_csv(\\'file_8d84cd3d9a09__usgs_comc"
+        }
+      ],
+      "unproductive": 3
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog (`usgs_comcat_ridgecrest_2019-07.csv`, containing 1,054 events with magnitudes 3.0\u20137.1):\n\n**1. Largest event's magnitude:** **7.1** \u2014 This was the M7.1 Ridgecrest mainshock (event ID `ci38457511`), which occurred on **2019-07-06 03:19:53 UTC** at 35.7695\u00b0N, \u2212117.5993\u00b0W.\n\n**2. Events within 7 days after it and within 25 km of its epicentre:** **673** \u2014 This count includes events occurring strictly after the M7.1 mainshock (through 2019-07-13) and within a 25 km great-circle (haversine) distance of its epicentre.\n\n**3. Of those, how many were magnitude 4 or greater:** **63**\n\n### Summary\n- **Largest event magnitude:** 7.1\n- **Events within 7 days & within 25 km:** 673\n- **Of those, magnitude \u2265 4:** 63\n\nNote: The 7-day window extends to 2019-07-13, which is within the catalog's July 2019 coverage, so the count is complete for that window. The largest event itself is excluded from the count (it occurs at time = t0 and distance = 0, and the filter requires time strictly after t0).",
+  "seconds": 117.3,
+  "route": [
+    "analyze",
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 14,
+    "input_tokens": 267685,
+    "cached_input_tokens": 227072,
+    "output_tokens": 4387,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791495133-1"
+}

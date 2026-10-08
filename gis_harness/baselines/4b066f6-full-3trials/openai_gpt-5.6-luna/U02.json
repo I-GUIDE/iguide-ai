@@ -1,0 +1,66 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "can't",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "I can\u2019t compute NDVI from this scene because it contains only one band, identified as **red**. NDVI requires both red and near-infrared (NIR) values:\n\n\\[\nNDVI=\\frac{NIR-Red}{NIR+Red}\n\\]\n\nThe raster is 60 \u00d7 60 pixels, with red values ranging from 400\u2013899, but no NIR band is present. Please provide the corresponding NIR band or a multispectral scene containing both red and NIR bands.",
+  "seconds": 52.8,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 104294,
+    "cached_input_tokens": 0,
+    "output_tokens": 953,
+    "usage_absent": 0,
+    "cost_usd": 0.022,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-U02-gpt-5.6-luna-1791495977-0"
+}
