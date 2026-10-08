@@ -233,7 +233,7 @@ def test_a_throwing_search_peer_does_not_kill_the_turn(monkeypatch):
     # The integration keeps backend_swap's deterministic disclosure (`_peer_failure_note`): when a
     # peer failed, the answer says so. The synthesizer's own text must still LEAD it.
     assert (out.get("final_answer") or "").startswith("an answer")
-    assert "Partial answer" in out["final_answer"], "a failed peer went unmentioned"
+    assert "failed during this turn" in out["final_answer"], "a failed peer went unmentioned"
 
 
 def test_agent_dev_off_emits_status_only(stub_orchestrator, monkeypatch):

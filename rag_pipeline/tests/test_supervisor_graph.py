@@ -468,7 +468,7 @@ def test_grounding_audit_appends_caveat_when_flagged():
         do_rerank=False, do_audit=True,
     )
     assert "raw answer" in state["final_answer"]
-    assert "Grounding check" in state["final_answer"]  # caveat appended -> not cosmetic
+    assert "not supported by what the turn" in state["final_answer"]  # not cosmetic
     assert state["audit"]["severity"] == "high"
 
 
@@ -813,7 +813,7 @@ def test_medium_severity_does_not_warn_user():
     assert _apply_grounding_caveat("the answer", medium) == "the answer"  # unchanged
     high = {"hallucination_detected": True, "severity": "high", "summary": "fabricated statistic"}
     assert _audit_flagged(high) is True
-    assert "Grounding check" in _apply_grounding_caveat("the answer", high)
+    assert "Check this answer" in _apply_grounding_caveat("the answer", high)
 
 
 def test_reconcile_audit_tolerates_malformed_issue_strings():
@@ -2043,7 +2043,7 @@ def test_the_gate_spends_at_most_one_pass(monkeypatch):
     assert state["actions"].count("analyze") == 2, state["actions"]
     assert state.get("grounding_retries") == 1
     # second pass still ungrounded -> ship WITH the caveat rather than loop
-    assert "may not be fully supported" in state["final_answer"]
+    assert "not supported by what the turn" in state["final_answer"]
 
 
 def test_a_grounded_answer_never_triggers_a_pass(monkeypatch):
@@ -2169,7 +2169,7 @@ def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypa
     # Not swallowed: the caveat still reaches the user, with the finding that caused it. Since
     # stage 43 a unit that does not parse is a real unknown (units parse with a unit library),
     # so it says COULD NOT VERIFY rather than stage 37's quieter note.
-    assert "COULD NOT VERIFY" in state["final_answer"]
+    assert "could be checked" in state["final_answer"]
     assert "km/hr^^" in state["final_answer"]
 
 

@@ -25,7 +25,7 @@ import json
 import pytest
 
 from rag_pipeline.tests.test_regrounding_turn_record import (
-    ANSWER_1, FIRST_PASS, GROUNDED, ROUTING_AUDIT, SECOND_PASS, _run)
+    ANSWER_1, FIRST_PASS, GROUNDED, ROUTING_AUDIT, SECOND_PASS, _run, scripted_producers)
 
 from agent_runtime.supervisor import graph as g
 
@@ -135,7 +135,7 @@ def test_run_1_the_flag_is_no_longer_reconciled_away(monkeypatch, ledger):
     assert "340.0 km" in final and "2,584.6 km²" in final and "GEOID 17019" in final
     # Stage 42: a FLAGGED claim no bound tool produces is cut by the producer check, with its
     # general note; the routing note is the unflagged scan's (run 2 below).
-    assert "none of the tools available here can establish" in final
+    assert "none of the tools available here can produce" in final
     assert state["actions"].count("analyze") == 1, state["actions"]
 
 
@@ -146,13 +146,16 @@ def test_run_2_unflagged_travel_figures_are_cut(monkeypatch, ledger):
     assert "**London to Paris** is **340.0 km** in a straight line between the geocoded centres." \
         in final
     assert "2,584.6 km²" in final and "interactive map" in final
-    assert "no routing tool is available" in final
+    # Stage 44: the scan's own note, one general sentence for every cut class.
+    assert "none of the tools available here can produce" in final
     assert "Grounding check" not in final, final
     assert state["actions"].count("analyze") == 1
 
 
 def test_the_scan_leaves_travel_figures_alone_when_a_routing_tool_is_bound(monkeypatch, ledger):
-    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"]}
+    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"],
+             "bound_tool_docs": {"execute_code": "run code",
+                                 "network_route_distance": "road distance between points"}}
     state, _ = _run(monkeypatch, [GROUNDED], passes=(first, SECOND_PASS), answers=(RUN_2,))
     assert "450–470 km" in state["final_answer"]
 
@@ -171,8 +174,16 @@ def test_a_travel_figure_a_tool_computed_is_kept(monkeypatch, ledger):
 
 
 def _scan(text, *contents, bound=()):
-    ctx = _record(*[("execute_code", c) for c in contents])
-    return g._scan_unrecorded_travel(text, ctx, list(bound))
+    """Stage 44: the general pass, `_cut_unproducible_figures`, over a record of *contents*, with
+    the scripted producer model (test_regrounding_turn_record.scripted_producers)."""
+    from agent_runtime import facts
+
+    fs = facts.build(results=[{"name": "execute_code", "tool_call_id": f"c{i}", "content": c}
+                              for i, c in enumerate(contents)])
+    docs = {t: t for t in bound}
+    out, cut, _kept, _res, _ = g._cut_unproducible_figures(
+        text, fs, lambda sents: scripted_producers(sents, docs))
+    return out, cut
 
 
 @pytest.mark.parametrize("text", [
