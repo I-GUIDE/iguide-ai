@@ -51,6 +51,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 | 36 | [The gate stops flagging correct runs, and its unknowns stop re-running them](#stage-36) | 2026-10-08 | a declared label is not a measurement; `points` is a count; a gate `cannot_determine` is a caveat, not a reason to redo the analysis |
 | 37 | [A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make](#stage-37) | 2026-10-08 | a second peer run adds to the result slot instead of replacing it; routing claims with no routing tool are cut, not re-run; imperial units; a unit-only unknown is a note |
+| 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6500,3 +6501,68 @@ on both.
 The same turn also showed "⚠️ Partial answer: analysis failed during this turn" although the code
 peer then answered in full. That is outside this stage and is being proposed separately.
 
+## Stage 40 — Six Overpass names, four servers, two operators {#stage-40}
+
+*2026-10-08. Branch `claude/overpass-mirrors`, from `prototype` at `81fd7c8`. Stage 38 (#88) and
+stage 39 (#87) are open; 40 is the next free number on every branch and worktree.*
+
+Since stage 38 binds `overpass_search` in the analyze and code peers, an Overpass outage fails
+ordinary GIS questions, not just the search peer's. Between about 15:16 and 15:31 local time,
+during the stage 38 replays, all three default mirrors (overpass-api.de, overpass.kumi.systems,
+lz4.overpass-api.de) answered 504/500/504 on two occasions, while overpass.private.coffee answered
+the same query with 200 in 22 s.
+
+### Stage S40.1 The probe
+
+Eight rounds from 15:45 to 16:01 local time, about two minutes apart. Each round posted the query
+the module builds (`amenity=school`, a 0.06° × 0.045° box in south-west Chicago, `out geom 80`)
+to six mirrors in turn, with the module's User-Agent and its 35 s request timeout. Every 200
+returned the same 39 elements.
+
+| mirror | answered | seconds when it answered | how it failed |
+|---|---|---|---|
+| z.overpass-api.de | **5/8** | 1.4, 2.9, 3.1, 4.3, 5.5 | 504 after 7.7–11.1 s (3) |
+| lz4.overpass-api.de | 3/8 | 1.0, 1.8, 17.0 | 504 after 7.5–14.2 s (5) |
+| overpass-api.de | 2/8 | 1.0, 7.7 | 504 after 7.1–8.0 s (6) |
+| maps.mail.ru | 2/8 | 19.2, 20.5 | read timeout at 35 s (5), 504 in 0.9 s (1) |
+| overpass.kumi.systems | 1/8 | 1.0 | 500 in 0.4–1.4 s (7) |
+| overpass.private.coffee | 0/8 | — | 500 in 0.4–0.6 s (8) |
+
+DNS shows six names but four servers. overpass-api.de is round-robin over lz4 (65.109.112.52) and
+z (162.55.144.139). overpass.kumi.systems is a CNAME of overpass.private.coffee (193.219.97.30).
+Each of those two has answered while the other returned 500, so the 500 is per virtual host, and
+both stay. During the probe, private.coffee's 500 was an Apache-style "Internal Server Error"
+page behind nginx, with or without an `Accept` header, so its backend was broken, not refusing
+us. maps.mail.ru is the only operator independent of the other two, and in round 4 it was the
+only mirror that answered.
+
+### Stage S40.2 The order
+
+`_DEFAULT_ENDPOINTS` is now z, kumi, private.coffee, lz4, overpass-api.de, mail.ru:
+
+- z first, because it answered most often and fastest.
+- kumi and private.coffee next, because a failure there costs under a second.
+- lz4 before the bare overpass-api.de name, which only reaches lz4 or z again.
+- mail.ru last, because it usually fails by hanging for the whole timeout.
+
+The same eight rounds, replayed through each list:
+
+| | rounds answered | seconds to the answer | seconds to give up |
+|---|---|---|---|
+| before (de, kumi, lz4) | 5/8 | 25.5, 7.7, 8.6, 1.0, 9.6 | 15.1, 19.9, 16.1 |
+| after | 7/8 | 5.5, 3.1, 4.3, 47.1 (mail.ru), 2.9, 1.4, 12.3 | 59.8 |
+
+`OVERPASS_API_URL` still replaces the whole list.
+
+Tests: `test_overpass_mirrors.py` (5). `requests.post` is patched to fail every mirror but one,
+and the tests check that the fallback reaches private.coffee and mail.ru, that it tries the
+mirrors in list order, that the first answer ends the search, and that all failing gives an
+`overpass_failed` payload. The first three fail on `81fd7c8`.
+
+### Stage S40.3 What this stage does not fix
+
+- **Worst case.** When every mirror is down, the wait is now about 60 s, and up to 6 × 35 s if
+  each one hangs. The old worst case was about 16 s.
+- **No memory between calls.** Every call starts again at z, even when z failed a moment ago.
+- **Not tested from the VM.** All of this was measured from one Mac on one afternoon. The VM's
+  network may rank the mirrors differently.
