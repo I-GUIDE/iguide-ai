@@ -355,4 +355,4 @@ def test_a_broken_recorder_never_breaks_the_turn(caplog, monkeypatch):
 def test_instrumentation_is_innermost_in_the_default_stack():
     """First handler is outermost, so instrumentation must be LAST to see the final payload."""
     names = [m.name for m in ef._default_middleware()]
-    assert names == ["repair_history", "budget_context", "instrument"], names
+    assert names == ["repair_history", "budget_context", "instrument", "answer_repeats"], names
