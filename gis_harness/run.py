@@ -42,7 +42,9 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
            "AGENT_CHAT_API_KEY": "", "GOOGLE_MAPS_API_KEY": "",
            "AGENT_TRACE_JSON_LIMIT": "20000", "AGENT_TRACE_TEXT_LIMIT": "20000",
            "AGENT_TRACE_SSE_TEXT_LIMIT": "20000"}
-    log = open(log_path, "w")
+    # Appended, not truncated: a --resume run starts a new server on the same label, and a
+    # truncated log lost the main run's evidence (2026-10-08, phase 2's after-run).
+    log = open(log_path, "a")
     proc = subprocess.Popen([sys.executable, str(REPO / "api" / "server.py")], env=env,
                             stdout=log, stderr=subprocess.STDOUT, cwd=str(REPO))
     import requests
