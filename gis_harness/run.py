@@ -132,7 +132,8 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
               "answer": turn["answer"], "seconds": turn["seconds"], "route": turn["route"],
               "audit_severity": turn["audit_severity"], "map_layers": turn["map_layers"],
               "tool_calls": [{"name": c["name"], "agent": c.get("agent")} for c in turn["tool_calls"]],
-              "usage": cost_usd(turn["usage"]), "error": turn["error"], "thread_id": thread}
+              "usage": cost_usd(turn["usage"]), "error": turn["error"], "thread_id": thread,
+              "gate": turn.get("gate", [])}
     (out / f"{stem}.json").write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
 
@@ -165,6 +166,7 @@ def rescore(path: Path) -> Dict[str, Any]:
     turn["error"] = record.get("error") or turn["error"]
     record["score"] = score(BY_ID[record["task"]], record["expected"], turn).to_dict()
     record["usage"] = cost_usd(turn["usage"])
+    record["gate"] = turn.get("gate", [])
     path.write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
 
@@ -195,8 +197,8 @@ def compare(base_dir: Path, new_dir: Path, trials: Optional[int] = None) -> Dict
         rows[model] = {k: (a.get(k), b.get(k)) for k in (
             "tasks", "correct", "refused_gracefully", "strict", "zero_unproductive",
             "unproductive_steps", "duplicate_calls", "failed_calls", "banners_on_correct",
-            "banners_total", "source_named", "seconds_total", "llm_calls", "input_tokens",
-            "output_tokens", "cost_usd")}
+            "banners_total", "source_named", "gate_runs", "gate_nonpass_on_correct",
+            "seconds_total", "llm_calls", "input_tokens", "output_tokens", "cost_usd")}
         changed = {}
         for t in sorted(set(a.get("per_task", {})) | set(b.get("per_task", {}))):
             ra, rb = a.get("per_task", {}).get(t), b.get("per_task", {}).get(t)
@@ -237,9 +239,27 @@ def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "input_tokens": sum(r["usage"]["input_tokens"] for r in rs),
             "output_tokens": sum(r["usage"]["output_tokens"] for r in rs),
             "cost_usd": round(sum(costs), 4) if costs else None,
+            # The invariant gate's verdicts on every execute_code run, and on runs of CORRECT
+            # answers the non-pass ones are what a user would have seen as a false alarm.
+            "gate_runs": _gate_counts(rs),
+            "gate_nonpass_on_correct": sum(
+                1 for r in rs if r["score"].get("correct")
+                for gv in r.get("gate") or [] if gv.get("verdict") in ("fail", "cannot_determine")),
             "per_task": {r["task"] + (f".t{r['trial']}" if r["trial"] else ""): _row(r) for r in rs},
         }
     return out
+
+
+def _gate_counts(rs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    import collections
+
+    verdicts, checks = collections.Counter(), collections.Counter()
+    for r in rs:
+        for gv in r.get("gate") or []:
+            verdicts[gv.get("verdict")] += 1
+            for c in gv.get("checks") or []:
+                checks[c] += 1
+    return {"verdicts": dict(verdicts), "checks": dict(checks)}
 
 
 def _row(r: Dict[str, Any]) -> str:

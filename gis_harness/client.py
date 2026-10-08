@@ -97,6 +97,9 @@ def _reduce(turn: Dict[str, Any], name: str, data: Dict[str, Any]) -> None:
         elif kind == "tool_result":
             turn["tool_results"].append({"name": detail.get("tool_name") or detail.get("name"),
                                          "content": detail.get("content")})
+            if (detail.get("tool_name") or detail.get("name")) == "execute_code":
+                gate = _gate_verdict(detail.get("content"))
+                turn.setdefault("gate", []).append(gate)
         else:
             turn["tool_errors"].append(detail)
     elif name == "agent_trace" and kind == "llm_usage":
@@ -114,3 +117,15 @@ def _reduce(turn: Dict[str, Any], name: str, data: Dict[str, Any]) -> None:
         turn["answer"] = data.get("answer")
     elif name == "error":
         turn["error"] = str(data.get("error"))[:2000]
+
+
+def _gate_verdict(content: Any) -> Dict[str, Any]:
+    """The invariant gate's verdict on one execute_code run, and the checks behind it."""
+    import re
+
+    text = str(content or "").replace('\\"', '"')
+    m = re.search(r'"verification": \{"verdict": "(\w+)"', text)
+    if not m:
+        return {"verdict": "none" if '"verification": {}' in text else "absent", "checks": []}
+    checks = re.findall(r'"check": "(\w+)", "status": "(?:cannot_determine|fail)"', text)
+    return {"verdict": m.group(1), "checks": sorted(set(checks))}
