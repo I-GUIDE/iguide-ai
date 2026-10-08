@@ -7129,3 +7129,14 @@ branch (`5b5e7ef` + stages 41–42, 2 trials), over the 67 task trials both have
   step. The harness cannot attribute the fall.
 - **Spend for this run:** $0.62 OpenAI and 6.6M Lumen tokens. Program total so far: $1.65 and
   19.7M.
+- **The run above had the invariant gate off,** as stage 41's baseline did: the harness server
+  did not set `AGENT_INVARIANT_GATE`, and the deployment turns the gate on through
+  `AGENT_EXTRACTION`. A gate-on run of this branch (1 trial, `baselines/p2-turn-event-log-gate-1trial`)
+  is the before for stage 43.
+- **The progress rule bounds repetition, not open-ended trying.** A step is productive when one
+  of its results is new, and a script that prints something different each time is always new.
+  - Stage 43's gate-on run shows the case: deepseek spent 30 steps in one code run on T06 and
+    counted 29 of them productive, while working through pysheds' API.
+  - Counting failures as no progress would not help. Across stages 42 and 43's runs, deepseek
+    had 8 streaks of two or more failed `execute_code` calls, and all 8 ended in a success.
+  - Telling convergence from wandering needs more than novelty. That is open.

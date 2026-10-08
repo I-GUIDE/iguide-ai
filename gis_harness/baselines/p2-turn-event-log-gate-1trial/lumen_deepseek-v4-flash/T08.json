@@ -1,0 +1,143 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 1024, in <module>\\\\n from osgeo import gdal\\\\nModuleNotFoundError"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "## NDVI Analysis Results\n\nI computed NDVI for both scenes using the formula NDVI = (NIR \u2212 Red) / (NIR + Red), where band 1 is red and band 2 is near-infrared. Both scenes are 100\u00d7100 pixels at 10 m resolution (each pixel = 0.01 ha), covering the same area in UTM zone 16N, with 9,975 valid (non-nodata) pixels in each.\n\n### Mean NDVI per date\n\n| Date | Mean NDVI | Range |\n|------|-----------|-------|\n| **2020** | **0.5326** | \u22120.251 to 0.736 |\n| **2024** | **0.4998** | \u22120.251 to 0.736 |\n\nThe mean NDVI declined by approximately 0.033 between 2020 and 2024, indicating a slight overall decrease in vegetation greenness.\n\n### Hectares that lost more than 0.2 NDVI\n\n- Change was computed as NDVI\u2082\u2080\u2082\u2084 \u2212 NDVI\u2082\u2080\u2082\u2080 on the 9,975 pixels valid in both dates.\n- **900 pixels** experienced a loss greater than 0.2 NDVI.\n- At 0.01 ha per pixel, this equals **9.0 hectares** \u2014 about 9% of the ~99.75 ha valid scene area \u2014 that lost more than 0.2 NDVI between 2020 and 2024.\n\n### Output files produced\n\n1. **[ndvi_2020.tif](https://agent/files/file_e31d2d706aef/download)** \u2014 NDVI raster for 2020 (float32, nodata \u22129999)\n2. **[ndvi_2024.tif](https://agent/files/file_c77a73430a9c/download)** \u2014 NDVI raster for 2024\n3. **[ndvi_loss_gt02.tif](https://agent/files/file_d1912878aca9/download)** \u2014 binary mask (1 = loss > 0.2, 0 = no, nodata 255)\n\nAll three GeoTIFFs share the source scenes' CRS, geotransform, and extent, so they overlay directly on the originals.\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `this run`: invariant gate (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked.\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- \u2026and 1 more",
+  "seconds": 157.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 192041,
+    "cached_input_tokens": 155136,
+    "output_tokens": 4555,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791502068-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    }
+  ]
+}
