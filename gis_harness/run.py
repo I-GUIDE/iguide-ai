@@ -38,7 +38,13 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
     Google, a metered call no task needs. The trace limits are raised so duplicate-call
     detection compares whole arguments, not their first 3,000 characters.
     """
+    # AGENT_INVARIANT_GATE=1: the deployment runs with AGENT_EXTRACTION=1, which turns the
+    # in-sandbox invariant gate on (code_execution.invariant_gate_enabled). Without it a local
+    # run never sees the gate's verdicts, and the gate's false alarms, the subject of three
+    # stages, cannot show up in a score. Found 2026-10-08 after the stage 41-43 runs: every
+    # execute_code result carried `"verification": {}`.
     env = {**os.environ, "PYTHONPATH": str(REPO), "PORT": str(port), "AGENT_MODE": "local",
+           "AGENT_INVARIANT_GATE": os.environ.get("AGENT_INVARIANT_GATE", "1"),
            "AGENT_CHAT_API_KEY": "", "GOOGLE_MAPS_API_KEY": "",
            "AGENT_TRACE_JSON_LIMIT": "20000", "AGENT_TRACE_TEXT_LIMIT": "20000",
            "AGENT_TRACE_SSE_TEXT_LIMIT": "20000"}

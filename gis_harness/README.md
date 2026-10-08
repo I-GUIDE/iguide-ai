@@ -28,7 +28,11 @@ python -m gis_harness.run --summarise gis_harness/runs/baseline-81fd7c8
 
 `--start-server` launches `api/server.py` from this checkout with `AGENT_MODE=local`, so the
 run writes no conversation, snapshot or trace to shared infrastructure. It also blanks
-`GOOGLE_MAPS_API_KEY` (KB spatial search geocodes through Google, a metered call no task needs).
+`GOOGLE_MAPS_API_KEY` (KB spatial search geocodes through Google, a metered call no task needs),
+and sets `AGENT_INVARIANT_GATE=1`, because the deployment's `AGENT_EXTRACTION=1` turns the code
+gate on. Runs made before that flag (the stage 41 baseline, stage 42 and 43's first after-runs)
+had the gate off; their scores say nothing about the gate. The rest of the extraction bundle (the
+Postgres record, the method-library contracts) is not reproduced locally.
 `--base-url` uses a server you started yourself. Start it the same way.
 
 Output: `gis_harness/runs/<label>/<provider>_<model>/<task>.json` (score, answer, tool calls,
