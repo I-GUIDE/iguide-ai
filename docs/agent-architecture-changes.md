@@ -6831,8 +6831,10 @@ mirrors in list order, that the first answer ends the search, and that all faili
 ## Stage 41 — Whole tasks, re-run after every change {#stage-41}
 
 *2026-10-08. Branch `claude/gis-task-harness`, built on `prototype` at `81fd7c8` and rebased onto
-`4b066f6` once #88 (stage 38) and #87 (stage 39) merged. Stage 40 is `claude/overpass-mirrors`
-(#89, open); 41 was the next free number on every branch and worktree. DEVLOG M8.78. Phase 1 of the eight-flaws program: it changes no agent
+`4b066f6` once #88 (stage 38) and #87 (stage 39) merged, then onto `5b5e7ef` after #89 (stage 40)
+and #92 (M8.77). 41 was the next free number on every branch and worktree. The baseline below
+was measured on `4b066f6`; #89 changes only the Overpass mirror order and #92 only how a
+conversation record is stored. DEVLOG M8.78. Phase 1 of the eight-flaws program: it changes no agent
 behaviour, and every later phase is measured against it.*
 
 **Why.** On 2026-10-08 two live turns on agent.i-guide.io got every GIS number right (2,584.6 km²
