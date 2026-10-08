@@ -11,6 +11,7 @@ and stripped of the fields the server owns.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -97,7 +98,7 @@ def test_a_snapshot_cannot_claim_an_owner(store):
     mid = as_user("alice", lambda: mm.create_memory("mine"))
     as_user("alice", lambda: mm.save_session_snapshot(mid, a_conversation(owner_id="bob")))
     assert store.docs[mid]["owner_id"] == "alice"
-    assert "owner_id" not in store.docs[mid]["session_snapshot"]
+    assert "owner_id" not in json.loads(store.docs[mid][mm.SNAPSHOT_TEXT_FIELD])
 
 
 def test_a_snapshot_cannot_rewrite_the_agent_memory(store):

@@ -5136,6 +5136,51 @@ rather than from the previous one.
 **Not fixed** The invariant gate's "COULD NOT VERIFY" on correct distances (PR #85's area),
   Overpass mirror outages, A-B-A-B alternation loops, and the capability atlas entry.
 
+## 2026-10-08 · M8.77 · A conversation record is stored as text, so a tool's argument types cannot lose the turn
+
+**Change** `save_session_snapshot` (`rag_pipeline/memory_module.py`) stores the client's record as
+  one JSON string in `session_snapshot_json`, and the same write nulls the old `session_snapshot`
+  object. `get_session_snapshot` reads the string, falling back to the object, so a conversation
+  saved before this opens as it did. `list_memories` lists a document with either field.
+  `GET /agent/conversations/<id>` returns the same shape as before, and the client is unchanged.
+
+**Why** At 2026-10-08 21:36:39 UTC a live turn never reached History:
+  `PUT /agent/conversations/sess-07bc717f-… 500`, `mapper_parsing_exception … [session_snapshot.
+  messages.response.agent_result.orchestration_result.analysis_results.tool_calls.args.bbox] of
+  type [float] … value: '-87.93…'`. `chat_memory` has no explicit mapping, so the record's fields
+  were typed by the first conversation that carried them. `bbox` had been a float array, and this
+  turn's `overpass_search` sent the string `"-87.93,41.87,…"`. The record holds each answer's
+  `agent_result`, whose tool arguments and results are shaped by the tool and the model, so any
+  turn that changed a JSON type would have been lost the same way. The fakes the tests used
+  accepted anything, which is why CI passed. This is the class of bug M8.74 fixed for
+  `chat_traces`. Here the whole record becomes text rather than being fitted field by field,
+  because nothing searches inside it. The general rule is in `persistent-state.md`, "The record is
+  stored as text, never as fields the index maps".
+
+**Measured** The live mapping (`GET chat_memory/_mapping`, 1,722 documents) has 300 leaf fields,
+  266 under `session_snapshot`, 181 under `agent_result`, and 559 of the 1,000 fields the index
+  may have, counting `.keyword` sub-fields. On a disposable OpenSearch 2.14.0 with that exact
+  mapping, the old object shape of the 21:36 record is refused with the same `…args.bbox` error,
+  and a record with a hex `layers.style.fill` is refused on that field. The new writer stores the
+  float-array record, then the string record in a new conversation and over the first, plus a
+  record of awkward values (unicode, 2^53+1, nested empties, mixed lists, a date-like string). All
+  read back identical when compared as JSON. A legacy object document opens and lists; re-saved,
+  it holds `session_snapshot: null` and the string; an untouched one still lists. A 4.8 MB record
+  stores. Thirty saves with thirty different argument shapes added no field beyond
+  `session_snapshot_json`. The new `test_snapshot_mapping.py` uses a fake that keeps each field's
+  first type, from the live mapping (`tests/chat_memory_mapping.py`) and from an empty index. Its
+  rules are M8.74's, which matched the real cluster on every verdict. 18 tests, 11 of which fail
+  with the old writer.
+  Full suite on the Mac: 3894 passed, 18 skipped, 1 failed. The failure is
+  `test_the_installed_networkx_matches_the_pin`, which depends on the machine.
+
+**Not fixed** The 266 old fields stay in the mapping until the index is rebuilt.
+  `session_snapshot_json` is analysed as text that nobody searches. An explicit mapping on a new
+  index would fix both, but that is a change to the prod cluster and the user's call; the PR
+  proposes it. Audited for the same pattern: `chat_traces` (fitted since M8.74), and
+  `chat_history[].elements` and `ratings` (latent, since no live caller sends a non-empty one).
+  The file metadata store is on the Docker volume, not this cluster.
+
 ## 2026-10-08 · M8.79 · A file_id the code names is staged without being listed
 
 **Change** `execute_code` (`agent_runtime/langchain_exec_tools.py`) now stages every minted file_id

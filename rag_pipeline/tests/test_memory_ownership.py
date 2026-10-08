@@ -76,14 +76,17 @@ class FakeOpenSearch:
                 else:
                     want, tokenised = term["owner_id"], True
             elif "exists" in clause:
-                must_exist.append(clause["exists"]["field"])
+                must_exist.append((clause["exists"]["field"],))
+            elif "bool" in clause:  # any one of several fields: {"should": [exists...]}
+                must_exist.append(tuple(c["exists"]["field"] for c in clause["bool"]["should"]))
         keep = body.get("_source")
         def project(doc):
             return {k: v for k, v in doc.items() if k in keep} if keep else dict(doc)
         def matches(doc):
             stored = doc.get("owner_id")
             owned = stored == want and (not tokenised or len(_tokens(want)) == 1)
-            return owned and all(doc.get(f) is not None for f in must_exist)
+            return owned and all(any(doc.get(f) is not None for f in fields)
+                                 for fields in must_exist)
         hits = [{"_id": k, "_source": project(v)} for k, v in self.docs.items()
                 if k in self.visible and matches(v)]
         hits.sort(key=lambda h: self.docs[h["_id"]].get("updatedAt") or "", reverse=True)
