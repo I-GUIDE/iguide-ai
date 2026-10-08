@@ -21,6 +21,7 @@ agent boot. Every tool returns a JSON string and NEVER raises — on error it re
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -49,7 +50,7 @@ _SHAPE_PARTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx", 
 
 def _resolve(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     """Resolve an uploaded file_id (preferred) or an on-disk path to (Path, record)."""
-    from agent_runtime.file_store import get_file_record, resolve_file_id
+    from agent_runtime.file_store import get_file_record, managed_path_record, resolve_file_id
 
     ref = str(ref or "").strip()
     if not ref:
@@ -58,6 +59,14 @@ def _resolve(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     if record:
         return resolve_file_id(ref), record
     p = Path(ref).expanduser()
+    # A path into the store's own directories is the record it names, with that record's checks.
+    # Refused, it is reported exactly as a path that does not exist.
+    try:
+        record = managed_path_record(p)
+    except ValueError:
+        raise ValueError(f"unknown file_id or path: {ref}") from None
+    if record:
+        return resolve_file_id(str(record["file_id"])), record
     if p.is_file():
         return p.resolve(), None
     raise ValueError(f"unknown file_id or path: {ref}")
@@ -84,6 +93,36 @@ def _index_attached(file_ids: Optional[List[str]]) -> List[Dict[str, Any]]:
             continue
         idx.append({"id": str(fid), "name": _true_name(p, rec), "path": p})
     return idx
+
+
+def source_content_key(ref: Any, read_path: Any = None) -> str:
+    """What a vector INPUT is, as it was actually read. This is the part of a layer's identity
+    that stands for its source data.
+
+    A self-contained file (GeoJSON, GeoPackage, a zipped shapefile) is read as it is, so this is
+    its ``file_content_key``, and a key its producer recorded wins. A shapefile is read from its
+    PARTS: geometry, attributes and projection live in separate files. A ``.shp`` read path, as
+    _stage_vector_source and the QGIS tools stage it, is therefore identified by digesting every
+    part that shares its stem, whichever file_ids those parts arrived under.
+
+    ``sibling_file_ids`` counts exactly when it changes what is read. Keyed on the list itself,
+    one buffer drew as two layers in a live run (2026-10-01): one call passed the boundary as a
+    "sibling" of the GeoJSON buffer, and its repeat passed nothing.
+    """
+    from agent_runtime.file_store import file_content_key
+
+    path = Path(str(read_path)) if read_path else None
+    if path is not None and path.suffix.lower() == ".shp" and path.is_file():
+        digest = hashlib.sha1()
+        for part in sorted(path.parent.iterdir(), key=lambda p: p.name.lower()):
+            ext = part.suffix.lower()
+            if part.stem == path.stem and ext in _SHAPE_PARTS and part.is_file():
+                digest.update(ext.encode("utf-8") + b"\0")
+                with open(part, "rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+        return "shp-" + digest.hexdigest()[:16]
+    return file_content_key(ref)
 
 
 def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]],
@@ -133,6 +172,30 @@ def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]],
         return str(Path(tmp) / f"{shp_stem}.shp"), tmp
     # Unknown extension: let GDAL attempt to read it directly.
     return str(path), None
+
+
+def input_content_key(ref: Any, sibling_file_ids: Optional[List[str]] = None,
+                      attached: Optional[List[Dict[str, Any]]] = None) -> str:
+    """:func:`source_content_key` for a tool whose reader has already deleted its staged copy.
+
+    The aggregate, spatial-statistics and temporal readers stage an input, read it, and remove
+    the staging directory before they return the frame. By the time such a tool builds its
+    layer key, the read path that source_content_key needs is gone. This stages the input again
+    with the same rules and keys what that staging reads. Staging a self-contained file is only
+    a path lookup, so the second pass copies nothing unless the input is a shapefile assembled
+    from its parts.
+    """
+    from agent_runtime.file_store import file_content_key
+
+    try:
+        read_path, tmp = _stage_vector_source(str(ref), sibling_file_ids, attached)
+    except Exception:  # noqa: BLE001 - the tool's own read already failed or succeeded
+        return file_content_key(ref)
+    try:
+        return source_content_key(ref, read_path)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def artifact_name(stem: Optional[str], suffix: str, *, source: Optional[str] = None,
@@ -800,6 +863,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         tmp = None
         try:
             from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.map_layers import drawn_layer_key
 
             redirect = _unmappable_input(file_id)
             if redirect:
@@ -870,7 +934,17 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             fname = artifact_name(name, "geojson", source=str(read_path), default=f"{mode}_layer")
             out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
             gdf.to_file(out, driver="GeoJSON")
-            rec = create_output_file_from_path(out, filename=fname)
+            # The layer is identified by WHAT IT SHOWS: the input's content and the view chosen
+            # for it. It used to be identified by its label, i.e. by the `name` the model passed,
+            # which is a per-run choice. The re-grounding pass of 2026-10-01 drew the same 2 km
+            # buffer twice, and it replaced itself only because the model happened to choose the
+            # same name both times. Two different buffers sharing a name also merged into one
+            # layer. The same data drawn as a heatmap and as points stays two layers, because
+            # render, column and sampling are part of the key. The input counts as what was READ
+            # (source_content_key), so a sibling that changes nothing read changes nothing here.
+            key = drawn_layer_key(source_content_key(file_id, read_path), mode, column=column,
+                                  sample=ceiling if sampled else None)
+            rec = create_output_file_from_path(out, filename=fname, content_key=key)
             # Look at what was actually written before calling it a visual. A choropleth over a
             # constant column, a styling column that did not survive the write, or geometry in
             # metres labelled EPSG:4326 all produce a map that is technically delivered and
@@ -908,7 +982,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    # Consumed by agent_runtime.map_layers.build_map_layer -> `map_layer` SSE event.
                    "sampled": bool(sampled), "features_total": total,
                    "size_bytes": rec.get("size_bytes"),
-                   "map_layer": {"url": rec.get("download_url"), "label": label, "render": mode,
+                   "map_layer": {"id": f"agent-{key}",
+                                 "url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
                                  "count": int(len(gdf)),
                                  # Only categorical layers carry one; the client keys its

@@ -42,6 +42,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Children are started through fork_safe, never subprocess directly: on macOS a fork of this
+# process after its first reprojection kills the child before exec (see fork_safe).
+from agent_runtime import fork_safe
 from agent_runtime.code_execution import (
     MAX_ARTIFACTS,
     _clip,
@@ -308,10 +311,10 @@ def run_opencode(
         exit_code: Optional[int] = None
         stdout, stderr, timed_out, error = "", "", False, None
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout + 5)
+            proc = fork_safe.run(argv, capture_output=True, text=True, env=env, timeout=timeout + 5)
             exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
-            subprocess.run(["docker", "kill", name], capture_output=True)
+            fork_safe.run(["docker", "kill", name], capture_output=True)
             stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
             timed_out, error = True, f"opencode run timed out after {timeout}s"
         except FileNotFoundError:

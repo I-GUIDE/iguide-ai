@@ -1,11 +1,17 @@
 # Where state lives
 
-A reference for the four places this agent keeps data, what each one holds, who owns it and what
+A reference for the places this agent keeps data, what each one holds, who owns it and what
 reclaims it. Companion to [`agent-architecture-changes.md`](agent-architecture-changes.md), which
 records *why things changed*; this one records *what is true now*.
 
 Figures are from the deployment on 2026-09-18 and are there to give a sense of scale, not to be
 kept current. The layout is the durable part.
+
+**Re-checked on 2026-10-03.** Locations come from the running deployment. It is on
+`PLATFORM_TIER=prod`, so conversations and traces live on the prod cluster, `149.165.155.195`.
+Behaviour comes from `prototype`, which is ahead of the deployment: the VM still runs `5ae6d92`
+(2026-09-22). Wherever a change below landed after that, the text gives its date, and it is
+not live until the next deploy.
 
 ---
 
@@ -18,16 +24,20 @@ kept current. The layout is the durable part.
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
+| Operational records | host journal; `/var/log/iguide-agent/incidents/` | container logs; one evidence bundle per watchdog incident | host access only | journal capped at 3 GB; newest 60 bundles |
 
-Two of these grow without bound by design; see [Nothing reclaims](#nothing-reclaims).
+Two of these grow without bound by design; see [Nothing reclaims](#nothing-reclaims). Under
+`AGENT_MODE=local` the first two are never written at all — see [Local mode](#local-mode).
 
 ---
 
 ## 1. Conversations — OpenSearch
 
-**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`), on `149.165.155.135` since 2026-09-22. The
-host comes from `OPENSEARCH_NODE` when set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and prod names none, so a
-production deployment cannot silently inherit dev's. One document per conversation, document id =
+**Index** `chat_memory` (`OPENSEARCH_MEMORY_INDEX`), on the prod cluster `149.165.155.195` since
+the deployment moved to `PLATFORM_TIER=prod` on 2026-09-22. The host comes from `OPENSEARCH_NODE`
+when set, otherwise from the tier — `PLATFORM_TIER=dev` names dev's cluster, and prod names none,
+so a production deployment cannot silently inherit dev's. That is why the deployment names
+`149.165.155.195` in `OPENSEARCH_NODE` explicitly. One document per conversation, document id =
 the `memoryId` the client and the agent share.
 
 > **Host and credential both come from the tier**, so flipping `PLATFORM_TIER` moves them
@@ -64,6 +74,14 @@ the `memoryId` the client and the agent share.
 > succeeds is indistinguishable from a working system from the outside — no error reached a user,
 > a log anyone watched, or the health check. If storage failure is survivable by design, it has to
 > be *visible* by design too.
+>
+> **Then the deployment moved to prod** (2026-09-22). `PLATFORM_TIER=prod` with `OPENSEARCH_NODE`
+> naming `149.165.155.195`, the cluster that had gone read-only. Its space was freed first, and
+> the switch waited for proof rather than a status: red to yellow, no write-blocked index, a real
+> write answering 201. The two clusters do **not** hold the same conversations. At the switch,
+> `.135` had 1,281 and `.195` had 1,274, so the seven written to dev after the copy are visible
+> only from a dev-tier deployment. The tier owns the conversation store, and moving tiers is not
+> a migration.
 
 ```
 chat_history        the AGENT's memory: what was asked and answered, context for the next turn
@@ -195,13 +213,36 @@ the dev platform against the prod knowledge base is an ordinary thing to want, a
 meant editing index names by hand and remembering to put them back. A split is logged at boot, so
 it is never something to deduce from surprising results.
 
+The deployment runs `PLATFORM_TIER=prod` and `SEARCH_TIER=prod` (checked 2026-10-03). Beyond
+hosts and credential, the tier also owns this agent's redirect id (`redirect_domain_id`: dev `006`,
+prod `003`). The access-cookie name is **not** in `_TIERS`. `JWT_ACCESS_TOKEN_NAME` is set per
+deployment, and `consistency_warning()` requires it to end in the tier's own suffix, `-dev` or
+`-prod`. Since 2026-10-03 the knowledge-base search client takes the tier's credential as well;
+before that it took the untiered one.
+
 Any setting can be tiered by adding `_DEV` / `_PROD` to its name — `tiered_env()` is the general
 rule, and every search read goes through it. In practice that is the index names:
 
 ```
-OPENSEARCH_INDEX          new-opensearch-index              (untiered fallback)
+OPENSEARCH_INDEX          iguide-feb12                      (untiered fallback)
+OPENSEARCH_INDEX_PROD     iguide-feb12                      (prod's knowledge base)
 OPENSEARCH_INDEX_DEV      iguide-platform-embeddings-dev    (dev's knowledge base)
 ```
+
+**The prod knowledge base is `iguide-feb12` since 2026-10-07**, the index the platform's own
+search reads. Before that the deployment searched `new-opensearch-index`, an index created
+2025-10-27 that has fallen behind. It had 619 elements against feb12's 763, so the 148
+elements the platform added since could not be found. A user saw it as a dataset the platform's search
+listed by its exact title while the agent said no such data existed. The two indices have the
+same mapping, and the 615 elements in both carry identical vectors, so the agent's embedding
+service still matches. Two gaps remain in feb12 itself:
+
+- 108 of its 763 elements have no `contents-embedding`, mostly ones added after the copy.
+  Semantic search cannot return them. Keyword and spatial search can, and so can Neo4j
+  search, since the graph is current.
+- Keyword search matches `contents` only. An element whose description does not repeat its
+  title's words, such as "Chicago Crime data 2026", is found only by words from its
+  description.
 
 An **empty** tiered value counts as unset, so a half-written `FOO_PROD=` cannot blank out a
 working `FOO`. An **unrecognised** tier raises rather than falling back, in both switches: a
@@ -226,9 +267,33 @@ agent_kb/
 generated_notebook_workflows/
 ```
 
-Every record carries `owner_id`, stamped at creation. `may_read(record, allow_unowned=True)`
-enforces it on `GET /agent/files/<id>/download`; a mismatch answers **404, not 403**, because a
-403 would confirm the id exists and make the endpoint an enumeration oracle.
+Every record carries `owner_id`, stamped at creation, and `may_read(record, allow_unowned=True)`
+enforces it. Until 2026-10-03 only the download endpoint, `GET /agent/files/<id>/download`, made
+that check. Since [Stage 30](agent-architecture-changes.md#stage-30), `get_file_record` makes it,
+so every lookup by id does, from any tool. Another user's file answers like an id that was never
+minted: **404, not 403**, because a 403 would confirm the id exists and make the endpoint an
+enumeration oracle. A path into the store's `uploads/` or `outputs/` is checked as the record it
+names, and `metadata/` cannot be reached by path at all.
+
+A record also carries `session`, the conversation that made it. Outputs have been stamped since
+2026-09-09. Uploads were not until 2026-10-03: the upload route bound the caller but never the
+thread, so every upload landed in the unstamped pool. Two rules read the stamp:
+
+- **A bare filename** resolves among this conversation's files plus the unstamped legacy pool
+  (`find_files`, `resolve_file_ref`), never among another conversation's. Records written before
+  stamping began carry no `session` and stay visible to every conversation, still subject to the
+  owner check. That is deliberate: they are the reuse pool, saved embedding packages included.
+- **An `overwrite=True` write** reuses only an output this conversation wrote for this owner
+  (`_output_to_replace`, 2026-10-03). Before that it took any output with the same name.
+  `qgis_metric_buffer` overwrote under the default name `buffer.geojson`, so one person's buffer
+  took over another's file id, and the first person's link served the second person's bytes.
+  The QGIS buffer and map render no longer overwrite at all. Each run is a new file, because an
+  earlier answer still links to the old one. A write by path follows the same rule
+  (`may_replace`, Stage 30).
+
+An output may also carry `content_key`, a digest of the inputs that produced it (2026-10-03).
+Map layers are keyed on that rather than on the file id, so a repeated step replaces its layer
+instead of stacking a byte-identical copy.
 
 `AGENT_FILE_RETENTION_DAYS` drives the sweep. **It is `0` on the deployment, which disables it
 entirely** — nothing here is ever deleted. ~7.3 GB, of which `outputs/` is 6.6 GB.
@@ -265,6 +330,50 @@ conversations follow the account to another browser. IndexedDB is per-*origin*, 
 signing out of the platform does not touch it — hence `visibleTo(record, viewer)`: an owned record
 is its owner's alone, an unowned one is shared. Another person's records are hidden, never
 deleted; it is their data and this is their browser too.
+
+---
+
+## 5. Operational records — the host
+
+Not agent data, but persistent state that outlives a container, kept so a failure leaves evidence.
+
+**Container logs** go through compose's `journald` driver to the host journal (`/var/log/journal`,
+persistent). A recreate, which every deploy performs, no longer deletes them, as the old
+`json-file` driver did. Read them with `journalctl CONTAINER_NAME=agent-api --since "2 days ago"`.
+Capped by size (`SystemMaxUse=3G`, `SystemKeepFree=5G`), with the per-unit rate limit off for
+docker, since a failing service is exactly when logging bursts.
+
+**Incident bundles.** `deploy/agent-watchdog.sh` runs every minute from a systemd timer and
+watches `agent-api`, `mcp-server` and `embedding-server`. It restarts a container that has been
+unhealthy for ten minutes, but first writes
+`/var/log/iguide-agent/incidents/<utc>-<container>-<reason>/`. Each bundle holds `inspect`, the
+health log, the last 20,000 lines of output, the container's process table, `docker stats`, the
+host's disk, memory and recent kernel messages, six hours of journal, and `py-spy` stacks for
+every process in the container. The stacks are the part that says *where* it was stuck. The
+newest 60 bundles are kept; the restart budget (three an hour) lives in
+`/var/lib/iguide-agent-watchdog/`.
+
+On 2026-10-03 there were three. The first records the container found exited on 2026-09-22,
+from an image that predated `py-spy`, so it has no stacks. The other two are real hangs, on
+2026-09-27 and 2026-09-29. Each was restarted after ten minutes unhealthy and was healthy again
+within 30 seconds, and both have stacks.
+
+---
+
+## Local mode
+
+`AGENT_MODE=local` ([Stage 24](agent-architecture-changes.md#stage-24), 2026-10-03) is for one
+developer's machine, and it changes which of the stores above are written.
+`_get_opensearch_client()` in `rag_pipeline/memory_module.py` raises `PersistentMemoryDisabled`
+**before** returning even a cached client, and every read and write of `chat_memory` and
+`chat_traces` goes through it. So a local run writes neither, whatever its requests ask for.
+Download links stay host-relative, so they resolve on the machine serving them. The file store
+and code workspaces still work, on that machine's own disk. Knowledge-base search is unaffected:
+it uses its own clients, and it only reads.
+
+It exists because the override recipe it replaced failed twice. The main checkout's `.env` points
+at shared infrastructure, and on 2026-10-01 a local verification run wrote seven conversations into
+prod with nothing erroring.
 
 ---
 
@@ -320,8 +429,10 @@ before a few hundred sessions accumulate without it.
 ## Not used
 
 **No Postgres and no Neo4j for the agent's own state.** `POSTGRES_HOST`, `POSTGRES_DB` and
-`DATABASE_URL` are unset. `NEO4J_CONNECTION_STRING` points at the *platform's* graph and is read
-for related-elements; the agent writes nothing to it. OpenSearch's other indices belong to the
+`DATABASE_URL` are unset. An optional Postgres record, `AGENT_KB_DB`, exists only on unmerged
+branches (`backend_swap`, `claude/extraction-integration`); nothing on `prototype` reads it.
+`NEO4J_CONNECTION_STRING` points at the *platform's* graph and is read for related-elements; the
+agent writes nothing to it. OpenSearch's other indices belong to the
 website — `chat_memory` is the agent's own.
 
 ---

@@ -25,9 +25,19 @@ DEFAULT_MCP_MODULES = (
     "data_tools",
     "spatial_analysis_tools",
     "image_tools",
+)
+# Tool modules whose tools exec() stored code. The local-import fallback below runs MCP tool code
+# INSIDE agent-api, which is root with the host's Docker socket mounted, so it never imports
+# these — not by default, and not when a request's mcpModules names them. Remotely they run in
+# the mcp-server container and stay bound. create_notebook_workflow_tool registers a generated
+# tool whose body exec()s notebook-derived source, and the next build would bind that tool here;
+# run_notebook_workflow / run_code_element exec() ingested manifests. Deliberately not
+# overridable. See docs/agent-architecture-changes.md, stage 13.
+_STORED_CODE_EXEC_MODULES = frozenset({
     "notebook_workflow_tools",
     "generated_notebook_tools",
-)
+    "generic_executor_tools",
+})
 DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp/")
 
 
@@ -394,7 +404,9 @@ def _unbound_mcp_tool_names() -> frozenset:
         return frozenset(_DEFAULT_UNBOUND_MCP_TOOLS)
     if raw.lower() in {"none", "0", "false", "off"}:
         return frozenset()
-    return frozenset(n.strip().lstrip("mcp_") for n in raw.split(",") if n.strip())
+    # removeprefix, not lstrip: lstrip("mcp_") strips the CHARACTERS m/c/p/_, so
+    # "create_notebook_workflow_tool" became "reate_notebook_workflow_tool" and matched nothing.
+    return frozenset(n.strip().removeprefix("mcp_") for n in raw.split(",") if n.strip())
 
 
 def _is_unbound_mcp_tool(bare_name: str) -> bool:
@@ -585,9 +597,13 @@ def make_langchain_mcp_tools(
         # and it would receive the entire remote tool surface (latency + mis-selection).
         allowed = _allowed_remote_tool_names(include_modules)
         if allowed:
-            scoped = [t for t in remote_tools if getattr(t, "name", "") in allowed]
-            if scoped:
-                remote_tools = scoped
+            # Exactly the modules' tools, even when that is none. This used to keep the whole
+            # list whenever nothing matched, which turned a scope into no scope: search_tools'
+            # one tool is unbound by default, so ["search_tools"] bound all 14 remote tools.
+            remote_tools = [t for t in remote_tools if getattr(t, "name", "") in allowed]
+            if not remote_tools:
+                logger.warning("MCP modules %s match none of the remote MCP tools; binding none",
+                               include_modules)
         if ttl > 0:
             with _mcp_cache_lock:
                 _mcp_tool_cache[cache_key] = (time.monotonic(), list(remote_tools))
@@ -609,6 +625,10 @@ def make_langchain_mcp_tools(
     tools: List[Any] = []
 
     for module_name in modules:
+        if module_name in _STORED_CODE_EXEC_MODULES:
+            logger.warning("Not importing MCP module %s into the agent process: its tools exec() "
+                           "stored code, so they run only on the MCP server.", module_name)
+            continue
         if module_name == "image_tools":
             _ensure_fastapi_stub()
         try:

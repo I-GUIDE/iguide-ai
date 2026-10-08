@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
-from .agent_file_store import create_output_file_from_path, get_file_record, resolve_file_id, storage_root
+from agent_runtime import fork_safe
+
+from .agent_file_store import (create_output_file_from_path, get_file_record, managed_path_record,
+                               resolve_file_id, storage_root)
 
 
 DEFAULT_QGIS_PROCESS_BIN = "qgis_process"
@@ -94,7 +97,7 @@ def pyqgis_available() -> bool:
             if python_bin == sys.executable:
                 ok = importlib.util.find_spec("qgis") is not None
             else:
-                probe = subprocess.run(
+                probe = fork_safe.run(
                     [python_bin, "-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('qgis') else 1)"],
                     capture_output=True, timeout=15,
                 )
@@ -205,6 +208,22 @@ def _orig_name(path: Path, record: Optional[Mapping[str, Any]]) -> str:
     return name.split("__", 1)[1] if "__" in name else name
 
 
+def _a_part_of(sibling: Path, record: Optional[Mapping[str, Any]]) -> bool:
+    """Whether ``sibling`` may be read as another part of ``record``'s shapefile.
+
+    Parts are found by NAME, and the scan below covers the whole directory, so it read every
+    upload in the store: bob's parcels.shp was opened with alice's parcels.dbf. A part must be a
+    stored file this caller may read, checked through its path as its id would be. It must also
+    come from the named part's conversation or from none, which is what a name looked up in that
+    conversation finds (Stage 21): a part uploaded with no thread id is still the user's part.
+    """
+    try:
+        part = managed_path_record(sibling)
+    except ValueError:
+        return False
+    return part is not None and part.get("session") in (None, (record or {}).get("session"))
+
+
 def _stage_shapefile_siblings(part_path: Path, record: Optional[Mapping[str, Any]]) -> str:
     """Co-locate an uploaded shapefile's parts so OGR/QGIS can open it.
 
@@ -223,7 +242,7 @@ def _stage_shapefile_siblings(part_path: Path, record: Optional[Mapping[str, Any
                 continue
             on = sibling.name.split("__", 1)[1] if "__" in sibling.name else sibling.name
             ext = Path(on).suffix.lower()
-            if Path(on).stem == stem and ext in _SHAPE_PARTS:
+            if Path(on).stem == stem and ext in _SHAPE_PARTS and _a_part_of(sibling, record):
                 members.setdefault(ext, sibling)
     except OSError:
         pass
@@ -331,7 +350,9 @@ def _qgis_env() -> Dict[str, str]:
 
 
 def _run_subprocess(command: list[str], *, timeout_sec: int, cwd: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    # fork_safe, not subprocess: on macOS a fork after the server's first reprojection dies
+    # before exec, and this returned -11 with empty output at native:reprojectlayer.
+    return fork_safe.run(
         command,
         cwd=str(cwd or _repo_root()),
         env=_qgis_env(),
@@ -621,6 +642,25 @@ def qgis_metric_buffer_tool(
                 }
             )
 
+    # What this buffer IS: the CONTENT of its input, the distance and the two projections.
+    # Recorded on the output so that the layer drawn from it (add_map_layer, which reads it
+    # back through file_content_key) is the same layer however often the step is repeated.
+    # The output name and the input's file_id stay out. On 2026-10-01 a re-grounding pass
+    # buffered a second, byte-identical copy of the same boundary under a new file_id.
+    # Never at the buffer's expense: without a key the output is still identified by its bytes.
+    key: Optional[str] = None
+    try:
+        from agent_runtime.langchain_geo_tools import source_content_key
+        from agent_runtime.map_layers import content_key
+
+        key = content_key("qgis_buffer", f"{distance:g}m",
+                          input=source_content_key(str(input_layer or "").strip(), source),
+                          distance_m=round(distance, 3),
+                          projected_crs=str(projected_crs or "").strip().upper(),
+                          target_crs=str(target_crs or "").strip().upper(),
+                          dissolve=bool(dissolve), segments=segment_count)
+    except Exception:  # noqa: BLE001
+        key = None
     payload: Dict[str, Any] = {
         "ok": final_output.exists(),
         "job_id": job_id,
@@ -634,10 +674,12 @@ def qgis_metric_buffer_tool(
     }
     if final_output.exists():
         try:
+            # A new file every run, never overwrite=True. A re-run can differ (a corrected
+            # distance), and the earlier answer's link must keep serving the buffer it showed.
             payload["managed_output"] = create_output_file_from_path(
                 final_output,
                 filename=final_output.name,
-                overwrite=True,
+                content_key=key,
             )
         except Exception as exc:
             payload["managed_output_error"] = str(exc)
@@ -766,10 +808,10 @@ def pyqgis_render_map_tool(
     output_path = result.get("output_path")
     if result.get("ok") and output_path:
         try:
+            # A new file every run, as in qgis_metric_buffer: an earlier answer embeds this image.
             record = create_output_file_from_path(
                 output_path,
                 filename=Path(str(output_path)).name,
-                overwrite=True,
             )
             result["managed_output"] = record
         except Exception as exc:

@@ -9,18 +9,21 @@
     "preview": "vite preview --port 5173 --strictPort",
     "check:fold": "esbuild src/components/foldTrace.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/foldcheck.mjs --define:import.meta.env='{\"VITE_UI_VARIANT\":\"prototype\"}' && node node_modules/.cache/foldcheck.mjs",
     "check:auth": "esbuild src/auth.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/authcheck.mjs && node node_modules/.cache/authcheck.mjs",
-    "check:hooks": "node scripts/check-hook-deps.mjs"
+    "check:files": "esbuild src/files.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/filescheck.mjs && node node_modules/.cache/filescheck.mjs",
+    "check:upload": "esbuild src/upload.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/uploadcheck.mjs && node node_modules/.cache/uploadcheck.mjs",
+    "check:hooks": "node scripts/check-hook-deps.mjs",
+    "check:models": "esbuild src/modelChoice.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/modelcheck.mjs && node node_modules/.cache/modelcheck.mjs"
   },
   "dependencies": {
-    "@deck.gl/aggregation-layers": "^9.0.33",
-    "@deck.gl/core": "^9.0.33",
-    "@deck.gl/layers": "^9.0.33",
-    "@deck.gl/mapbox": "^9.0.33",
+    "@deck.gl/aggregation-layers": "^9.4.0",
+    "@deck.gl/core": "^9.4.0",
+    "@deck.gl/layers": "^9.4.0",
+    "@deck.gl/maplibre": "^9.4.0",
     "@turf/turf": "^7.1.0",
-    "maplibre-gl": "^4.7.1",
+    "maplibre-gl": "^6.11.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-map-gl": "^7.1.7"
+    "react-map-gl": "^8.1.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

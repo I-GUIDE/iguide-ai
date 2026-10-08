@@ -2142,7 +2142,7 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
 
-def _capability_inventory(capability: str) -> str:
+def _capability_inventory(capability: str, skill_roots: Optional[List[str]] = None) -> str:
     """What a peer can actually do, from ``agent_runtime.capability_registry``.
 
     GENERATED rather than written here on purpose. The hand-written version drifted behind the
@@ -2150,17 +2150,99 @@ def _capability_inventory(capability: str) -> str:
     were all bound to a peer while the supervisor's description of it never mentioned them, and
     a DEM request became a knowledge-base search as a direct result. The reasoning guidance in
     this prompt stays hand-written, because that is judgement rather than inventory.
+
+    ``skill_roots`` are the request's. The analyze peer loads skills from them, so its skills
+    clause is decided by discovery over them, not over the defaults.
     """
     try:
         from agent_runtime.capability_registry import describe
-        return describe(capability)
+        return describe(capability, skill_roots=skill_roots)
     except Exception:  # noqa: BLE001 - a prompt must still be produced
         logger.exception("capability inventory unavailable; falling back to a generic phrase")
         return "geospatial analysis over the evidence or uploaded files"
 
 
-def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
-    """LLM-driven next-action chooser with a deterministic heuristic fallback."""
+def _code_peer_backend(code_peer: Optional[str] = None) -> str:
+    """Which code peer runs: ``"opencode"``, ``"claude"`` or ``"langchain"``.
+
+    The request's ``code_peer`` wins, falling back to ``AGENT_CODE_PEER``; anything neither CLI
+    accepts (``"langchain"`` included) is the built-in peer. ONE resolution, read by the code
+    node that runs the peer AND by the decider that describes it. Two copies would let the
+    supervisor describe one peer while another one runs, which is the drift this exists to end.
+    """
+    from agent_runtime.claude_peer import selects_claude
+    from agent_runtime.opencode_peer import CODE_PEER_ENV, selects_opencode
+
+    choice = code_peer if code_peer else os.getenv(CODE_PEER_ENV)
+    if selects_opencode(choice):
+        return "opencode"
+    if selects_claude(choice):
+        return "claude"
+    return "langchain"
+
+
+def _code_capability_line(code_peer: Optional[str] = None,
+                          skill_roots: Optional[List[str]] = None) -> str:
+    """The decider's ``code`` line, for the code peer THIS request will run.
+
+    Generated, like the ``analyze`` line, and for the same reason. The hand-written version told
+    every request that the code peer "binds the same toolkit as analyze, plus packaged skills and
+    saved workflows": it binds no tool that runs a saved workflow, the deployed image shipped no
+    skills, and a CLI peer has none of that toolkit. The inventory comes from
+    ``capability_registry`` keyed on the backend ``_code_peer_backend`` resolves, and the skills
+    clause from the same discovery over the same roots the peer's skill tools are built from.
+    """
+    head = "- code: produce and run NEW code for work no existing tool covers."
+    try:
+        from agent_runtime.capability_registry import (
+            CLI_PEER_NAMES, describe_code_peer, is_cli_code_peer,
+        )
+
+        backend = _code_peer_backend(code_peer)
+        inventory = describe_code_peer(backend, skill_roots=skill_roots)
+        cli = is_cli_code_peer(backend)
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        # No inventory rather than a guessed one: an unknown peer described as having tools it
+        # may lack is the failure this function exists to remove.
+        logger.exception("code peer description unavailable; the decider gets no inventory")
+        return head + "\n"
+    if not cli:
+        return f"{head} It can currently do: {inventory}\n"
+    return (
+        f"{head} For this request it is an agentic coding CLI ({CLI_PEER_NAMES[backend]}) in its "
+        f"own sandboxed container. It can currently do: {inventory}. It has none of the tools "
+        "listed for analyze and cannot request another capability mid-run, and what earlier "
+        "steps produced reaches it only as that abridged text, never as files. So work one of "
+        "those tools does — a boundary, a DEM, an embedding — is analyze's, and anything else "
+        "the CLI needs it fetches with its own code. Each run is a write-run-debug loop that can "
+        "take minutes.\n"
+    )
+
+
+def _capability_request_example(code_peer: Optional[str] = None) -> str:
+    """The example in the decider's "peers may REQUEST a capability" sentence.
+
+    It named the code peer unconditionally, and a CLI code peer has no ``request_capability``
+    tool, so for one the example names analyze, which always has it. Same resolution as the code
+    line, so the two sentences cannot disagree about which peer runs.
+    """
+    try:
+        from agent_runtime.capability_registry import is_cli_code_peer
+
+        cli = is_cli_code_peer(_code_peer_backend(code_peer))
+    except Exception:  # noqa: BLE001 - a prompt must still be produced
+        cli = False
+    return "analyze needs evidence" if cli else "code needs evidence"
+
+
+def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = None,
+                      skill_roots: Optional[List[str]] = None) -> DecideFn:
+    """LLM-driven next-action chooser with a deterministic heuristic fallback.
+
+    ``code_peer`` and ``skill_roots`` are the request's, the same two values ``default_code_fn``
+    is built with, so the ``code`` line describes the peer that will actually run. The
+    ``analyze`` line reads ``skill_roots`` too, because that peer binds the same skill loaders.
+    """
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
         history = _format_chat_history(state.get("chat_history"))
@@ -2172,7 +2254,7 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
             "- analyze: run a workflow with EXISTING purpose-built tools over the evidence or "
             "uploaded files. It can currently do: "
-            + _capability_inventory("analyze") + ". "
+            + _capability_inventory("analyze", skill_roots) + ". "
             "Anything in that list is analyze work, not a retrieval question — a DEM, a "
             "boundary and a geocode all come from live services, not from the knowledge base, "
             "so searching for them finds writing ABOUT them and never the thing itself. "
@@ -2186,9 +2268,8 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "tools do not. "
             "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS, not datasets "
             "to retrieve — a request naming one is analyze work, not search.\n"
-            "- code: produce and run NEW code for work no existing tool covers. It binds the "
-            "same toolkit as analyze, plus packaged skills and saved workflows\n"
-            "- done: stop; a grounded final answer is composed automatically from the "
+            + _code_capability_line(code_peer, skill_roots)
+            + "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
             f"Actions available this step: {', '.join(available)}. "
             "Anything else has been ruled out already — a search whose sources are exhausted, or "
@@ -2200,7 +2281,8 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "already produced earlier (e.g. 'show me the code', 'explain that', 'what did you "
             "find'), the answer is composed from that conversation, so 'done' is enough unless "
             "genuinely new external information is needed.\n"
-            "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
+            "Peers may also REQUEST a capability they need (e.g. "
+            + _capability_request_example(code_peer) + "); such "
             "requests are fulfilled automatically before you are consulted again.\n"
             "`map_layer_delivered` in Progress means a layer is ALREADY on the user's map. When "
             "the request was to see something and it is there, choose `done` — `code` exists for "
@@ -3417,7 +3499,9 @@ _TOOL_FAIL_REPEATS = 2
 
 
 def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
-    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
+    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times
+    since they last returned ok=true: a tool that is failing now, not one that failed and then
+    worked."""
     counts: Dict[str, int] = {}
     seen: Dict[str, List[str]] = {}
     for item in artifacts.get("tool_results") or []:
@@ -3434,6 +3518,14 @@ def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(parsed, dict) and parsed.get("ok") is False:
             counts[name] = counts.get(name, 0) + 1
             seen.setdefault(name, []).append(str(parsed.get("error") or "")[:300])
+        elif isinstance(parsed, dict) and parsed.get("ok") is True:
+            # A success after failures means the way out was found, not that there was none.
+            # Observed: regionalize refused a layer split into three parts, twice, naming the
+            # selection that would work; the peer made it and got its regions. Counting the two
+            # refusals anyway sent the peer to redo the work in execute_code and told synthesis
+            # the tool had failed.
+            counts.pop(name, None)
+            seen.pop(name, None)
 
     # The LATEST error, and a note when the failures were not the same one.
     #
@@ -3804,6 +3896,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         if unified_peer_enabled(state):
             # One agent, one tool list: fold in the retrieval set the search peer used to own.
             try:
@@ -4115,20 +4216,16 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # iterates internally — no request_capability, no nested tools. Two are
         # wired: `opencode` (OpenAI-compatible endpoint) and `claude` (Anthropic).
         # A per-request `code_peer` overrides the env default; anything else
-        # (including "langchain") means the built-in peer below.
-        import os as _os
-
-        from agent_runtime.opencode_peer import CODE_PEER_ENV, selects_opencode
-        from agent_runtime.claude_peer import selects_claude
-
-        choice = code_peer if code_peer else _os.getenv(CODE_PEER_ENV)
-        if selects_opencode(choice):
+        # (including "langchain") means the built-in peer below. The decider describes
+        # the peer through the same _code_peer_backend, so it cannot describe another.
+        backend = _code_peer_backend(code_peer)
+        if backend == "opencode":
             from agent_runtime.opencode_peer import run_opencode_code_peer
 
             return run_opencode_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
             )
-        if selects_claude(choice):
+        if backend == "claude":
             from agent_runtime.claude_peer import run_claude_code_peer
 
             return run_claude_code_peer(
@@ -4332,8 +4429,16 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             # separates staged files from the sandbox that is supposed to read them.
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
-                session_id=child_thread_id(state.get("thread_id"), "codeexec"),
-            ))
+                session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        # Public data reaches the code through the agent, not through a network in the sandbox:
+        # this downloads from approved hosts into a conversation file that execute_code reads as
+        # an input. Gated by AGENT_PUBLIC_FETCH (the factory binds nothing when it is off), and
+        # not tied to execute_code being on, since the other tools read a file by its id too.
+        try:
+            from agent_runtime.public_data_tools import make_public_data_tools
+            tools.extend(make_public_data_tools())
+        except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
+            pass
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,

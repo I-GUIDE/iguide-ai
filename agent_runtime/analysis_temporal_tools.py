@@ -13,12 +13,17 @@ tool at all. These five do:
 The hard part is that time arrives as *strings in whatever format the publisher liked* —
 Chicago crime ships ``07/26/2026 08:00:00 PM``, ISO feeds ship ``2026-07-26T20:00:00Z``,
 survey exports ship a bare ``2026`` or epoch milliseconds. ``parse_time_series`` tries a
-ladder of strategies (already-datetime, epoch, inferred single format, pandas ``format="mixed"``,
-then an explicit format list) and keeps whichever parsed the MOST rows, then every tool
-reports the parse rate and how many rows were dropped — a silent 40% NaT is the classic way
-a temporal answer ends up quietly wrong. Timestamps that carry a UTC offset are converted to
+ladder of strategies and keeps whichever parsed the MOST rows, then every tool reports the
+parse rate and how many rows were dropped — a silent 40% NaT is the classic way a temporal
+answer ends up quietly wrong. A column of NUMBERS (typed, or text holding only numbers, which
+is how every CSV field arrives) gets only numeric readings: a bare year, YYYYMMDD, epoch
+seconds or milliseconds. Text gets the text ladder: inferred single format, pandas
+``format="mixed"``, then an explicit format list. Either way an inferred time must fall in
+the years ``_YEAR_FLOOR``..``_YEAR_CEILING``. Timestamps that carry a UTC offset are converted to
 UTC and made tz-naive, so one dataset never mixes wall-clock and offset time; everything
-downstream (windows, periods, hour-of-day) is therefore in UTC for such inputs.
+downstream (windows, periods, hour-of-day) is therefore in UTC for such inputs, as it is for
+epoch numbers, which count from 1970 in UTC. Every report names its clock (``clock``: ``"UTC"``
+for those, ``"local"`` for times as written), and a chart in UTC says so on its axis.
 
 Conventions copied from ``langchain_geo_tools``: heavy imports deferred into tool bodies,
 every tool returns a JSON string and NEVER raises, metric work happens in a projected CRS
@@ -41,8 +46,10 @@ from agent_runtime.langchain_geo_tools import (  # reuse, do not reinvent
     _resolve,
     _stage_vector_source,
     artifact_name,
+    input_content_key,
     read_vector,
 )
+from agent_runtime.map_layers import content_key
 from agent_runtime.tool_args import accept_null_defaults
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -58,10 +65,30 @@ _MIN_PARSE_RATE = float(os.getenv("AGENT_TIME_MIN_PARSE_RATE", "0.6"))
 # Above this many points, an "auto" temporal slice renders as density instead of marks.
 _AUTO_HEATMAP_ABOVE = int(os.getenv("AGENT_TIME_HEATMAP_ABOVE", "5000"))
 
+# The years an INFERRED time may fall in: the ones a nanosecond timestamp can hold. pandas 2
+# enforced this window without saying so, by turning anything outside it into NaT, and every
+# test and every development-machine run was made inside it. pandas 3 parses at microsecond
+# resolution and silently dropped it, so on the deployed image any four-digit code became a
+# year: a CSV's beat column ("1234", "1235", "1236") parsed as 1234-1236, and an incident_id
+# of 1001-1005 was auto-detected instead of the real date column. Stating the window here keeps
+# the verdict from moving with the pandas version. A column the source already typed as
+# datetime is not clamped.
+_YEAR_FLOOR, _YEAR_CEILING = 1678, 2262
+
+# A plain number as text (what pandas.read_csv would type as numeric), and the NA markers it
+# would turn into NaN. GDAL's CSV reader types EVERY field as text, so these decide whether a
+# CSV column is "numeric" at all.
+_PLAIN_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_NA_TEXT = ("na", "n/a", "nan", "-nan", "null", "none", "#n/a", "#n/a n/a", "#na", "<na>")
+
 # Column names that suggest time. Used only to BREAK TIES / to justify trying a numeric
-# column — the decision is made by how many values actually parse.
+# column — the decision is made by how many values actually parse. A CSV's numbers count as
+# numeric (_as_numbers), so a year column is tried only if its name matches a hint here. "yr"
+# keeps a CSV's yr, YRBUILT or SALE_YR column detectable; the text ladder used to read those as
+# years with no hint at all. Hints match as substrings, which is how the run-together YRBUILT
+# is caught; a numeric column still has to hold years, YYYYMMDD or epochs to parse as time.
 _TIME_NAME_HINTS = (
-    "date", "time", "timestamp", "datetime", "_dt", "dt_", "year", "month", "day", "hour",
+    "date", "time", "timestamp", "datetime", "_dt", "dt_", "year", "yr", "month", "day", "hour",
     "period", "when", "occur", "report", "observ", "record", "creat", "updat", "modif",
     "start", "end", "begin", "epoch", "collect", "sampl", "visit", "arrest", "incident",
 )
@@ -152,7 +179,7 @@ def _num(value: Any) -> Optional[float]:
 
 # ------------------------------------------------------------------- time parsing
 def _naive(series: Any) -> Any:
-    """Force a parse result to tz-naive ``datetime64[ns]`` (mixed offsets come back as object)."""
+    """Force a parse result to tz-naive ``datetime64``; a tz-aware one is converted to UTC first."""
     import pandas as pd
 
     if series is None:
@@ -173,9 +200,56 @@ def _naive(series: Any) -> Any:
         return pd.Series(pd.NaT, index=getattr(series, "index", None), dtype="datetime64[ns]")
 
 
+def _clean_text(series: Any) -> Any:
+    """The column as stripped text with blanks as NA — the form the text ladder parses."""
+    return series.astype("string").str.strip().replace({"": None})
+
+
+def _as_numbers(series: Any, text: Any = None) -> Any:
+    """The column as numbers when that is all it holds, else ``None``.
+
+    Typed numeric columns qualify, and so does TEXT in which every value is a plain number:
+    GDAL's CSV reader types every field as a string, so a CSV's beat column arrives as
+    ``"1234"``, never ``1234``, and walked past every check that asked the dtype. Blank cells
+    and the NA markers ``pandas.read_csv`` would turn into NaN do not disqualify a column; at
+    least one real number is required. ``text`` is ``_clean_text(series)`` when the caller
+    already has it, so a big date column is not cleaned twice.
+    """
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(series):
+        return None
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        return None
+    # Back to the string dtype: the blank-to-NA replace in _clean_text yields object dtype
+    # whenever a blank was present, and object-dtype matching makes fillna warn on pandas 2.
+    text = (_clean_text(series) if text is None else text).astype("string")
+    present = text.dropna()
+    if present.empty:
+        return None
+    sniff = present.head(64)  # a column of dates fails here, before any full pass
+    if not bool((sniff.str.fullmatch(_PLAIN_NUMBER) | sniff.str.lower().isin(_NA_TEXT)).all()):
+        return None
+    is_number = text.str.fullmatch(_PLAIN_NUMBER).fillna(False).astype(bool)
+    rest = text[text.notna() & ~is_number]
+    if not bool(is_number.any()) or not bool(rest.str.lower().isin(_NA_TEXT).all()):
+        return None
+    return pd.to_numeric(text.where(is_number), errors="coerce").astype("float64")
+
+
+def _in_year_window(parsed: Any) -> Any:
+    """``parsed`` with every time outside ``_YEAR_FLOOR``..``_YEAR_CEILING`` set to NaT."""
+    if parsed is None:
+        return None
+    return parsed.where(parsed.dt.year.between(_YEAR_FLOOR, _YEAR_CEILING))
+
+
 def parse_time_series(values: Any) -> Tuple[Any, str]:
     """``(tz-naive datetime64 Series, method label)`` — the best of several strategies.
 
+    Numbers get only numeric readings; text gets the text ladder (see the module docstring).
     Never raises: a hopeless column comes back as all-NaT with method ``"unparsed"`` so the
     caller can report a 0% parse rate instead of blowing up.
     """
@@ -187,9 +261,14 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
     if len(series) == 0:
         return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]"), "unparsed"
 
+    typed_number = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+    text = None if typed_number else _clean_text(series)
+    numeric = _as_numbers(series, text)
     attempts: List[Tuple[str, Any]] = []
-    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-        numeric = pd.to_numeric(series, errors="coerce")
+    if numeric is not None:
+        # A number gets ONLY these readings. It used to fall through to the text ladder too,
+        # which is how pandas came to decide that a beat ("1834", and under pandas 3 "1011")
+        # is a year. A number that fits none of them is a code, and stays unparsed.
         finite = numeric.dropna()
         if len(finite):
             lo, hi = float(finite.min()), float(finite.abs().max())
@@ -197,19 +276,32 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
                 text_years = finite.astype("int64").astype("string").reindex(series.index)
                 attempts.append(("year number",
                                  lambda t=text_years: pd.to_datetime(t, format="%Y", errors="coerce")))
+            elif 19000101 <= lo and hi <= 21001231 and bool((finite % 1 == 0).all()):
+                # YYYYMMDD (20190315); an impossible month or day becomes NaT, not a guess
+                text_days = finite.astype("int64").astype("string").reindex(series.index)
+                attempts.append(("YYYYMMDD number",
+                                 lambda t=text_days: pd.to_datetime(t, format="%Y%m%d", errors="coerce")))
             elif 1e8 <= hi < 1e11:
                 attempts.append(("epoch seconds",
                                  lambda n=numeric: pd.to_datetime(n, unit="s", errors="coerce")))
             elif 1e11 <= hi < 1e14:
                 attempts.append(("epoch milliseconds",
                                  lambda n=numeric: pd.to_datetime(n, unit="ms", errors="coerce")))
-    text = series.astype("string").str.strip().replace({"": None})
-    attempts.append(("inferred single format", lambda: pd.to_datetime(text, errors="coerce")))
-    attempts.append(("mixed formats", lambda: pd.to_datetime(text, errors="coerce", format="mixed")))
-    attempts.extend(
-        (f"format {fmt}", lambda f=fmt: pd.to_datetime(text, format=f, errors="coerce"))
-        for fmt in _EXPLICIT_FORMATS
-    )
+    else:
+        # utc=True converts every offset to UTC inside pandas. Without it, a column whose offsets
+        # differ (Z beside +01:00, or -06:00 and -05:00 either side of a daylight-saving change)
+        # came back from pandas 2 as objects, which _naive converted, but pandas 3 raises "Mixed
+        # timezones detected", and the whole column read as unparsed. Text without an offset is
+        # read as UTC and made naive again, so its values do not change. The explicit formats
+        # below have no %z, so they never match a time that carries an offset.
+        attempts.append(("inferred single format",
+                         lambda: pd.to_datetime(text, errors="coerce", utc=True)))
+        attempts.append(("mixed formats",
+                         lambda: pd.to_datetime(text, errors="coerce", format="mixed", utc=True)))
+        attempts.extend(
+            (f"format {fmt}", lambda f=fmt: pd.to_datetime(text, format=f, errors="coerce"))
+            for fmt in _EXPLICIT_FORMATS
+        )
 
     best, best_label, best_n = None, "unparsed", -1
     target = int(series.notna().sum())
@@ -217,7 +309,7 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                parsed = _naive(attempt())
+                parsed = _in_year_window(_naive(attempt()))
         except Exception:  # noqa: BLE001 - a format that doesn't apply is not an error
             continue
         if parsed is None:
@@ -230,6 +322,41 @@ def parse_time_series(values: Any) -> Tuple[Any, str]:
     if best is None or best_n <= 0:
         return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]"), "unparsed"
     return best, best_label
+
+
+# The end of a time that carries a zone, as pandas reads one: an offset (-06:00, -0600, -06), Z,
+# UTC or GMT after a time of day. The year may still follow, as in Twitter's created_at
+# ("Mon Jan 05 09:00:00 -0600 2026"), and so may a comment, as in an email's "-0600 (CST)",
+# which pandas 3 reads. A date alone is not enough, or 2026-01-05 would end in "-05".
+_ZONE_SUFFIX = (r"(?:\d{1,2}:\d{2}(?::\d{2})?|\d[T ]\d{2}(?:\d{2}){0,2})(?:[.,]\d+)?"
+                r"(?:\s*[ap]\.?m\.?)?\s*(?:z|utc|gmt|(?:utc|gmt)?\s*[+-]\d{1,2}(?::?\d{2}){0,2})"
+                r"(?:\s+\d{4})?(?:\s*\([^()]*\))?$")
+# The pattern only ever asks for "a digit", so text with every digit made 0 matches exactly when
+# the text does, and a column of distinct times is tested once per layout instead of once per row.
+_DIGITS_TO_ZERO = str.maketrans("123456789", "000000000")
+
+
+def _clock(values: Any, parsed: Any, method: str) -> Optional[str]:
+    """``"UTC"`` when parse_time_series gave UTC times, ``"local"`` when it gave clock times as written.
+
+    A time that carries a UTC offset was converted to UTC: text ending in an offset, Z, UTC or
+    GMT, or a column whose type has a zone, as GDAL types a GeoJSON's ISO times. An epoch number
+    counts from 1970 in UTC. Any other time is the clock time it was written in, in a zone the
+    data does not name. Text without an offset beside text with one is read as UTC, so a single
+    offset makes the whole column UTC. ``None`` when nothing parsed.
+    """
+    import pandas as pd
+
+    if method == "unparsed":
+        return None
+    series = values if isinstance(values, pd.Series) else pd.Series(values)
+    if method.startswith("epoch") or isinstance(series.dtype, pd.DatetimeTZDtype):
+        return "UTC"
+    if method not in ("inferred single format", "mixed formats"):  # no explicit format has a %z
+        return "local"
+    text = _clean_text(series)[parsed.notna().to_numpy()]
+    layouts = pd.Series(text.str.translate(_DIGITS_TO_ZERO).unique(), dtype="string").dropna()
+    return "UTC" if bool(layouts.str.contains(_ZONE_SUFFIX, case=False, regex=True).any()) else "local"
 
 
 def _granularity(parsed: Any) -> Optional[str]:
@@ -265,13 +392,18 @@ def _span(parsed: Any) -> Dict[str, Any]:
     }
 
 
-def _profile(parsed: Any, column: str, method: str) -> Dict[str, Any]:
-    """The per-column report shared by detect_time_column and every other tool."""
+def _profile(parsed: Any, column: str, method: str, values: Any) -> Dict[str, Any]:
+    """The per-column report shared by detect_time_column and every other tool.
+
+    ``values`` is the column as it was read, which ``clock`` needs: the parsed times no longer
+    show whether they carried an offset.
+    """
     total = int(len(parsed))
     ok = int(parsed.notna().sum())
     return {
         "column": column,
         "parse_method": method,
+        "clock": _clock(values, parsed, method),
         "rows": total,
         "parsed_rows": ok,
         "failed_rows": total - ok,
@@ -292,6 +424,8 @@ def _candidate_columns(frame: Any) -> List[str]:
 
     A numeric column without a time-ish name is skipped on purpose — "beat", "ward" and
     "population" all parse happily as epoch seconds and would outrank the real date.
+    "Numeric" means what the column HOLDS, not its dtype: every CSV field arrives as text
+    (GDAL's reader), and while this asked the dtype, a CSV's beat column was never skipped.
     """
     import pandas as pd
 
@@ -304,7 +438,7 @@ def _candidate_columns(frame: Any) -> List[str]:
             out.append(col)
         elif pd.api.types.is_bool_dtype(series):
             continue
-        elif pd.api.types.is_numeric_dtype(series):
+        elif _as_numbers(series) is not None:
             if _name_hint(col):
                 out.append(col)
         else:
@@ -318,7 +452,7 @@ def _rank_time_columns(frame: Any, limit: int = 6) -> List[Dict[str, Any]]:
     scored: List[Tuple[float, int, Dict[str, Any]]] = []
     for col in _candidate_columns(sample):
         parsed, method = parse_time_series(sample[col])
-        report = _profile(parsed, str(col), method)
+        report = _profile(parsed, str(col), method, sample[col])
         if report["parse_rate"] < _MIN_PARSE_RATE or report["parsed_rows"] == 0:
             continue
         report["name_suggests_time"] = _name_hint(col)
@@ -351,7 +485,7 @@ def _resolve_time_column(frame: Any, time_column: Optional[str]) -> Tuple[Any, D
                     columns=columns[:60],
                 )
         parsed, method = parse_time_series(frame[wanted])
-        report = _profile(parsed, wanted, method)
+        report = _profile(parsed, wanted, method, frame[wanted])
         if report["parsed_rows"] == 0:
             ranked = _rank_time_columns(frame)
             cands = [r["column"] for r in ranked]
@@ -374,7 +508,7 @@ def _resolve_time_column(frame: Any, time_column: Optional[str]) -> Tuple[Any, D
         )
     chosen = ranked[0]["column"]
     parsed, method = parse_time_series(frame[chosen])  # re-parse in FULL (ranking used a sample)
-    report = _profile(parsed, chosen, method)
+    report = _profile(parsed, chosen, method, frame[chosen])
     report["auto_detected"] = True
     report["other_candidates"] = [r["column"] for r in ranked[1:]]
     return parsed, report
@@ -512,14 +646,16 @@ def _stringify(gdf: Any) -> Any:
     return out
 
 
-def _publish_geojson(gdf: Any, filename: str) -> Dict[str, Any]:
+def _publish_geojson(gdf: Any, filename: str, key: Optional[str] = None) -> Dict[str, Any]:
+    """``key``, the content key of the inputs, is recorded on the file for whatever reads it
+    next (see file_store.file_content_key)."""
     from agent_runtime.file_store import create_output_file_from_path
 
     tmpdir = Path(tempfile.mkdtemp(prefix="temporal_gj_"))
     try:
         out = tmpdir / filename
         _stringify(gdf).to_file(out, driver="GeoJSON")
-        return create_output_file_from_path(out, filename=filename)
+        return create_output_file_from_path(out, filename=filename, content_key=key)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -639,6 +775,10 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
               need_geometry: bool = True) -> Tuple[Any, str]:
         return _read_frame(ref, siblings, _attached, layer=layer, need_geometry=need_geometry)
 
+    def _input_key(ref: str, siblings: Optional[List[str]] = None) -> str:
+        """What an input IS, as _load reads it: its content, never its file_id."""
+        return input_content_key(ref, siblings, _attached)
+
     # -------------------------------------------------------------- detect
     def detect_time_column(file_id: str, time_column: Optional[str] = None,
                            sibling_file_ids: Optional[List[str]] = None,
@@ -674,7 +814,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 payload["note"] = (
                     f"{best['column']}: {best['parsed_rows']}/{best['rows']} rows parsed "
                     f"({best['parse_method']}), granularity {best['granularity']}, "
-                    f"{best['span']['start']} -> {best['span']['end']}")
+                    f"{best['span']['start']} -> {best['span']['end']}"
+                    + (" (UTC)" if best["clock"] == "UTC" else ""))
                 if best["failed_rows"]:
                     payload["warning"] = (
                         f"{best['failed_rows']} row(s) ({best['null_rate']:.1%}) have no usable "
@@ -764,8 +905,15 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
             ceiling = int(max_features) if max_features else _MAP_MAX_FEATURES
             subset, sampled, total = _sample_for_map(subset, ceiling)
+            # The window as PARSED, so "2026-07" and "2026-07-01".."2026-07-31" are one slice,
+            # and the time column as resolved, so naming the column auto-detection picks is the
+            # same slice as not naming it.
+            layer_key = content_key("time_window", input=_input_key(file_id, sibling_file_ids),
+                                    layer=layer, time_column=report["column"],
+                                    window=[window["start"], window["end"]], render=mode,
+                                    style_by=style_by, sample=ceiling if sampled else None)
             fname = artifact_name(name, "geojson", source=source, default="time_window")
-            record = _publish_geojson(subset, fname)
+            record = _publish_geojson(subset, fname, key=layer_key)
             label_bits = [w for w in (window["start"], window["end"]) if w]
             label = (name or "").replace("_", " ").strip() or (
                 " to ".join(b[:10] for b in label_bits) if label_bits else "time window")
@@ -775,7 +923,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 "feature_count": int(len(subset)), "features_total": total,
                 "sampled": bool(sampled), "on_map": True,
                 "crs": _epsg(getattr(subset, "crs", None)),
-                "map_layer": {"url": record.get("download_url"), "label": label, "render": mode,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": record.get("download_url"), "label": label, "render": mode,
                               "style_by": style_by, "source": "analysis",
                               "count": int(len(subset)), "sampled": bool(sampled),
                               "total": total},
@@ -795,7 +944,9 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         """Count records per time period and return a CSV of the table plus a PNG chart.
         `freq`: hour|day|week|month|quarter|year, or a cyclical profile hour_of_day |
         day_of_week | month_of_year. `by` splits the series by a category column (top_n
-        categories kept). NON-SPATIAL: this returns a chart and a table, NOT a map layer. """
+        categories kept). NON-SPATIAL: this returns a chart and a table, NOT a map layer.
+        Times that carried a UTC offset, and epoch numbers, are counted in UTC, and the
+        chart's axis and ``parse.clock`` say so. """
         fig = None
         try:
             import matplotlib
@@ -828,27 +979,32 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if times.empty:
                 raise ValueError(f"no parseable timestamp in column {report['column']!r}")
 
+            # Times that carried an offset, and epoch numbers, are UTC ones by now, and the axis
+            # says so. It once read "local clock time" under UTC hours: 09:00 at -06:00 counted
+            # at hour 15, so a Chicago peak moved six hours under a label saying it had not.
+            in_utc = report["clock"] == "UTC"
+            clock = " (UTC)" if in_utc else ""
             if kind == "period":
                 period_start, labels = _period_labels(times, code)
                 order = pd.DataFrame({"period": labels, "_start": period_start})
                 order = order.drop_duplicates("period").sort_values("_start")
                 index_order = order["period"].tolist()
                 axis_label = {"h": "hour", "D": "day", "W": "week (starting)",
-                              "M": "month", "Q": "quarter", "Y": "year"}[code]
+                              "M": "month", "Q": "quarter", "Y": "year"}[code] + clock
                 chart_kind = "line"
                 keys = labels
             elif code == "hour_of_day":
                 keys = times.dt.hour.astype(int).map(lambda h: f"{h:02d}")
                 index_order = [f"{h:02d}" for h in range(24)]
-                axis_label, chart_kind = "hour of day (local clock time)", "bar"
+                axis_label, chart_kind = "hour of day" + (clock or " (local clock time)"), "bar"
             elif code == "day_of_week":
                 keys = times.dt.day_name()
                 index_order = list(_DOW_ORDER)
-                axis_label, chart_kind = "day of week", "bar"
+                axis_label, chart_kind = "day of week" + clock, "bar"
             else:  # month_of_year
                 keys = times.dt.month.map(lambda m: _MONTH_ORDER[int(m) - 1])
                 index_order = list(_MONTH_ORDER)
-                axis_label, chart_kind = "month of year", "bar"
+                axis_label, chart_kind = "month of year" + clock, "bar"
 
             work = pd.DataFrame({"period": list(keys)})
             note_by = None
@@ -931,6 +1087,11 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             }
             if note_by:
                 payload["by_note"] = note_by
+            if in_utc:
+                payload["clock_note"] = (
+                    "these times carried a UTC offset or were epoch numbers, so they are counted "
+                    "in UTC: every hour, day and month here is a UTC one, not the local clock "
+                    "time the records were made in")
             if report["failed_rows"]:
                 payload["warning"] = (f"{report['failed_rows']} row(s) had no usable timestamp "
                                       "and are not counted anywhere in this series")
@@ -1016,8 +1177,17 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             })
             csv_rec = _publish_table(csv_frame, artifact_name(name, "csv", source=areas_source,
                                                               default="period_comparison"))
+            # Both periods as parsed and in order (a -> b is the opposite change of b -> a),
+            # and the label column as resolved, because it is carried into the layer.
+            layer_key = content_key(
+                "period_change", events=_input_key(file_id, sibling_file_ids),
+                areas=_input_key(areas_file_id, areas_sibling_file_ids),
+                time_column=report["column"],
+                period_a=[a_start.isoformat(), a_end.isoformat()],
+                period_b=[b_start.isoformat(), b_end.isoformat()], predicate=pred,
+                label_column=label_col)
             gj_name = artifact_name(name, "geojson", source=areas_source, default="period_change")
-            gj_rec = _publish_geojson(out, gj_name)
+            gj_rec = _publish_geojson(out, gj_name, key=layer_key)
 
             ranked = csv_frame.sort_values("change", ascending=False)
             top_up = [{"area": str(r["area"]), "a": int(r["a"]), "b": int(r["b"]),
@@ -1051,7 +1221,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 "method": (f"records counted per area with a spatial join (predicate={pred}); "
                            "change = count in period_b minus count in period_a; pct_change is "
                            "null where period_a was zero (no baseline to divide by)"),
-                "map_layer": {"url": gj_rec.get("download_url"), "label": label,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": gj_rec.get("download_url"), "label": label,
                               "render": "choropleth", "style_by": "change",
                               "source": "analysis", "count": int(len(out)),
                               # Hints for a diverging ramp: 0 is the neutral middle.
@@ -1173,8 +1344,13 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             csv_frame = pd.DataFrame(grid.drop(columns="geometry"))
             csv_rec = _publish_table(csv_frame, artifact_name(name, "csv", source=source,
                                                               default="temporal_hotspots"))
+            layer_key = content_key("temporal_hotspots", f"{code}_{size_km:g}km",
+                                    input=_input_key(file_id, sibling_file_ids), layer=layer,
+                                    time_column=report["column"], freq=code,
+                                    cell_m=round(size_m, 3), min_events=floor)
             gj_rec = _publish_geojson(grid, artifact_name(name, "geojson", source=source,
-                                                          default="temporal_hotspots"))
+                                                          default="temporal_hotspots"),
+                                      key=layer_key)
 
             ranked = grid.sort_values("shift", ascending=False)
             def _cell_rows(rows: Any) -> List[Dict[str, Any]]:
@@ -1208,7 +1384,8 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                     f"shift = count in the latest period ({latest}) minus the mean count across the "
                     f"{len(earlier)} earlier period(s) {earlier[0]}..{earlier[-1]}, where a period "
                     "with no records in a cell counts as 0; pct_shift is null when the baseline was 0"),
-                "map_layer": {"url": gj_rec.get("download_url"), "label": label,
+                "map_layer": {"id": f"agent-{layer_key}",
+                              "url": gj_rec.get("download_url"), "label": label,
                               "render": "choropleth", "style_by": "shift",
                               "source": "analysis", "count": int(len(grid)),
                               "diverging": True, "midpoint": 0,
@@ -1249,7 +1426,9 @@ def make_temporal_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                          "'which months?'. freq: hour|day|week|month|quarter|year, or a cyclical "
                          "profile hour_of_day|day_of_week|month_of_year. `by` splits the series by a "
                          "category column. This output is NON-SPATIAL: it produces a chart and a "
-                         "table, not a map layer.")),
+                         "table, not a map layer. Times that carried a UTC offset, and epoch "
+                         "numbers, are counted in UTC, not local clock time; parse.clock says "
+                         "which.")),
         StructuredTool.from_function(func=accept_null_defaults(compare_periods), name="compare_periods", metadata=meta,
             description=("Compare two time windows per AREA: counts records inside each polygon of "
                          "an areas layer (tracts, neighborhoods, counties) in period_a and period_b "

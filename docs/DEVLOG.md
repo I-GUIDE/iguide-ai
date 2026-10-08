@@ -4885,3 +4885,58 @@ rather than from the previous one.
   Four join and flag tests that had been checking the CODE peer's view through the default
   consumer now name `consumer="code_peer"`. The exit-path test's docstring records the call-site
   signal seeing inside `main()` as the design win it is.
+
+## 2026-10-08 · M8.70 · Merge prototype (61 commits, #30–#81) into the extraction branch
+
+**Change** `origin/prototype` at `defcc86` merged into `claude/extraction-integration` so the
+  branch can go to prototype as one PR. The merge base is `5ae6d92`, the VM's deployed tree. 13
+  files conflicted. Each resolution keeps both sides' intent:
+  - `capability_registry.py`: `Toolset` carries both sides' gates. Ours is `requires_extraction`
+    and `extraction_summary`; prototype's are `requires_skills` and `requires_flag`.
+    `describe(capability, *, skill_roots=None)` applies all three. Prototype's
+    `describe_code_peer` is kept, and the staging toolset is its only code-only entry, shown only
+    while the bundle is on.
+  - `api/server.py`: three things must each allow persistence before a turn writes to the store:
+    the request's flag, prototype's `deployment_mode.persistent_memory_allowed()` (`AGENT_MODE=local`,
+    #47), and our `AGENT_PERSISTENT_MEMORY=0` (M8.66). Either server-side switch keeps a laptop
+    off the shared store.
+  - `code_execution.py` imports both `extraction_enabled` and `fork_safe` (#57). `graph.py` keeps
+    prototype's gated `public_data_tools` block (#77). `executor_factory.py` gets one docstring
+    listing claude-cli, then anvilgpt/lumen, then OpenAI.
+  - `requirements.txt` and `constraints.txt` are prototype's (#44 installs through constraints),
+    plus only what extraction needs: `psycopg[binary]` pinned to 3.3.4, `pyogrio` and `networkx`.
+  - Dockerfiles are prototype's, plus our lines. `metadata-extraction-server` copies
+    `extractors/`, `rag_pipeline/` and `agent_runtime/`. `rag_pipeline` copies the library build
+    and smoke scripts and creates `agent_chat_files/skills`.
+  - CI keeps prototype's `tests` job plus our `deployment-contract` and `artifact-replay` jobs.
+  - `.claude/launch.json` keeps both sides' configs.
+  - `test_supervisor_knows_its_peers.py` maps both `make_skill_tools` and the staging factory.
+
+**Why** The user asked for the extraction work on prototype so the deployed agent can try it.
+  Merging prototype in first, instead of asking a reviewer to resolve 13 conflicts in a PR, keeps
+  the decisions here, beside the reasons for each one.
+
+  Nothing changes behaviour for a deployment that does not opt in. `AGENT_EXTRACTION` is off by
+  default, the KB Postgres record is lazy and off unless `AGENT_KB_DB=1`, and the library mount
+  needs `docker-compose.extraction.yml`.
+
+  Three of prototype's guards caught extraction code the moment the two met. Each is fixed
+  here, not exempted:
+  - The fork guard (#57) found `agent_runtime/artifacts.py` (`docker image inspect`) and
+    `rag_pipeline/llm_claude_cli.py` (both CLI calls) on `subprocess.run`. Both now use
+    `fork_safe.run`. The dev claude-cli path runs on exactly the Mac where a fork after a
+    reprojection kills the child. The retry tests now stub `llm_claude_cli.fork_safe`.
+  - The bare-credential guard's `_STILL_BARE` listed `agent_kb.py` and `opensearch_emitter.py`
+    as "moved by claude/extraction-integration", and both did move in M8.65. It is empty now, as
+    the guard's own expiry assertion asked.
+  - The loopback-port guard read `127.0.0.1:${AGENT_DB_PORT:-5544}:5432` as exposed, because
+    the default's own colon shifted its `rsplit`. It now interpolates first, as compose does. A
+    default stands in for its variable, and an undefaulted variable reads as empty, so an
+    interpolated ADDRESS never passes. The three new cases agree with
+    `docker compose config` (the `${BIND}` one renders with no `host_ip`).
+
+**Measured** Deployed-replica image (`iguide-replica:deeb331-freeze`, amd64, `--network none`):
+  **3,514 passed, 13 failed, 16 skipped**. After the three fixes: 121 of 121 pass in the touched files.
+  The other 10 fail identically on a `git archive` of pure `origin/prototype` in the same image.
+  The freeze predates the readers prototype now declares (xarray, pyarrow, pypdf, docx). CI
+  installs `requirements.txt -c constraints.txt`, which has them.

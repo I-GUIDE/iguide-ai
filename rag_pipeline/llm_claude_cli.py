@@ -33,6 +33,8 @@ import time
 from functools import lru_cache
 from typing import Optional
 
+from agent_runtime import fork_safe
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "sonnet"
@@ -283,7 +285,7 @@ def native_tools_visible(*, timeout: int = 120) -> list:
         raise ClaudeCliUnavailable("claude executable not found")
     _load_token_from_env_file()
     try:
-        proc = subprocess.run(_build_argv(exe, _TOOL_PROBE, model()), capture_output=True,
+        proc = fork_safe.run(_build_argv(exe, _TOOL_PROBE, model()), capture_output=True,
                               text=True, timeout=timeout, cwd=_neutral_cwd())
         payload = json.loads(proc.stdout or "{}")
     except Exception as exc:                                # pragma: no cover - environment
@@ -374,7 +376,7 @@ def _call_once(prompt: str, *, system: Optional[str] = None) -> str:
     _load_token_from_env_file()
     mdl = model()
     try:
-        proc = subprocess.run(_build_argv(exe, prompt, mdl, system), capture_output=True,
+        proc = fork_safe.run(_build_argv(exe, prompt, mdl, system), capture_output=True,
                               text=True, timeout=_timeout(), cwd=_neutral_cwd())
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"claude CLI timed out after {_timeout()}s (model={mdl})") from exc

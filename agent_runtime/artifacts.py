@@ -24,9 +24,10 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from agent_runtime import fork_safe
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def resolve_image_digest(image: str) -> Optional[str]:
     if "@sha256:" in image:
         return image
     try:
-        proc = subprocess.run(
+        proc = fork_safe.run(
             ["docker", "image", "inspect", image,
              "--format", "{{json .RepoDigests}}|{{.Id}}"],
             capture_output=True, text=True, timeout=30)

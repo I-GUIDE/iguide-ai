@@ -42,6 +42,13 @@
         "outputs"
       ],
       "port": 8141
+    },
+    {
+      "name": "map-ui-prototype",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "map-ui-prototype",
+      "port": 5173
     }
   ]
 }

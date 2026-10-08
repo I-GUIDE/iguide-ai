@@ -1,117 +1,69 @@
-# Version lock for reproducible builds.
+# constraints.txt: the package versions the DEPLOYED agent-api image runs.
 #
-# WHAT THIS PINS
-# The stack the DEPLOYED agent-api image runs, from `pip freeze` inside the running container
-# on 2026-10-01 (CPython 3.11.16, x86_64). That is the stack the EarthVerse / GeoAnalystBench
-# runs measured, so it is the baseline: a lock that differs from it describes an environment
-# nobody deploys. Until 2026-10-01 this file instead pinned a dev Mac's stack (pandas 2.2.3,
-# numpy 2.1.3, langchain 1.2.10, networkx 3.4.2); building the image from it would have
-# downgraded production across a pandas MAJOR version.
+# Generated 2026-10-01 by `pip freeze` inside the running agent-api container: image
+# deeb331964f6, built 2026-09-22 from rag_pipeline/Dockerfile (python:3.11-slim; CPython
+# 3.11.16, x86_64). Everything below the marker line at the end of this header is that output,
+# verbatim: 177 package names and versions, nothing else.
 #
-# WHY A LOCK AT ALL
-# requirements.txt carries unbounded pins (`langchain>=1.0`, bare `pandas`), so a clean build
-# resolves whatever is newest that day. Measured 2026-08-07: the resolution moved inside one
-# afternoon. Nothing measured against a baseline means anything while the stack drifts.
+# Why it exists. requirements.txt names 42 packages and pins none of them to a version:
+# geopandas, shapely, rasterio, libpysal and pandas are bare names, and the few bounds are lower
+# bounds. So until this file, "the deployed stack" was whatever pip happened to resolve on the
+# day the image was built, recorded nowhere.
+# CI installs through it,
+#     pip install -r requirements.txt -c constraints.txt
+# so the suite tests the versions that are actually running, not latest-at-run-time.
 #
-# Upgrading is fine, as a deliberate, measured step: bump here, re-run `pytest` and the
-# benchmark, and record the delta in docs/DEVLOG.md. Regenerate the generated block below from
-# a fresh `pip freeze` of the image rather than editing it by hand.
+# The images install through it as well. rag_pipeline/Dockerfile, MCP_server/Dockerfile and
+# metadata-extraction-server/Dockerfile pass `-c constraints.txt` to every pip install, so a
+# rebuild reproduces the versions below instead of resolving that day's newest, and
+# rag_pipeline/tests/test_image_installs_through_lock.py fails if one of them stops.
 #
-# Usage (both Dockerfiles, CI, and any clean venv):
-#   pip install -r requirements.txt -c constraints.txt
-
-# --- agent / LLM stack. Fastest-moving packages in the tree. -------------------
-langchain==1.4.1
-langchain-core==1.6.3
-langchain-openai==1.6.2
-langchain-anthropic==1.7.2
-anthropic==1.6.0
-langgraph==1.2.11
-# The langgraph SUB-PACKAGES must be pinned too, and this is not optional bookkeeping:
-# with only the parent pinned, a clean build once resolved a langgraph-prebuilt that imported
-# a name its langgraph did not have, raising ImportError while importing `langchain.agents`
-# — create_agent dies and the ENTIRE agent is dead on arrival. These version independently.
-langgraph-prebuilt==1.1.0
-langgraph-checkpoint==4.2.0
-langgraph-sdk==0.4.4
-langchain-mcp-adapters==0.3.2
-# langsmith is a langchain-core dependency and has jumped minor series in a clean build.
-langsmith==0.12.6
-mcp==1.30.0
-openai==3.14.1
-
-# --- retrieval backends -------------------------------------------------------
-opensearch-py==3.2.0
-neo4j==6.3.1
-
-# --- scientific / geospatial stack --------------------------------------------
-# pandas 3 is what production runs and the benchmark measured. backend_swap's suite was
-# re-run on exactly this stack before the switch (1,945/1,947; M8.56), so extraction's
-# tested paths are pandas-3 clean. Extracted SLICES are third-party code and are not covered.
-pandas==3.0.5
-numpy==2.4.6
-geopandas==1.1.4
-shapely==2.1.2
-pyproj==3.7.2
-# One pin for every interpreter: 1.4.4 ships wheels for cp310-cp314 on Linux and macOS.
-# (1.5.0, pinned here until 2026-10-01, is cp312+ only, so no 3.11 image could install it.)
-rasterio==1.4.4
-pyogrio==0.13.0
-# pyarrow is REQUIRED, not optional: vector_reproject / vector_spatial_join write GeoParquet.
-# It was once absent from requirements.txt and both tools failed in every clean build.
-pyarrow==25.0.1
-matplotlib==3.11.2
-# The community-detection work was measured on 3.4.2; production runs 3.6.1, and the
-# seeded-partition contract tests pass on it. Re-measure the corpus graph before treating
-# results across the two as comparable.
-networkx==3.6.1
-
-# --- embeddings / NLP ---------------------------------------------------------
-sentence-transformers==6.0.1
-transformers==5.17.0
-# The image installs the CPU build from the PyTorch index; macOS has no `+cpu` wheel.
-torch==2.14.0+cpu ; sys_platform == "linux"
-torch==2.14.0 ; sys_platform != "linux"
-spacy==3.8.16
-
-# --- web / serving / identity -------------------------------------------------
-flask==3.1.3
-flask-cors==6.0.5
-flasgger==0.9.7.1
-gunicorn==26.2.0
-fastapi==0.141.1
-pydantic==2.13.5
-PyJWT==2.14.0
-
-# --- open-web extraction, data, storage, config -------------------------------
-beautifulsoup4==4.15.0
-lxml==6.1.3
-markdownify==1.2.3
-ddgs==9.16.0
-nbformat==5.11.1
-boto3==1.43.96
-python-dotenv==1.2.3
-
-# --- the extraction bundle: NOT in the deployed image yet ----------------------
-# The Postgres client and the three readers the extractors import (declared 2026-10-01).
-# Versions are backend_swap's; all four support CPython 3.11 and fit the pins above.
-psycopg==3.3.4
-psycopg-binary==3.3.4
-pypdf==6.6.2
-python-docx==1.2.0
-xarray==2026.7.0
-
-# --- the rest of the deployed agent-api image (generated; do not edit by hand) ----
+# A new requirement floats until this file is retaken. A constraint binds only a name it lists,
+# so a package added to requirements.txt after the freeze, and any new dependency it brings,
+# resolves at build time to its newest version that fits the pins below. Nothing listed here
+# moves to make room: if no version fits, the build fails with ResolutionImpossible. CI's drift
+# step names every floating package in a warning. After the deploy that ships it, retake this
+# file from the rebuilt container (command below); that pins it and clears the warning. To move
+# a listed package on purpose, edit its line here in the same change. A later retake should
+# then reproduce this file exactly, apart from packages that floated; any other difference
+# means the image did not install what this file says.
+#
+# Regenerate from the deployment (read-only there), never from a development machine:
+#     { sed -n '1,/^# ---- pip freeze/p' constraints.txt
+#       ssh exouser@149.165.147.219 'docker exec agent-api python -m pip freeze'
+#     } > constraints.new && mv constraints.new constraints.txt
+# then update the date, image id, interpreter and count above (the image id is
+# `docker inspect --format '{{.Image}}' agent-api` on the same host). A freeze taken on the Mac
+# is the trap this replaces: it carries ~/.local packages that a clean build lacks, and it pins
+# what the Mac resolved. origin/backend_swap's constraints.txt is one such Mac-frozen lock. It
+# disagrees with this image on 34 of the 40 packages the two share (pandas 2.2.3 vs 3.0.5,
+# numpy 2.1.3 vs 2.4.6), so it must not replace this file if that branch merges.
+#
+# Three lines look unusual and are correct:
+#   torch==...+cpu   exists only on the PyTorch CPU index, which requirements.txt adds with
+#                    --extra-index-url. There is no +cpu wheel for macOS, so this file
+#                    installs on Linux only. That is the point: it describes the deployment.
+#   en_core_web_sm   is spaCy's English model, which is not on PyPI. rag_pipeline/Dockerfile
+#                    installs it by name through this file, and this line supplies the wheel's
+#                    URL and sha256, which pip verifies.
+#   py-spy           is installed in its own Dockerfile layer, for the watchdog.
+# requirements.txt requests neither of the last two, so CI's install ignores them; they pin the
+# agent-api image's own layers.
+#
+# ---- pip freeze of the agent-api container, 2026-10-01 (everything below is generated) ----
 affine==3.0.1
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
+anthropic==1.6.0
 anyio==4.15.1
 attrs==26.1.0
+beautifulsoup4==4.15.0
 blinker==1.9.0
 blis==1.3.3
+boto3==1.43.96
 botocore==1.43.96
 catalogue==2.0.10
 certifi==2026.7.22
@@ -127,17 +79,25 @@ contourpy==1.3.3
 cryptography==50.0.1
 cycler==0.12.1
 cymem==2.0.13
+ddgs==9.16.0
 distro==1.9.0
 docstring_parser==0.18.0
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 esda==2.9.0
 Events==0.5
+fastapi==0.141.1
 fastjsonschema==2.22.2
 filelock==4.0.0
 fiona==1.10.1
+flasgger==0.9.7.1
+Flask==3.1.3
+flask-cors==6.0.5
 fonttools==4.65.0
 frozenlist==1.8.0
 fsspec==2026.7.0
+geopandas==1.1.4
 grpcio==1.84.0
+gunicorn==26.2.0
 h11==0.16.0
 hf-xet==1.6.0
 httpcore==1.0.9
@@ -159,20 +119,41 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 jupyter_core==5.9.1
 kiwisolver==1.5.1
+langchain==1.4.1
+langchain-anthropic==1.7.2
+langchain-core==1.6.3
+langchain-mcp-adapters==0.3.2
+langchain-openai==1.6.2
 langchain-protocol==0.0.19
+langgraph==1.2.11
+langgraph-checkpoint==4.2.0
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.4
+langsmith==0.12.6
 libpysal==4.14.1
+lxml==6.1.3
 markdown-it-py==4.2.0
+markdownify==1.2.3
 MarkupSafe==3.0.3
+matplotlib==3.11.2
+mcp==1.30.0
 mdurl==0.1.2
 mistune==3.3.4
 mpmath==1.3.0
 multidict==6.8.0
 murmurhash==1.0.15
 narwhals==2.26.0
+nbformat==5.11.1
+neo4j==6.3.1
+networkx==3.6.1
+numpy==2.4.6
+openai==3.14.1
 opensearch-protobufs==1.2.0
+opensearch-py==3.2.0
 orjson==3.12.0
 ormsgpack==1.12.2
 packaging==26.3
+pandas==3.0.5
 pillow==12.3.0
 platformdirs==4.11.9
 pluggy==1.6.0
@@ -182,16 +163,22 @@ propcache==0.5.4
 protobuf==7.36.1
 py-spy==0.4.2
 pycparser==3.0
-pydantic_core==2.46.5
+pydantic==2.13.5
 pydantic-settings==2.15.0
+pydantic_core==2.46.5
 pygeoda==0.1.3
 Pygments==2.21.0
+PyJWT==2.14.0
+pyogrio==0.13.0
 pyparsing==3.3.2
+pyproj==3.7.2
 pytest==9.1.1
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
 python-multipart==0.0.32
 pytz==2026.3.post1
 PyYAML==6.0.3
+rasterio==1.4.4
 referencing==0.37.0
 regex==2026.9.10
 requests==2.34.2
@@ -202,11 +189,14 @@ s3transfer==0.19.2
 safetensors==0.8.0
 scikit-learn==1.9.1
 scipy==1.17.1
+sentence-transformers==6.0.1
+shapely==2.1.2
 shellingham==1.5.4
 six==1.17.0
 smart_open==8.0.1
 sniffio==1.3.1
 soupsieve==2.9.2
+spacy==3.8.16
 spacy-legacy==3.0.12
 spacy-loggers==1.0.5
 spreg==1.9.0
@@ -219,12 +209,14 @@ thinc==8.3.13
 threadpoolctl==3.7.0
 tiktoken==0.14.0
 tokenizers==0.23.2
+torch==2.14.0+cpu
 tqdm==4.70.1
 traitlets==5.16.1
+transformers==5.17.0
 truststore==0.10.4
 typer==0.27.2
-typing_extensions==4.16.0
 typing-inspection==0.4.4
+typing_extensions==4.16.0
 urllib3==2.8.0
 uuid_utils==0.17.1
 uvicorn==0.53.0
@@ -236,3 +228,7 @@ wrapt==2.4.1
 xxhash==4.0.1
 yarl==1.25.1
 zstandard==0.25.0
+
+# The extraction bundle's Postgres client (extractors/kb_db.py); not yet in the deployed image.
+psycopg==3.3.4
+psycopg-binary==3.3.4

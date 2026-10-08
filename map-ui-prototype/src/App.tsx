@@ -14,11 +14,14 @@ import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, laye
 import { bboxToFC } from './mapFit';
 import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
-  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine } from './agentClient';
+  fetchAgentFile,
+  type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
+  type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
@@ -34,6 +37,17 @@ const DEFAULT_CFG: AgentCfg = {
 // Retrieval tools that do NOT touch geography — used when the "Spatial tools" toggle
 // is off so a pure-chat turn stays fast and never opens the map.
 const CHAT_ONLY_METHODS = ['keyword_search', 'semantic_search', 'neo4j_search', 'web_search', 'agent_kb_search', 'get_kb_block'];
+
+// How long a turn whose answer has arrived waits for its layers to finish downloading before it
+// ends and gives the composer back. Usually it waits for nothing: a map_layer download starts
+// when the event arrives, and the rest of the turn ran another 45.6 s in the measured case. It
+// waits when the download starts late. The artifact fallback starts at the end of the stream, and
+// a server whose threads are all holding streams serves the download only when one of them ends.
+// 20 s covers the largest point layer add_map_layer serves (150,000 points, about 18 MB without
+// attributes) at 7.5 Mbps with no head start. Past it the turn ends without the layer, which is
+// still drawn when it arrives. Unbounded, the fallback's wait held the composer through 60.8 s of
+// a stalled download, and Stop could not end it.
+const LAYER_WAIT_MS = 20_000;
 
 // The chat pane's width belongs to the user now. These are mirrored in styles.css as
 // --chat-min / --map-min so the stylesheet can re-clamp a restored width on its own, live, as
@@ -217,6 +231,19 @@ export default function App() {
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
 
   const pushMsg = useCallback((m: ChatMessage) => setMessages((prev) => [...prev, m]), []);
+  // A saved model the catalogue no longer offers goes back to the agent default, and says so.
+  // Left alone, the picker would SHOW "Agent default" (a <select> whose value matches no option
+  // shows its first one) while every turn still sent the saved id: qwen3:4b, now hidden because
+  // AnvilGPT refuses it tool calls, would fail every turn behind a picker that looks fine.
+  useEffect(() => {
+    const why = unavailableChoice(cfg.model, cfg.provider, models);
+    if (!why || !models) return;
+    setCfg((c) => ({ ...c, model: '', provider: '', reasoningEffort: '' }));
+    // A demo pins its model server-side and hides the picker, so there is nothing to explain.
+    if (!demoMode) {
+      pushMsg({ role: 'agent', text: `${why} Turns now use the agent default (${models.default.model}).` });
+    }
+  }, [models, cfg.model, cfg.provider, demoMode, pushMsg]);
   const putLayer = useCallback((a: LayerArtifact) => {
     setLayers((prev) => { const i = prev.findIndex((l) => l.id === a.id); if (i === -1) return [...prev, a]; const n = prev.slice(); n[i] = a; return n; });
   }, []);
@@ -261,6 +288,10 @@ export default function App() {
   // --- local chat history: snapshot, restore, continue ------------------------------
   // Saved after each turn rather than on every keystroke: a turn is the unit a user would
   // expect to come back to, and it keeps writes off the streaming path.
+  //
+  // These two refs are assigned DURING RENDER, so they hold what React last rendered, not what
+  // was last set. snapshotSession reads them, which is why it runs from an effect after the
+  // commit (below), never straight from runLive.
   const layersRef2 = useRef(layers); layersRef2.current = layers;
   const messagesRef = useRef(messages); messagesRef.current = messages;
   /** Where the history list comes from.
@@ -340,6 +371,34 @@ export default function App() {
     }).then(() => refreshSessions());
   }, [drawnRegion, cfg.model, cfg.provider, tokenMode, asAgentConfig, refreshSessions]);
 
+  // One snapshot per finished turn, taken after React commits the turn's last update.
+  //
+  // runLive's `finally` used to call snapshotSession itself. The turn's final patch (the
+  // answer's html, `streaming: false`) and any layer the artifact fallback adds are state
+  // updates, and with createRoot React renders them on a later task, so the snapshot read the
+  // refs above as they were BEFORE that render. S9.8 measured 5 of 6 turns storing their answer
+  // as `streaming: true` with no html, which reopened as an open "thinking…" trace with no
+  // answer. The sixth kept its answer only because the fallback awaited a fetch, and lost the
+  // layer the fallback drew. `finally` now bumps this counter instead. Every update queued
+  // before the bump is rendered no later than the bump, and this effect runs after that commit.
+  const [turnsEnded, setTurnsEnded] = useState(0);
+  // Through a ref, not as a dependency: as a dependency, every change to snapshotSession's own
+  // inputs (a drawn region, a model switch, tokenMode once ui-config answers) would save again
+  // with no turn behind it. The ref still hands over the callback from the latest render, so
+  // the save sees this commit's tokenMode, not the one the turn started with.
+  const snapshotRef = useRef(snapshotSession); snapshotRef.current = snapshotSession;
+  // Once per value of the counter, not once per run of the effect. The counter is 0 on mount,
+  // so StrictMode's double mount saves nothing. Fast Refresh re-runs every effect on an edit,
+  // whatever its deps, and a plain `if (turnsEnded)` saved again each time: one comment edit
+  // re-saved all four conversations open in dev tabs, one of them held by three tabs at
+  // different turns, where the last tab to save wins.
+  const savedTurns = useRef(0);
+  useEffect(() => {
+    if (turnsEnded === savedTurns.current) return;
+    savedTurns.current = turnsEnded;
+    snapshotRef.current();
+  }, [turnsEnded]);
+
   const restoreSession = useCallback(async (id: string) => {
     // Local first — it is a cache, and a hit avoids a round trip. In token mode fall back to
     // the server, which is where a conversation opened on another browser actually lives.
@@ -371,6 +430,9 @@ export default function App() {
     memoryRef.current = rec.memoryId ?? null;
     sessionFileIds.current = [...(rec.fileIds || [])];
     pendingFileIds.current = [...(rec.fileIds || [])];
+    // As at upload time: each upload counts as drawn, so a later turn that lists it does not
+    // bring back a second copy of it through the artifact fallback.
+    for (const id of rec.fileIds || []) layerSourceFiles.current.add(id);
     setMessages(rec.messages || []);
     setLayers([]);
     autoRevealed.current = false;
@@ -389,11 +451,16 @@ export default function App() {
         continue;
       }
       try {
-        const res = await fetch(resolveUrl(url));
+        const res = await fetchAgentFile(resolveUrl(url), asAgentConfig());
         if (!res.ok) continue;
         const fc = await res.json();
         if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
         restored.push({ ...(l as any), data: fc } as LayerArtifact);
+        // Back on the map, so it counts as drawn, as onMapLayer counts a live layer. The set
+        // starts empty in a new tab, and the first turn whose results carried this file's
+        // download record (list_conversation_files does) drew it again through the artifact
+        // fallback: a second copy, filled, over the restored one.
+        layerSourceFiles.current.add(fileKey(url));
       } catch { /* the file is gone — leave the layer out rather than showing an empty one */ }
     }
     setLayers(restored);
@@ -474,7 +541,7 @@ export default function App() {
     const m = /\/agent\/files\/([^/]+)\/download/.exec(u);
     return m ? m[1] : u;
   };
-  const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
+  const loadVectorArtifacts = useCallback(async (files: FileRecord[], signal?: AbortSignal) => {
     if (!spatial) return;
     for (const f of files) {
       const name = f.filename || f.download_url || '';
@@ -486,7 +553,7 @@ export default function App() {
           layerSourceFiles.current.has(fileKey(f.download_url))) continue;
       loadedArtifacts.current.add(key);
       try {
-        const res = await fetch(resolveUrl(f.download_url));
+        const res = await fetchAgentFile(resolveUrl(f.download_url), asAgentConfig(), { signal });
         if (!res.ok) continue;
         const j = await res.json();
         const fc: FeatureCollection =
@@ -519,7 +586,7 @@ export default function App() {
         fitView(fc);
       } catch { /* not loadable as GeoJSON — leave it as a download */ }
     }
-  }, [spatial, resolveUrl, putLayer, fitView]);
+  }, [spatial, resolveUrl, putLayer, fitView, asAgentConfig]);
 
   const onFeatureClick = useCallback((feature: any, layerId: string) => {
     const props = (feature && feature.properties) || {};
@@ -551,6 +618,15 @@ export default function App() {
     mapLayerDelivered.current = false;
     const trace: TraceLine[] = [];
     const addTrace = (t: TraceLine) => { trace.push(t); patch({ trace: [...trace] }); };
+    // Stop aborts the stream AND every layer download the turn started. Only the stream was tied
+    // to it, so a stalled download could not be abandoned.
+    const ctl = new AbortController();
+    // streamChat does not wait for onMapLayer, so a layer fetched from its url could still be
+    // downloading when the stream ended, and the end-of-turn snapshot was taken without it.
+    // Each download is kept here, and `finally` waits for them before it ends the turn.
+    const layerLoads: Promise<unknown>[] = [];
+    const tracked = (draw: (layer: MapLayerEvent) => Promise<void>) =>
+      (layer: MapLayerEvent) => { layerLoads.push(draw(layer)); };
     setBusy(true);
     // A drawn region becomes spatial context for the agent (the API has no geometry
     // field, so it rides along in the prompt). The user bubble keeps the original text.
@@ -559,9 +635,9 @@ export default function App() {
     if (spatial && uploadContext.current) hints.push(uploadContext.current);
     const regionHint = hints.length ? `\n\n(${hints.join(' ')})` : '';
     try {
-      abortRef.current = new AbortController();
+      abortRef.current = ctl;
       const res = await streamChat(text + regionHint, {
-        signal: abortRef.current.signal,
+        signal: ctl.signal,
         threadId: threadRef.current, memoryId: memoryRef.current,
         fileIds: pendingFileIds.current, agentDev: true,
         includeMcpTools: spatial,
@@ -577,7 +653,7 @@ export default function App() {
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
         onFile: (files) => patch({ artifacts: files }),
-        onMapLayer: async (layer) => {
+        onMapLayer: tracked(async (layer) => {
           mapLayerDelivered.current = true;
           if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
           // A raster (embedding PCA image, segmentation mask) is an IMAGE draped over its
@@ -601,8 +677,16 @@ export default function App() {
           let fc = layer.geojson;
           if (!fc && layer.url) {
             try {
-              const res = await fetch(resolveUrl(layer.url));
+              const res = await fetchAgentFile(resolveUrl(layer.url), asAgentConfig(),
+                                               { signal: ctl.signal });
               if (res.ok) fc = await res.json();
+              else {
+                // Say so. A refused download used to vanish here without a word, beside an
+                // answer saying the layer was on the map.
+                const why = await res.json().then((j) => j?.reason || '').catch(() => '');
+                addTrace({ text: `map: ${layer.label} could not be loaded (HTTP ${res.status}`
+                  + `${why ? `, ${why}` : ''}), so it is not on the map`, kind: 'warn' });
+              }
             } catch { /* leave it undelivered rather than guess */ }
           }
           if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;
@@ -637,7 +721,7 @@ export default function App() {
                 ? `(SAMPLE: ${layer.count ?? fc.features.length} of ${layer.total})`
                 : (() => { const n = layer.count ?? fc.features.length;
                             return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
-        },
+        }),
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
       });
       pendingFileIds.current = []; // attached to the thread server-side now
@@ -649,10 +733,11 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
-      // Only when the agent did NOT place a layer itself. AWAITED, not fire-and-forget: the
-      // snapshot in `finally` used to run first, so a turn whose layers came from the artifact
-      // fallback was saved with an empty layer list and restored as a bare transcript.
-      if (!mapLayerDelivered.current) await loadVectorArtifacts(res.downloads);
+      // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
+      // rather than being awaited here. The await put the fallback's layers before `finally` ended
+      // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
+      // not end it.
+      if (!mapLayerDelivered.current) layerLoads.push(loadVectorArtifacts(res.downloads, ctl.signal));
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
       // An auth refusal is not a failed request and must not read like one: "Request failed:
@@ -673,8 +758,21 @@ export default function App() {
       patch(isAuth
         ? { html: renderMarkdown(text, resolveUrl), streaming: false }
         : { text, streaming: false });
-    } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
-    // `snapshotSession` MUST be in these deps. It was not, and that single omission is the
+    } finally {
+      // The turn ends when its layers are drawn, so the snapshot this counter triggers includes
+      // them, and `busy` keeps the composer from starting the next turn until then. A second save
+      // after the layers landed would free the composer sooner, but it could fall inside the next
+      // turn and store that turn mid-stream, which is what S9.9 stopped. Stop still works while
+      // this waits, because abortRef is cleared only after it. History does too, and a
+      // conversation opened during the wait is the one this snapshot saves (S9.10, not fixed).
+      if (!(await settledWithin(layerLoads, LAYER_WAIT_MS))) {
+        addTrace({ text: `map: a layer was still downloading ${LAYER_WAIT_MS / 1000} s after the reply; `
+          + 'the turn was saved without it', kind: 'warn' });
+      }
+      setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1);
+    }
+    // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
+    // `snapshotSession` was first missing from these deps, and that single omission was the
     // whole of "after I ask a question the wrong history shows up" — plus two things that
     // looked unrelated.
     //
@@ -691,11 +789,12 @@ export default function App() {
     // is where the orphan `conversation-sess-...` documents came from.
     //
     // Third instance of this exact class in this file (`refreshSessions`/`viewer`,
-    // `restoreSession`/`tokenMode`, now this). The neighbouring long-lived reads use refs for
+    // `restoreSession`/`tokenMode`, then this). The neighbouring long-lived reads use refs for
     // the same reason; anything read inside a callback that outlives a render either goes in
-    // the deps or goes in a ref.
-  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts,
-      snapshotSession]);
+    // the deps or goes in a ref. Declaring it fixed every turn that STARTED after ui-config
+    // answered; the effect that now takes the snapshot reads the callback of the render that
+    // ends the turn, which also covers a turn already running when it answered.
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;
@@ -766,12 +865,15 @@ export default function App() {
 
   const onUpload = useCallback(async (files: File[]) => {
     // Always try to show GeoJSON on the map locally for instant feedback.
-    for (const f of files) {
+    // previews[i] is the layer files[i] drew, if it drew one.
+    const previews: (string | undefined)[] = [];
+    for (const [i, f] of files.entries()) {
       if (/\.(geo)?json$/i.test(f.name)) {
         try { const j = JSON.parse(await f.text());
           const fc: FeatureCollection = j.type === 'FeatureCollection' ? j : j.type === 'Feature' ? { type: 'FeatureCollection', features: [j] } : { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: j, properties: {} }] };
           const name = f.name.replace(/\.(geo)?json$/i, '');
           putLayer({ kind: 'geojson', id: `upload-${name}`, source: 'upload', label: `Upload: ${name}`, data: fc, style: { fill: [239, 68, 68, 90], line: [239, 68, 68, 255], pointRadius: 6 }, fitBounds: true });
+          previews[i] = `upload-${name}`;
           fitView(fc);
           // Remember the upload's extent so the agent can bound Overpass by "the geojson I uploaded".
           try { const bb = layerBBox(fc); uploadContext.current = `The uploaded file "${name}" covers bbox [${bb.map((x) => x.toFixed(4)).join(', ')}] (minLon,minLat,maxLon,maxLat, EPSG:4326).`; } catch { /* */ }
@@ -780,19 +882,34 @@ export default function App() {
     }
     if (mode === 'live') {
       try {
-        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig());
+        const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could
         // not survive a reload. Now that the same bytes live in the file store, record where
         // to re-fetch them so a restored session shows the upload too.
+        //
+        // Every upload is on the map already, as the preview above, so the artifact fallback must
+        // not draw it again. It did, after any turn whose results carried the upload's download
+        // record, and the agent's file listing carries it now that the upload names this
+        // conversation. Registered by id, because the server's secure_filename rewrites names.
         for (const r of recs) {
-          const stem = (r.filename || '').replace(/\.(geo)?json$/i, '');
-          if (stem && r.download_url) {
+          if (r.file_id) layerSourceFiles.current.add(r.file_id);
+        }
+        // Paired by POSITION, not by name. The route answers one record per file, in the order
+        // sent, but names it by werkzeug's secure_filename: "My Data.geojson" comes back as
+        // "My_Data.geojson", "roads(1).geojson" as "roads1.geojson". Matched by name, such a
+        // preview never got its url and was stored inline, which INLINE_KEEP_BYTES drops past
+        // 2 MB: a 3.8 MB upload reopened as "0 layer(s) restored, 1 no longer available".
+        // A count that disagrees pairs nothing: a wrong pairing would restore one file's
+        // geometry under another's name.
+        if (recs.length === files.length) {
+          recs.forEach((r, i) => {
+            const id = previews[i];
+            if (!id || !r.download_url) return;
             setLayers((prev) => prev.map((l) => (
-              l.id === `upload-${stem}` && l.kind === 'geojson'
-                ? { ...l, sourceUrl: r.download_url } : l)));
-          }
+              l.id === id && l.kind === 'geojson' ? { ...l, sourceUrl: r.download_url } : l)));
+          });
         }
         pushMsg({ role: 'agent', text: `Uploaded ${recs.length} file(s) to the agent: ${recs.map((r) => r.filename).join(', ')}. They're attached to this conversation — ask me about them.` });
       } catch (e: any) { pushMsg({ role: 'agent', text: `Upload to agent failed: ${e.message}` }); }
@@ -930,6 +1047,20 @@ export default function App() {
 }
 
 function short(v: any): string { try { const s = typeof v === 'string' ? v : JSON.stringify(v); return s.length > 80 ? s.slice(0, 80) + '…' : s; } catch { return ''; } }
+
+/** True once every promise has settled, false if `ms` passes first. */
+async function settledWithin(ps: Promise<unknown>[], ms: number): Promise<boolean> {
+  if (!ps.length) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.allSettled(ps).then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 type VectorLayer = Extract<LayerArtifact, { kind: 'geojson' }>;
 // Buffer / hull / clip / relate all read `.data`, so only a vector layer can be their

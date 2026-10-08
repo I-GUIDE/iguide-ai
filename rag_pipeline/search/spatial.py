@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
@@ -216,6 +218,48 @@ def _feature_phrase(doc, ent) -> Optional[str]:
     return None
 
 
+def _without_article(ent):
+    """``ent`` minus a leading lowercase "the" ("the Great Plains" -> "Great Plains").
+
+    en_core_web_sm, the model production loads, keeps the article inside many entities: "the Great
+    Plains", "the Chesapeake Bay", "the United States", "the Gulf of Mexico". The fallback never
+    offered it, so the same place reached the geocoder and its cache under two spellings depending
+    on which path ran. Only a LOWERCASE "the" goes. A capitalized one can belong to the name ("The
+    Hague"), or is the query's first word, where the two cannot be told apart.
+    """
+    if len(ent) > 1 and ent[0].text == "the":
+        return ent[1:]
+    return ent
+
+
+def _only_non_places(text: str) -> bool:
+    """Whether every word of *text* is one ``_NOT_PLACES`` excludes ("GeoJSON", "NetCDF", "MODIS")."""
+    return all(word.lower() in _NOT_PLACES for word in text.split())
+
+
+# Python's re has no \p{Lu}, so the uppercase letters are spelled out. With [A-Z] no non-ASCII place
+# could be a candidate: "Rondônia" never matched, and "São Paulo" became "Paulo". The Basic
+# Multilingual Plane holds Latin, Greek, Cyrillic, Armenian and Georgian and is cheap to scan once;
+# the few cased scripts beyond it, such as Deseret, are left out.
+_UPPER = "[" + "".join(c for c in map(chr, range(0x10000)) if c.isupper() or c.istitle()) + "]"
+# An uppercase letter, then letters of any script, ".", "-", "'", the typographic apostrophe
+# ("Xi’an") and U+2018, which stands in for the okina ("Hawai‘i").
+_CAPITALIZED_WORD = _UPPER + r"(?:[^\W\d_]|[.'\u2018\u2019-])*"
+# Words keep their "." for "U.S." and "St. Louis", so a run used to continue past the end of a
+# sentence: "Illinois. Then county" was offered and the bare "Illinois" never was, and "Python. The"
+# kept its period, which slipped it past _NOT_PLACES. A period, or a period and a closing quote
+# ("Ohio.’ Then"), now ends the run unless it closes an initial ("N. Dakota"), an initialism
+# ("U.S.") or an abbreviation that opens a place name.
+_NAME_ABBREVIATIONS = ("St", "Ste", "Mt", "Ft", "Pt")
+_RUN_GAP = (
+    r"(?:(?<!\.)(?<!\.['\u2018\u2019])"
+    + rf"|(?<=\b{_UPPER}\.)|(?<=\.[^\W\d_]\.)"
+    + "".join(rf"|(?<=\b{a}\.)|(?<=\b{a.upper()}\.)" for a in _NAME_ABBREVIATIONS)
+    + r")\s+"
+)
+_CAPITALIZED_RUN = re.compile(rf"\b({_CAPITALIZED_WORD}(?:{_RUN_GAP}{_CAPITALIZED_WORD}){{0,2}})\b")
+
+
 def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
     """Fallback place candidates from capitalization, for when NER finds nothing.
 
@@ -224,10 +268,10 @@ def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
     string while extracting both places from the original sentence. Candidates here are deliberately
     liberal because the geocoder is the arbiter: a non-place simply fails to resolve.
     """
-    import re
-
+    # A combining mark is not a word character, so decomposed text would cut "Rondônia" to "Rondo".
+    user_query = unicodedata.normalize("NFC", user_query)
     runs: List[str] = []
-    for match in re.finditer(r"\b([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2})\b", user_query):
+    for match in _CAPITALIZED_RUN.finditer(user_query):
         phrase = match.group(1).strip()
         words = [w for w in phrase.split() if w.lower() not in _NOT_PLACES]
         if not words:
@@ -255,7 +299,8 @@ def extract_locations_from_query(user_query: str) -> List[str]:
     """Place names in *user_query*, best candidate first.
 
     A named entity is emitted WITH its feature word when it has one, because that is the form the
-    geocoder can resolve. When NER yields nothing usable, capitalized phrases are offered instead.
+    geocoder can resolve, and without a leading lowercase "the". When NER finds no place entity at
+    all, capitalized phrases are offered instead.
     """
     if nlp is None:
         logger.debug("Spacy model unavailable; skipping spatial entity extraction.")
@@ -263,15 +308,28 @@ def extract_locations_from_query(user_query: str) -> List[str]:
 
     doc = nlp(user_query)
     ordered: List[str] = []
+    found_place_entity = False
     for ent in doc.ents:
         if ent.label_ not in ("GPE", "LOC", "FAC"):
+            continue
+        found_place_entity = True
+        ent = _without_article(ent)
+        # NER does not know a file format from a place. en_core_web_sm tags "GeoJSON" as GPE in
+        # "convert a GeoJSON to a COG with GDAL", and "NetCDF", "MODIS", "USGS", "LAS" and "Python"
+        # elsewhere, so production offered them to the geocoder. The fallback's vocabulary applies
+        # here as well.
+        if _only_non_places(ent.text):
             continue
         phrase = _feature_phrase(doc, ent)
         # Prefer the fuller phrase, but keep the bare entity as a fallback candidate after it.
         for value in ((phrase, ent.text) if phrase else (ent.text,)):
             if value and value not in ordered:
                 ordered.append(value)
-    if not ordered:
+    # The fallback is for text NER could not parse, like the keyword form _capitalized_candidates
+    # describes. When NER found place entities and every one was a technical term, the query names
+    # no place, and the fallback would offer its capitalized words instead: "Convert" from "Convert
+    # a GeoJSON to a COG with GDAL".
+    if not ordered and not found_place_entity:
         return _capitalized_candidates(user_query)
     return ordered
 

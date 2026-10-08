@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 
-# Install system dependencies for GDAL, PROJ, and spatial libraries
+# Install system dependencies for GDAL, PROJ, and spatial libraries. libexpat1 is named on its
+# own account: the rasterio and fiona wheels (extract_metadata.py imports both) bundle their
+# own GDAL, which links the system's libexpat.so.1, and python:3.11-slim does not ship it
+# (see rag_pipeline/Dockerfile).
 RUN apt-get update && apt-get install -y \
     build-essential \
     gdal-bin \
@@ -8,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     libproj-dev \
     proj-data \
     proj-bin \
+    libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set GDAL environment variables
@@ -16,23 +20,17 @@ ENV C_INCLUDE_PATH=/usr/include/gdal
 
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# Copy requirements and install Python dependencies through the lock, as rag_pipeline/Dockerfile
+# does: this is the same root requirements.txt, and constraints.txt pins what it resolves to.
 COPY requirements.txt constraints.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
-# Copy application code.
-#
+# Copy application code
+COPY metadata-extraction-server/ ./metadata-extraction-server/
 # `extractors/` is NOT optional: minio_webhook.py's only real work is
 # `from extractors.ingest import ingest_submission`, so without it every request fails with
-# ModuleNotFoundError. The healthcheck hits /health, which imports none of this — so the
-# container reported HEALTHY while being entirely non-functional. A liveness probe that cannot
-# fail for the reason the service exists is not a probe.
-#
-# rag_pipeline is here for llm_utils (the publication extractor) and search.geo_shapes (dataset
-# bbox reprojection); agent_runtime for file_store and element_resolver. Both are dependencies
-# of `extractors` today — see the note in docs/DEPLOYMENT.md about which direction that should
-# eventually point.
-COPY metadata-extraction-server/ ./metadata-extraction-server/
+# ModuleNotFoundError while /health (which imports none of it) reports HEALTHY. rag_pipeline and
+# agent_runtime are dependencies of `extractors` (llm_utils, geo_shapes, file_store).
 COPY extractors/ ./extractors/
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/

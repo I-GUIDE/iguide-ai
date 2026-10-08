@@ -560,7 +560,7 @@ def test_the_probe_is_no_less_confined_than_a_real_run(monkeypatch):
         seen["argv"] = argv
         raise FileNotFoundError
 
-    monkeypatch.setattr(ce.subprocess, "run", fake_run)
+    monkeypatch.setattr(ce.fork_safe, "run", fake_run)
     ce.DockerCodeExecutor(image="img:test")._probe_versions()
     s = " ".join(seen["argv"])
     assert "--network none" in s and "--read-only" in s and "--cap-drop ALL" in s
@@ -869,7 +869,7 @@ def test_the_probe_container_is_bounded_and_killable(monkeypatch):
         seen.setdefault("calls", []).append(argv)
         raise ce.subprocess.TimeoutExpired(cmd="docker", timeout=1)
 
-    monkeypatch.setattr(ce.subprocess, "run", fake_run)
+    monkeypatch.setattr(ce.fork_safe, "run", fake_run)
     # Returns None even though the cleanup kill ALSO fails — a probe that cannot clean up
     # must not raise into the caller's run.
     assert ce.DockerCodeExecutor(image="img:test")._probe_versions() is None

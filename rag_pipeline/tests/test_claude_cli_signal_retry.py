@@ -61,9 +61,7 @@ def scripted(monkeypatch):
             calls["n"] += 1
             return seq[min(calls["n"] - 1, len(seq) - 1)]
 
-        monkeypatch.setattr(llm_claude_cli, "subprocess",
-                            types.SimpleNamespace(run=run,
-                                                  TimeoutExpired=subprocess.TimeoutExpired))
+        monkeypatch.setattr(llm_claude_cli, "fork_safe", types.SimpleNamespace(run=run))
         return calls
 
     return install
@@ -158,9 +156,7 @@ def test_a_timeout_is_not_retried(scripted, monkeypatch):
     def run(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
 
-    monkeypatch.setattr(llm_claude_cli, "subprocess",
-                        types.SimpleNamespace(run=run,
-                                              TimeoutExpired=subprocess.TimeoutExpired))
+    monkeypatch.setattr(llm_claude_cli, "fork_safe", types.SimpleNamespace(run=run))
     with pytest.raises(RuntimeError, match="timed out"):
         llm_claude_cli.call("hi")
 

@@ -53,8 +53,70 @@ _GEO_TOOLS: Dict[str, tuple] = {
 }
 
 
+# --- layer identity -----------------------------------------------------------------------
+# The client REPLACES a layer whose id matches and ADDS one whose id does not, so the id is the
+# layer's identity. Both ways of getting it wrong have happened. An id built from too little
+# merged different results: a label cut to 40 characters made one region's raster overwrite
+# another's (see _slug_id). An id built from a per-run value split identical results: keying on
+# the OUTPUT file_id meant a re-grounding pass that re-ran admin_boundary left two copies of the
+# same city outline on the map (2026-10-01), because the repeat wrote the same content under a
+# new file_id. The rule that avoids both is to digest every input that decides what the layer
+# shows and nothing else. A file among those inputs goes in as
+# ``file_store.file_content_key(file_id)``, never as the file_id itself.
+
+def _id_part(text: Any) -> str:
+    """One readable piece of a layer id. Byte-for-byte ``rs_embed_tools._slug``, so the ids of
+    the embedding layers, which were built this way before the rule moved here, do not change."""
+    keep = [c if c.isalnum() else "_" for c in str(text).lower()]
+    return "".join(keep).strip("_")[:40] or "region"
+
+
+def content_key(kind: str, hint: Any = None, /, **content: Any) -> str:
+    """A key for what a step PRODUCES: ``<kind>[-<hint>]-<digest of content>``.
+
+    ``content`` is every input that changes the features or pixels: the region, the distance,
+    the model, the period, the parameters, and the content keys of any input files. Identical
+    inputs give an identical key, so a repeat of the step replaces its own layer. Different
+    inputs give different keys, so two genuinely different analyses never collide.
+
+    Labels and filenames stay OUT. The model words them differently from one run to the next
+    ("Champaign city 2 km buffer" one pass, "Champaign_city_2km_buffer" the next), and a key
+    that moved with the wording would turn one layer into two.
+
+    ``hint`` is for legibility in logs and the DOM only. It must itself come from the content
+    (a GEOID, a distance) so it cannot drift while the content stays the same. Uniqueness never
+    rests on it.
+
+    Generalised from ``rs_embed_tools._layer_id``, which already worked this way.
+    """
+    blob = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
+    bits = [_id_part(kind)]
+    if hint is not None and str(hint).strip():
+        bits.append(_id_part(str(hint)))
+    bits.append(digest)
+    return "-".join(bits)
+
+
+def content_layer_id(namespace: str, kind: str, hint: Any = None, /, **content: Any) -> str:
+    """A layer id: ``<namespace>-`` followed by :func:`content_key`."""
+    return f"{_id_part(namespace)}-{content_key(kind, hint, **content)}"
+
+
+def drawn_layer_key(input_key: str, render: str, *, column: Any = None,
+                    sample: Any = None) -> str:
+    """The key of a layer that DRAWS one input as it is, without changing its features.
+
+    Such a layer is the input's content plus the view chosen for it, and nothing else.
+    add_map_layer builds its key here, and so does layers_for_artifacts for a file a code peer
+    wrote. The same file drawn the same way is therefore one layer, whichever route drew it.
+    """
+    return content_key("map", render, input=input_key, render=render, column=column,
+                       sample=sample)
+
+
 def boundary_layer_id(file_id: str) -> str:
-    """The id of the map layer that SHOWS a polygon file, keyed on the file itself.
+    """The id of the map layer that SHOWS a polygon file, keyed on what the file HOLDS.
 
     Two tools draw the same polygons: admin_boundary puts the outline up, and embed_zones then
     redraws it with what the embedding found inside. They arrived as separate layers — a city
@@ -64,8 +126,16 @@ def boundary_layer_id(file_id: str) -> str:
 
     Keying on the file they both hold means the second can take the first's place instead of
     stacking on it, and means neither has to know the other's wording.
+
+    The key is the file's CONTENT KEY, not its file_id (2026-10-01). Keyed on the file_id, a
+    re-grounding pass that fetched the same city again wrote it as a new file, got a new id, and
+    stacked a second identical outline. admin_boundary now records a key derived from the place
+    it resolved (its level and GEOIDs) on the file it writes. The repeat therefore lands on the
+    same id, and embed_zones, handed either file, rebuilds that id from it.
     """
-    return f"boundary-{str(file_id or '').strip()}"
+    from agent_runtime.file_store import file_content_key
+
+    return f"boundary-{file_content_key(file_id)}"
 
 
 def _coerce_obj(output: Any) -> Optional[Any]:
@@ -126,7 +196,17 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
     looks the same however it was produced. A file with no features is skipped rather than
     shipped: an empty layer draws nothing, and inspect_artifacts already tells the answer
     about it.
+
+    The id is keyed on what the file HOLDS. It used to fall back to a slug of the label, which
+    is the filename the peer chose, so a re-run that named its output differently stacked a
+    second copy, and two different results written under one name merged into one layer. A
+    peer's inputs are invisible from here, which leaves the file as the only record of what
+    the layer shows. Two runs that wrote byte-identical files therefore share a layer, and
+    their layers would draw identically anyway. The key is drawn_layer_key's, so a later
+    add_map_layer of the same file with the same view lands on the same layer too.
     """
+    from agent_runtime.file_store import file_content_key
+
     out: List[Dict[str, Any]] = []
     base = Path(str(directory))
     try:
@@ -153,6 +233,7 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
         render = ("heatmap" if (is_point and features > 2000)
                   else ("points" if is_point else "shapes"))
         out.append({
+            "id": f"agent-{drawn_layer_key(file_content_key(str(path)), render)}",
             "url": url,
             "label": Path(name).stem.replace("_", " ").strip() or name,
             "render": render,

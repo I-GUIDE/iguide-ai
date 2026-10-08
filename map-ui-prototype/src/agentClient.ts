@@ -10,7 +10,7 @@ export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
   apiKey: string;
-  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.6:27b'. Empty = the agent's default. */
+  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.8:27b'. Empty = the agent's default. */
   model?: string;
   /** 'openai' | 'anvilgpt'. Empty lets the server infer it from the model id. */
   provider?: string;
@@ -46,7 +46,11 @@ export interface ModelCatalogue {
                 *  A global list offered 'high' on models that refuse any real level. */
                effort_options?: Record<string, string[]>;
                /** Models that REFUSE tools unless this exact value is sent (gpt-5.6-*). */
-               effort_required?: Record<string, string> }[];
+               effort_required?: Record<string, string>;
+               /** Models the provider serves but this agent cannot use, with why: each one
+                *  answered a tool-call probe with a refusal or with no structured call, and
+                *  the agent binds tools on every step. Not in `models`. */
+               hidden?: Record<string, string> }[];
   /** The code-peer backends a request may select. A second axis, reported under its
    *  own key so nothing conflates "which model answers" with "which agent codes". */
   code_peers?: {
@@ -61,10 +65,14 @@ export interface ModelCatalogue {
 }
 
 export interface UiConfig {
-  /** What this deployment is for. Absent on a server built before modes existed. */
-  mode?: 'dev' | 'demo' | 'token';
+  /** What this deployment is for. Absent on a server built before modes existed. `local` is a
+   *  developer's own machine: dev access, and nothing written to a shared store. Not to be
+   *  confused with this app's own MOCK mode, which App.tsx also calls "local" (`runLocal`). */
+  mode?: 'dev' | 'demo' | 'token' | 'local';
   demo_mode: boolean;
   api_key_required: boolean;
+  /** False when the server keeps no conversations (local mode). Absent on older servers. */
+  persistent_memory?: boolean;
   /** Token mode only: where the BROWSER refreshes an aged-out access cookie, and where it
    *  sends someone who is not signed in. Reported by the server rather than compiled in, so
    *  one bundle runs against either tier — dev and production are different backends. */
@@ -305,6 +313,25 @@ function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
   return h;
 }
 
+/** Fetch a file the agent serves (a layer's GeoJSON, a download) with the credentials the chat
+ *  call itself carried, and only from the agent's own origin.
+ *
+ *  These fetches went out bare. In token mode `/agent/files/<id>/download` refuses a request
+ *  that has neither a sign-in cookie nor the service key (403, `not_signed_in`), so a browser
+ *  chatting on the key alone, which chat and upload both send, drew none of the layers its own
+ *  turn produced while the answer said they were on the map. Measured on agent.i-guide.io: four
+ *  layer downloads in one turn, all 403. Cross-origin (`npm run dev` against the deployed API)
+ *  the bare fetch also left the cookie behind, so a signed-in developer lost them the same way.
+ *
+ *  A layer's url can point anywhere, and the key must not travel with it: a credential sent to
+ *  someone else's host is a leaked credential. */
+export function fetchAgentFile(url: string, cfg: AgentConfig, init: RequestInit = {}): Promise<Response> {
+  let own = false;
+  try { own = new URL(url).origin === new URL(apiBase(cfg)).origin; } catch { /* not a url */ }
+  if (!own) return fetch(url, init);
+  return fetch(url, { ...init, headers: authHeaders(cfg, false), credentials: CREDENTIALS });
+}
+
 export function newThreadId(): string {
   try { if (crypto?.randomUUID) return 'sess-' + crypto.randomUUID(); } catch { /* */ }
   return 'sess-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
@@ -334,8 +361,12 @@ function parseMaybeJson(raw: any): any {
   try { return JSON.parse(candidate); } catch { return null; }
 }
 
-export async function uploadFiles(files: File[], cfg: AgentConfig): Promise<FileRecord[]> {
+/** `threadId` is the conversation the files belong to: pass the one its turns send. Without it
+ *  the server stores them with no conversation, which keeps them out of the agent's listing of
+ *  this conversation's files and, outside token mode, lets every conversation find them by name. */
+export async function uploadFiles(files: File[], cfg: AgentConfig, threadId?: string): Promise<FileRecord[]> {
   const fd = new FormData();
+  if (threadId) fd.append('thread_id', threadId);
   files.forEach((f) => fd.append('files', f, f.name));
   const res = await withTokenRetry(async () => {
     const r = await fetch(cfg.uploadEndpoint, {
