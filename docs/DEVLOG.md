@@ -5018,3 +5018,8 @@ rather than from the previous one.
   reconciliation removed the flag (the rule was not logged; now it is), and in run 2 the auditor
   passed them. The first execute_code failing to open the boundary was seen in all three runs.
 
+**M8.73, geocode part** `geocode_places` returns Nominatim's own point (`point: "nominatim"`),
+  not the bbox centre, falling back to the centre when the point lies outside the box. Greater
+  London's box centre is 3.4 km from Charing Cross, which made London–Paris 340.0 km instead of
+  343.7 km. Stage S37.7.
+

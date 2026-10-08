@@ -6293,3 +6293,25 @@ units, the unit-only note and its guard, and rule (2′). On `00e560f` 42 of the
 pass are guards that are meant to pass on both: a replayed pass, a routing tool bound, the eight
 units that were already known, and a non-unit unknown. Three revised assertions in
 `test_supervisor_graph.py` (2) and `test_unified_peer.py` (1) fail there too, by design.
+
+### Stage S37.7 geocode_places returns Nominatim's point, not the box centre
+
+`geocode_places` reported each place's lat/lon as the centre of its Nominatim bounding box. For
+an administrative area that is not where the place is. Greater London's box
+(−0.510…0.334, 51.287…51.692) has its centre at 51.4893, −0.0882, which is 3.4 km from the point
+Nominatim itself returns (51.5074, −0.1278, Charing Cross). Paris's centre is 0.6 km off. The
+live turn's 340.0 km was the haversine between box centres. Between Nominatim's points it is
+343.7 km.
+
+`geocode_place` already had Nominatim's `lat`/`lon` in the response it parsed and threw them
+away. It now stores them in `geocode_point_cache`. `geocode_place_point(name)` reads that cache,
+which costs no second request. `geocode_places_tool` uses the point when it lies inside the box
+and the box centre otherwise. Each result says which one it used (`point: "nominatim"` or
+`"bbox_centre"`). The bbox is still returned unchanged, and `geocode_place`'s return value is the
+same, so search filtering and Overpass are untouched. Both local replays answered 343.7 km.
+
+Tests: `test_geocode_tool.py` replays Nominatim's real London and Paris responses through
+`geocode_place`, and checks the point, that the distance is 343.7 km and that two requests are
+made. It also checks the fallback to the centre when the point lies outside the box. Both fail on
+`00e560f`. The four existing tests pass on both.
+

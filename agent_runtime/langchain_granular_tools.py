@@ -315,13 +315,15 @@ def geocode_places_tool(places: Any) -> str:
     """Geocode place/institution names to coordinates via Nominatim (agent-side network).
 
     Accepts a JSON list or a comma/newline-separated string of names. Returns JSON:
-    ``{"results": [{"place", "found", "lat", "lon", "bbox"}], "not_found": [...], "count"}``
-    where lat/lon is the center of the geocoded bounding box. Names that cannot be geocoded
+    ``{"results": [{"place", "found", "lat", "lon", "bbox", "point"}], "not_found": [...],
+    "count"}`` where lat/lon is Nominatim's own reference point for the place (``point:
+    "nominatim"``), or the centre of its bounding box when Nominatim gave none or gave one
+    outside the box (``point: "bbox_centre"``). Names that cannot be geocoded
     (organizations without a location, typos, "null") come back found=false — drop them.
     """
     # The code-exec sandbox has NO network, so geocoding must happen here, in the agent
     # process (which reuses the cached, rate-limited Nominatim helper from opengeodata).
-    from rag_pipeline.search.opengeodata_new import geocode_place
+    from rag_pipeline.search.opengeodata_new import geocode_place, geocode_place_point
 
     if isinstance(places, str):
         try:
@@ -348,9 +350,19 @@ def geocode_places_tool(places: Any) -> str:
             bbox = None
         if bbox:
             minlon, minlat, maxlon, maxlat = bbox
+            # The box centre is not where a city is. Live, 2026-10-08: Greater London's box
+            # centre sits 3.4 km from Charing Cross, so London–Paris came out 340.0 km instead
+            # of 343.7 km. Nominatim returns its own reference point with the same match.
+            try:
+                point = geocode_place_point(name)
+            except Exception:
+                point = None
+            if point and minlat <= point[0] <= maxlat and minlon <= point[1] <= maxlon:
+                lat, lon, source = point[0], point[1], "nominatim"
+            else:
+                lat, lon, source = (minlat + maxlat) / 2.0, (minlon + maxlon) / 2.0, "bbox_centre"
             results.append({"place": name, "found": True,
-                            "lat": round((minlat + maxlat) / 2.0, 6),
-                            "lon": round((minlon + maxlon) / 2.0, 6),
+                            "lat": round(lat, 6), "lon": round(lon, 6), "point": source,
                             "bbox": [minlon, minlat, maxlon, maxlat]})
         else:
             results.append({"place": name, "found": False})
@@ -373,8 +385,8 @@ def make_langchain_geocode_tools() -> List[Any]:
             name="geocode_places",
             description=(
                 "Geocode place or institution names to coordinates (Nominatim). Input: a JSON "
-                "list (or comma-separated string) of names; returns per-name lat/lon (bbox "
-                "center) with found=false for names that aren't real places. USE THIS to get "
+                "list (or comma-separated string) of names; returns per-name lat/lon (Nominatim's "
+                "reference point for the place, e.g. a city's centre) and its bbox, with found=false for names that aren't real places. USE THIS to get "
                 "coordinates for maps (e.g. a bubble map from a CSV of institutions) and pass "
                 "them into execute_code as literal data — sandboxed code has NO network and "
                 "cannot geocode itself. Never ask the user for coordinates. "
