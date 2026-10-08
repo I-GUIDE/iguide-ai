@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -270,9 +271,16 @@ def list_memories(owner_id: Optional[str] = None, *, limit: int = 50) -> List[Di
                 # could not be opened — the worst kind of entry, because nothing about them
                 # says why. A conversation becomes listable exactly when it becomes
                 # restorable: when the client has stored its view of it.
+                #
+                # Either field counts: `session_snapshot_json` is where a record is stored now,
+                # and `session_snapshot` is where it was stored before M8.77 and still is on
+                # every conversation that has not been saved since. See `_stored_snapshot`.
                 "query": {"bool": {
                     "filter": [{"term": {"owner_id.keyword": owner}},
-                               {"exists": {"field": "session_snapshot"}}],
+                               {"bool": {"should": [
+                                   {"exists": {"field": SNAPSHOT_TEXT_FIELD}},
+                                   {"exists": {"field": LEGACY_SNAPSHOT_FIELD}}],
+                                   "minimum_should_match": 1}}],
                 }},
                 "sort": [{"updatedAt": {"order": "desc", "unmapped_type": "date"}}],
                 "_source": ["conversationName", "owner_id", "createdAt", "updatedAt", "threadId",
@@ -332,9 +340,45 @@ class SnapshotTooLarge(Exception):
     """The client's conversation record exceeds what this store will hold."""
 
 
-def _snapshot_size(snapshot: Mapping[str, Any]) -> int:
-    import json as _json
-    return len(_json.dumps(snapshot, default=str).encode("utf-8"))
+# The record is stored as ONE JSON string, never as an object for the index to map.
+#
+# `chat_memory` has no explicit mapping, so OpenSearch typed every field of the record from the
+# first conversation that carried it, and a later record that disagrees is refused WHOLE. The
+# record's shape is not the client's to promise: it carries each answer's `agent_result`, so the
+# shape of tool arguments and results is decided per turn by whichever tool and model ran. On
+# 2026-10-08 21:36 UTC `overpass_search` sent `bbox` as the string "-87.93,41.87,..." where an
+# earlier turn had sent a float array, and the PUT came back 500 with `mapper_parsing_exception`
+# on `session_snapshot.messages.response.agent_result.orchestration_result.analysis_results.
+# tool_calls.args.bbox`. The turn never reached History, and the user was told nothing.
+#
+# A string has one type whatever it holds, so no record can conflict and none adds fields. The
+# record had already put 266 fields into the mapping (559 of the 1,000 that `chat_memory` may
+# have, counting `.keyword` sub-fields), and every new tool argument name added more; past the
+# limit every save would have failed. Nothing searches inside the record, so nothing is lost by
+# not indexing its parts: the list filters and sorts on the document's own fields.
+SNAPSHOT_TEXT_FIELD = "session_snapshot_json"
+# Where records were stored as objects until M8.77. Read, never written, and cleared (null) on
+# the next save, so a conversation does not carry a stale second copy.
+LEGACY_SNAPSHOT_FIELD = "session_snapshot"
+
+
+def _encode_snapshot(snapshot: Mapping[str, Any]) -> str:
+    return json.dumps(snapshot, ensure_ascii=False, default=str)
+
+
+def _stored_snapshot(doc: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The client record in a stored document, from whichever field holds it, or None."""
+    text = doc.get(SNAPSHOT_TEXT_FIELD)
+    if isinstance(text, str):
+        try:
+            decoded = json.loads(text)
+        except ValueError as err:
+            logger.error("Stored conversation record is not JSON: %s", err)
+        else:
+            if isinstance(decoded, Mapping):
+                return dict(decoded)
+    legacy = doc.get(LEGACY_SNAPSHOT_FIELD)
+    return dict(legacy) if isinstance(legacy, Mapping) else None
 
 
 def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
@@ -345,13 +389,14 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
     conversation to someone else by claiming to.
     """
     clean = {k: v for k, v in dict(snapshot or {}).items() if k not in _SNAPSHOT_RESERVED}
-    size = _snapshot_size(clean)
+    encoded = _encode_snapshot(clean)
+    size = len(encoded.encode("utf-8"))
     limit = _snapshot_max_bytes()
     if size > limit:
         raise SnapshotTooLarge(
             f"conversation record is {size} bytes, over the {limit} limit")
     client = _get_opensearch_client()
-    patch: Dict[str, Any] = {"session_snapshot": clean, "updatedAt": _now()}
+    patch: Dict[str, Any] = {SNAPSHOT_TEXT_FIELD: encoded, "updatedAt": _now()}
     # A rename in the client should show up in the conversation list, which sorts and labels on
     # the document's own fields rather than reaching into the snapshot.
     title = clean.get("title")
@@ -374,7 +419,10 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
     # listable. It costs up to one refresh interval, and it is paid after the turn has already
     # been answered, not on the streaming path.
     try:
-        client.update(index=MEMORY_INDEX, id=memory_id, body={"doc": patch}, refresh="wait_for")
+        # The legacy object is cleared in the same write: null is accepted by any field, and a
+        # conversation saved since M8.77 then holds one copy of its record, not two.
+        client.update(index=MEMORY_INDEX, id=memory_id, refresh="wait_for",
+                      body={"doc": {**patch, LEGACY_SNAPSHOT_FIELD: None}})
     except NotFoundError:
         owner = _current_owner()
         client.index(index=MEMORY_INDEX, id=memory_id, refresh="wait_for",
@@ -537,11 +585,11 @@ def get_session_snapshot(memory_id: str) -> Optional[Dict[str, Any]]:
     doc = get_memory(memory_id)
     if not doc:
         return None
-    snapshot = doc.get("session_snapshot")
-    if not isinstance(snapshot, Mapping):
+    snapshot = _stored_snapshot(doc)
+    if snapshot is None:
         return None
-    return {**dict(snapshot), "memoryId": memory_id,
-            "title": doc.get("conversationName") or dict(snapshot).get("title"),
+    return {**snapshot, "memoryId": memory_id,
+            "title": doc.get("conversationName") or snapshot.get("title"),
             "createdAt": doc.get("createdAt"), "updatedAt": doc.get("updatedAt")}
 
 
