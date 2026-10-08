@@ -66,6 +66,7 @@ REQUIRED_TERMS = {
     "make_rs_embed_zonal_tools": ("zone", "zonal", "segment"),
     "make_langchain_qgis_tools": ("qgis", "pyqgis"),
     "make_langchain_geocode_tools": ("geocod", "place name", "address"),
+    "make_langchain_osm_tools": ("openstreetmap", "features"),
     "make_langchain_geo_tools": ("reproject", "vector", "geojson"),
     "make_langchain_granular_tools": ("search", "retriev"),
     "make_langchain_file_tools": ("file", "upload"),

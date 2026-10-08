@@ -1113,8 +1113,46 @@ def _cut_unit(text: str, s: int, e: int) -> str:
     return text[:start] + text[stop:]
 
 
-def _tidy_after_cuts(text: str) -> str:
-    """Collapse what cutting leaves behind: doubled spaces, empty bullets, emptied sections."""
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
+_LEAD_IN_END_RE = re.compile(r":[ \t*_]*$")
+
+
+def _lead_ins(text: str) -> set:
+    """Lines that end in ':' and introduce a list: "Actual travel distances are longer:"."""
+    lines = text.split("\n")
+    found = set()
+    for i, ln in enumerate(lines):
+        if (_LEAD_IN_END_RE.search(ln) and not re.match(r"^\s*#", ln)
+                and not _LIST_ITEM_RE.match(ln)):
+            nxt = next((x for x in lines[i + 1:] if x.strip()), None)
+            if nxt is not None and _LIST_ITEM_RE.match(nxt):
+                found.add(ln.strip())
+    return found
+
+
+def _drop_orphaned_lead_ins(text: str, before: str) -> str:
+    """*text* without the lead-in sentences whose whole list was cut since *before*.
+
+    Only a line that introduced a list in *before* and introduces none now: a colon that never
+    had a list under it ("Here is the result:") is left alone. Only the line's last sentence
+    goes, so "This is the straight-line distance. Actual travel is longer:" keeps its first."""
+    orphans = _lead_ins(before) - _lead_ins(text)
+    for _ in range(8):
+        lines = text.split("\n")
+        hit = next((i for i, ln in enumerate(lines) if ln.strip() in orphans), None)
+        if hit is None:
+            break
+        orphans.discard(lines[hit].strip())
+        end = sum(len(x) + 1 for x in lines[:hit]) + len(lines[hit].rstrip())
+        text = _cut_unit(text, end - 1, end)
+    return text
+
+
+def _tidy_after_cuts(text: str, before: Optional[str] = None) -> str:
+    """Collapse what cutting leaves behind: doubled spaces, empty bullets, emptied sections,
+    and — given the text *before* the cuts — a lead-in whose list is gone."""
+    if before is not None:
+        text = _drop_orphaned_lead_ins(text, before)
     text = re.sub(r"(?<=\S)[ \t]{2,}(?=\S)", " ", text)
     text = re.sub(r"[ \t]+([.,;:])", r"\1", text)
     lines = [ln.rstrip() for ln in text.split("\n")]
@@ -1151,7 +1189,7 @@ def _drop_claims(text: str, claims: List[str]) -> tuple:
             out = _cut_unit(out, m.start(), m.end())
         if not pat.search(out):
             dropped.append(claim)
-    return (_tidy_after_cuts(out) if dropped else original), dropped
+    return (_tidy_after_cuts(out, before=original) if dropped else original), dropped
 
 
 def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
@@ -1192,9 +1230,16 @@ def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
                     f"{'; '.join(c[:80] for c in dropped[:3])}"},
         node="synthesize",
     )
+    return new_answer, _audit_without(audit, kept, dropped), dropped
+
+
+def _audit_without(audit: Optional[Dict[str, Any]], kept: List[Any], removed: List[str]) -> Dict:
+    """*audit* holding only the *kept* issues, after *removed* claims were cut from the answer.
+    If no auditor issue is left the audit stops flagging; a gate finding is untouched."""
     auditor_left = [i for i in kept
                     if not (isinstance(i, dict) and i.get("source") == "invariant_gate")]
-    new_audit = {**(audit or {}), "issues": kept, "removed_claims": dropped}
+    new_audit = {**(audit or {}), "issues": kept,
+                 "removed_claims": [*((audit or {}).get("removed_claims") or []), *removed]}
     if not auditor_left:
         gate = str((audit or {}).get("invariant_gate") or "")
         if gate:
@@ -1203,7 +1248,200 @@ def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
             new_audit.update({"hallucination_detected": False, "severity": "none",
                               "summary": "Grounded: claims no available tool could produce were "
                                          "removed from the answer."})
-    return new_answer, new_audit, dropped
+    return new_audit
+
+
+# A number's edges in a JSON record. Not after a word character or a '.', so "450" is not found
+# in the coordinate 48.84502 or the id file_2272c8450ec9 — except after a JSON-escaped newline
+# or tab, where stdout lines begin ("\\n450 km"). Not before a digit, so not in 14502 either;
+# a following '.' is allowed, so 2584 is in 2584.62.
+_NUM_EDGE_BEFORE = r"(?:(?<![\w.])|(?<=\\[nt]))"
+
+
+def _number_in(number: str, record: str) -> bool:
+    """Whether *number* stands as a number of its own in *record*, not inside another."""
+    return bool(number) and re.search(
+        _NUM_EDGE_BEFORE + re.escape(number) + r"(?!\d)", record or "") is not None
+
+
+# --- travel figures the audit did not flag --------------------------------------------------
+#
+# The cut above acts only on what the audit flags. Local replays, 2026-10-08, 2 of 2: the
+# answer still shipped "roughly 490 km by rail and ~450 km by road" (the flag was reconciled
+# away on a coordinate's digits) and "Driving is roughly 450–470 km" (the auditor passed it).
+# With no routing tool bound, a travel sentence carrying a distance or a time that is in no tool
+# result can only have come from the model's memory, so it is cut without asking the audit.
+#
+# The mode words are narrower than _ROUTING_CLAIM_RE's shapes allow ("Driving is …" is not a
+# "driving distance"), but they still exclude "driving factors", "Google Drive", "train the
+# model" and "as the crow flies". A bare "road" is not a mode either: "the road network layer
+# holds 3,400 km" is a measurement of a layer, not a journey.
+_TRAVEL_MODE_RE = re.compile(
+    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle)\b"
+    r"|\b(?:road|rail|railway|train|driving|walking|cycling|flight|flying)\s+"
+    r"(?:distance|time|route|journey|trip|ride)s?\b"
+    r"|(?<!google )(?<!hard )(?<!usb )(?<!shared )(?<!flash )(?<!disk )"
+    r"\bdriv(?:e|es|ing|en)\b"
+    r"(?!\s+(?:factors?|forces?|variables?|mechanisms?|causes?|process(?:es)?)\b)"
+    r"|\bflights?\b|\bflying\b|\btravel(?:l?ing|l?ed|s)?\b"
+    r"|\b(?:eurostar|amtrak|tgv)\b|\bhigh-speed\s+(?:rail|train)\b",
+    re.I)
+_QTY_NUM = r"\d[\d,]*(?:\.\d+)?"
+# A distance or a duration: "450 km", "450–470 km", "2 hours", "a 5-hour drive", "1 h 15 min".
+# Not a speed ("100 km/h") and not an area ("450 km²": no word boundary before the '²').
+_TRAVEL_QTY_RE = re.compile(
+    rf"(?<![\w.])({_QTY_NUM})(?:\s*(?:–|—|-|to)\s*({_QTY_NUM}))?[\s-]*"
+    r"(kilomet(?:er|re)s?|km|miles?|mi|met(?:er|re)s?|hours?|hrs?|hr|h|minutes?|mins?|min)"
+    r"\b(?!\s*/)",
+    re.I)
+_TIME_UNIT_RE = re.compile(r"^(?:h|hr|hrs|hours?|min|mins|minutes?)$", re.I)
+_TIME_CONTEXT_RE = re.compile(r"hour|hr|min|time|duration|eta|(?<![a-z])h(?![a-z])", re.I)
+_DIST_CONTEXT_RE = re.compile(r"km|kilomet|mile|(?<![a-z])mi(?![a-z])|dist|length|met(?:er|re)",
+                              re.I)
+_RECORD_NUM_RE = re.compile(_NUM_EDGE_BEFORE + r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)")
+_RECORD_FIELD_SEP_RE = re.compile(r"[,{}\[\];\n]|\\n")
+
+
+def _tool_record_text(execution_context: Optional[Dict[str, Any]]) -> str:
+    """Every tool result of this turn, and the earlier turns' ledger — what a figure can come
+    from. Not a peer's summary: that is model prose, and may hold the same memorised figure."""
+    ctx = execution_context if isinstance(execution_context, dict) else {}
+    parts: List[str] = []
+    for key in ("analysis_results", "code_result"):
+        result = ctx.get(key)
+        if isinstance(result, dict):
+            parts += [str(r.get("content") or "") for r in result.get("tool_results") or []
+                      if isinstance(r, dict)]
+    parts.append(str(ctx.get("prior_actions") or ""))
+    return "\n".join(parts)
+
+
+def _quantity_recorded(number: str, unit: str, record: str) -> bool:
+    """Whether a tool result holds *number*, as a number of its own, to the answer's precision.
+
+    Rounded, so "about 464 km" is 463.8 and "340 km" is 340.0. A value under 100 also needs a
+    field or a unit of its kind beside it: "2 hours by Eurostar" is not grounded by "count": 2."""
+    n = number.replace(",", "")
+    try:
+        value = float(n)
+    except ValueError:
+        return False
+    places = len(n.split(".", 1)[1]) if "." in n else 0
+    context_re = _TIME_CONTEXT_RE if _TIME_UNIT_RE.match(unit) else _DIST_CONTEXT_RE
+    for m in _RECORD_NUM_RE.finditer(record or ""):
+        try:
+            found = float(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if abs(round(found, places) - value) > 1e-9:
+            continue
+        if value >= 100:
+            return True
+        seps_before = list(_RECORD_FIELD_SEP_RE.finditer(record, 0, m.start()))
+        lo = seps_before[-1].end() if seps_before else 0
+        after = _RECORD_FIELD_SEP_RE.search(record, m.end())
+        hi = after.start() if after else len(record)
+        if context_re.search(record[lo:m.start()] + " " + record[m.end():hi]):
+            return True
+    return False
+
+
+def _first_unrecorded_travel(text: str, record: str) -> Optional[tuple]:
+    """``(start, end, sentence)`` of the first travel claim in *text* whose distance or time is
+    in no tool result, or None. Fenced code is skipped."""
+    pos, fenced = 0, False
+    for line in text.split("\n"):
+        ls, pos = pos, pos + len(line) + 1
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not _TRAVEL_MODE_RE.search(line):
+            continue
+        body = _LINE_MARKER_RE.match(line).end()
+        bounds = [body, *[body + o for o in _sentence_ends(line[body:])], len(line)]
+        for a, b in zip(bounds, bounds[1:]):
+            sentence = line[a:b]
+            modes = list(_TRAVEL_MODE_RE.finditer(sentence))
+            if not modes:
+                continue
+            for q in _TRAVEL_QTY_RE.finditer(sentence):
+                nums = [x for x in (q.group(1), q.group(2)) if x]
+                if all(_quantity_recorded(x, q.group(3), record) for x in nums):
+                    continue
+                mode = min(modes, key=lambda m: min(abs(m.start() - q.end()),
+                                                    abs(q.start() - m.end())))
+                s, e = min(mode.start(), q.start()), max(mode.end(), q.end())
+                if "(" in sentence[s:e] or ")" in sentence[s:e]:
+                    s, e = 0, len(sentence)          # straddles a parenthesis: the sentence
+                return ls + a + s, ls + a + e, sentence.strip()
+    return None
+
+
+def _scan_unrecorded_travel(answer: str, execution_context: Optional[Dict[str, Any]],
+                            bound_tools: Optional[List[str]]) -> tuple:
+    """*answer* without its travel claims whose figures are in no tool result.
+
+    Returns ``(answer, cut)``. Does nothing when a routing tool is bound: its figures would be in
+    the record, and a figure that is not is the audit's to judge."""
+    if any(_ROUTING_TOOL_RE.search(str(t)) for t in bound_tools or []):
+        return answer, []
+    original = str(answer or "")
+    record = _tool_record_text(execution_context)
+    text, cut = original, []
+    for _ in range(16):
+        hit = _first_unrecorded_travel(text, record)
+        if not hit:
+            break
+        new = _cut_unit(text, hit[0], hit[1])
+        if new == text:
+            break
+        text = new
+        cut.append(hit[2])
+    if not cut:
+        return answer, []
+    return _tidy_after_cuts(text, before=original), cut
+
+
+def _remove_unrecorded_travel(answer: str, audit: Optional[Dict[str, Any]],
+                              bound_tools: Optional[List[str]],
+                              execution_context: Optional[Dict[str, Any]]) -> tuple:
+    """Cut unflagged memorised travel figures from *answer*; see _scan_unrecorded_travel.
+
+    Returns ``(answer, audit, cut)``. A flagged routing claim whose figures the cut removed from
+    the answer goes from the audit too: it is about text the user will not see. That is how an
+    issue the auditor paraphrased — which _drop_claims cannot place — stops leaving a caveat."""
+    new_answer, cut = _scan_unrecorded_travel(answer, execution_context, bound_tools)
+    if not cut:
+        return answer, audit, []
+    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
+        if label == "routing" and not mention_re.search(new_answer):
+            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
+    plain = new_answer.replace(",", "")
+    kept, moot = [], []
+    for item in (audit or {}).get("issues") or []:
+        claim = str(item.get("claim") if isinstance(item, dict) else item or "")
+        # Its travel quantities only: "A26" names a road, it is not a figure the cut removed.
+        nums = [n.replace(",", "") for q in _TRAVEL_QTY_RE.finditer(claim)
+                for n in (q.group(1), q.group(2)) if n]
+        if (not (isinstance(item, dict) and item.get("source") == "invariant_gate")
+                and _unproducible_capability(claim, bound_tools) and nums
+                and not any(_number_in(n, plain) for n in nums)):
+            moot.append(claim)
+        else:
+            kept.append(item)
+    _LEDGER_LOG.info("cut %d unrecorded travel claim(s) the audit did not remove: %s",
+                     len(cut), cut)
+    emit_trace_event(
+        "unproducible_claims_dropped",
+        {"stage": "synthesize", "claims": cut, "capabilities": ["routing"],
+         "source": "answer_scan",
+         "message": f"removed {len(cut)} travel figure(s) no tool result holds: "
+                    f"{'; '.join(c[:80] for c in cut[:3])}"},
+        node="synthesize",
+    )
+    if not moot or not audit:
+        return new_answer, audit, cut
+    return new_answer, _audit_without(audit, kept, [*cut, *moot]), cut
 
 
 # After a re-grounding pass the answer is about to reach a user who never saw the draft it
@@ -1664,8 +1902,11 @@ def _run_peer(name: str, call, state: SupervisorState):
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
+        # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
+        # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
+        # later peer made good from one that left the answer short.
         failure = {"peer": name, "error": f"{type(exc).__name__}: {exc}"[:300],
-                   "fatal": _is_fatal_peer_error(exc)}
+                   "fatal": _is_fatal_peer_error(exc), "at": len(state.get("actions") or [])}
         try:
             import logging
             logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
@@ -1687,6 +1928,163 @@ def _with_failure(update: Dict[str, Any], state: SupervisorState,
         return update
     update["peer_failures"] = [*(state.get("peer_failures") or []), failure]
     return update
+
+
+# The peers whose result answers the question, and the field that holds that answer.
+_ANSWERING_PEERS = {"analyze": ("analysis_results", "summary"), "code": ("code_result", "answer")}
+
+
+def _unresolved_peer_failures(state: SupervisorState) -> List[Dict[str, Any]]:
+    """The peer failures the answer is still short by.
+
+    A failure is resolved when a LATER answering peer ran without failing and came back with an
+    answer. Live, 2026-10-08: analyze hit the recursion limit, code then answered in full, and
+    the reply still said it was "based on what completed before the failure" — the opposite of
+    what happened. The failures stay in state for the trace and the turn ledger either way; this
+    decides only whether the user is told the answer is partial.
+
+    A failure without a position (``at``) is never treated as resolved.
+    """
+    failures = list(state.get("peer_failures") or [])
+    actions = list(state.get("actions") or [])
+    failed_at = {f.get("at") for f in failures if isinstance(f.get("at"), int)}
+
+    def _delivered(peer: str) -> bool:
+        slot, field = _ANSWERING_PEERS[peer]
+        result = state.get(slot)
+        return isinstance(result, dict) and bool(str(result.get(field) or "").strip())
+
+    out = []
+    for f in failures:
+        at = f.get("at")
+        resolved = isinstance(at, int) and f.get("peer") in _ANSWERING_PEERS and any(
+            peer in _ANSWERING_PEERS and (j + 1) not in failed_at and _delivered(peer)
+            for j, peer in enumerate(actions) if j + 1 > at)
+        if not resolved:
+            out.append(f)
+    return out
+
+
+# --- where a listed set of features came from -------------------------------------------
+# Live, 2026-10-08: "which schools are within 1 mile of [a drawn box]?" was answered "18 schools",
+# each distance right to within 4 m, from the Chicago Public Schools locations file the code peer
+# had found on the Chicago Data Portal, and the answer never said so. OpenStreetMap has 31 schools
+# in the same buffer, two of them inside the box itself. Without its source, "18 schools" reads
+# as a claim about all schools. With it, it is a correct statement about one district's file.
+#
+# A check, not an instruction: the sources come from the tool record, and the line is added only
+# when the composed answer lists features and names none of them.
+_LIST_ROW = re.compile(r"^\s*(?:\|(?!\s*:?-{3})|[-*+]\s+|\d+[.)]\s+)")
+
+
+def _peer_tool_pairs(state: SupervisorState) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """(call, result) for every tool the answering peers ran this turn, paired by call id."""
+    pairs = []
+    for slot in ("analysis_results", "code_result"):
+        res = state.get(slot)
+        if not isinstance(res, dict):
+            continue
+        calls = {c.get("id"): c for c in (res.get("tool_calls") or []) if isinstance(c, dict)}
+        for r in res.get("tool_results") or []:
+            if isinstance(r, dict):
+                pairs.append((calls.get(r.get("tool_call_id")) or {}, r))
+    return pairs
+
+
+def _json_or_empty(text: Any) -> Dict[str, Any]:
+    try:
+        val = json.loads(text) if isinstance(text, str) else text
+    except (TypeError, ValueError):
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def _title_by_shared_id(url: str, titles: Dict[str, str]) -> str:
+    """The search title of a page on the same host that shares an id-like path segment.
+
+    A data portal's download URL is rarely the page the search found: Socrata serves
+    ``/api/views/<4x4>/rows.csv`` for a dataset whose page is ``/<Category>/<Name>/<4x4>``. The
+    dataset id is the segment both carry.
+    """
+    from urllib.parse import urlparse
+
+    target = urlparse(url)
+    ids = {seg for seg in target.path.split("/") if len(seg) >= 6 and any(c.isdigit() for c in seg)}
+    for page, title in titles.items():
+        parsed = urlparse(page)
+        if parsed.netloc == target.netloc and ids & set(parsed.path.split("/")):
+            return title
+    return ""
+
+
+def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
+    """(statement, names any of which counts as the answer naming it), one per data source."""
+    pairs = _peer_tool_pairs(state)
+    titles: Dict[str, str] = {}
+    for call, res in pairs:
+        if res.get("name") != "web_search":
+            continue
+        payload = _json_or_empty(res.get("content"))
+        for hit in [*(payload.get("documents") or []), *(payload.get("results") or [])]:
+            if isinstance(hit, dict) and hit.get("url") and hit.get("title"):
+                titles.setdefault(str(hit["url"]).split("?")[0].rstrip("/"), str(hit["title"]))
+    # One entry per SOURCE, not per call: a peer that retried Overpass with three boxes used
+    # one source, and the last good call is the one its list came from. Keyed "osm" for
+    # OpenStreetMap and by URL for a staged file.
+    found: Dict[str, Tuple[str, List[str]]] = {}
+    for call, res in pairs:
+        name = res.get("name")
+        payload = _json_or_empty(res.get("content"))
+        # Empty is not JSON: the repeat guard's note, a raw traceback. Neither is a source.
+        if not payload or payload.get("error"):
+            continue
+        if name == "overpass_search":
+            statement = payload.get("source_statement") or (
+                "OpenStreetMap features tagged "
+                f"{(payload.get('query') or {}).get('osm_filter') or 'as requested'}, as mapped by "
+                "OSM contributors")
+            found.pop("osm", None)          # re-insert, so the last good call is the one kept
+            found["osm"] = (str(statement), ["openstreetmap", "osm"])
+            continue
+        elif name in ("stage_url", "stage_element"):
+            url = str((call.get("args") or {}).get("url") or payload.get("origin") or "")
+            if not url:
+                continue
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc
+            title = titles.get(url.split("?")[0].rstrip("/"), "") or _title_by_shared_id(url, titles)
+            head = title.split(" | ")[0].strip()
+            statement = f"{title} ({host})" if title else url
+            found.setdefault(url, (statement, [n.lower() for n in (host, head) if n]))
+    return list(found.values())
+
+
+def _feature_sources(state: SupervisorState) -> List[str]:
+    """The data sources a list of features in this turn's answer could have come from."""
+    return [statement for statement, _ in _source_entries(state)]
+
+
+def _with_feature_source(answer: str, state: SupervisorState) -> str:
+    """*answer*, plus a line naming where its list came from when it lists and names nothing."""
+    if not isinstance(answer, str) or not answer.strip():
+        return answer
+    if sum(1 for line in answer.splitlines() if _LIST_ROW.match(line)) < 3:
+        return answer
+    entries = _source_entries(state)
+    if not entries:
+        return answer
+    low = answer.lower()
+    if any(n in low for _, names in entries for n in names):
+        return answer
+    joined = "; ".join(statement.rstrip(" .") for statement, _ in entries)
+    plural = "these sources hold" if len(entries) > 1 else "that source holds"
+    line = f"**Source:** {joined}. The list covers only what {plural}."
+    # Beside the list, ahead of any caveat block the answer already ends with.
+    cut = answer.find("\n⚠️")
+    if cut == -1:
+        return f"{answer.rstrip()}\n\n{line}"
+    return f"{answer[:cut].rstrip()}\n\n{line}\n\n{answer[cut:].lstrip(chr(10))}"
 
 
 def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
@@ -1911,8 +2309,38 @@ _CONTRADICTION_MARKERS = (
 
 
 def _claim_numbers(text: str) -> List[str]:
-    """Significant (3+ digit) numbers in a claim, comma-normalized for record matching."""
-    return [m.replace(",", "") for m in re.findall(r"\d[\d,]{2,}", text or "")]
+    """Significant (3+ digit) numbers in a claim, comma-normalized for record matching.
+
+    Not the tail of a decimal: "0.450" is not the number 450."""
+    return [m.replace(",", "") for m in re.findall(r"(?<![\d.])\d[\d,]{2,}", text or "")]
+
+
+def _without_peer_prose(execution_context: Any) -> Any:
+    """The execution record without the peers' own summaries.
+
+    A summary is the peer model's prose, not a tool result. Local replay, 2026-10-08: the analyze
+    peer's summary said "roughly 490 km by road", the answer repeated it, the audit flagged it,
+    and rule (2) found 490 in the record — in that summary, and nowhere else."""
+    if not isinstance(execution_context, dict):
+        return execution_context
+    out = dict(execution_context)
+    for key in ("analysis_results", "code_result"):
+        if isinstance(out.get(key), dict):
+            out[key] = {k: v for k, v in out[key].items() if k != "summary"}
+    return out
+
+
+def _number_sources(nums: List[str], execution_context: Optional[Any]) -> str:
+    """Where in the record rule (2) found *nums*: "analysis_results.summary", … — for the log."""
+    found = []
+    ctx = execution_context if isinstance(execution_context, dict) else {}
+    for key, val in ctx.items():
+        parts = val.items() if isinstance(val, dict) else [("", val)]
+        for sub, v in parts:
+            text = json.dumps(v, default=str).replace(",", "")
+            if any(_number_in(n, text) for n in nums):
+                found.append(f"{key}.{sub}" if sub else key)
+    return "+".join(found) or "?"
 
 
 def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
@@ -2203,7 +2631,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     blob = ""
     if execution_context is not None:
         try:
-            blob = json.dumps(execution_context, default=str)
+            blob = json.dumps(_without_peer_prose(execution_context), default=str)
         except Exception:
             blob = str(execution_context)
         blob = blob.replace(",", "")
@@ -2233,13 +2661,17 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             rule = "4 map"                # a map claim, and a layer really did reach the map
         elif any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             rule = "3 concedes"           # the auditor's own reason concedes grounding
-        elif nums and blob and not gate and all(n in blob for n in nums):
+        # On numeric boundaries, not as substrings. A substring match let "~450 km by road"
+        # through on a coordinate holding the digits 450 (local replay, 2026-10-08).
+        elif nums and blob and not gate and all(_number_in(n, blob) for n in nums):
             rule = "2 number"             # every disputed number is in a VERIFIED record
-        elif nums and ungated and all(n in ungated for n in nums):
+        elif nums and ungated and all(_number_in(n, ungated) for n in nums):
             rule = "2' number"            # ... or in a tool result the gate does not cover
         else:
             kept.append(it)
             continue
+        if rule.startswith("2"):
+            rule += f" @{_number_sources(nums, execution_context)}"
         removed.append((claim[:120], rule))
     if removed:
         _LEDGER_LOG.info("audit reconciliation removed %d issue(s): %s", len(removed), removed)
@@ -4151,6 +4583,16 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_langchain_geocode_tools())
         except Exception:
             pass
+        # Features by KIND in an area (schools, hospitals, rivers) from live OpenStreetMap,
+        # written to a file this peer can measure against. Not upload-gated, for the reason
+        # admin_boundary is not: it produces its own input. Without it, "schools within 1 mile
+        # of this box" was 27 geocoding calls of remembered school names and street corners
+        # (live, 2026-10-08). See make_langchain_osm_tools.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_osm_tools
+            tools.extend(make_langchain_osm_tools())
+        except Exception:
+            pass
         tools.append(request_tool)
         # When files are attached to the conversation, let the analysis peer inspect
         # them directly (read_text_file / inspect_file_for_analysis) instead of only
@@ -4679,6 +5121,13 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
             tools.extend(make_langchain_geocode_tools())
+        except Exception:
+            pass
+        # The same feature lookup analyze has (see default_analyze_fn): the sandbox has no
+        # network, so features this peer's code measures against are fetched agent-side.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_osm_tools
+            tools.extend(make_langchain_osm_tools())
         except Exception:
             pass
         # Staging, for the same reason and with the same boundary: the fetch happens HERE, where
@@ -5448,8 +5897,16 @@ def build_supervisor_graph(
         # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
         # and presenting it as a normal answer hides that a capability the user asked for did
         # not run.
-        if failures:
-            note = _peer_failure_note(failures)
+        # A list of features says which source it came from (see _with_feature_source). Before
+        # the failure note, so the note stays last.
+        for key in ("answer", "final_answer"):
+            if isinstance(update.get(key), str):
+                update[key] = _with_feature_source(update[key], state)
+        if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
+            update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+        unresolved = _unresolved_peer_failures({**state, **update})
+        if unresolved:
+            note = _peer_failure_note(unresolved)
             for key in ("answer", "final_answer"):
                 if isinstance(update.get(key), str) and update[key].strip():
                     update[key] = f"{update[key]}\n\n---\n\n{note}"
@@ -5571,6 +6028,8 @@ def build_supervisor_graph(
             # a figure we know is unsupported is worse than not printing the figure.
             _bound = state.get("bound_tools") or []
             answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound)
+            # ... and one the audit did not flag, or that reconciliation let through.
+            answer, audit, _ = _remove_unrecorded_travel(answer, audit, _bound, exec_ctx)
             if state.get("grounding_retries"):
                 answer = _drop_draft_mentions(answer)
             # THE GATE. A surviving flag means the audit still cannot find these claims in the

@@ -51,6 +51,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 35 | [Lumen, in dev mode only](#stage-35) | 2026-10-06 | NCSA's OpenAI-compatible Lumen joins the picker in dev and local mode; its windows come from its own catalogue |
 | 36 | [The gate stops flagging correct runs, and its unknowns stop re-running them](#stage-36) | 2026-10-08 | a declared label is not a measurement; `points` is a count; a gate `cannot_determine` is a caveat, not a reason to redo the analysis |
 | 37 | [A re-grounding pass keeps the turn's record, and stops chasing claims no tool can make](#stage-37) | 2026-10-08 | a second peer run adds to the result slot instead of replacing it; routing claims with no routing tool are cut, not re-run; imperial units; a unit-only unknown is a note |
+| 38 | [A peer that can find what it measures, and stops when it repeats itself](#stage-38) | 2026-10-08 | `overpass_search` bound to both measuring peers with a file; an identical repeated call is answered, then ends the run; a delivered answer drops the partial banner; a feature list names its source |
+| 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -6420,7 +6422,8 @@ not logged then, and it is logged now. The likely candidate is rule (2), which m
 number as a substring of the whole JSON record, so "450" can match inside a coordinate. In run 2
 the auditor itself called every claim supported. S37.3 acts on what the audit flags, so neither
 run reached it. A deterministic scan of the answer for routing quantities absent from the record,
-plus number-boundary matching in rule (2), is the follow-up.
+plus number-boundary matching in rule (2), is the follow-up. *Closed by Stage 39, which found the
+match in run 1's position was the analyze peer's own summary rather than a coordinate.*
 
 **The first execute_code cannot open the boundary.** All three runs (live and both local) had a
 failing first execute_code: `gpd.read_file("file_2272c8426ec9")` live, and `gpd.read_file("Champaign_County.geojson")`
@@ -6499,7 +6502,265 @@ whole schools script through the assembled prologue/epilogue). There is 1 more i
 on both.
 
 The same turn also showed "⚠️ Partial answer: analysis failed during this turn" although the code
-peer then answered in full. That is outside this stage and is being proposed separately.
+peer then answered in full. That is outside this stage. Stage 38 (S38.3) removes the banner
+when a later peer delivered.
+
+## Stage 38 — A peer that can find what it measures, and stops when it repeats itself {#stage-38}
+
+*2026-10-08. Branch `claude/peer-repeat-and-scope`, from `prototype` at `00e560f`, rebased onto
+`81fd7c8`. Stage 37 is #85, and 39 is open PR #87, which left 38 for this branch.*
+
+A live turn on agent.i-guide.io (2026-10-08 19:42:29 UTC, thread `sess-38c02242`, Lumen
+deepseek-v4-flash) asked: *"Treat the bounding box I draw on the map as a hazardous-waste site.
+Which schools are within 1 mile of it? List them with their distance in metres and put them on
+the map."* The turn took 13 min 5 s. The distances in the answer were right to within 4 m, but
+four things around them were wrong.
+
+| | time (UTC) | what happened |
+|---|---|---|
+| analyze seq 1–3 | 19:42:30–19:42:45 | conversation files, skills, two KB and two method searches for "schools" |
+| seq 4 | 19:42:55–19:43:23 | geocoded 20 school names from memory: Hyde Park and Kenwood, 15 km east of the box |
+| seq 5–6 | 19:43:52–19:48:13 | 7 neighbourhood names, then one model call that took **4 min 12 s** |
+| seq 6–16 | 19:48:13–19:52:06 | Cicero school names, then street intersections ("Cicero Ave 51st St", …) in varied forms |
+| seq 17–30 | 19:52:11–19:53:06 | the seq 16 call, **identical, fourteen more times**, then `GraphRecursionError` at 60 |
+| code | 19:53:31–19:55:06 | web search, staged the Chicago Public Schools locations file, measured in EPSG:26916 |
+
+The answer listed 18 schools, ended with *"⚠️ Partial answer: analysis failed during this turn,
+so this reply is based on what completed before the failure"*, and never said the 18 came from
+one district's file. OpenStreetMap has 31 schools within the same mile, two of them inside the
+box (Sahs Elementary of the Central Stickney district, and Saint Camillus).
+
+### Stage S38.1 The peer that measured could not find
+
+The analyze peer's bound tools, read from the VM's `turn_instrumentation_toolset` line for its
+toolset (`1ec90e12acae`, 43 tools), held no tool that finds features by kind in an area.
+`overpass_search` existed but was bound only to the search peer, and the code peer's 42 tools
+had `web_search` but not it. The decider sent the request to analyze, correctly by its
+description, and from there the only lookup the peer had was `geocode_places`, one name at a
+time. It never had a choice to make about `overpass_search`.
+
+`make_langchain_osm_tools` (`agent_runtime/langchain_granular_tools.py`) binds a tool of the same
+name in both measuring peers, with or without an upload, for the reason `admin_boundary` is not
+upload-gated: it produces its own input. It runs the same Overpass query, and adds what a
+measuring peer needs next: the features written to a GeoJSON file (`file_id`, OSM tags as
+columns) that `execute_code` reads through `input_files`, a `source_statement` saying what the
+list is (OSM-mapped, public, private and religious alike, not an official register), and a note
+when the result reaches the limit (default 200, max 500), since Overpass cuts off silently. The
+description states what it does, including that it returns only what lies inside the area given,
+so "within 1 mile of X" needs a bbox enlarged by that distance. The registry
+(`capability_registry._SHARED`) tells the decider: "finding real-world features of a kind inside
+an area from live OpenStreetMap".
+
+### Stage S38.2 A repeated call is answered, and then ends the run
+
+The supervisor's repeat guard (`_is_unproductive_repeat`) works between peers and never saw a
+loop inside one. `_make_repeat_call_middleware` (`agent_runtime/executor_factory.py`) wraps tool
+calls in every peer. A call with the same name and arguments as one in the most recent model
+step that actually ran gets the earlier result back with a line saying so, and the tool does not
+run again. The condition is that nothing new has run since. Without it, `list_conversation_files`
+after a write, or `read_workspace_file` after an edit, would answer from a stale result. A run
+begins at the latest human message, because the supervisor re-invokes a peer thread with an
+observation for its retries.
+
+*Revised during the work.* The first version also answered a repeat of a call that had
+**failed**. The t4 replay below caught it: all three Overpass mirrors answered 504/500/504, the
+peer retried the identical call, and the guard returned the failure with "nothing has changed
+since". For an outage that is false, because an identical retry is how an outage gets through.
+A result that reports an error (`status="error"`, or a JSON body with a truthy `error`) now runs
+again (`_is_error_result`).
+
+**Being told was not enough, so the guard also ends the run.** This was measured on the
+incident's own history: its query, its 27 real calls with results regenerated by the same tool,
+and the analyze peer's system prompt and tool schemas, sent to Lumen deepseek-v4-flash at
+temperature 0, three trials per cell. The question was whether the next call repeats the loop's.
+
+| decision point | result as production sent it | result carrying the observation |
+|---|---|---|
+| after 1 repeat | 0 of 3 repeated | 2 of 3 repeated |
+| after 4 repeats | 3 of 3 repeated | 3 of 3 repeated |
+
+So at the fourth identical ask, with the observation ignored twice, the guard raises
+`RepeatedToolCallError`. That reaches the supervisor as a peer failure, as the recursion limit
+did, about three steps into the loop instead of fourteen. In the incident that saves under a
+minute: the fourteen repeats took 55 s, because the geocodes were cached. Most of the 10.5
+minutes came from the varied calls and the single 4-minute model call, and S38.1 is what removes
+those.
+
+**It was not reasoning loss.** Lumen's deepseek-v4-flash, asked with tools bound as the agent asks
+it, returns `reasoning_content: null` and `reasoning_tokens: 0`. Its plan is in `content`, and
+`content` is kept between steps. All twelve measurement calls also reported 0 reasoning tokens.
+The model's own text while it looped was "I keep repeating the same query. Let me stop and
+reconsider my approach entirely." It had its plan, and it repeated anyway.
+
+### Stage S38.3 A failure a later peer made good is not a partial answer
+
+`_run_peer` now records where in the turn a peer failed (`at`, the length of `actions`).
+`_unresolved_peer_failures` drops a failure when a later answering peer (analyze or code) ran
+without failing and came back with an answer. Only the failures that remain produce the banner.
+The failures stay in state for the trace either way. The banner stays when no later peer ran,
+when the later peer failed too or returned nothing, and when the failure came after the answer.
+A failure with no position, from an older state, keeps its banner.
+
+### Stage S38.4 A list of features names where it came from
+
+This is a check on the composed answer, not an instruction to the answerer.
+`_with_feature_source` (`graph.py`) reads the turn's tool record for data sources: an
+`overpass_search` result's `source_statement`, or a `stage_url`/`stage_element` URL named by the
+`web_search` title it was found under. Socrata serves a dataset's CSV under `/api/views/<id>/`
+and its page under `/<Category>/<Name>/<id>`, so a shared id-like path segment on the same host
+also counts as a match. If the answer lists at least three rows and names none of those sources,
+a **Source:** line goes beside the list, ahead of any caveat block, ending "The list covers only
+what that source holds." An answer that already names its source is left as it is.
+
+*Revised during the work.* The t4 replay retried Overpass with three boxes, and the line came out
+listing three "sources". One of them was built from the repeat guard's note, which is not JSON,
+as "features tagged as requested". The check now keeps one entry per source: the last good
+Overpass call for OSM, and one per URL for a staged file. It skips any result that does not parse
+as a JSON object.
+
+### Stage S38.5 Replays
+
+Local, `AGENT_MODE=local`, Lumen deepseek-v4-flash, the map UI in Chrome, the question typed with
+the bbox line the UI adds:
+
+| tab | code | Overpass | time | result |
+|---|---|---|---|---|
+| t2 | S38.2 answer-only | mirrors failing (504/500/504) | 4 min 55 s | no loop. The search peer's OSM layer had 30 schools, but the answer measured 8 and named OSM |
+| t3 | S38.1–S38.4 | up | 2 min 8 s | 8 analyze steps, 1 `overpass_search` (56 features, 2.9 s) on a bbox enlarged by about 1 mile, 31 schools within 1 mile, Sahs and Saint Camillus at 0 m, no banner, source line added |
+| t4 | S38.1–S38.4, before the two revisions | failing for most of the turn | 4 min 15 s | 17 analyze steps through the outage. The guard answered two retries of a *failed* call (the first revision), a later box got through (32 features), 31 schools, no banner, and the source line listed three "sources" (the second revision) |
+| t5 | `1bf161c`, final | up | 2 min 42 s | 1 `overpass_search` (56 features), 31 schools, Sahs and Saint Camillus at 0 m, no banner. The answer named OpenStreetMap itself, so the check added nothing |
+
+Production took 13 min 5 s for 18 schools from one district's file. Each replay of the full
+change returned the same 31 schools with the same distances (t3, t4 and t5 agree to 0.1 m).
+
+### Stage S38.6 What this stage does not fix
+
+- The invariant gate still prints "COULD NOT VERIFY" over the correct distances in every replay
+  (`distance_m` in an EPSG:4326 frame, `unit 'schools'`). PR #85 owns that code.
+- Overpass mirrors fail for minutes at a time. During this work all three configured mirrors
+  answered 504/500/504 twice, while `overpass.private.coffee` answered. Adding a mirror is a
+  separate change.
+- An A, B, A, B alternation is not a repeat under S38.2's rule, because each call is new work
+  relative to the one before it.
+- `docs/spatial-toolkit.html` has no `overpass_search` entry.
+- The model's narration can still misread its own numbers. t5 called Kennedy High School at
+  1607.1 m "just barely outside" a 1609.34 m mile.
+
+Tests: `test_repeat_tool_calls.py` (real `create_agent`, with and without a checkpointer),
+`test_osm_features_in_peers.py`, `test_peer_failure_superseded.py` and
+`test_answer_names_its_source.py`. Every new test that asserts the new behaviour failed before
+its change. The negative cases (different arguments run, a call after new work runs, the banner
+stays when it is true) pass on both.
+
+## Stage 39 — Travel figures in no tool result are cut, whether or not the audit flags them {#stage-39}
+
+*2026-10-08. Branch `claude/routing-claim-scan`, from `prototype` at `81fd7c8` (Stage 37 merged as
+#85, M8.74 as #86). Stage 38 is taken by `claude/peer-repeat-and-scope`, not yet pushed.*
+
+Stage S37.3 cuts a road or rail figure only when the LLM audit flags it. S37.6 recorded that in
+2 of 2 local replays the answer still shipped memorised travel figures with no caveat. In run 1
+the audit flagged them and reconciliation removed the flag. In run 2 the auditor passed them. This
+stage closes that gap without relying on the audit.
+
+### Stage S39.1 Where rule (2) found the number
+
+Rule (2) of `_reconcile_audit_with_artifacts` drops a disputed claim when every 3+ digit number in
+it appears in the execution record. It matched with `n in blob`, a substring test against the
+whole JSON record, so "450" was "in the record" when the coordinate 48.84502, the id
+`file_2272c8450ec9` or the number 14502 held those digits. It now matches on numeric boundaries
+(`_number_in`): the number must not come after a word character or a '.', and must not be followed
+by a digit. A JSON-escaped newline or tab before the number is allowed, because stdout lines
+start there. A following '.' is allowed too, so 2584 is still in 2584.62. This is stricter than
+"not after a digit or '.'": a hex id puts letters before its digits. `_claim_numbers` no longer
+takes the tail of a decimal ("0.450" is not 450). Rule (2′) uses the same match.
+
+That fixed the substring case, and it was not what happened live. The reconciliation log now
+names where a rule-(2) number was found. In local replay 3 it logged
+`('roughly 490 km by road', '2 number @analysis_results.summary')` and the same for
+"about 340 km via the eurostar rail line". The analyze peer's own summary had repeated the
+memorised figures, the synthesizer had copied them, and rule (2) counted the summary as part of
+the record. No tool result held 490, and none held 340 either, because geocode now gives 343.7.
+The record that rule (2) reads now leaves out `analysis_results.summary` and
+`code_result.summary` (`_without_peer_prose`). A number that a tool result also holds is still
+found there.
+
+### Stage S39.2 A deterministic scan of the answer
+
+`_remove_unrecorded_travel` runs in synthesize after `_remove_unproducible_claims`. When no bound
+tool matches `_ROUTING_TOOL_RE`, it looks for sentences that make a travel claim and carry a
+distance or a duration found in no tool result. It cuts them with `_cut_unit` and adds the routing
+note. It does not consult the audit.
+
+- **A travel claim** (`_TRAVEL_MODE_RE`): "by road/rail/train/car/air…", "road/rail/driving/flight
+  distance|time|route|journey|trip|ride", drive/driving (but not after Google/hard/USB, and not
+  "driving factors/forces/variables"), flight(s)/flying, travel, Eurostar/Amtrak/TGV. A bare
+  "road" does not count, because "the road network layer holds 3,400 km" measures a layer. Bare
+  "train" does not count ("train the model"), and neither does "flies" ("as the crow flies").
+- **A quantity** (`_TRAVEL_QTY_RE`): a number or a range ("450–470 km", "a 5-hour drive",
+  "1 h 15 min") in km/mi/metres/h/min. Not a speed ("100 km/h"), and not an area ("450 km²").
+- **In a tool result** (`_quantity_recorded`): the record is every tool result's content this turn
+  plus the earlier turns' ledger lines. Peer summaries are left out, for the reason in S39.1. A
+  number counts when some record number rounds to it at the answer's precision ("about 464 km" is
+  463.8). Below 100 the record number also needs a field or unit of the same kind next to it. A
+  plain boundary match would let "2 hours 15 minutes by Eurostar" be grounded by `"count": 2`.
+
+The cut takes the smallest unit holding both the mode word and the quantity: a `;` segment of a
+parenthetical, otherwise the sentence. A span that crosses a parenthesis takes the sentence.
+Fenced code is skipped. A flagged routing claim whose travel quantities are gone from the answer
+after the cut is removed from the audit as well. That is how an issue the auditor paraphrased, which
+`_drop_claims` cannot place, stops leaving a caveat about text the user will not see. A routing
+claim without a quantity ("goes via the A26") keeps its caveat, as in S37.3.
+
+With a routing tool bound the scan does nothing. A figure that tool produced would be in the
+record, and one it did not produce is for the audit to judge.
+
+### Stage S39.3 A lead-in whose list was cut
+
+"Actual travel distances are longer:" followed by two cut bullet items used to stay behind,
+pointing at nothing. `_tidy_after_cuts` now takes the text from before the cuts. A line that
+ended in ':' and introduced a list then, and introduces none now, loses its last sentence, so
+"This is the straight-line distance. Actual travel distances are longer:" keeps its first
+sentence. A colon that never had a list under it is left alone. `_drop_claims` (S37.3) uses the
+same rule.
+
+### Stage S39.4 Replayed locally
+
+There were four Chrome replays of the S37 question. The setup was `AGENT_MODE=local`, Lumen
+deepseek-v4-flash, the map UI on :5205, one new tab each, and the tabs `#s38-t1-replay` …
+`#s38-t4-summary-fix` were left open. Every synthesized answer again contained a memorised travel
+sentence: "roughly 490 km by road and about 340 km by rail (Eurostar)", "roughly 460 km by road,
+or about 340 km via the Eurostar rail tunnel", "roughly 490 km by road and about 340 km via the
+Eurostar rail line", "roughly 450–490 km by road, and about 490 km by Eurostar rail".
+
+| replay | audit | reconciliation | scan | shipped |
+|---|---|---|---|---|
+| 1 | flagged both | rule (2) removed both (location not logged yet) | cut the sentence | no figure, routing note, no warning |
+| 2 | passed | — | cut the sentence | same |
+| 3 | flagged both | rule (2) removed both, `@analysis_results.summary` | cut the sentence | same |
+| 4 (summary excluded) | passed | — | cut the sentence | same |
+
+No re-grounding pass ran in any of the four turns, and each recorded 4–5 ledger rows.
+
+### Stage S39.5 What this stage does not fix
+
+- **A figure equal to a recorded number passes.** The match is by number, not by meaning, so
+  "~340 km by Eurostar" next to a 340.0 km great-circle result counts as grounded. Since S37.7 the
+  great-circle figure is 343.7, which separates the two here, but a coincidence elsewhere would not.
+- **Memorised figures outside travel.** "This matches the commonly cited figure of ~998 sq mi"
+  appeared in three of the four replays. It is consistent with the computed value, and only the
+  audit judges it.
+- **A sentence holding a grounded figure and a memorised one loses both.** Replay 1's cut sentence
+  also restated the great-circle distance ("~344 km"), which the answer already gave above it.
+
+Tests: `test_routing_figures_scan.py` (37). It covers rule (2) and (2′) on boundaries (a coordinate,
+an id, a longer number), numbers that must still reconcile, decimal tails, and the peer summary.
+It covers the scan on both live shapes through the real graph, with a routing tool bound, with a
+tool-computed figure, the six false-positive sentences, seven cut shapes, the parenthetical
+segment, code fences, and the paraphrased-flag cleanup. It covers the lead-in in five shapes. On
+`81fd7c8`, 30 of them fail. The 7 that pass are guards meant to pass on both: five in-record
+numbers, a routing tool bound, and a tool-computed figure. One Stage 37 test
+(`test_an_unproducible_claim_that_cannot_be_located_is_not_re_run`) now uses a claim without a
+figure, because the scan removes the old one's "about 460 km".
 
 ## Stage 40 — Six Overpass names, four servers, two operators {#stage-40}
 
