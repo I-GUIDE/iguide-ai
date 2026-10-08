@@ -5136,7 +5136,7 @@ rather than from the previous one.
 **Not fixed** The invariant gate's "COULD NOT VERIFY" on correct distances (PR #85's area),
   Overpass mirror outages, A-B-A-B alternation loops, and the capability atlas entry.
 
-## 2026-10-08 · M8.77 · A file_id the code names is staged without being listed
+## 2026-10-08 · M8.79 · A file_id the code names is staged without being listed
 
 **Change** `execute_code` (`agent_runtime/langchain_exec_tools.py`) now stages every minted file_id
   (`file_` plus 12 hex digits) that the code spells out. With an `entrypoint` and no inline code,
