@@ -1025,3 +1025,95 @@ def test_the_gates_own_files_are_not_offered_as_downloads(tmp_path, monkeypatch)
     names = {a.get("filename") or a.get("name") for a in result.artifacts}
     assert "buffer.geojson" in names, names
     assert not {"environment.json", "declared_outputs.json", "checks.json"} & names, names
+
+
+# --------------------------------------------- labels beside numbers, and the nouns runs count
+#
+# The live turn, 2026-10-08 (Lumen deepseek-v4-flash, "buffer points by distance ... Champaign
+# County"): 4 points, 10 km buffers in EPSG:26916, area/(pi r^2) = 0.9984 — correct — and the user
+# saw "COULD NOT VERIFY". Run 1 declared its count in `points`; run 2 declared the CRS it worked
+# in. Both are things a correct run says, and both cost the turn a caveat and a full re-run.
+
+_LIVE_RUN_2 = {"buffer_radius_km": {"value": 10.0, "unit": "km"},
+               "num_points_buffered": {"value": 4, "unit": "count"},
+               "output_crs": {"value": "EPSG:26916", "unit": "crs"}}
+
+
+def test_the_live_declared_outputs_pass():
+    """Exactly what run 2 published: 15 pass, 0 fail, 2 cannot_determine — both on the label."""
+    report = _declared(_LIVE_RUN_2)
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+    assert report["counts"][UNKNOWN] == 0
+
+
+def test_a_label_is_recorded_as_not_a_measurement_and_gets_no_numeric_checks():
+    findings = check_declared_units({"output_crs": {"value": "EPSG:26916", "unit": "crs"}})
+    assert [f["check"] for f in findings] == ["declared_value"], findings
+    assert findings[0]["status"] == PASS and findings[0]["measurement"] is False
+    assert "EPSG:26916" in findings[0]["message"], "the report still shows what was declared"
+
+
+@pytest.mark.parametrize("value", ["EPSG:26916", "geopandas.GeoSeries.buffer", True, False,
+                                   None, [1, 2], {"a": 1}])
+def test_no_non_numeric_value_moves_the_verdict(value):
+    """str, bool, None, list, dict — with a unit, without one, or bare."""
+    for spec in ({"value": value, "unit": "crs"}, {"value": value}, value):
+        report = _declared({"x": spec, "radius": {"value": 25000, "unit": "metres"}})
+        assert report["verdict"] == PASS, (spec, report["findings"])
+
+
+def test_a_numeric_string_is_still_a_measurement():
+    """`"10.0"` is a model reporting a number; it keeps every check the number would get."""
+    assert _declared({"r": {"value": "10.0", "unit": "km"}})["verdict"] == PASS
+    assert _declared({"r": {"value": "10.0", "unit": "furlongs"}})["verdict"] == UNKNOWN
+    assert _declared({"r": {"value": "10.0", "unit": None}})["verdict"] == FAIL
+    assert _declared({"n": {"value": "-3", "unit": "points"}})["verdict"] == FAIL
+
+
+def test_a_number_with_a_genuinely_unknown_unit_is_still_unknown():
+    """The label fix must not become "accept anything": a NUMBER in an unrecognised unit is a
+    measurement nobody can read, and stays cannot_determine."""
+    assert _declared({"r": {"value": 10.0, "unit": "crs"}})["verdict"] == UNKNOWN
+    assert _declared({"r": {"value": 10.0, "unit": "furlongs"}})["verdict"] == UNKNOWN
+
+
+def test_a_degree_buffer_still_fails_beside_a_label(tracked, tmp_path):
+    """The bug the gate exists for is untouched by declaring the CRS alongside it."""
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
+
+    tracked["gdf"] = _geo("EPSG:4326")
+    tracked[DECLARED_OUTPUTS] = {"output_crs": {"value": "EPSG:4326", "unit": "crs"}}
+    report = _run(tracked, tmp_path, "bad = gdf.buffer(0.1)\n")
+    assert report["verdict"] == FAIL
+    assert any(f.get("op") == "buffer" and f["status"] == FAIL for f in report["findings"])
+
+
+@pytest.mark.parametrize("unit", ["point", "points", "polygon", "polygons", "zone", "zones",
+                                  "tract", "tracts", "county", "counties", "cell", "cells",
+                                  "pixel", "pixels", "region", "regions", "site", "sites",
+                                  "building", "buildings", "Points"])
+def test_the_geometry_and_zone_nouns_are_counts(unit):
+    """Run 1 declared {"value": 4, "unit": "points"}; `features` was a count and `points` was not."""
+    findings = check_declared_units({"n": {"value": 4, "unit": unit}})
+    assert {f["status"] for f in findings if f["check"] == "declared_units"} == {PASS}, findings
+
+
+def test_a_geometry_noun_count_is_still_checked_as_a_count():
+    assert _declared({"n": {"value": 2.5, "unit": "tracts"}})["verdict"] == FAIL
+    assert _declared({"n": {"value": -1, "unit": "points"}})["verdict"] == FAIL
+
+
+def test_the_live_run_passes_through_the_assembled_gate(tmp_path, monkeypatch):
+    """What the sandbox executes — prologue, the run's code, epilogue — not the agent-side
+    import. `_declared_number` has to be inlined for the label rule to exist in there at all."""
+    import warnings
+
+    monkeypatch.setattr(warnings, "warn", warnings.warn)
+    monkeypatch.chdir(tmp_path)
+    ns = {"points": _geo("EPSG:4326", n=4), "__name__": "__main__"}
+    code = ("projected = points.to_crs('EPSG:26916')\n"
+            "buffers = projected.buffer(10000)\n"
+            f"IGUIDE_OUTPUTS = {_LIVE_RUN_2!r}\n")
+    exec(compile(prologue_source(None) + code + epilogue_source(), "<script>", "exec"), ns)
+    report = json.loads((tmp_path / "checks.json").read_text())
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]

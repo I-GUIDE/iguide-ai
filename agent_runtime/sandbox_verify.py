@@ -119,6 +119,15 @@ _UNIT_ALIASES = {
     "observations": "count", "feature": "count", "features": "count",
     "item": "count", "items": "count", "event": "count", "events": "count",
     "incident": "count", "incidents": "count", "occurrence": "count", "occurrences": "count",
+    # The nouns a geospatial run counts. `points` was missing while `features` was present, so a
+    # live run declaring {"value": 4, "unit": "points"} (Champaign, 2026-10-08) came back
+    # "unrecognised unit 'points'" and the turn was re-run in full. Explicit on purpose: a
+    # plural-stripping rule would also accept "metres" -> "metre" as a count.
+    "point": "count", "points": "count", "polygon": "count", "polygons": "count",
+    "zone": "count", "zones": "count", "tract": "count", "tracts": "count",
+    "county": "count", "counties": "count", "cell": "count", "cells": "count",
+    "pixel": "count", "pixels": "count", "region": "count", "regions": "count",
+    "site": "count", "sites": "count", "building": "count", "buildings": "count",
     "hectare": "hectares", "hectares": "hectares", "ha": "hectares",
     "acre": "acres", "acres": "acres",
     "degree": "degrees", "degrees": "degrees", "deg": "degrees", "°": "degrees",
@@ -407,6 +416,26 @@ def check_count_population(outputs: Any, namespace: Dict[str, Any],
     return findings
 
 
+def _declared_number(value: Any) -> Optional[float]:
+    """The declared value as a number, or None when it is not one.
+
+    ``bool`` is excluded although it is an ``int``: ``True`` is a flag, not the count 1. A numeric
+    STRING still counts — a model that writes ``"10.0"`` is reporting a number, and checking it
+    is what the old ``float(value)`` path did. NaN and inf come back as floats so the finite
+    check can fail them.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
     """Every numeric output the run declares must carry a unit and be in a plausible range.
 
@@ -431,13 +460,28 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
         return findings
     for key, spec in list(outputs.items())[:24]:
         target = str(key)
+        value = spec.get("value") if isinstance(spec, dict) else spec
+        if _declared_number(value) is None:
+            # NOT A MEASUREMENT. A run reports labels beside its numbers — the CRS it worked in,
+            # a method name, a flag — and IGUIDE_OUTPUTS is where it was told to report. Live,
+            # 2026-10-08: {"output_crs": {"value": "EPSG:26916", "unit": "crs"}} beside two
+            # numbers that passed, and the label scored TWO cannot_determine ("not a numeric
+            # scalar", "unrecognised unit 'crs'") that put "COULD NOT VERIFY" on a correct
+            # answer. There is no number here for a unit, range or finiteness check to be about,
+            # so none runs; it is recorded, with its type, so the report still shows it.
+            unit = spec.get("unit") if isinstance(spec, dict) else None
+            findings.append(_finding("declared_value", PASS, target,
+                                     f"not a measurement ({type(value).__name__} {value!r:.60}"
+                                     f"{f', unit {unit!r}' if unit else ''}): recorded as "
+                                     f"declared; numeric checks do not apply",
+                                     measurement=False))
+            continue
         if not isinstance(spec, dict):
             findings.append(check_finite(target, spec))
             findings.append(_finding("declared_units", FAIL, target,
                                      "declared without a unit — give "
                                      "{'value': x, 'unit': 'metres'}"))
             continue
-        value = spec.get("value")
         findings.append(check_finite(target, value))
         unit = spec.get("unit")
         if unit is None or str(unit).strip() == "":
@@ -456,7 +500,7 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
             # A count is the one unit whose VALUE the gate can judge on its own: a negative or
             # fractional count is wrong whatever produced it. Recognising the unit and then not
             # checking it is how "unit count" passed for a value of -3.
-            findings.append(_count_finding(target, value, unit))
+            findings.append(_count_finding(target, _declared_number(value), unit))
         else:
             findings.append(_finding("declared_units", PASS, target, f"unit {unit}",
                                      unit=str(unit)))
@@ -1105,7 +1149,8 @@ def _inlined_helpers() -> str:
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
                 check_not_all_nan, _looks_like_join_result, _has_metric_column,
                 check_join_cardinality,
-                check_finite, _count_finding, check_declared_units, check_count_population,
+                check_finite, _count_finding, _declared_number, check_declared_units,
+                check_count_population,
                 capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
                 _looks_like_frame, _has_geometry, install_contract_guards,
                 install_operation_tracker, run_checks):

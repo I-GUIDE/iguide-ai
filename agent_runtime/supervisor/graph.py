@@ -962,8 +962,8 @@ _MAX_GROUNDING_RETRIES = 1
 
 _REGROUND_DIRECTIVE = (
     "IMPORTANT — a previous attempt at this same question produced an answer whose key claims "
-    "were NOT present in any tool result, so it was rejected. The claims that could not be "
-    "grounded were:\n{gaps}\n\n"
+    "were NOT present in any tool result, or failed a deterministic invariant check, so it was "
+    "rejected. The claims that could not be grounded were:\n{gaps}\n\n"
     "Do NOT restate them from your own knowledge. Either (a) actually compute or retrieve them "
     "now with the tools you have, so the values appear in a tool result, or (b) say plainly "
     "which parts you could not establish. A partial answer that is fully grounded is better "
@@ -986,10 +986,29 @@ def _reground_note(state: SupervisorState) -> Optional[str]:
 
 
 def _unsupported_claims(audit: Optional[Dict[str, Any]], limit: int = 6) -> List[str]:
-    """The claims a flagged audit could not ground, as plain strings."""
+    """The claims a flagged audit could not ground, as plain strings — what a re-run can fix.
+
+    An invariant-gate ``cannot_determine`` is NOT one of them. Its value is in the execution
+    record by construction (the gate read it there), and the gate is deterministic, so re-running
+    the same analysis reproduces the same verdict: nothing the peer can do answers "unconfirmed".
+    Live, 2026-10-08: a correct Champaign buffer (area/(πr²) = 0.9984) was sent back because
+    the gate could not verify `output_crs`, and the analyze peer redid the whole chain —
+    kb_method_search, admin_boundary, get_method_contract, execute_code, add_map_layer, ~50 s
+    and five LLM calls — under a directive saying its claims were "NOT present in any tool
+    result", which was false. The caveat still reaches the user; only the re-run is skipped.
+
+    A gate ``fail`` IS a reason to re-run — a buffer in degrees is a wrong number the peer can
+    fix — and its claim carries the gate's own message, because "computed value from `gdf`"
+    alone tells the peer neither what was wrong nor that reprojecting is the fix.
+    """
     out: List[str] = []
     for item in ((audit or {}).get("issues") or []):
-        if isinstance(item, dict):
+        if isinstance(item, dict) and item.get("source") == "invariant_gate":
+            if item.get("status") != "fail":
+                continue
+            claim = " — ".join(p for p in (str(item.get("claim") or "").strip(),
+                                           str(item.get("reason") or "").strip()) if p)
+        elif isinstance(item, dict):
             claim = str(item.get("claim") or "").strip()
         else:
             claim = str(item or "").strip()
@@ -1883,8 +1902,11 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     if gate:
         # Prepended: the deterministic finding is the one the reader must see first, and it
         # carries the remedy ("reproject before measuring"), not just a complaint.
+        # Tagged with their source and status so `_unsupported_claims` can tell a gate finding
+        # from an auditor's — they call for different things; see there.
         gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
-                        "reason": f"invariant gate ({f.get('check')}): {f.get('message')}"}
+                        "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
+                        "source": "invariant_gate", "status": f.get("status")}
                        for f in gate]
         headline = ("A deterministic invariant check FAILED on this run, so its numeric results "
                     "are not verified."

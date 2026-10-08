@@ -4958,3 +4958,32 @@ rather than from the previous one.
   `pip install … -c constraints.txt`: **27 passed, 2 skipped** (was 29 errors in CI). In the
   replica, the contract tests and the stub's own consumers (web search, artifact claims, ports):
   91 passed, 2 skipped.
+
+## 2026-10-08 · M8.72 · A label is not a measurement, and a gate unknown does not re-run the turn
+
+**Change** `check_declared_units` gives a non-numeric declared value (str, bool, None, list,
+  dict) no numeric checks and records it as `declared_value`, pass, `measurement: false`.
+  `_UNIT_ALIASES` counts point(s), polygon(s), zone(s), tract(s), county/counties, cell(s),
+  pixel(s), region(s), site(s) and building(s). In `graph.py`, `_unsupported_claims` leaves out
+  a gate `cannot_determine`, so it no longer sends the turn back to analyze. A gate `fail` still
+  re-runs, and the peer is now given the gate's message.
+
+**Why** This was the first live turn with the bundle on (2026-10-08, Lumen deepseek-v4-flash,
+  Champaign buffer). The answer was right: 4 points, 10 km in EPSG:26916, area/(πr²) = 0.9984.
+  It still shipped "COULD NOT VERIFY" and re-ran everything once. Run 1 was marked unknown
+  because of `unit: "points"` (and because its work was inside a function). Run 2 got 15 pass,
+  0 fail and 2 cannot_determine, both on `output_crs: {"value": "EPSG:26916", "unit": "crs"}`.
+  The re-run repeated kb_method_search, admin_boundary, get_method_contract, execute_code and
+  add_map_layer, taking about 50 s and five extra LLM calls, and emitted both layers again. The
+  gate is deterministic, so re-running cannot confirm what it could not. Reasoning is in
+  architecture stage 36, "The gate stops flagging correct runs, and its unknowns stop re-running
+  them".
+
+**Measured** Run 2's declared outputs now get a pass verdict with 0 unknowns, both agent-side
+  and through the assembled sandbox gate. In the old code, 33 of the new gate tests and all 4
+  new graph tests fail. The guards (a number in an unknown unit stays unknown, a degree buffer
+  still fails) pass on both. Full suite on the Mac: 3566 passed, 18 skipped, 1 failed. The failure is `test_the_installed_networkx_matches_the_pin`, which compares the anaconda networkx (3.4.2) with `constraints.txt`. It depends on the machine and not on this change.
+
+**Not fixed** The run 1 `coverage` unknown for work done inside a function. It shows a caveat
+  and no longer causes a re-run.
+
