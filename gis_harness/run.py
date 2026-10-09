@@ -3,9 +3,11 @@
     python -m gis_harness.run --start-server 5301 --model lumen:deepseek-v4-flash --tasks sample
     python -m gis_harness.run --base-url http://localhost:5301 --model openai:gpt-5.6-luna --tasks all
     python -m gis_harness.run --summarise gis_harness/runs/<label>
+    python -m gis_harness.run ... --screenshots       # and <task>.png per turn, at the end
 
 Each run writes gis_harness/runs/<label>/<model>/<task>.json (the score, the answer, the tool
-calls, the token usage) and <task>.events.jsonl (every SSE event), then summary.json and a
+calls, the token usage), <task>.events.jsonl (every SSE event) and layers/ (each map layer's
+file, fetched while the server is up), then summary.json and a
 printed table with one column block per model. Scores for different models are never pooled.
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from . import datasets
 from .client import run_turn, upload
 from .score import score
+from .screenshots import capture_layers, render as render_screenshots
 from .tasks import BY_ID, SAMPLE, TASKS, live_osm_schools
 
 HERE = Path(__file__).resolve().parent
@@ -124,6 +127,8 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
     stem = f"{task_id}" + (f".t{trial}" if trial else "")
     turn = run_turn(base_url, query, provider=provider, model=model, file_ids=file_ids,
                     thread_id=thread, raw_log=out / f"{stem}.events.jsonl")
+    # The layer files live on this server, which is gone by the time anyone replays the turn.
+    layers = capture_layers(base_url, out / f"{stem}.events.jsonl")
     s = score(task, expected, turn)
     record = {"task": task_id, "title": task.title, "trial": trial, "provider": provider,
               "model": model, "query": query, "files": sorted(files),
@@ -131,6 +136,7 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
               "expected_why": expected.get("_why"), "score": s.to_dict(),
               "answer": turn["answer"], "seconds": turn["seconds"], "route": turn["route"],
               "audit_severity": turn["audit_severity"], "map_layers": turn["map_layers"],
+              "layer_files": layers,
               "tool_calls": [{"name": c["name"], "agent": c.get("agent")} for c in turn["tool_calls"]],
               "usage": cost_usd(turn["usage"]), "error": turn["error"], "thread_id": thread,
               "gate": turn.get("gate", [])}
@@ -309,6 +315,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--compare", nargs=2, type=Path, metavar=("BASE", "NEW"),
                     help="per-model metrics of two finished runs over the trials both have")
     ap.add_argument("--compare-trials", type=int, default=None)
+    ap.add_argument("--screenshots", action="store_true",
+                    help="at the end, replay every turn through the map UI and write <task>.png "
+                         "(needs npm and Google Chrome; see gis_harness/screenshots.py)")
     a = ap.parse_args(argv)
 
     if a.compare:
@@ -373,6 +382,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = summarise(records)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     print_summary(summary)
+    if a.screenshots:
+        render_screenshots([root])
     return 0
 
 

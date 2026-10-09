@@ -12,7 +12,9 @@
     "check:files": "esbuild src/files.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/filescheck.mjs && node node_modules/.cache/filescheck.mjs",
     "check:upload": "esbuild src/upload.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/uploadcheck.mjs && node node_modules/.cache/uploadcheck.mjs",
     "check:hooks": "node scripts/check-hook-deps.mjs",
-    "check:models": "esbuild src/modelChoice.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/modelcheck.mjs && node node_modules/.cache/modelcheck.mjs"
+    "check:models": "esbuild src/modelChoice.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/modelcheck.mjs && node node_modules/.cache/modelcheck.mjs",
+    "check:replay": "esbuild src/replay.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/replaycheck.mjs && node node_modules/.cache/replaycheck.mjs",
+    "replay:shots": "esbuild scripts/replay-shots.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/replayshots.mjs --log-level=warning && node node_modules/.cache/replayshots.mjs"
   },
   "dependencies": {
     "@deck.gl/aggregation-layers": "^9.4.0",
@@ -29,6 +31,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "playwright-core": "1.63.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   }

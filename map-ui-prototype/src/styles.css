@@ -553,3 +553,16 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
   .app.map-on .mapwrap, .app.map-on .splitter { display: none; }
   .app.map-on .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; }
 }
+
+/* ---- replay capture (?replay=<key>, dev and replay builds only) ------------------------------
+   The screenshot has to hold the WHOLE transcript, so the page grows to fit it instead of
+   scrolling inside .transcript; the map keeps the height of a laptop window and stays at the
+   top, so its framing is the one a user would have seen. */
+.app.replay-capture { height: auto; min-height: 100vh; overflow: visible; }
+.app.replay-capture .workspace { align-items: flex-start; }
+.app.replay-capture .chat { height: auto; }
+.app.replay-capture .transcript { flex: none; overflow: visible; }
+.app.replay-capture .mapwrap { position: sticky; top: 0; height: 820px; flex: 1; align-self: flex-start; }
+.replay-strip { background: #1f2937; color: #f9fafb; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 6px 16px; }
+.replay-strip.bad { background: #7f1d1d; }
+.replay-strip .replay-line { padding-left: 1.5em; }
