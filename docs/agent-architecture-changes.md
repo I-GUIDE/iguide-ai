@@ -60,6 +60,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 | 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
+| 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7717,3 +7718,128 @@ they used to assert the printed caveat.
 - No live run of this stage. It changes no tool and no route; the replay and calibration above
   are offline over recorded turns.
 
+
+## Stage 48 — Measured numbers reach the gate without being declared {#stage-48}
+
+*2026-10-09. Branch `claude/undeclared-measurements`, stacked on stage 46 (#98). DEVLOG M8.86.
+Stage 47 is #100's. Follows the stage 43 finding that no model declared `IGUIDE_OUTPUTS` in 96
+gate reports.*
+
+**Why.** The gate's unit and CRS checks (stage 43, `agent_runtime/declared_outputs.py`) ran
+only on numbers a script assigned to `IGUIDE_OUTPUTS`. Whether a number got checked depended on
+the model's habits, the dependence the design programme set out to remove. The record has more
+to it than stage 43 said:
+
+| runs | tool description asks for `IGUIDE_OUTPUTS` | gate reports | with a declaration |
+|---|---|---|---|
+| every phase run (`p2-gate` … `p5-fixed-gate`, `mac-`/`deployed-23cfd02-gate`), both models | no: `AGENT_EXTRACTION` was off | 499 | 0 (one luna run printed it instead of assigning it) |
+| `stack-live-cases` (deepseek, `AGENT_EXTRACTION=1` as on the VM) | yes | 117 | 48 |
+
+So the "0 of 96" was the harness's toolset, the gap #99 found, and the request works for
+deepseek when it is there. It still leaves 59% of runs undeclared. A gate that checks a number
+only when the model declares it depends on the model either way.
+
+**The candidates**, judged by what generalises across models and what it costs:
+
+| route | across models | gives | cost | taken |
+|---|---|---|---|---|
+| parse what the run PRINTS with a unit | depends on print style: deepseek writes "2,586.01 km²", luna `area_km2=2586.0` or a bare tuple | value, unit | agent side only: a regex and pint over stdout | yes |
+| module-level numeric bindings and frame columns after the run | a bare number has no unit, and reading one from a name is what stage 43 deleted; work inside a function leaves module scope empty (A3) | value | small | no |
+| wrap the MEASURING CALLS (`.area`, `.length`, `.distance`) | independent of the model's print style, for geopandas | value, unit (from the CRS), CRS | one numpy pass per call; the calls were already wrapped for the CRS (stage 43) | yes, linked to the first |
+
+A model can quote only a number it has seen, and it sees only what the run prints, so the
+printed channel covers every model's numbers. The measuring calls add what printing cannot:
+where a figure was measured.
+
+**What changed.**
+
+1. **The metric-op recorder keeps what the call returned** (`sandbox_verify._summarise`): count,
+   sum, min, max, mean, and the values when there are 64 or fewer, for `area`, `length`,
+   `distance` and `hausdorff_distance`, plus the CRS's linear unit and its metres-per-unit
+   (pyproj's `axis_info`). The values stay in `checks.json`; the `metric_ops` the model sees
+   drop them.
+2. **`agent_runtime/measured_outputs.py` types what was printed.** A number counts when a unit
+   pint parses stands after it ("16.2 km²", "382254.14 person-km"), or when a length or area unit
+   ends its label: bracketed ("Area (km²): 16.2"), the last word of a label joined to a word
+   ("area_km2=", "Watershed area km2:", `"distance_m": 412.5`), or a snake_case key printed
+   beside its value (`print('area_ha', x)`). The word before has to be letters, so a parameter
+   is not read as the unit of the result after it ("within_1_mile: 19", "within 25 km: 673").
+   Only lengths and areas are read from labels, because "min=0" is a minimum and "C2:" a site.
+   No name decides what a number is; pint decides what the unit is.
+3. **A printed length or area that equals a recorded measurement inherits its CRS.** The match is
+   by value after unit conversion, within the digits printed, and only for figures shown to three
+   or more significant digits. Two checks follow:
+   - `measured_in` FAILS a figure measured in a geographic CRS. It names the printed figure; the
+     op-level `projected_crs` failure names the line.
+   - `printed_unit` FAILS a figure that equals the measurement only if the CRS's unit is read as
+     metres. EPSG:3435 is in US survey feet: ft² ÷ 1e6 printed as "km²" is 10.76 times too large,
+     and nothing in a frame shows it.
+4. **Typed values travel back as `verification.outputs`**, at most 16 per run, linked figures
+   first. They become typed facts in the turn log, so the number scan (stage 44) resolves an
+   answer's figure to a typed fact that carries its CRS. A measurement nobody printed with a
+   unit is still typed (`source: "measured"`), in metres.
+5. **The declared-count checks are not run on printed numbers.** They judge a model's claim about
+   a count. "108785 people" printed by a run is a sum, and "Mean: 4.5 schools" a mean; both would
+   fail correct runs. The number scan already holds an answer's counts to what the run printed.
+6. **The `IGUIDE_OUTPUTS` request in the tool description is unchanged.** It is the only way to
+   range-check a number, and it works for deepseek when present.
+7. **`gis_harness/typed_coverage.py`** measures all of this over an archive. `--reexec`
+   re-runs every recorded call through the current prologue in `iguide-codeexec:latest`, with no
+   network, against the task's regenerated data. It reads the code from the CALL events, because
+   the recorded result's `code` has its whitespace collapsed.
+
+**Measured.**
+
+- **Archive, correct answers only** (`python -m gis_harness.typed_coverage
+  gis_harness_runs_archive`, 304 turns, without this stage's own run):
+
+  | model | figures | typed today | typed from print | lengths and areas | typed from print |
+  |---|---|---|---|---|---|
+  | deepseek-v4-flash | 4,198 | 19 | 1,162 (28%) | 1,218 | 732 (60%) |
+  | gpt-5.6-luna | 1,061 | 0 | 110 (10%) | 286 | 100 (35%) |
+
+  "Typed today" is tool `outputs` (`terrain_derivative`, `inundation_at_level`) and the two
+  `extraction-smoke` turns' declarations. Many untyped figures are parameters restated from the
+  question ("10 m", "1 mile"), which the question already grounds.
+- **Re-executed** (`--reexec`): 853 calls from 282 turns. 851 wrote a report, and 601 reproduced
+  the recorded stdout's numbers (the rest read fetched TIGER or OpenStreetMap files). A measuring
+  call returned values in 20 of them: T02 distances, T04 lengths, one T06 area. 34 answer figures
+  inherit a CRS that way, 27 for deepseek and 7 for luna. Most lengths and areas in these tasks
+  are pixel counts on rasters (T06, T07, T08, T11), a haversine written by hand, or a
+  `pyproj.Transformer` and arithmetic, and no geopandas call measures them. **Neither new check
+  fired on any of the 851 reports**, all from correct answers.
+- **With the request in the description** (`stack-live-cases`, 227 figures): declarations type
+  77, the printed route types 74, and together they type 116. Printing adds 39 to what was
+  declared.
+- **Gate-on harness run** `undeclared-b24495a4` (deepseek-v4-flash, the 16 tasks of
+  `p5-fixed-gate`, `AGENT_EXTRACTION` off as there, one trial):
+
+  | | `p5-fixed-gate` | `undeclared-b24495a4` |
+  |---|---|---|
+  | correct | 11/12 | 10/12 |
+  | strict | 5/16 | 9/16 |
+  | banners on correct answers | 5 | 0 |
+  | answer figures resolved to a typed fact | 0 of 298 | 88 of 334 |
+  | typed outputs in gate reports (with a CRS) | 0 | 143 (7) |
+  | `measured_in` / `printed_unit` failures | — | 0 |
+
+  T10 missed the kriging value (295.1 against 309.5, the nugget put on the diagonal), the same
+  method error `stack-live-cases` made; no new finding was in that turn. The one banner, on U04's
+  fabricated answer, is the op-level `projected_crs` failure for `gdf.geometry.distance(...)` on
+  EPSG:4326. Most of the banner change is stage 46's. Spend: 3.28M input and 0.08M output Lumen
+  tokens. The run, its layers and screenshots are in `gis_harness_runs_archive/undeclared-b24495a4`.
+- **What the model reads:** `verification.outputs` averaged 232 characters per call over the 853
+  re-executed calls (median 0, 90th percentile 608, largest 2,899).
+
+**Not fixed.**
+
+- A raster area (cells × cell area) has no measuring call to inherit a CRS from. Matching a
+  printed area to "an integer number of cells" means nothing once the printed precision is coarser
+  than a cell, which it usually is (16.2 km² ± 0.05 km² spans 111 cells of 900 m²).
+- `pyproj.Transformer` with arithmetic, a hand-written haversine and shapely's scalar `.area`
+  are not recorded. `pyproj.Geod` measures correctly in degrees and needs no check.
+- Web Mercator's scale error (T01's 1.8x, T02's 1.34x) is in metres, so no unit check sees it. A
+  scale-factor check on the measuring call (pyproj's `Factors` at the data's centroid) would.
+- The count checks stay with declarations.
+- One live trial, deepseek only. The claim across models rests on luna's archived runs, re-executed,
+  and on the tests, which use no model.

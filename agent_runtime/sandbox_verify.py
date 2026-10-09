@@ -691,7 +691,14 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
     a correct measurement was made. This wraps the operations on ``GeoPandasBase`` (which both
     GeoSeries and GeoDataFrame use) the first time geopandas is imported, by hooking
     ``__import__``: importing geopandas up front would cost every run that never uses it. The
-    wrapper records, then calls the original, so results are unchanged. Never raises.
+    wrapper calls the original and records, so results are unchanged. Never raises.
+
+    The record carries what the call RETURNED as well as where it ran: for ``area``, ``length``,
+    ``distance`` and ``hausdorff_distance``, a summary of the values (``_summarise``) and the
+    CRS's linear unit. A number the script prints is then matched to the call that measured it,
+    and inherits its CRS, without the script declaring anything (agent_runtime/
+    measured_outputs.py). Until then the gate's unit checks ran only on ``IGUIDE_OUTPUTS``, which
+    no model in the GIS harness ever assigned (0 of 96 gate reports).
     """
     import builtins
     import linecache
@@ -718,7 +725,7 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
             return ""
         return linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()[:160]
 
-    def note(op: str, obj: Any) -> None:
+    def note(op: str, obj: Any, result: Any = None) -> None:
         try:
             record = state["record"]
             if len(record) >= 200:
@@ -728,6 +735,12 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
                                                                    if hasattr(crs, "to_string")
                                                                    else crs),
                      "projected": _is_projected(crs), "code": code_line()}
+            if op in ("area", "length", "distance", "hausdorff_distance"):
+                entry["crs_unit"] = _crs_unit(crs)
+                entry["crs_unit_factor"] = _crs_unit_factor(crs)
+                summary = _summarise(result)
+                if summary:
+                    entry["values"] = summary
             record.append(entry)
         except Exception:
             pass
@@ -745,8 +758,9 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
             if isinstance(original, property) and not getattr(original.fget, "_iguide", False):
                 def make(op, fget):
                     def getter(self):
-                        note(op, self)
-                        return fget(self)
+                        value = fget(self)
+                        note(op, self, value)
+                        return value
                     getter._iguide = True
                     helpers.add(getter.__code__)
                     return property(getter)
@@ -756,9 +770,10 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
             if callable(original) and not getattr(original, "_iguide", False):
                 def wrap(op, fn):
                     def method(self, *args, **kwargs):
+                        value = fn(self, *args, **kwargs)
                         if not (op == "buffer" and args and args[0] == 0):
-                            note(op, self)
-                        return fn(self, *args, **kwargs)
+                            note(op, self, value)
+                        return value
                     method._iguide = True
                     helpers.add(method.__code__)
                     method.__name__ = fn.__name__
@@ -788,10 +803,32 @@ def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
         pass
 
 
+def _summarise(result: Any) -> Optional[Dict[str, Any]]:
+    """What a measuring call returned: count, sum, min, max, mean, and the values themselves when
+    there are few. Enough for a printed total, nearest, largest or single figure to be matched to
+    the call that measured it. One pass over the array; nothing is copied for a large result."""
+    try:
+        import numpy as np
+
+        arr = np.asarray(getattr(result, "values", result), dtype=float).ravel()
+        finite = arr[np.isfinite(arr)]
+        if not finite.size:
+            return None
+        out = {"n": int(arr.size), "sum": float(finite.sum()), "min": float(finite.min()),
+               "max": float(finite.max()), "mean": float(finite.mean())}
+        if finite.size <= 64:
+            out["each"] = [float(v) for v in finite]
+        return out
+    except Exception:
+        return None
+
+
 def _dedup_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen, out = set(), []
     for o in ops:
-        key = (o.get("op"), o.get("crs"), o.get("code"))
+        # The values are part of the key: a loop that measures a different buffer each pass made
+        # a different measurement each pass, and a printed figure may come from any of them.
+        key = (o.get("op"), o.get("crs"), o.get("code"), (o.get("values") or {}).get("sum"))
         if key in seen:
             continue
         seen.add(key)
@@ -1136,7 +1173,8 @@ def _inlined_helpers() -> str:
                 check_join_cardinality, check_finite, _declared_number, check_declared_values,
                 declared_entries, capture_environment, check_contract_arg, _check_one_arg,
                 _geometry_column, _looks_like_frame, _has_geometry, install_contract_guards,
-                install_operation_tracker, _install_metric_op_recorder, _dedup_ops, run_checks):
+                install_operation_tracker, _install_metric_op_recorder, _summarise, _dedup_ops,
+                run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))

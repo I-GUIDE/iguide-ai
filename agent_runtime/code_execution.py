@@ -439,12 +439,16 @@ def _note_printed_outputs(verification: Dict[str, Any], stdout: Any, work: Path)
         return verification
 
 
-def _read_checks(work: Path) -> Dict[str, Any]:
+def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
     """Load the invariant gate's report, if it wrote one.
 
     Absent is not a failure: the gate may be disabled, or the run may have died before the
     epilogue. Absent and "checked, all fine" must stay distinguishable, so this returns {} for
     absent rather than a synthetic pass.
+
+    *stdout* is the run's printed output. Its figures and the measuring calls' recorded values
+    are typed here (agent_runtime/measured_outputs.py), so the unit and CRS checks run without
+    the script declaring anything.
     """
     from agent_runtime.sandbox_verify import CHECKS_FILENAME
 
@@ -484,6 +488,18 @@ def _read_checks(work: Path) -> Dict[str, Any]:
             data = {**data, "findings": [*(data.get("findings") or []), *extra],
                     "counts": counts,
                     "verdict": "fail" if counts.get("fail") else "cannot_determine"}
+    # Undeclared: what the run printed with a unit, and what its measuring calls returned. Never
+    # at the cost of the report: a failure here leaves the declared path's result as it was.
+    try:
+        from agent_runtime import declared_outputs, measured_outputs
+
+        extra, captured = measured_outputs.evaluate(data, stdout)
+        if extra or captured:
+            data = {**data, "findings": [*(data.get("findings") or []), *extra],
+                    **declared_outputs.merge_verdict(data, extra)}
+            outputs = [*outputs, *captured][:max(len(outputs), measured_outputs.MAX_OUTPUTS)]
+    except Exception:  # noqa: BLE001
+        pass
     order = {"fail": 0, "cannot_determine": 1}
     findings = sorted((f for f in (data.get("findings") or [])
                        if isinstance(f, dict) and f.get("status") != "pass"),
@@ -492,7 +508,10 @@ def _read_checks(work: Path) -> Dict[str, Any]:
     return {"verdict": data.get("verdict"), "counts": data.get("counts") or {},
             "inspected": data.get("inspected") or [], "findings": findings[:12],
             **({"outputs": outputs} if outputs else {}),
-            **({"metric_ops": data["metric_ops"][:12]} if data.get("metric_ops") else {}),
+            # The recorded values stay in checks.json: this dict is in the model's tool result.
+            **({"metric_ops": [{k: v for k, v in o.items() if k != "values"}
+                               for o in data["metric_ops"][:12] if isinstance(o, dict)]}
+               if data.get("metric_ops") else {}),
             **({"findings_truncated": truncated} if truncated else {}),
             **({"error": data["error"]} if data.get("error") else {})}
 
@@ -1233,7 +1252,7 @@ class CodeExecutor:
             artifacts = [*source_artifacts,
                          *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, ENVIRONMENT_FILENAME,
                                                     DECLARED_FILENAME, *staged, *unchanged})]
-            verification = _note_printed_outputs(_read_checks(work), stdout, work)
+            verification = _note_printed_outputs(_read_checks(work, stdout), stdout, work)
             # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
             # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
             # run dir before it is carried back, so it lands in the durable workspace beside the

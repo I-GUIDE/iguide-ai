@@ -169,8 +169,9 @@ _EXTRACTION_NOTE = (
     # package name: one run guessed `from method_library import ...` (the host
     # directory name) and failed with ModuleNotFoundError. The importable package is
     # `iguide_methods`, whatever the mount is called.
-    # The gate can only check a UNIT if the run declares one; nothing in a frame
-    # distinguishes 21500 metres from 21500 feet.
+    # A declaration is the only way to range-check a number. It is no longer the only way a
+    # number reaches the gate (agent_runtime/measured_outputs.py): with this note, deepseek
+    # declared in 48 of 117 gate runs (stack-live-cases); without it, in 0 (every phase run).
     "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
     "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
     "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
