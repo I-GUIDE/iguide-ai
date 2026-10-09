@@ -58,6 +58,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
 | 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
 | 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
+| 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7500,3 +7501,110 @@ The five banners on correct answers, read one by one:
 
 **Spend:** `p4-gate` 5.41M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen
 (with stage 45's run).
+
+## Stage 45 — Every source catalogued, every answer naming its sources {#stage-45}
+
+*2026-10-08. Branch `claude/source-catalog`, stacked on stage 44. DEVLOG M8.83. Phase 5 of the
+eight-flaws program, flaw 6. Review §F6 has the root cause.*
+
+**Why.**
+
+- **Sources were chosen blind.** The model chose a source by reading tool descriptions, and
+  nothing recorded what each source includes or leaves out. Live, 2026-10-08 19:42 UTC: "18
+  schools within 1 mile" came from the Chicago Public Schools file, while OpenStreetMap has 31,
+  and the answer did not say which source it used.
+- **`source` meant four things across tools,** and naming a source was enforced in one place:
+  stage 38's `_with_feature_source`, for two tool families and only lists of three or more rows.
+- **Naming depended on the model.** Stage 41's baseline measured answers naming their source on
+  33 of 50 runs (deepseek-v4-flash) and 18 of 51 (gpt-5.6-luna). Whether a user learns where a
+  number came from was model habit.
+
+**What changed.**
+
+1. **`agent_runtime/source_catalog.py`**, one entry per source the agent reaches: TIGERweb,
+   OpenStreetMap via Overpass, Nominatim, 3DEP, the rs-embed service, the Chicago Data Portal,
+   Census and USGS data services, the platform knowledge base, and the web.
+   - Each declares `covers`, `excludes`, `extent` and `licence`, the tools that read it, and the
+     hosts it is fetched from.
+   - It is a list, as the review says: of sources, which change in months, not of words, which
+     change with every query.
+   - Two structural tests guard it: every host `fetch_public_data` may fetch from has an entry
+     (`tnmaccess.nationalmap.gov` did not), and no tool belongs to two sources.
+2. **Selection by declared coverage.**
+   - Every peer step's brief (stage 42's system-message block) lists what each source covers and
+     leaves out. That is a capability statement, not a rule: a count from a city's school file
+     and a count from OpenStreetMap answer different questions.
+   - `dem_for_region` refuses a region outside 3DEP's declared extent before fetching. The
+     all-NoData check stays behind it.
+3. **The answer names its sources from the record, always.**
+   - `_with_sources` renders a Sources line from the results the answer used: those its figures
+     resolved to (stage 44's links), those that delivered a layer, and otherwise every successful
+     data result.
+   - Each source is named with what it leaves out and its licence.
+   - A dataset staged from a URL keeps stage 38's search-title naming.
+   - Uploads are named by filename.
+   - A failed result, a repeat note, a web or knowledge-base search that only found a dataset,
+     and an agent's own output are not sources.
+   - This replaces `_with_feature_source`, `_source_entries` and `_feature_sources`.
+
+**Tests.**
+- **New:** `test_source_catalog.py` (10).
+- **Rewritten:** `test_answer_names_its_source.py` (10) for the new rule. The two tests that held
+  "an answer that already names its source, or prose without a list, gets no line" changed
+  intent: the line is now always rendered, because the prose is the model's and the line is the
+  record's.
+- **Suites:** `rag_pipeline/tests` 3858 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
+  157 passed. After the fix below: 3872 passed, the same one failed, and `tests/` 157 passed.
+
+**Measured with the harness, on one model.** Run on deepseek-v4-flash only (the user's budget
+decision), gate on, 1 trial, 17 tasks. Both runs below carry stage 44's first version, so the
+difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| answer names a source the task's data came from | 12/17 → 17/17 |
+| answers carrying a Sources line | 0/17 → 15/17 |
+| correct | 11/13 → 13/13 |
+| refused gracefully | 4/4 → 3/4 |
+| unproductive steps | 20 → 11 |
+| input tokens | 5.29M → 4.39M |
+
+- **The source is now the record's, not the model's habit.** 15 of 17 answers carry a line
+  naming every source they used, with what it leaves out. Uploads appear as "schools.geojson
+  (your upload)", and catalogued services carry their coverage.
+  - Example: "OpenStreetMap (via Overpass), which leaves out whatever volunteers have not mapped
+    ... (ODbL)".
+  - Stage 41's baseline named a source on 33 of 50 deepseek runs and on 18 of 51 luna runs.
+- **The two answers without a line,** T11 and U02, read their uploads only through
+  `execute_code`. Its arguments reach the graph as a string, so `input_files` was never seen.
+  - Fixed after the run: string arguments are parsed, and a code run's own `input_files`
+    (with filenames) name the upload.
+  - A file the store records as the agent's own output is still never a source.
+  - 2 of the 3 new test cases fail before the fix.
+  - Both answers named their file in prose anyway, which is why the score is 17/17.
+- **The changes in correctness and steps are trial variance:** T09 and T10, the method-choice
+  tasks, both went BAD → OK. This stage changes no tool and no route.
+- **Not measured on gpt-5.6-luna,** whose baseline habit (18/51) is what this stage exists for. The
+  line is rendered from the tool record whatever the model writes, and the tests hold that. A
+  live check on a second model has not been run.
+- **Spend:** `p5-gate` 4.49M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen.
+- **Confirmation run of the fixed tip** (`p5-fixed-gate`, 2026-10-09). This includes stage 44's
+  fixes and the code-only-upload fix. deepseek-v4-flash, gate on, 1 trial, 16 tasks (all but T06):
+  - a source the task's data came from is named on **16/16** answers (stage 43, same tasks:
+    10/16);
+  - **15/16** carry the rendered Sources line, among them T11, which read its uploads only through
+    `execute_code` and had no line before the fix;
+  - the one without a line, U01, is an unsolvable task: it refused after inspecting its upload,
+    and the file inspector takes the upload's id as `path`, an argument name the code did not
+    read. Fixed after the run: any argument value that is a file id counts as an input, whatever
+    the tool calls it, and the result's own `filename` names it. A new test fails before the fix.
+    Suites after it: `rag_pipeline/tests` 3873 passed, 18 skipped, 1 failed (the networkx pin);
+    `tests/` 157 passed;
+  - correct 11/12. Stage 44 has the verdict side of this run.
+  - Spend: 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
+
+**Not done.**
+- The source does not yet travel on the `map_layer` event itself; it travels on the typed facts
+  (stage 43) and in the answer.
+- Selection among sources is still the model's, now informed. No code picks one source over
+  another.

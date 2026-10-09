@@ -1,0 +1,189 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": true,
+        "found": "13"
+      }
+    ],
+    "steps": {
+      "tool_calls": 16,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "lattice.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on your `lattice.geojson` file, here are the results:\n\n## Global Moran's I (Queen Contiguity, Row-Standardised Weights)\n\n**Moran's I = 0.2252** (expected under spatial randomness: \u22120.0101), with a z-score of 4.42 and p < 0.01.\n\nThis indicates **significant positive spatial autocorrelation** \u2014 similar values are clustered together rather than randomly distributed across the lattice. The result was verified by independently building the queen weights matrix from the polygon geometries and computing Moran's I directly, confirming the value of 0.2252.\n\n## Getis-Ord Gi* Hot Spot Analysis (Binary Queen Weights, Self Included)\n\n**13 cells are hot spots with z > 1.96.**\n\nThis was computed using the canonical PySAL `esda.G_Local` implementation with binary weights and `star=True` (each cell included in its own neighbourhood), and verified with a manual computation of the standard Getis-Ord Gi* formula. Both methods agree on **13 cells**.\n\nThe hot-spot cells (by cell_id) are: **26, 27, 28, 29, 36, 37, 38, 39, 40, 47, 48, 49, 50** \u2014 forming a contiguous block in the upper-central part of the lattice. The strongest hot spot is cell 38 (z = 6.51).\n\n**Note on methodology:** The tool's built-in `local_getis_ord` function returned z-scores systematically ~2\u20133\u00d7 smaller than the standard Getis-Ord Gi* statistic, and its values were not a constant rescaling of the standard results. Since these did not match the reference PySAL/GeoDa implementation, the count of **13** is based on the standard, verified `esda.G_Local` computation rather than the tool's output.\n\nAn interactive map layer \"Getis-Ord Gi* z-scores\" (100 cells, choropleth by `gi_star_z`) has been produced and is available for you to explore.\n\n**Sources:** lattice.geojson (your upload).\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked. (`this run`)\n- Note: 1 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 293.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 2,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 20,
+    "input_tokens": 578372,
+    "cached_input_tokens": 531200,
+    "output_tokens": 11077,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T09-deepseek-v4-flash-1791511574-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    }
+  ]
+}
