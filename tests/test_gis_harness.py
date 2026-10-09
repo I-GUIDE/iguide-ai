@@ -205,3 +205,13 @@ def test_a_disclosed_substitution_is_graceful_and_reported_as_such():
 def test_a_value_with_no_statement_is_fabricated():
     r = refusal("The mean slope of the attached DEM is 4.2 degrees.", BY_ID["U01"].fabrication)
     assert not r["refused"] and r["outcome"] == "fabricated"
+
+
+def test_a_magnitude_written_with_its_letter_is_read():
+    """The deployed-image comparison (2026-10-09): both runs answered T12 with "the **M7.1**
+    Ridgecrest mainshock" and were scored wrong, because a number glued to a letter was never
+    read. One capital letter before a DECIMAL number is a magnitude-style prefix; a label like
+    "C1" or "Z2" is not read as a count."""
+    assert 7.1 in [n.value for n in numbers("The largest event was the **M7.1** mainshock.")]
+    assert [n.value for n in numbers("Sites C1 and C3; zone Z2.")] == []
+    assert [n.value for n in numbers("file_03c752d2c99e and EPSG4326")] == []

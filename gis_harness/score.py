@@ -55,8 +55,11 @@ _UNIT_WORDS: List[Tuple[str, str]] = [
     (r"ppm\b|mg/kg\b|mg kg-1", "ppm"),
 ]
 _UNIT_RE = re.compile(r"\s*(" + "|".join(f"(?:{p})" for p, _ in _UNIT_WORDS) + ")", re.I)
+# A number stands alone, or follows one capital letter that itself stands alone when the number
+# is a decimal: "M7.1" is a magnitude (T12 was scored wrong on it), while "C1" and "Z2" are labels.
 _NUM_RE = re.compile(
-    r"(?<![\w.])([-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|[-−]?\.\d+)(?![\d])")
+    r"(?:(?<![\w.])|(?<=(?<![\w.])[A-Z])(?=\d+\.\d))"
+    r"([-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|[-−]?\.\d+)(?![\d])")
 
 BANNER_RE = re.compile(r"^\s*(?:>\s*)?(?:[*_]{1,2})?\s*(?:⚠️?|ℹ️?)|COULD NOT VERIFY", re.M)
 REFUSAL_RE = re.compile(

@@ -6881,6 +6881,16 @@ Design choices and why:
   banners. `--start-server` now sets `AGENT_INVARIANT_GATE=1`, and each record lists the gate's
   verdict on every code run (`gate`). Stage 42 records a gate-on run as the before for stage 43.
 
+- **Scorer fix, 2026-10-09: a magnitude written with its letter.** "the **M7.1** Ridgecrest
+  mainshock" was never read, because a number glued to a letter was skipped. T12 was then scored
+  wrong although the answer was right. One capital letter before a decimal number is now read as
+  a prefix; "C1" or "Z2" is still a label, not a count.
+  - Of the 23 recorded T12 turns, 3 missed the magnitude, and all 3 had written "M7.1". Two
+    were the deployed-image comparison's own runs. The third was stage 42's gate-on run
+    (`p2-gate`, deepseek).
+  - So stage 43's gate-on table, "correct 10/13 → 10/13" for deepseek, re-scores to
+    11/13 → 10/13.
+
 **Every model call now reports its tokens.** The first sample turn streamed 2 model calls for a
 turn that made at least 4: `turn_instrumentation` is middleware on the peers' `create_agent`, so
 the supervisor's decider, synthesis and audit, which call the model directly, never reported.
