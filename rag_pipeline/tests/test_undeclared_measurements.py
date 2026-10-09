@@ -29,6 +29,7 @@ from agent_runtime import facts as turn_facts, measured_outputs, sandbox_verify 
     ('{"distance_m": 412.52746200242365, "name": "School 08"}', 412.52746200242365, "m"),
     ("Watershed area (km²): 16.2", 16.2, "km²"),
     ("total valid area ha: 99.0", 99.0, "ha"),
+    ("suitable_cells 10385 area_ha 103.85", 103.85, "ha"),   # print('area_ha', x)
 ])
 def test_a_printed_figure_carries_the_unit_printed_with_it(line, value, unit):
     got = measured_outputs.printed_quantities(line)

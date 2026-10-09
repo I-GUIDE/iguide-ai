@@ -53,16 +53,18 @@ _LINES, _NUMBERS = 2000, 400
 # A unit in the label in front of the number, as the run printed it. Two shapes:
 # - bracketed: "Area (km²): 16.2", "area [m]: 5";
 # - the label's last word, joined to a word before it: `area_km2=`, "Watershed area km2:",
-#   `"distance_m": 412.5`. The word before has to be letters, so a parameter is not read as
-#   the unit of the result after it ("within_1_mile: 19", "within 25 km: 673").
+#   `"distance_m": 412.5`, and a snake_case key printed beside its value (`print('area_ha',
+#   x)` gives "area_ha 103.85"). The word before has to be letters, so a parameter is not read
+#   as the unit of the result after it ("within_1_mile: 19", "within 25 km: 673").
 # Only lengths and areas are read this way. They are what the CRS checks are about, and other
 # dimensions collide with common labels ("min=0" is a minimum, "C2:" a site name).
 _BRACKET_LABEL_RE = re.compile(r"[(\[]\s*([^()\[\]]{1,24}?)\s*[)\]]\s*[\"']?\s*[:=]\s*$")
 _TOKEN_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]+[_ ]([A-Za-z²]{1,12}\d?)[\"']?\s*[:=]\s*$")
+_KEY_LABEL_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]+_([A-Za-z²]{1,12}\d?)[\"']?,?\s+$")
 
 
 def _label_unit(before: str) -> Optional[str]:
-    for rx in (_BRACKET_LABEL_RE, _TOKEN_LABEL_RE):
+    for rx in (_BRACKET_LABEL_RE, _TOKEN_LABEL_RE, _KEY_LABEL_RE):
         m = rx.search(before)
         if m and parse_unit(m.group(1)).dimension in _MEASURES:
             return m.group(1)
