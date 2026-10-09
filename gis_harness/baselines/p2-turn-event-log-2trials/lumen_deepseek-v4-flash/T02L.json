@@ -1,0 +1,80 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://z.overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "20"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "**20 schools** \u2014 that's how many OpenStreetMap features tagged `amenity=school` fall within 1 mile of the point (41.9231 N, 87.7093 W) in Chicago's Logan Square area.\n\n### How it was computed\n1. **Fetched OSM schools** tagged `amenity=school` in a bounding box around the point (enlarged beyond 1 mile so nothing near the edge was missed) \u2014 32 school features returned.\n2. **Measured exact distances** in a projected CRS (UTM zone 16N, EPSG:26916) from the point to each school's centroid, and counted those within **1 mile = 1,609.344 m**.\n\n### The 20 schools within 1 mile\n\n| School | Distance |\n|---|---|\n| Darwin Elementary School | 0.21 mi |\n| Saint Sylvester School | 0.37 mi |\n| St. Sylvester's School & Hall | 0.43 mi |\n| Funston Elementary School | 0.54 mi |\n| Jehovah School | 0.61 mi |\n| (unnamed school, 2430-2446 N Ridgeway) | 0.63 mi |\n| Our Lady of Grace School | 0.63 mi |\n| Logan Square Elementary School | 0.67 mi |\n| Mozart Elementary School | 0.68 mi |\n| Stowe Elementary School | 0.74 mi |\n| Yates Elementary School | 0.75 mi |\n| Avondale-Logandale Elementary School | 0.81 mi |\n| Marine Leadership Academy | 0.82 mi |\n| Chase Elementary School | 0.83 mi |\n| Goethe Elementary School | 0.83 mi |\n| St. Hyacinth Catholic School | 0.87 mi |\n| Brentano Elementary Math & Science Academy | 0.88 mi |\n| McAuliffe Elementary School | 0.94 mi |\n| Moos Elementary School | 0.96 mi |\n| ASPIRA Business & Finance High School | 0.99 mi |\n\nThe 20 schools are now on your interactive map as a clickable layer (each feature shows its name and distance in miles).\n\n**Caveat:** This counts what OSM contributors have mapped as `amenity=school` \u2014 it is not an official register, so a recently opened or closed school may be missing or still listed.",
+  "seconds": 122.7,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 2,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 152824,
+    "cached_input_tokens": 115200,
+    "output_tokens": 4333,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791498954-0"
+}

@@ -353,6 +353,10 @@ def test_a_broken_recorder_never_breaks_the_turn(caplog, monkeypatch):
 
 
 def test_instrumentation_is_innermost_in_the_default_stack():
-    """First handler is outermost, so instrumentation must be LAST to see the final payload."""
+    """First handler is outermost, so instrumentation must be the last MODEL wrapper to see the
+    final payload. The progress middleware is first (stage 42): it decides whether the model is
+    called at all, and its brief has to be in the system message before the budget measures it.
+    `answer_repeats` wraps tool calls, not model calls."""
     names = [m.name for m in ef._default_middleware()]
-    assert names == ["repair_history", "budget_context", "instrument", "answer_repeats"], names
+    assert names == ["progress", "repair_history", "budget_context", "instrument",
+                     "answer_repeats"], names

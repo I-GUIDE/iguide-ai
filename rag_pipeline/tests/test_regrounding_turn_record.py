@@ -133,6 +133,16 @@ def _run(monkeypatch, audits, *, passes=(FIRST_PASS, SECOND_PASS), answers=(ANSW
 
     monkeypatch.setattr(g, "audit_answer_grounding", fake_audit)
 
+    # Stage 42: whether a bound tool produces a flagged claim is the producer check's answer (a
+    # model call in production). Scripted here as a model that knows only routing needs a
+    # routing tool; the graph's reaction to that answer is what these tests hold.
+    def fake_producers(claims, tool_docs, llm):
+        routing = any(g._ROUTING_TOOL_RE.search(t) for t in tool_docs)
+        return {c: (None if g._ROUTING_CLAIM_RE.search(c) and not routing else "execute_code")
+                for c in claims}
+
+    monkeypatch.setattr(g, "_producing_tools", fake_producers)
+
     def peer(q, ev, st):
         seen["analyze"].append(list(st.get("grounding_gaps") or []))
         return json.loads(json.dumps(passes[min(len(seen["analyze"]) - 1, len(passes) - 1)]))
@@ -228,7 +238,9 @@ def test_routing_claims_are_dropped_and_nothing_re_runs(monkeypatch, ledger):
 
 def test_a_routing_claim_with_a_routing_tool_bound_still_re_runs(monkeypatch, ledger):
     """The rule is "no BOUND tool can produce it", not "routing is never computable"."""
-    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"]}
+    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"],
+             "bound_tool_docs": {"execute_code": "run code",
+                                 "network_route_distance": "road distance between points"}}
     state, seen = _run(monkeypatch, [ROUTING_AUDIT, GROUNDED], passes=(first, SECOND_PASS))
     assert state["actions"].count("analyze") == 2, state["actions"]
     assert "bound_tools" not in state["analysis_results"]

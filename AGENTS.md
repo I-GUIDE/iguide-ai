@@ -241,10 +241,19 @@ picker actually selects gpt-oss.
 the agent calls it, returns `reasoning_content: null` and `reasoning_tokens: 0`, so it has no
 thinking to lose, and its plan stays in `content`. It still re-issued one identical
 `geocode_places` call fourteen times in a live turn (2026-10-08), and telling it the call was a
-repeat did not stop it. The fix for that is `_make_repeat_call_middleware`
-(`agent_runtime/executor_factory.py`), which answers the repeat and then ends the run. Stage 38 of
-`docs/agent-architecture-changes.md` has the measurements. Check `reasoning_tokens` before
-blaming the shim.
+repeat did not stop it. Since stage 42 the turn's event log (`agent_runtime/turn_log.py`) answers
+an identical call from the record for the whole turn, across peers and runs, and two consecutive
+steps that add nothing new end a peer run (`_make_repeat_call_middleware`,
+`_make_progress_middleware` in `agent_runtime/executor_factory.py`). Neither depends on the model
+reading the observation. Stages 38 and 42 of `docs/agent-architecture-changes.md` have the
+measurements. Check `reasoning_tokens` before blaming the shim.
+
+**What a turn did is one record, and what it is for is in state.** `agent_runtime/turn_log.py` is
+the turn's append-only event log: the peers' tool records, the ledger and the progress rule all
+read it. The plan (`SupervisorState["plan"]`) and the task are rendered into every peer step's
+SYSTEM message, which the context budget never trims, so a retry whose latest human message is a
+bare observation still carries the task. Do not add a second record of "what happened"; derive a
+view from the log.
 
 Which model actually answered is not visible in the transport log — it shows only the host,
 and a dropped `reasoning_effort` looks identical to an applied one. So each per-request build

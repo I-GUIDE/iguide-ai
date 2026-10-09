@@ -133,7 +133,9 @@ def test_run_1_the_flag_is_no_longer_reconciled_away(monkeypatch, ledger):
     final = state["final_answer"]
     assert "450" not in final and "490" not in final, final
     assert "340.0 km" in final and "2,584.6 km²" in final and "GEOID 17019" in final
-    assert "no routing tool" in final
+    # Stage 42: a FLAGGED claim no bound tool produces is cut by the producer check, with its
+    # general note; the routing note is the unflagged scan's (run 2 below).
+    assert "none of the tools available here can establish" in final
     assert state["actions"].count("analyze") == 1, state["actions"]
 
 

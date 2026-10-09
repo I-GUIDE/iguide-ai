@@ -1,0 +1,70 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 21
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://overpass.kumi.systems/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 21,
+        "matched": true,
+        "found": "19"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "OpenStreetMap has **19 schools within 1 mile** of **41.9231\u00b0 N, 87.7093\u00b0 W**.\n\nThis count comes from live OSM features tagged `amenity=school`, using straight-line distance. It includes public, private, religious, and unnamed mapped schools; OSM coverage may be incomplete or outdated.",
+  "seconds": 53.5,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 74798,
+    "cached_input_tokens": 0,
+    "output_tokens": 1140,
+    "usage_absent": 0,
+    "cost_usd": 0.0163,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T02L-gpt-5.6-luna-1791498325-0"
+}

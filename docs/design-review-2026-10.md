@@ -604,11 +604,13 @@ tasks that phases are not written against.
 4. **Some answers are never audited.** That covers conversational answers and the
    general-knowledge branch (§F2). Phase 4: the number scan runs on every answer, which costs
    nothing.
-5. **A synthesis failure can leave the turn looping** (inferred, not reproduced). The exception
-   path (`G:5888–5895`) returns without resetting `reground`, so a failed second synthesis
-   routes back to the supervisor (`G:6153`) until LangGraph's default recursion limit. The
-   supervisor graph's `invoke` sets none, and `run_supervisor` does not catch it. Phase 2: the
-   progress rule bounds it, and the node returns an explicit reset.
+5. **A composition after a re-grounding pass can loop the turn.** First inferred from the
+   exception path (`G:5888–5895`). Phase 2 then reproduced it through a different exit, the
+   general-knowledge answer (`G:6262`), which also returns without resetting `reground`. With the
+   flag still set, the conditional edge (`G:6153`) sends the graph back to the supervisor on every
+   composition. The test reached LangGraph's recursion limit of 10,000. The fix is in phase 2:
+   the node wrapper clears the flag on every exit except the one that asks for a pass, rather
+   than at each return.
 6. **The needs FIFO bypasses both the decider and the repeat guard.** `_dead` silently discards
    requests (`G:5560–5571`). Phase 2: needs become subgoals.
 7. **Stale documentation in the code.**
