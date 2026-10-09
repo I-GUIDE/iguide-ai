@@ -20,6 +20,7 @@ months, not of words, which change with every query. Each entry declares its cov
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
@@ -207,6 +208,23 @@ def _args(args: Any) -> Dict[str, Any]:
     return {}
 
 
+_FILE_ID_RE = re.compile(r"^file_[0-9a-f]{6,}$")
+
+
+def _file_ids_in(node: Any, out: List[str], depth: int = 0) -> None:
+    if depth > 4:
+        return
+    if isinstance(node, str):
+        if _FILE_ID_RE.match(node) and node not in out:
+            out.append(node)
+    elif isinstance(node, dict):
+        for v in node.values():
+            _file_ids_in(v, out, depth + 1)
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            _file_ids_in(v, out, depth + 1)
+
+
 def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]:
     """[(statement, names an answer could use for it)] for one tool result."""
     args = _args(args)
@@ -224,17 +242,15 @@ def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]
             out.append((_statement(hs), [hs.name, *hs.aliases, host]))
         else:
             out.append((url, [host]))
-    ids = [v for k, v in args.items() if k in ("file_id", "points_file_id", "areas_file_id",
-                                               "raster_file_id", "zones_file_id")
-           and isinstance(v, str)]
-    for ref in args.get("input_files") or args.get("file_ids") or []:
-        if isinstance(ref, str):
-            ids.append(ref)
-        elif isinstance(ref, dict) and ref.get("file_id"):
-            ids.append(ref["file_id"])
+    # Every file id the call was given, under whatever argument name the tool chose (`file_id`,
+    # `raster_file_id`, `input_files`, and `path`, which the file inspector takes an id in).
+    ids: List[str] = []
+    _file_ids_in(args, ids)
     # A code run's result names the files it was given, with their filenames.
     staged = {str(f["file_id"]): f.get("filename") for f in payload.get("input_files") or []
               if isinstance(f, dict) and f.get("file_id")}
+    if payload.get("file_id") in ids and payload.get("filename"):
+        staged.setdefault(str(payload["file_id"]), payload["filename"])
     for fid in [*ids, *(i for i in staged if i not in ids)]:
         name = _upload_name(fid, staged.get(fid))
         if name:

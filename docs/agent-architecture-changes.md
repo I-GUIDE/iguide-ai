@@ -7588,6 +7588,20 @@ difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
   line is rendered from the tool record whatever the model writes, and the tests hold that. A
   live check on a second model has not been run.
 - **Spend:** `p5-gate` 4.49M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen.
+- **Confirmation run of the fixed tip** (`p5-fixed-gate`, 2026-10-09). This includes stage 44's
+  fixes and the code-only-upload fix. deepseek-v4-flash, gate on, 1 trial, 16 tasks (all but T06):
+  - a source the task's data came from is named on **16/16** answers (stage 43, same tasks:
+    10/16);
+  - **15/16** carry the rendered Sources line, among them T11, which read its uploads only through
+    `execute_code` and had no line before the fix;
+  - the one without a line, U01, is an unsolvable task: it refused after inspecting its upload,
+    and the file inspector takes the upload's id as `path`, an argument name the code did not
+    read. Fixed after the run: any argument value that is a file id counts as an input, whatever
+    the tool calls it, and the result's own `filename` names it. A new test fails before the fix.
+    Suites after it: `rag_pipeline/tests` 3873 passed, 18 skipped, 1 failed (the networkx pin);
+    `tests/` 157 passed;
+  - correct 11/12. Stage 44 has the verdict side of this run.
+  - Spend: 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
 
 **Not done.**
 - The source does not yet travel on the `map_layer` event itself; it travels on the typed facts

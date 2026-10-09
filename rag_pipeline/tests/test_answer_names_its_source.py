@@ -191,3 +191,18 @@ def test_an_upload_read_only_by_code_is_named(monkeypatch, record, expected):
         "tool_results": [{"name": "execute_code", "tool_call_id": "k1", "content": content}]}
     statements = [s for s, _ in g._answer_sources(_state(code_result=result))]
     assert statements == expected, statements
+
+
+def test_a_file_given_under_any_argument_name_is_named(monkeypatch):
+    """Confirmation run, U01: the file inspector takes the upload's id as `path`, which no list
+    of argument names had."""
+    import agent_runtime.file_store as file_store
+
+    monkeypatch.setattr(file_store, "get_file_record", lambda fid: {})
+    result = {"summary": "x", "tool_calls": [
+        {"name": "inspect_file_for_analysis", "id": "i1", "args": "{'path': 'file_d59cc3babab1'}"}],
+        "tool_results": [{"name": "inspect_file_for_analysis", "tool_call_id": "i1",
+                          "content": json.dumps({"file_id": "file_d59cc3babab1",
+                                                 "filename": "schools.geojson"})}]}
+    statements = [s for s, _ in g._answer_sources(_state(analysis_results=result))]
+    assert statements == ["schools.geojson (your upload)"], statements
