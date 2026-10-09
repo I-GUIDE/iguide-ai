@@ -1954,6 +1954,16 @@ def _web_titles(pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> Dict[str,
     return titles
 
 
+def _sandbox_note() -> str:
+    try:
+        from agent_runtime.code_execution import sandbox_capability_note
+
+        note = sandbox_capability_note()
+    except Exception:  # noqa: BLE001 - a note never costs the peer
+        return ""
+    return ("\n" + note) if note else ""
+
+
 def _answer_sources(state: SupervisorState,
                     numbers: Optional[List[Dict[str, Any]]] = None) -> List[Tuple[str, List[str]]]:
     """The data sources behind what the answer used (stage 45, agent_runtime/source_catalog.py).
@@ -5332,7 +5342,10 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
             pass
         executor = build_agent_executor(
-            llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
+            # The prompt says the sandbox has no network; while a measurement flag gives it one,
+            # or the tool bridge is on, the note after it says what the code can reach.
+            llm=llm, preloaded_tools=tools,
+            system_prompt_override=CODE_PEER_PROMPT + _sandbox_note(),
             agent_name="code_agent", skill_roots=skill_roots,
         )
         parts = [query]
