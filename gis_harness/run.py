@@ -30,6 +30,55 @@ REPO = HERE.parent
 PRICING = json.loads((HERE / "pricing.json").read_text())["models"]
 
 
+# Run in the server's environment before it starts: the code peer binds exactly what
+# make_langchain_staging_tools returns (supervisor/graph.py, default_code_fn).
+_STAGING_PROBE = (
+    "import json\n"
+    "from agent_runtime.extraction_flag import extraction_enabled\n"
+    "from agent_runtime.langchain_granular_tools import make_langchain_staging_tools\n"
+    "names = [t.name for t in make_langchain_staging_tools(session_id='harness-probe')]\n"
+    "print('STAGING_PROBE ' + json.dumps({'on': extraction_enabled(), 'tools': names}))\n")
+
+
+def probe_staging_tools(env: Dict[str, str]) -> Dict[str, Any]:
+    """What the code peer will bind for staging under ``env``. Raises if the flag is on and
+    ``stage_url`` is missing: such a run measures a toolset production does not have."""
+    out = subprocess.run([sys.executable, "-c", _STAGING_PROBE], env=env, cwd=str(REPO),
+                         capture_output=True, text=True, timeout=300)
+    line = next((x for x in reversed(out.stdout.splitlines()) if x.startswith("STAGING_PROBE ")),
+                None)
+    if line is None:
+        raise RuntimeError(f"staging probe failed (exit {out.returncode}):\n{out.stderr[-2000:]}")
+    found = json.loads(line.split(" ", 1)[1])
+    if found["on"] and "stage_url" not in found["tools"]:
+        raise RuntimeError(f"AGENT_EXTRACTION is on but the code peer binds no stage_url "
+                           f"(staging tools: {found['tools']}); refusing to run")
+    return found
+
+
+def code_peer_toolsets(log_path: Path, offset: int = 0) -> List[Dict[str, Any]]:
+    """Every code-peer toolset the server logged after ``offset``, with whether it had stage_url.
+
+    ``turn_instrumentation_toolset`` is logged once per distinct bound tool set
+    (executor_factory), so this is the server's own account of what the code peer was given.
+    """
+    rows = []
+    with open(log_path, "rb") as f:
+        f.seek(offset)
+        for raw in f:
+            line = raw.decode("utf-8", "replace")
+            if "turn_instrumentation_toolset " not in line:
+                continue
+            try:
+                rec = json.loads(line.split("turn_instrumentation_toolset ", 1)[1])
+            except ValueError:
+                continue
+            if rec.get("peer") == "code":
+                rows.append({"toolset": rec.get("toolset"), "tools_bound": rec.get("tools_bound"),
+                             "stage_url": "stage_url" in (rec.get("per_tool") or {})})
+    return rows
+
+
 def start_server(port: int, log_path: Path) -> subprocess.Popen:
     """A local agent server that cannot write to shared infrastructure, or pay for geocoding.
 
@@ -43,14 +92,25 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
     # run never sees the gate's verdicts, and the gate's false alarms, the subject of three
     # stages, cannot show up in a score. Found 2026-10-08 after the stage 41-43 runs: every
     # execute_code result carried `"verification": {}`.
+    # AGENT_EXTRACTION=1: the VM sets it, and it binds the code peer's staging tools
+    # (stage_url, stage_element, list_staged_inputs) and the method-library tools
+    # (kb_method_search, get_method_contract). Every run before 2026-10-09 lacked them, so a
+    # no-input task that needs public data was measured on a toolset production does not have.
+    # It writes nothing shared: run artifacts land in the local workspace, and the Postgres
+    # read path is a separate switch (AGENT_KB_DB). Override with AGENT_EXTRACTION=0.
     env = {**os.environ, "PYTHONPATH": str(REPO), "PORT": str(port), "AGENT_MODE": "local",
+           "AGENT_EXTRACTION": os.environ.get("AGENT_EXTRACTION", "1"),
            "AGENT_INVARIANT_GATE": os.environ.get("AGENT_INVARIANT_GATE", "1"),
            "AGENT_CHAT_API_KEY": "", "GOOGLE_MAPS_API_KEY": "",
            "AGENT_TRACE_JSON_LIMIT": "20000", "AGENT_TRACE_TEXT_LIMIT": "20000",
            "AGENT_TRACE_SSE_TEXT_LIMIT": "20000"}
     # Appended, not truncated: a --resume run starts a new server on the same label, and a
     # truncated log lost the main run's evidence (2026-10-08, phase 2's after-run).
+    staging = probe_staging_tools(env)
     log = open(log_path, "a")
+    log.write(f"harness: AGENT_EXTRACTION={env['AGENT_EXTRACTION']!r}, "
+              f"code-peer staging tools {staging['tools']}\n")
+    log.flush()
     proc = subprocess.Popen([sys.executable, str(REPO / "api" / "server.py")], env=env,
                             stdout=log, stderr=subprocess.STDOUT, cwd=str(REPO))
     import requests
@@ -344,8 +404,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     proc = None
     base = a.base_url
+    log_offset = 0
     if a.start_server:
-        proc = start_server(a.start_server, root / "server.log")
+        server_log = root / "server.log"
+        log_offset = server_log.stat().st_size if server_log.exists() else 0
+        proc = start_server(a.start_server, server_log)
         base = f"http://localhost:{a.start_server}"
     if not base:
         ap.error("--base-url or --start-server is required")
@@ -373,6 +436,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = summarise(records)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     print_summary(summary)
+    if proc:
+        # The probe checked the factory; this checks what the running server actually bound.
+        sets = code_peer_toolsets(root / "server.log", log_offset)
+        (root / "toolsets.json").write_text(json.dumps(sets, indent=2))
+        missing = [t["toolset"] for t in sets if not t["stage_url"]]
+        if not sets:
+            print("\ncode peer: no turn reached it; its toolset is unchecked beyond the probe")
+        elif missing and os.environ.get("AGENT_EXTRACTION", "1").strip().lower() in (
+                "1", "true", "yes", "on"):
+            print(f"\nERROR: code-peer toolset(s) {missing} lack stage_url with "
+                  f"AGENT_EXTRACTION on; these scores do not measure production's toolset",
+                  file=sys.stderr)
+            return 2
+        else:
+            print(f"\ncode peer: stage_url bound in {len(sets) - len(missing)}/{len(sets)} "
+                  f"toolset(s)")
     return 0
 
 

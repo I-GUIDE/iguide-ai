@@ -215,3 +215,38 @@ def test_a_magnitude_written_with_its_letter_is_read():
     assert 7.1 in [n.value for n in numbers("The largest event was the **M7.1** mainshock.")]
     assert [n.value for n in numbers("Sites C1 and C3; zone Z2.")] == []
     assert [n.value for n in numbers("file_03c752d2c99e and EPSG4326")] == []
+
+
+# --------------------------------------------------------------------------- the server's toolset
+
+
+def test_the_harness_server_binds_the_staging_tools_the_vm_has():
+    """The VM runs with AGENT_EXTRACTION=1, which binds stage_url for the code peer. Every
+    harness run before 2026-10-09 ran without it, so the probe must see it under the env
+    start_server builds, and must see nothing when the flag is explicitly off."""
+    import os
+
+    from gis_harness.run import REPO, probe_staging_tools
+
+    base = {**os.environ, "PYTHONPATH": str(REPO), "AGENT_MODE": "local"}
+    assert "stage_url" in probe_staging_tools({**base, "AGENT_EXTRACTION": "1"})["tools"]
+    assert probe_staging_tools({**base, "AGENT_EXTRACTION": "0"}) == {"on": False, "tools": []}
+
+
+def test_code_peer_toolsets_are_read_from_the_server_log(tmp_path):
+    from gis_harness.run import code_peer_toolsets
+
+    log = tmp_path / "server.log"
+    log.write_text(
+        'x INFO turn_instrumentation_toolset {"toolset": "old", "peer": "code", "tools_bound": 2,'
+        ' "per_tool": {"execute_code": 1}}\n')
+    offset = log.stat().st_size
+    with open(log, "a") as f:
+        f.write('x INFO turn_instrumentation_toolset {"toolset": "a", "peer": "analysis",'
+                ' "tools_bound": 1, "per_tool": {"geocode_places": 1}}\n'
+                'x INFO turn_instrumentation_toolset {"toolset": "c", "peer": "code",'
+                ' "tools_bound": 2, "per_tool": {"execute_code": 1, "stage_url": 1}}\n')
+    assert code_peer_toolsets(log) == [
+        {"toolset": "old", "tools_bound": 2, "stage_url": False},
+        {"toolset": "c", "tools_bound": 2, "stage_url": True}]
+    assert code_peer_toolsets(log, offset) == [{"toolset": "c", "tools_bound": 2, "stage_url": True}]
