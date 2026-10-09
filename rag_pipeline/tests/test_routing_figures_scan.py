@@ -135,7 +135,7 @@ def test_run_1_the_flag_is_no_longer_reconciled_away(monkeypatch, ledger):
     assert "340.0 km" in final and "2,584.6 km²" in final and "GEOID 17019" in final
     # Stage 42: a FLAGGED claim no bound tool produces is cut by the producer check, with its
     # general note; the routing note is the unflagged scan's (run 2 below).
-    assert "none of the tools available here can produce" in final
+    assert "no tool here can produce" in final
     assert state["actions"].count("analyze") == 1, state["actions"]
 
 
@@ -147,7 +147,7 @@ def test_run_2_unflagged_travel_figures_are_cut(monkeypatch, ledger):
         in final
     assert "2,584.6 km²" in final and "interactive map" in final
     # Stage 44: the scan's own note, one general sentence for every cut class.
-    assert "none of the tools available here can produce" in final
+    assert "no tool here can produce" in final
     assert "Grounding check" not in final, final
     assert state["actions"].count("analyze") == 1
 

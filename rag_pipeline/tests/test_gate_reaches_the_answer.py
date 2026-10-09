@@ -183,15 +183,22 @@ def test_cannot_determine_reaches_the_user_at_all():
     that every cannot_determine verdict was computed, reconciled, and then silently dropped
     before it reached the answer. The plan's requirement is the opposite: reported, never
     swallowed."""
-    out = _caveat({"verdict": "cannot_determine", "counts": {"cannot_determine": 1},
-                   "findings": [{"check": "coverage", "status": "cannot_determine",
-                                 "target": "module scope",
-                                 "message": "no frame was reachable at module scope"}]})
-    assert out != ANSWER, "the caveat never reached the user"
-    assert "could be checked" in out
-    assert "not the same as wrong" in out, (
-        "unverified must not read as wrong, or the label stops being believed")
-    assert "no frame was reachable" in out
+    report = {"verdict": "cannot_determine", "counts": {"cannot_determine": 1},
+              "findings": [{"check": "coverage", "status": "cannot_determine",
+                            "target": "module scope",
+                            "message": "no frame was reachable at module scope"}]}
+    # Stage 46: still never swallowed, but it is reported in the verdict, not printed. Across
+    # the stack's runs "could not check" sat on 22 correct answers and 0 wrong ones.
+    ctx = {"messages": [{"role": "tool", "content": _tool_result(report)}]}
+    audit = _reconcile_audit_with_artifacts(
+        {"hallucination_detected": False, "severity": "none", "issues": [], "summary": ""},
+        [{"name": "map.png"}], ctx)
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert [f.kind for f in findings] == [V.UNVERIFIABLE]
+    assert "no frame was reachable" in findings[0].message
+    assert V.status(findings) == "unverified"
+    assert _caveat(report) == ANSWER
 
 
 def test_a_passing_run_gets_no_caveat():

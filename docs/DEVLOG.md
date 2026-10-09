@@ -5291,3 +5291,22 @@ rather than from the previous one.
 
 **Not fixed** The map layer event carries no source yet. Choosing a source is still the model's,
   now with each source's coverage in front of it.
+
+## 2026-10-09 · M8.84 · A banner only when a check found something (architecture stage 46)
+
+**Change** `verdict.render` prints only a problem or a failed peer; a cut is one quiet line;
+  "not checked" stays in the verdict payload. The number scan no longer splits sentences at a
+  decimal point, resolves unit conversions, numbers inside lists and short sums of operands in
+  the same sentence. The gate's `all_nan` fails a join only when nothing matched. Two offline
+  tools: `gis_harness/replay_number_scan.py`, `gis_harness/banner_calibration.py`.
+
+**Why** Across 437 archived turns a banner marked a wrong answer 8% of the time (98 correct, 9
+  wrong) and caught 9 of 39 wrong answers. Of 49 number-scan cuts, 19 began mid-number (a sentence split
+  at a decimal point), among them p5-gate T02's headline.
+
+**Measured** Replay over 1,226 figures: split sentences 335 → 0, unresolved 60 → 55. Calibration
+  over 50 recorded verdicts: correct answers with a banner 33 → 3.
+
+**Not fixed** Method errors among the 30 unmarked wrong answers need reference recomputation. The map
+  UI does not show the verdict payload yet.
+

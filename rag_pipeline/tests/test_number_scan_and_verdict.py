@@ -97,16 +97,35 @@ def test_no_findings_no_banner():
 
 def test_one_banner_however_many_checks_spoke():
     findings = [V.Finding("gate", V.UNVERIFIABLE, "a"), V.Finding("peer", V.UNVERIFIABLE, "b"),
-                V.Finding("correction", V.PROBLEM, "c"), V.Finding("number_scan", V.NOTE, "d")]
+                V.Finding("correction", V.PROBLEM, "c"),
+                V.Finding("number_scan", V.NOTE, "1 statement(s) were left out", evidence=["d"])]
     out = V.render("The answer.", findings)
     assert out.count("---") == 1 and out.count("⚠️") == 1 and "ℹ️" not in out
-    assert out.index("Problem: c") < out.index("Not checked: a")
+    assert out.index("Problem: c") < out.index("Incomplete: b")
+    assert "One statement with a figure no tool here can produce was left out." in out
+    # "Not checked" items stay in the verdict, not in the text (stage 46).
+    assert "- Problem: c" in out and "Not checked" not in out
 
 
 def test_could_not_check_is_never_called_a_detection():
-    out = V.render("x", [V.Finding("gate", V.UNVERIFIABLE, "a unit did not parse")])
-    assert "⚠️" not in out and "hallucination" not in out.lower()
-    assert "not the same as wrong" in out
+    """Stage 46: "could not check" no longer prints at all. Across the archive it sat on 22
+    correct answers and 0 wrong ones in the stack's runs. It stays in the verdict payload."""
+    findings = [V.Finding("gate", V.UNVERIFIABLE, "a unit did not parse")]
+    out = V.render("x", findings)
+    assert out == "x"
+    assert V.status(findings) == "unverified"
+
+
+def test_a_failed_peer_still_says_the_answer_is_incomplete():
+    out = V.render("x", V.from_peer_failures([{"peer": "code"}]))
+    assert "may be incomplete" in out and "code execution failed" in out and "⚠️" not in out
+
+
+def test_a_cut_is_one_quiet_line_with_the_full_count():
+    out = V.render("x", [V.Finding("number_scan", V.NOTE, "8 statement(s) were left out",
+                                   evidence=list("abcdef"))])
+    assert out.endswith("_8 statements with figures no tool here can produce were left out._")
+    assert "⚠️" not in out and "ℹ️" not in out
 
 
 def test_a_failed_audit_is_reported_as_not_checked_not_as_clean():
@@ -281,9 +300,9 @@ def test_a_run_with_nothing_geospatial_is_not_reported_as_unchecked():
     assert [f.kind for f in V.from_gate(audit("coverage"))] == [V.UNVERIFIABLE]
 
 
-def test_a_banner_of_notes_has_a_heading():
-    out = V.render("x", [V.Finding("number_scan", V.NOTE, "1 statement was left out")])
-    assert "ℹ️ **Note:**" in out
+def test_a_gate_note_is_not_printed():
+    out = V.render("x", [V.Finding("gate", V.NOTE, "an optional column is empty")])
+    assert out == "x"
 
 
 def test_an_unresolved_figure_does_not_make_side_runs_speak():
@@ -299,3 +318,73 @@ def test_an_unresolved_figure_does_not_make_side_runs_speak():
     state = _turn("There are 23 schools within 1 mile; Earth's radius is 6,371.0088 km.",
                   [side, main])
     assert not any(f["check"] == "gate" for f in state["verdict"]["findings"]), state["verdict"]
+
+
+# --------------------------------------------------------------------------- stage 46
+
+def test_a_decimal_point_does_not_end_a_sentence():
+    """The sentence start was the last "." of any kind, so "1,609.344 m … 41.8827° N" split
+    into "344 meters) … 8827° N". The fragment resolved to nothing and was cut, which in
+    p5-gate T02 removed the headline answer itself."""
+    answer = ("**20 schools** are within 1 mile (1,609.344 meters) of the site at 41.8827° N, "
+              "87.6233° W. The nearest is 412.5 m away.")
+    qs = F.quantities(answer)
+    head = [q for q in qs if q.text.startswith(("20", "1,609", "41.8827", "87.6233"))]
+    assert len(head) == 4
+    assert all(q.sentence.startswith("**20 schools**") for q in head)
+    assert [q for q in qs if q.text.startswith("412.5")][0].sentence.rstrip(".") == "The nearest is 412.5 m away"
+
+
+def test_the_whole_headline_survives_the_scan():
+    fs = F.build(results=_record("count 20 nearest 412.53 m radius 1609.344"),
+                 query="How many schools are within 1 mile of 41.8827 N, 87.6233 W?")
+    answer = ("**20 schools** are within 1 mile (1,609.344 meters) of the site at 41.8827° N, "
+              "87.6233° W. The nearest is 412.5 m away.")
+    assert all(r.resolved for r in F.resolve(answer, fs) if F.is_claim(r.quantity))
+
+
+def test_a_unit_conversion_of_a_grounded_figure_resolves():
+    """p4-gate U04: "≈ 3.43 minutes (0.0571 hours, ~206 seconds)" lost both conversions. The
+    conversion of 3.43 as shown carries its rounding: 0.05717 h ± 0.00015 h covers 0.0571."""
+    fs = F.build(results=_record("fastest_minutes: 3.4298"))
+    res = [r for r in F.resolve("Fastest: ≈ 3.43 minutes (0.0571 hours, ~206 seconds).", fs)
+           if F.is_claim(r.quantity)]
+    assert [r.resolved for r in res] == [True, True, True]
+    assert [r.fact.source for r in res[1:]] == ["converted", "converted"]
+
+
+def test_a_recalled_figure_in_another_unit_stays_unresolved():
+    """The true catch the cut exists for (p5-fixed-gate T01): a remembered Census figure."""
+    fs = F.build(results=_record("area_km2: 2584.6234"))
+    answer = ("The area is 2,584.62 km². This is consistent with the official Census figure of "
+              "approximately 997.5 sq mi (≈ 2,583.5 km²).")
+    res = [r for r in F.resolve(answer, fs) if F.is_claim(r.quantity)]
+    assert [r.resolved for r in res] == [True, False, False]
+
+
+def test_a_short_sum_resolves_when_its_operands_are_in_its_sentence():
+    """p5-fixed-gate T10 cut a correct "total sill 0.64" (0.05 + 0.59): two significant digits
+    were below the derivation floor."""
+    fs = F.build(query="spherical variogram (nugget 0.05, partial sill 0.59, range 897 m)")
+    res = [r for r in F.resolve("Nugget 0.05, partial sill 0.59 (total sill = 0.64), "
+                                "range 897 m.", fs) if F.is_claim(r.quantity)]
+    assert all(r.resolved for r in res)
+    assert res[2].fact.source == "derived"
+
+
+def test_a_short_sum_of_operands_elsewhere_does_not_resolve():
+    fs = F.build(query="nugget 0.05, partial sill 0.59")
+    answer = "The nugget is 0.05 and the partial sill 0.59. Separately, the ratio was 0.64."
+    res = [r for r in F.resolve(answer, fs) if F.is_claim(r.quantity)]
+    assert [r.resolved for r in res] == [True, True, False]
+
+
+def test_numbers_inside_a_list_are_recorded():
+    """`"region_bbox": [-87.65221, 41.855, …]` was dropped, so an answer restating its own
+    bounding box (deployed-23cfd02-gate U01) resolved to nothing."""
+    fs = F.build(results=[{"name": "dem_for_region", "tool_call_id": "c1", "content": json.dumps(
+        {"ok": True, "region_bbox": [-87.65221, 41.855, -87.59659, 41.9091]})}])
+    res = [r for r in F.resolve("The DEM covers lon −87.652 to −87.597, lat 41.855 to 41.909.",
+                                fs) if F.is_claim(r.quantity)]
+    assert all(r.resolved for r in res)
+    assert any(f.label.endswith("region_bbox: ") for f in fs.facts)
