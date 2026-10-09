@@ -4688,6 +4688,29 @@ reads are still real network calls; the banner names them. It does not change an
 `token` on the VM is untouched. And the map UI's own word "local" — its mock mode, `runLocal` —
 is a different thing from this server mode; a comment in both places says so.
 
+### Stage S24.6 No input budget for a local experiment (2026-10-09)
+
+`execute_code` stages at most `AGENT_CODE_EXEC_MAX_INPUT_MB` of files into one run, 200 by default
+(`_max_input_bytes` in `agent_runtime/langchain_exec_tools.py`). On 2026-10-09 that cap refused a
+306,095,589-byte dasymetric population GeoTIFF of New York in a local-mode session. The file had
+uploaded fine, so the agent answered that it could not compute the population total because the
+raster exceeded "the analysis runtime's 200 MB input limit", and no code ran.
+
+The budget exists to protect a shared server's disk and run time from a large conversation. A
+laptop running `AGENT_MODE=local` has no other users, and the user asked that local experiments
+carry no such limit. So, with the variable unset, local mode now stages without a size cap. Every
+other mode keeps the 200 MB default. An explicit value still wins in every mode, so a local run can
+reproduce a deployment's budget by setting it. The VM sets `AGENT_CODE_EXEC_MAX_INPUT_MB=500`, which
+matches nginx's `client_max_body_size 500m`, so a file that uploads can also be analysed. Two
+smaller fixes ride along. `inf` now means no cap; before, `int()` of it raised `OverflowError`
+mid-staging. `nan` now falls back to the default. An unreadable `AGENT_MODE` keeps the cap rather
+than lifting it. The file-count cap (`AGENT_CODE_EXEC_MAX_INPUT_FILES`, 20) is unchanged.
+
+`rag_pipeline/tests/test_exec_input_cap.py` holds both sides. A 306 MB sparse file is staged in
+local mode and skipped in `token` mode with `limit_bytes` 200 MB. Four of its twelve tests fail on
+the previous code. The sandbox's memory (`AGENT_CODE_EXEC_MEMORY`, 4g) and timeout (60 s) still
+apply to the run itself.
+
 ---
 
 ## Stage 25 — Starting a child without forking the agent {#stage-25}
