@@ -7462,12 +7462,12 @@ remains is mostly figures the model computed in its head ("28 pairs", percentage
 and so honestly unrecorded, plus English words pint knows as units ("20 are", "9 at",
 "0.53 in 2020").
 
-**Tests for the fixes:** 11 new tests in `test_number_scan_and_verdict.py`, 9 of which fail on the
-first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
+**Tests for the fixes:** 11 new tests (13 cases) in `test_number_scan_and_verdict.py`; 9 cases
+fail on the first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
 (the networkx pin); `tests/` 157 passed.
 
 **Not re-measured live.** A full re-run of the fixed stage would take Lumen past the program's 50M
-cap, so the fixed stage has the tests (9 of the 11 new ones fail on the first version) and the
+cap, so the fixed stage has the tests (9 of 13 new cases fail on the first version) and the
 replay, not a second harness run.
 
 **Not fixed here.**
