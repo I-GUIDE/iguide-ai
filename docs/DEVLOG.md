@@ -5238,8 +5238,10 @@ rather than from the previous one.
   read, the newest of two, the bounded match, the write under a listed input's name, and the
   manifest hash. Both suites: 3918 passed, 19 skipped, 1 failed
   (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
-  The local replay has NOT been measured yet: on 2026-10-09 every Lumen call returned
-  `429 insufficient_quota`, on both builds, before any `execute_code` ran.
+  **Replay PENDING**: the local Chrome replay on Lumen deepseek-v4-flash was started on both
+  builds on 2026-10-09 at 13:57 CDT (18:57 UTC). Every Lumen call returned
+  `429 insufficient_quota` ("Coin budget exhausted"), before any `execute_code` ran. No first-run
+  rate is claimed. It is to be measured on the same model once the quota resets.
 
 **Not fixed** The claude and opencode peers do not scan. A writer that refuses an existing file
   (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input

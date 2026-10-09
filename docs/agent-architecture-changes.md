@@ -5736,11 +5736,12 @@ the claude peer's 3,000-character clip budget (`_DESC_BUDGET`), and
 `test_the_longest_real_description_is_not_clipped` caught it. The wording was tightened to 2,955
 and the budget raised to 3,500, as that constant's comment asks.
 
-**Replay: not yet measured.** The local Chrome replay (`AGENT_MODE=local`, Lumen
-deepseek-v4-flash) of "what is the area of Champaign County, Illinois, and how far is London from
-Paris?" was set up on both builds on 2026-10-09. Every Lumen call returned `429 insufficient_quota`
-("Coin budget exhausted"), and both turns ended before any `execute_code`. The first-run success
-rate before and after is still to be recorded here.
+**Replay: PENDING.** The local Chrome replay (`AGENT_MODE=local`, Lumen deepseek-v4-flash, the
+model of #93's baseline) of "what is the area of Champaign County, Illinois, and how far is London
+from Paris?" was started on both builds on 2026-10-09 at 13:57 CDT (18:57 UTC). Every Lumen call
+returned `429 insufficient_quota` ("Coin budget exhausted"), and both turns ended before any
+`execute_code`. No first-run rate is claimed here. It is to be measured once the quota resets, on
+the same model.
 
 **What it does not fix.** The claude and opencode peers stage the conversation's files once, at
 the start of a run, and do not scan. A writer that refuses an existing file (`open(name, "x")`)
