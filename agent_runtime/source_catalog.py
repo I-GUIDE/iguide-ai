@@ -169,21 +169,47 @@ def _payload(content: Any) -> Dict[str, Any]:
     return val if isinstance(val, dict) else {}
 
 
-def _upload_name(file_id: str) -> Optional[str]:
+def _upload_record(file_id: str) -> Dict[str, Any]:
     try:
         from agent_runtime.file_store import get_file_record
 
-        rec = get_file_record(file_id) or {}
+        return get_file_record(file_id) or {}
     except Exception:  # noqa: BLE001
+        return {}
+
+
+def _is_output(rec: Dict[str, Any]) -> bool:
+    return rec.get("kind") == "output" or str(rec.get("source") or "") == "agent"
+
+
+def _upload_name(file_id: str, fallback: Optional[str] = None) -> Optional[str]:
+    """The name a user's file goes by; None for a file the agent wrote, which is not a source."""
+    rec = _upload_record(file_id)
+    if _is_output(rec):
         return None
-    if rec.get("kind") == "output" or str(rec.get("source") or "") == "agent":
-        return None
-    return rec.get("filename") or rec.get("original_name")
+    return rec.get("filename") or rec.get("original_name") or fallback
+
+
+def _args(args: Any) -> Dict[str, Any]:
+    """A call's arguments, which some peers record as a JSON or Python-literal string."""
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args.lstrip().startswith("{"):
+        import ast
+
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                val = parse(args)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(val, dict):
+                return val
+    return {}
 
 
 def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]:
     """[(statement, names an answer could use for it)] for one tool result."""
-    args = args if isinstance(args, dict) else {}
+    args = _args(args)
     out: List[Tuple[str, List[str]]] = []
     src = _BY_TOOL.get(tool)
     if src is not None:
@@ -206,8 +232,11 @@ def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]
             ids.append(ref)
         elif isinstance(ref, dict) and ref.get("file_id"):
             ids.append(ref["file_id"])
-    for fid in ids:
-        name = _upload_name(fid)
+    # A code run's result names the files it was given, with their filenames.
+    staged = {str(f["file_id"]): f.get("filename") for f in payload.get("input_files") or []
+              if isinstance(f, dict) and f.get("file_id")}
+    for fid in [*ids, *(i for i in staged if i not in ids)]:
+        name = _upload_name(fid, staged.get(fid))
         if name:
             out.append((f"{name} (your upload)", [name]))
     return out

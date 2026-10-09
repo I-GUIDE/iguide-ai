@@ -5283,7 +5283,11 @@ rather than from the previous one.
 **Why** Review flaw 6. The baseline's answers named their source on 33/50 (deepseek) and 18/51
   (luna) runs; the 10-08 schools answer did not say it was one district's file.
 
-**Measured** See stage 45.
+**Measured** deepseek-v4-flash only (user's budget decision), gate on, 1 trial: a source the
+  task's data came from is named on 17/17 answers (was 12/17), and 15/17 carry the rendered
+  Sources line. The two that did not read their uploads only through `execute_code`, whose
+  string arguments hid `input_files`; that is fixed after the run, with tests. luna is not
+  re-measured.
 
 **Not fixed** The map layer event carries no source yet. Choosing a source is still the model's,
   now with each source's coverage in front of it.

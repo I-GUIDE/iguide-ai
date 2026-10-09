@@ -7554,7 +7554,40 @@ eight-flaws program, flaw 6. Review §F6 has the root cause.*
   intent: the line is now always rendered, because the prose is the model's and the line is the
   record's.
 - **Suites:** `rag_pipeline/tests` 3858 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
-  157 passed.
+  157 passed. After the fix below: 3872 passed, the same one failed, and `tests/` 157 passed.
+
+**Measured with the harness, on one model.** Run on deepseek-v4-flash only (the user's budget
+decision), gate on, 1 trial, 17 tasks. Both runs below carry stage 44's first version, so the
+difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| answer names a source the task's data came from | 12/17 → 17/17 |
+| answers carrying a Sources line | 0/17 → 15/17 |
+| correct | 11/13 → 13/13 |
+| refused gracefully | 4/4 → 3/4 |
+| unproductive steps | 20 → 11 |
+| input tokens | 5.29M → 4.39M |
+
+- **The source is now the record's, not the model's habit.** 15 of 17 answers carry a line
+  naming every source they used, with what it leaves out. Uploads appear as "schools.geojson
+  (your upload)", and catalogued services carry their coverage.
+  - Example: "OpenStreetMap (via Overpass), which leaves out whatever volunteers have not mapped
+    ... (ODbL)".
+  - Stage 41's baseline named a source on 33 of 50 deepseek runs and on 18 of 51 luna runs.
+- **The two answers without a line,** T11 and U02, read their uploads only through
+  `execute_code`. Its arguments reach the graph as a string, so `input_files` was never seen.
+  - Fixed after the run: string arguments are parsed, and a code run's own `input_files`
+    (with filenames) name the upload.
+  - A file the store records as the agent's own output is still never a source.
+  - 2 of the 3 new test cases fail before the fix.
+  - Both answers named their file in prose anyway, which is why the score is 17/17.
+- **The changes in correctness and steps are trial variance:** T09 and T10, the method-choice
+  tasks, both went BAD → OK. This stage changes no tool and no route.
+- **Not measured on gpt-5.6-luna,** whose baseline habit (18/51) is what this stage exists for. The
+  line is rendered from the tool record whatever the model writes, and the tests hold that. A
+  live check on a second model has not been run.
+- **Spend:** `p5-gate` 4.49M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen.
 
 **Not done.**
 - The source does not yet travel on the `map_layer` event itself; it travels on the typed facts

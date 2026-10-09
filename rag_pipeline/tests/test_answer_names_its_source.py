@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_runtime.supervisor import graph as g
 
 CPS_URL = "https://data.cityofchicago.org/api/views/abcd-1234/rows.csv?accessType=DOWNLOAD"
@@ -166,3 +168,26 @@ def test_two_sources_read_as_two():
                    code_result=_code_result_from_the_portal())
     line = g._with_sources(LIST, state).split("**Sources:**")[1]
     assert "OpenStreetMap" in line and "Chicago Public Schools" in line
+
+
+@pytest.mark.parametrize("record,expected", [
+    ({}, ["slope.tif (your upload)"]),                                   # the run's own name
+    ({"filename": "slope_deg.tif"}, ["slope_deg.tif (your upload)"]),    # the store's name
+    ({"filename": "x.tif", "kind": "output"}, []),                       # the agent's own file
+])
+def test_an_upload_read_only_by_code_is_named(monkeypatch, record, expected):
+    """Stage 45's harness run: T11 and U02 read their uploads only through `execute_code`, whose
+    arguments reach the graph as a string, and the answer named no source."""
+    import agent_runtime.file_store as file_store
+
+    monkeypatch.setattr(file_store, "get_file_record", lambda fid: record)
+    content = json.dumps({"ok": True, "stdout": "slope ok\n",
+                          "input_files": [{"ref": "file_25b1b37c732f",
+                                           "file_id": "file_25b1b37c732f",
+                                           "filename": "slope.tif"}]})
+    result = {"answer": "x", "tool_calls": [
+        {"name": "execute_code", "id": "k1",
+         "args": "{'code': 'import rasterio', 'input_files': ['file_25b1b37c732f']}"}],
+        "tool_results": [{"name": "execute_code", "tool_call_id": "k1", "content": content}]}
+    statements = [s for s, _ in g._answer_sources(_state(code_result=result))]
+    assert statements == expected, statements
