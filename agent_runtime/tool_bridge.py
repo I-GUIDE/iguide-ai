@@ -229,7 +229,7 @@ def _fetch_handler(url: str, filename: Optional[str] = None) -> Dict[str, Any]:
 
 # Features asked for per Overpass query. overpass_search caps its own answers at 500 (a model
 # reads them); the bridge writes them to a file, so it asks for far more per query. Measured
-# 2026-10-09 (stage 48): paging at 500 needed ~16 queries for Piatt County's 4,159 buildings and
+# 2026-10-09 ("Three ways to reach public data"): paging at 500 needed ~16 queries for Piatt County's 4,159 buildings and
 # failed twice on mirror 504s; one query answers all of them.
 _OVERPASS_PAGE = 5000
 # A tile whose query failed on every mirror is retried once after this pause, then split in four:
@@ -349,7 +349,7 @@ def _resolve_file(file_id: str) -> Tuple[Optional[Path], Optional[str]]:
 
 
 # Answers already given in a conversation, so code re-run after a fix does not fetch again.
-# Measured 2026-10-09 (stage 48, T08L): 33 of 70 bridge calls in one turn repeated an earlier one
+# Measured 2026-10-09 ("Three ways to reach public data", T08L): 33 of 70 bridge calls in one turn repeated an earlier one
 # exactly. Keyed by conversation, function and arguments; an answer is reused for MEMO_TTL_S.
 _MEMO: "Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]]" = {}
 _MEMO_LOCK = threading.Lock()
