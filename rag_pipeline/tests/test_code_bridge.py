@@ -256,7 +256,7 @@ def test_overpass_pages_past_the_cap_by_splitting_the_box(monkeypatch):
     # 1,600 buildings on a 40 x 40 grid, plus one long way that every tile returns.
     world = [(i, (0.0125 + (i % 40) / 40, 0.0125 + (i // 40) / 40)) for i in range(1600)]
 
-    def fake(feature, place=None, bbox=None, limit=500):
+    def fake(feature, place=None, bbox=None, limit=500, max_limit=500):
         w, s_, e, n = bbox
         inside = [{"osm_type": "node", "osm_id": i, "geometry": {"type": "Point",
                                                                   "coordinates": [x, y]}}
@@ -267,6 +267,7 @@ def test_overpass_pages_past_the_cap_by_splitting_the_box(monkeypatch):
                 "features": inside[:limit]}
 
     monkeypatch.setattr(ov, "overpass_search", fake)
+    monkeypatch.setattr(tool_bridge, "_OVERPASS_PAGE", 500)
     out = tool_bridge._overpass_handler("building", bbox=[0, 0, 1, 1])
     assert out["complete"] is True and out["splits"] == 1 and out["tiles"] == 5
     assert out["count"] == 1601, "every building once, the shared way once"
@@ -279,7 +280,9 @@ def test_overpass_says_when_it_is_not_everything(monkeypatch):
     from rag_pipeline.search import overpass as ov
 
     monkeypatch.setenv("AGENT_CODE_BRIDGE_OSM_TILES", "3")
-    monkeypatch.setattr(ov, "overpass_search", lambda feature, bbox=None, limit=500, place=None: {
+    monkeypatch.setattr(tool_bridge, "_OVERPASS_PAGE", 500)
+    monkeypatch.setattr(ov, "overpass_search", lambda feature, bbox=None, limit=500, place=None,
+                        max_limit=500: {
         "count": 500, "features": [{"osm_type": "way", "osm_id": hash(tuple(bbox)) + i,
                                     "geometry": {"type": "Point", "coordinates": [0, 0]}}
                                    for i in range(500)]})
@@ -296,3 +299,58 @@ def test_the_client_needs_only_the_standard_library(tmp_path):
     out = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "requests" not in out.stdout and "http" not in out.stdout
+
+
+def test_overpass_asks_for_more_than_its_own_500_and_retries_then_splits(monkeypatch):
+    from rag_pipeline.search import overpass as ov
+
+    monkeypatch.setattr(tool_bridge, "_OVERPASS_RETRY_S", 0)
+    asked = []
+
+    def flaky(feature, place=None, bbox=None, limit=500, max_limit=500):
+        asked.append((tuple(bbox), limit, max_limit))
+        if (bbox[2] - bbox[0]) > 0.6:            # the whole box always times out
+            return {"error": "overpass_failed", "message": "504", "features": [], "count": 0}
+        return {"count": 1, "features": [{"osm_type": "node", "osm_id": hash(tuple(bbox)),
+                                          "geometry": {"type": "Point", "coordinates": [0, 0]}}]}
+
+    monkeypatch.setattr(ov, "overpass_search", flaky)
+    out = tool_bridge._overpass_handler("building", bbox=[0, 0, 1, 1])
+    assert asked[0][1] == asked[0][2] == tool_bridge._OVERPASS_PAGE > 500
+    assert [a[0] for a in asked[:2]] == [(0, 0, 1, 1)] * 2, "one retry of the same box first"
+    assert out["complete"] is True and out["count"] == 4 and out["retries"] == 2
+
+
+def test_overpass_gives_up_without_a_partial_answer(monkeypatch):
+    from rag_pipeline.search import overpass as ov
+
+    monkeypatch.setattr(tool_bridge, "_OVERPASS_RETRY_S", 0)
+    monkeypatch.setattr(ov, "overpass_search", lambda feature, place=None, bbox=None, limit=500,
+                        max_limit=500: {"error": "overpass_failed", "message": "504",
+                                        "features": [], "count": 0})
+    with pytest.raises(tool_bridge.Refused, match="no partial result"):
+        tool_bridge._overpass_handler("building", bbox=[0, 0, 1, 1])
+
+
+def test_the_same_call_in_a_later_run_is_answered_without_running_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_bridge, "_MEMO", {})
+    runs = []
+
+    def handler(text):
+        runs.append(text)
+        return {"ok": True, "text": text}
+
+    first = tool_bridge.BridgeServer(tmp_path / "a", handlers={"echo": handler}, record=False,
+                                     session="conv-1")
+    first.prepare()
+    assert _request(first, "echo", text="x")["result"]["text"] == "x"
+    second = tool_bridge.BridgeServer(tmp_path / "b", handlers={"echo": handler}, record=False,
+                                      session="conv-1")
+    second.prepare()
+    again = _request(second, "echo", text="x")["result"]
+    assert again["repeat_of_earlier_call"] is True and runs == ["x"]
+    other = tool_bridge.BridgeServer(tmp_path / "c", handlers={"echo": handler}, record=False,
+                                     session="conv-2")
+    other.prepare()
+    _request(other, "echo", text="x")
+    assert runs == ["x", "x"], "another conversation never shares an answer"

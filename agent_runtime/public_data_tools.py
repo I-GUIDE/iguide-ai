@@ -63,8 +63,8 @@ BRIDGE_EXTRA_HOSTS: Tuple[Tuple[str, str], ...] = (
     ("api.waterdata.usgs.gov", "USGS Water Data OGC API: monitoring locations, drainage area"),
     ("waterdata.usgs.gov", "USGS monitoring-location pages"),
     ("planetarycomputer.microsoft.com", "Planetary Computer: STAC search /api/stac/v1/search?collections=sentinel-2-l2a&bbox=..&datetime=..; "
-     "data API /api/data/v1/item/crop/{minx},{miny},{maxx},{maxy}.tif?collection=..&item=..&expression=..&asset_as_band=true "
-     "returns a small GeoTIFF"),
+     "data API /api/data/v1/item/crop/{minx},{miny},{maxx},{maxy}.tif?collection=..&item=..&assets=..&asset_as_band=true&max_size=1024 "
+     "returns a GeoTIFF; without max_size a county is over the size cap"),
     ("sentinel2l2a01.blob.core.windows.net", "Sentinel-2 L2A assets (signed with a token from planetarycomputer.microsoft.com/api/sas/v1/token/sentinel-2-l2a; files are 50-200 MB, over the cap: prefer the data API)"),
     ("z.overpass-api.de", "OpenStreetMap Overpass mirror"),
     ("lz4.overpass-api.de", "OpenStreetMap Overpass mirror"),

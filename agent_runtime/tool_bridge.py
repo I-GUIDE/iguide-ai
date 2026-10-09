@@ -227,8 +227,14 @@ def _fetch_handler(url: str, filename: Optional[str] = None) -> Dict[str, Any]:
         raise Refused(str(exc)) from None
 
 
-# Overpass answers at most this many features per query (rag_pipeline.search.overpass).
-_OVERPASS_PAGE = 500
+# Features asked for per Overpass query. overpass_search caps its own answers at 500 (a model
+# reads them); the bridge writes them to a file, so it asks for far more per query. Measured
+# 2026-10-09 (stage 48): paging at 500 needed ~16 queries for Piatt County's 4,159 buildings and
+# failed twice on mirror 504s; one query answers all of them.
+_OVERPASS_PAGE = 5000
+# A tile whose query failed on every mirror is retried once after this pause, then split in four:
+# a smaller query is likelier to finish inside a busy server's timeout.
+_OVERPASS_RETRY_S = 5.0
 
 
 def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
@@ -247,24 +253,38 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
                       "[minlon, minlat, maxlon, maxlat]")
     cap = max(1, min(int(max_features or 20000), _int_env("AGENT_CODE_BRIDGE_OSM_MAX", 50000)))
     max_tiles = _int_env("AGENT_CODE_BRIDGE_OSM_TILES", 96)
-    pending: List[Tuple[float, float, float, float]] = [tuple(region)]
+    pending: List[Tuple[Tuple[float, float, float, float], int]] = [(tuple(region), 0)]
     seen: Dict[Tuple[str, Any], Dict[str, Any]] = {}
-    tiles = splits = 0
+    tiles = splits = retries = 0
     filt = None
     while pending and tiles < max_tiles and len(seen) < cap:
-        box = pending.pop(0)
-        res = ov.overpass_search(feature, bbox=list(box), limit=_OVERPASS_PAGE)
+        box, failures = pending.pop(0)
+        res = ov.overpass_search(feature, bbox=list(box), limit=_OVERPASS_PAGE,
+                                 max_limit=_OVERPASS_PAGE)
         tiles += 1
         if res.get("error"):
-            raise Refused(f"Overpass failed on tile {tiles} ({res.get('error')}: "
-                          f"{str(res.get('message'))[:200]}); no partial result is returned")
+            if res.get("error") == "no_location" or failures >= 2:
+                raise Refused(f"Overpass failed on tile {tiles} ({res.get('error')}: "
+                              f"{str(res.get('message'))[:200]}); no partial result is returned")
+            retries += 1
+            if failures == 0:
+                time.sleep(_OVERPASS_RETRY_S)
+                pending.insert(0, (box, 1))
+            else:
+                w, s, e, n = box
+                mx, my = (w + e) / 2, (s + n) / 2
+                pending[:0] = [((w, s, mx, my), 2), ((mx, s, e, my), 2),
+                               ((w, my, mx, n), 2), ((mx, my, e, n), 2)]
+                splits += 1
+            continue
         filt = (res.get("query") or {}).get("osm_filter")
         for f in res.get("features") or []:
             seen.setdefault((str(f.get("osm_type")), f.get("osm_id")), f)
         if int(res.get("count") or 0) >= _OVERPASS_PAGE:
             w, s, e, n = box
             mx, my = (w + e) / 2, (s + n) / 2
-            pending += [(w, s, mx, my), (mx, s, e, my), (w, my, mx, n), (mx, my, e, n)]
+            pending += [((w, s, mx, my), 0), ((mx, s, e, my), 0), ((w, my, mx, n), 0),
+                        ((mx, my, e, n), 0)]
             splits += 1
     complete = not pending and len(seen) < cap
     feats = list(seen.values())[:cap]
@@ -284,7 +304,7 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
         shutil.rmtree(tmp.parent, ignore_errors=True)
     out = {"ok": True, "source": "OpenStreetMap (via Overpass)", "feature": feature,
            "osm_filter": filt, "bbox": list(region), "count": len(fc["features"]),
-           "complete": complete, "tiles": tiles, "splits": splits,
+           "complete": complete, "tiles": tiles, "splits": splits, "retries": retries,
            "file_id": rec.get("file_id"), "filename": rec.get("filename")}
     if not complete:
         out["warning"] = (f"NOT every feature: stopped at {len(feats)} features / {tiles} tiles "
@@ -328,14 +348,30 @@ def _resolve_file(file_id: str) -> Tuple[Optional[Path], Optional[str]]:
         return None, None
 
 
+# Answers already given in a conversation, so code re-run after a fix does not fetch again.
+# Measured 2026-10-09 (stage 48, T08L): 33 of 70 bridge calls in one turn repeated an earlier one
+# exactly. Keyed by conversation, function and arguments; an answer is reused for MEMO_TTL_S.
+_MEMO: "Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]]" = {}
+_MEMO_LOCK = threading.Lock()
+MEMO_TTL_S = 1800.0
+_MEMO_MAX = 512
+
+
+def _memo_key(session: Optional[str], fname: str, args: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    if not session:
+        return None
+    return (session, fname + "\x00" + json.dumps(args, sort_keys=True, default=str))
+
+
 class BridgeServer:
     """Answers one run's bridge calls. ``start()`` before the container, ``stop()`` after."""
 
     def __init__(self, root: Path, *, container_root: str = CONTAINER_ROOT,
                  handlers: Optional[Dict[str, Callable[..., Dict[str, Any]]]] = None,
                  resolve_file: Callable[[str], Tuple[Optional[Path], Optional[str]]] = _resolve_file,
-                 record: bool = True) -> None:
+                 record: bool = True, session: Optional[str] = None) -> None:
         self.root = Path(root)
+        self.session = session
         self.inbox = self.root / "in"
         self.out = self.root / "out"
         self.container_root = container_root.rstrip("/")
@@ -470,12 +506,23 @@ class BridgeServer:
         unknown = sorted(k for k in args if k not in params)
         if unknown:
             raise Refused(f"{fname} takes no argument(s) {unknown}")
+        key = _memo_key(self.session, fname, args)
+        with _MEMO_LOCK:
+            hit = _MEMO.get(key) if key else None
+        if hit is not None and time.monotonic() - hit[0] < MEMO_TTL_S:
+            # The same answer, not a new fetch: the files are copied in again for this run.
+            return self._materialise({**hit[1], "repeat_of_earlier_call": True})
         result = handler(**args)
         if not isinstance(result, dict):
             result = _as_dict(result)
         if result.get("ok") is False or (result.get("error") and result.get("ok") is not True):
             raise Refused(str(result.get("error") or "failed") + (
                 f" (hint: {result['hint']})" if result.get("hint") else ""))
+        if key:
+            with _MEMO_LOCK:
+                _MEMO[key] = (time.monotonic(), result)
+                while len(_MEMO) > _MEMO_MAX:
+                    _MEMO.pop(next(iter(_MEMO)))
         return self._materialise(result)
 
     def _materialise(self, result: Dict[str, Any]) -> Dict[str, Any]:

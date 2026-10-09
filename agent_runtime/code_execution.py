@@ -1288,7 +1288,7 @@ class CodeExecutor:
                 broot = tool_bridge.bridge_root_for(work)
                 bridge = tool_bridge.BridgeServer(
                     broot, container_root=(tool_bridge.CONTAINER_ROOT if self.backend == "docker"
-                                           else str(broot)))
+                                           else str(broot)), session=session)
                 bridge.start()
                 extra_run["bridge_dir"] = broot
             try:
