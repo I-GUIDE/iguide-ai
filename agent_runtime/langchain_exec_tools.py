@@ -204,6 +204,56 @@ def _readable_ids(ids: List[str]) -> Tuple[List[str], List[Dict[str, str]]]:
     return readable, refused
 
 
+def _names_file(source: str, filename: str) -> bool:
+    """Whether the program text names ``filename`` as a whole file name.
+
+    Bounded so a longer name that merely contains it does not count: 'my_data.csv' and
+    'data.csv.bak' do not name data.csv. A directory in front ('./data.csv', 'out/data.csv')
+    still does, since the file may be what that path means, and staging it costs nothing if not.
+    """
+    if not filename:
+        return False
+    pattern = r"(?<![\w.\-])" + re.escape(filename) + r"(?![\w\-]|\.\w)"
+    return re.search(pattern, source) is not None
+
+
+def _conversation_files_named_in(source: str, taken: set, workspace: Optional[Path]
+                                 ) -> List[Dict[str, Any]]:
+    """Files of THIS conversation and THIS owner whose filename the program names, one record
+    per name (the newest), skipping names the run will already have.
+
+    The filename half of what ``_file_ids_named_in`` does for ids. A tool's answer names its
+    file both ways, and code opens either: "Champaign_County.geojson" failed a first run just as
+    "file_2272c8426ec9" did, in the 2026-10-08 replays and PR #85's. A filename is not unique the
+    way an id is, so it is looked up only among this conversation's own files, through the
+    store's scoped lookup (``find_files``, Stages 21/30) and then the owner compared exactly:
+    never the legacy pool, never another conversation of the same user, never a raw path.
+
+    Skipped, so the scan only fills a gap and never changes which file a name means:
+    * a name already taken by a listed or attached input, whose own allocation stands;
+    * a name the conversation's workspace already holds. A file there is one an earlier run
+      WROTE (staged inputs are never copied back unchanged), and the program means that one.
+    """
+    from agent_runtime.file_store import current_owner, current_session, find_files, record_owner
+
+    session = current_session()
+    if not session or not source:
+        return []
+    owner = current_owner()
+    chosen: Dict[str, Dict[str, Any]] = {}
+    # Newest first, so the first record seen under a name is the one a lookup by that name finds.
+    for record in find_files(session=session, include_unowned=False, limit=500):
+        filename = str(record.get("filename") or "")
+        if (not filename or filename in chosen or filename in taken
+                or record.get("session") != session or record_owner(record) != owner):
+            continue
+        if workspace is not None and (workspace / filename).exists():
+            continue
+        if _names_file(source, filename):
+            chosen[filename] = record
+    return list(chosen.values())
+
+
 # Appended to execute_code's description only while the extraction bundle is on
 # (agent_runtime/extraction_flag.py): it describes the gate and the mounted library, and a
 # model told about a library that is not mounted guesses at it.
@@ -281,8 +331,19 @@ def make_code_execution_tools(
             [fid for fid in _file_ids_named_in(source) if fid not in listed])
         refs = list(dict.fromkeys([*default_ids, *explicit, *named]))
         staging, staged_info, input_errors, skipped = _build_staging(refs)
+        # …and every file of this conversation the program names by FILENAME, unless a name is
+        # one the run already has. Looked up after the first allocation, so it can see which.
+        taken = {str(n) for info in staged_info for n in info.get("available_as") or []}
+        workspace = None
+        if session_id:
+            from agent_runtime.code_execution import session_workspace_dir
+            workspace = session_workspace_dir(session_id)
+        by_name = {str(r["file_id"]): r for r in _conversation_files_named_in(source, taken, workspace)}
+        if by_name:
+            refs = list(dict.fromkeys([*refs, *by_name]))
+            staging, staged_info, input_errors, skipped = _build_staging(refs)
         for info in staged_info:
-            if info.get("ref") in named:
+            if info.get("ref") in named or info.get("ref") in by_name:
                 info["staged_because"] = "named in the code"
         input_errors = [*input_errors, *refused]
 
@@ -432,7 +493,9 @@ def make_code_execution_tools(
             "file_id to `input_files` — an upload, or a file_id an earlier TOOL returned in "
             "this conversation (e.g. an embedding package's embedding_package.file_id, to "
             "cluster or difference its vectors). A file_id your code names literally (e.g. "
-            "gpd.read_file(\"file_2272c8426ec9\")) is staged too, without listing it. "
+            "gpd.read_file(\"file_2272c8426ec9\")) is staged too, without listing it, and so "
+            "is a file this conversation's tools made that your code opens by filename. "
+            "Writing under an input's name keeps your output. "
             "Use this to RUN and DEBUG code: run, read "
             "stdout/stderr, fix, re-run. Files you write persist in this conversation's working "
             "directory, so a later run can open what an earlier one produced and keep building "
