@@ -57,6 +57,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
 | 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
 | 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
+| 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7300,3 +7301,202 @@ verdict on every code run:
     model wandering. That is a stated limit of stage 42, not something this stage changes.
 - **Spend for these runs:** gate off $0.60 OpenAI and 7.6M Lumen tokens; gate on (both stages,
   one trial each) $0.63 and 8.7M. Program total: $2.88 OpenAI and 36.0M Lumen tokens.
+
+## Stage 44 — Facts, a number scan, one verdict {#stage-44}
+
+*2026-10-08. Branch `claude/one-verdict`, stacked on stage 43. DEVLOG M8.82. Phase 4 of the
+eight-flaws program, flaws 2 and 7. Review §F2 and §F7 have the root causes.*
+
+**Why.**
+
+Whether a figure in the answer was supported was decided four ways, each for one class:
+- the LLM audit's "verbatim" spans, which no code checked;
+- reconciliation rule (2), a substring match restricted to numbers of 3+ digits, so `21.5` was
+  never seen and `997.93` matched `997`;
+- stage 37's one-entry routing list (`_UNPRODUCIBLE_CAPABILITIES`);
+- stage 39's travel-figure scan.
+
+The next class shipped until someone wrote a rule. The open case was "~998 sq mi" in 3 of 4
+replays.
+
+Thirteen post-processing steps appended their own banners, none seeing the others' verdicts.
+"Could not check" was loud in the gate (COULD NOT VERIFY) and silent in the audit (a failed
+audit returned severity `unknown` and raised nothing).
+
+The gate's verdict was a union over every run in the turn. Live, 2026-10-08 21:34 UTC
+(`sess-07bc717f`, trace `…:0af26be5b3f8`, the first turn after `40356bd` was deployed): a correct
+23-school answer showed COULD NOT VERIFY, and all three findings came from side runs: an
+`os.listdir`, a lookup that matched 0 rows, and a failed first attempt. The run that produced the
+numbers raised none.
+
+**What changed.**
+
+1. **`agent_runtime/facts.py`.** The turn's fact set:
+   - the typed facts tools reported (stage 43);
+   - every number in a tool result, with the unit written beside it;
+   - the user's question, the retrieved evidence, and earlier turns' records.
+
+   `resolve` matches each figure the answer states to a recorded number:
+   - across units (pint), so `998 square miles` resolves to `2584.62 km²`;
+   - within the precision shown, so `2,585` resolves to 2,584.62 and `about 340` to 343.7,
+     since trailing zeros are rounding.
+
+   What is not a claim:
+   - identifiers (`EPSG:26916`, `GEOID 17019`: a number after an all-caps label), years, list
+     markers, code and links;
+   - small whole numbers without a unit.
+
+   A bare recorded number grounds a unit-bearing figure only when it is distinctive (≥100) or its
+   context names that dimension, so `"n": 5` is not evidence for "a 5-hour drive".
+2. **The writer is shown the typed facts,** with units and measurement CRS, in the synthesis note.
+3. **The number scan replaces the four rules.**
+   - A figure that resolves nowhere goes to the producer check (stage 42) with its sentence.
+   - If no bound tool produces it, the clause holding it is cut, whatever it is about. One
+     general note says so.
+   - If one does, the work goes back once (the existing re-grounding pass). What remains is
+     reported as not checked.
+   - Stage 37's routing list, stage 39's travel scan, `_remove_unproducible_claims` and
+     `_audit_without` are deleted.
+4. **The audit judges only what is not a number.** A claim that states a figure is the scan's;
+   the audit's sampled verdict on it is not used. A failed audit is "not checked", never clean.
+5. **`agent_runtime/verdict.py`: one finding type, one policy, one banner.**
+   - Every producer contributes `Finding`s: the gate, the audit, the number scan, artifact
+     corrections, and unresolved peer failures.
+   - `synthesize_node` renders them once, after peer failures are known: ⚠️ when something is a
+     problem, ℹ️ "Not everything here could be checked. Unchecked is not the same as wrong" when
+     something was not checked, and nothing when every check passed.
+   - At most six lines, the rest counted.
+   - `_apply_grounding_caveat`, `_peer_failure_note` and `_correct_artifact_claims` now render
+     through it. Their old banners (COULD NOT VERIFY, Grounding check, Partial answer,
+     Correction) are gone.
+   - The verdict travels on the state as `verdict: {status, findings, numbers}`, with each stated
+     figure's fact id.
+6. **The gate speaks for the code runs the answer uses:** runs a stated figure resolves to, or
+   runs that produced a file or layer.
+   - When no stated figure came from code (a qualitative answer), the runs that succeeded count.
+   - When the answer states figures that resolve nowhere, every run counts, because the gate
+     cannot tell which matter.
+   - A failed attempt that a later run superseded never counts (stage 42).
+
+**Tests.**
+- **New:** `test_number_scan_and_verdict.py` (24). Against stage 43 with only `facts.py` and
+  `verdict.py` copied in, the 7 graph-behaviour tests fail. The 17 that pass test the new modules
+  themselves.
+- **Rewritten:** the routing-figure scan tests now run the general pass with a scripted producer
+  model. The two routing-classifier parametrised tests are deleted with the classifier. Banner
+  assertions in 7 files moved to the new wording.
+- **Suites:** `rag_pipeline/tests` 3849 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
+  157 passed.
+
+**Measured with the harness, on one model.** By the user's budget decision, phases 4 and 5 ran on
+deepseek-v4-flash only, gate on, 1 trial, 17 tasks. The cross-model claim for this stage rests
+on the tests above and on gpt-5.6-luna's results up to stage 43. Stage 43's gate-on run
+(`p3-gate`) → this stage's first run (`p4-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| correct | 10/13 → 11/13 |
+| refused gracefully | 3/4 → 4/4 |
+| strict | 4/17 → 1/17 |
+| correct answers with a banner | 4 → 10 |
+| unproductive steps | 21 → 20 |
+| input tokens | 5.39M → 5.29M |
+
+`banners_total` counts banner lines, and this stage renders at most one banner per answer, so it
+falls by construction and is not reported. "Correct answers with a banner" counts answers.
+
+**The first run regressed on what this stage is for, and the records say why.** Reading all 10
+banners and replaying the number scan offline over every recorded answer (136 answers across
+`p3-gate`, `p3-after`, `p4-gate` and `p5-gate`, no model calls) found six defects. None was a
+class of claim; each was a reading error that a single list entry would have hidden.
+
+1. **A compass letter was read as a unit.** pint reads `N` as newtons and `W` as watts. The
+   question's "0.1281 W" therefore failed to ground the answer's "0.1281° W", and the sentence
+   holding the question's own coordinates was cut (T01, T02).
+   - **Fix:** a hemisphere letter after a number is read as a sign, so 117.5993°W equals a
+     recorded -117.599333 and does not equal 117.5993°E.
+   - **Also:** the question's own numbers ground a figure whatever unit the answer writes.
+2. **A recorded number was labelled by the first 60 characters of its whole output, not by the
+   words beside it.** "area hectares: 24.0" and `"watershed_area_km2": 16.2` never saw their own
+   unit names.
+   - **Fix:** the label is the 48 characters before the number, and a snake_case suffix
+     (`distance_m`) counts.
+   - **Fix:** the "small numbers coincide" guard now counts the digits a figure shows (three or
+     more ground it) instead of the magnitude (100 or more).
+3. **A unit was read across a line break.** `382254.14\nC2,C3 ...` gave the number the unit `C2`
+   (coulomb squared). A test written for the next fix found it.
+4. **Arithmetic on stated figures resolved nowhere and was cut.** Examples: "wins by 36,626
+   person-km" (418,880 − 382,254) and "all 28 pairs" (C(8,2)). The producer check answered
+   NONE although `execute_code` was bound.
+   - **Fix: one sum or difference of two figures the answer itself grounded resolves,** for a
+     figure shown to three or more significant digits.
+   - **Ratios and products were tried and dropped.** Audited over the replay, they matched mostly
+     by coincidence: "9 at p < 0.01" came out as 1.96 ÷ 0.2252, "0.3°" as 118 ÷ 470, "10 m" as
+     9975 ÷ 900. With sums and differences, every resolution in the replay is genuine or a
+     rounding of the true figure ("~2,584 km²" for 2,584.62).
+   - **Fix:** the producer prompt now says what NONE means: data no tool here can obtain. A
+     computation on values already present is produced by any tool that computes.
+5. **"Nothing in this run was geospatial" was reported as "not checked"** (T02, T03, T04).
+   `not_applicable` means the gate had nothing to apply its checks to, and the number scan still
+   holds the figures to the record. It is no longer a finding. `coverage` (geospatial work the
+   gate could not reach) still is.
+6. **One unresolved figure widened the gate's scope to every run,** so side runs spoke again.
+   Scope is now always the runs the answer's figures resolve to, including a derived figure's
+   operands, plus runs that produced a file or layer. A notes-only banner also lacked a heading.
+
+The ⚠️ heading now reads "A check found a problem". A gate failure is about the work behind the
+answer, not necessarily about something the answer states. That is T01's case: the run the answer
+used also printed an exploratory `gdf.geometry.area` in degrees, and scoping by run cannot
+separate two lines of one script.
+
+**Offline evidence for the fixes.** The share of figures in correct answers that resolve
+nowhere, on answers this stage never touched:
+
+| corpus | before the fixes | after |
+|---|---|---|
+| `p3-gate` (both models, gate on) | 37 / 325 (11.4%) | 10 / 316 (3.2%) |
+| `p3-after` (both models, 2 trials) | 97 / 824 (11.8%) | 37 / 804 (4.6%) |
+
+The claim count falls slightly because glued designations ("16N") are no longer claims. What
+remains is mostly figures the model computed in its head ("28 pairs", percentages, a 2.5× ratio)
+and so honestly unrecorded, plus English words pint knows as units ("20 are", "9 at",
+"0.53 in 2020").
+
+**Tests for the fixes:** 11 new tests (13 cases) in `test_number_scan_and_verdict.py`; 9 cases
+fail on the first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
+(the networkx pin); `tests/` 157 passed.
+
+**Confirmation run of the fixed stage** (the user approved it, 2026-10-09). This ran on stage 45's
+tip, which carries these fixes: deepseek-v4-flash, gate on, 1 trial, the 16 tasks other than T06
+(`p5-fixed-gate`). The same 16 tasks in each run:
+
+| deepseek-v4-flash, 16 tasks | stage 43 | stage 44 first version | stage 45 on that | **fixed** |
+|---|---|---|---|---|
+| correct | 9/12 | 10/12 | 12/12 | 11/12 |
+| correct answers with a banner | 3 | 9 | 8 | **5** |
+| strict | 4/16 | 1/16 | 2/16 | 5/16 |
+| unproductive steps | 6 | 9 | 6 | 6 |
+
+The five banners on correct answers, read one by one:
+- **Three are the gate's `coverage` finding** on raster work it could not reach (T07, T08, T11).
+  Stage 43 showed the same three, as COULD NOT VERIFY. They are accurate: nothing checked those
+  numbers.
+- **One cut a remembered figure** (T01). The answer added "the official Census figure of
+  approximately 997.5 sq mi (≈ 2,583.5 km²)", which nothing in the turn recorded, and it was cut
+  with a note. That is what the cut is for.
+- **One cut a correct sum** (T10). "Total sill 0.64" is the nugget 0.05 plus the partial sill
+  0.59. The figure shows two significant digits, so the derivation rule does not try it, and the
+  producer check answered NONE despite the reworded prompt. This is the residual: a short derived
+  figure can still be cut. The answer stayed correct, because the scored values were untouched.
+
+**Spend:** this run used 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
+
+**Not fixed here.**
+- The gate's `all_nan` check fails a join whose OpenStreetMap attribute columns are sparse
+  (`old_operator`, `wikidata`), which is a sandbox heuristic.
+- English words read as units.
+- An exploratory measurement inside the run the answer used.
+- A derived figure shown to fewer than three significant digits can still be cut (T10's "0.64").
+
+**Spend:** `p4-gate` 5.41M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen
+(with stage 45's run).

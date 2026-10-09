@@ -1,0 +1,117 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": null, \"stdout\": \"Collecting gdal\\\\n Downloading gdal-3.13.3.tar.gz (940 kB)\\\\n \\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of `coast_dem.tif`, **24.0 hectares** of the DEM are at or below 5 m elevation.\n\n### How it was computed\n- **Dataset**: `coast_dem.tif`, a 100 \u00d7 100 grid in **EPSG:32616** (UTM zone 16N), so pixel dimensions are already in metres.\n- **Pixel size**: 10 m \u00d7 10 m = **100 m\u00b2 per cell**.\n- **NoData handling**: The raster has a NoData value of **-9999.0** (100 cells). These were excluded \u2014 they would otherwise have been wrongly counted as \"below 5 m\" since -9999 \u2264 5. The valid elevation range is 0.1 m to 19.9 m.\n- **Count**: 2,400 valid cells have elevation \u2264 5 m.\n- **Area**: 2,400 cells \u00d7 100 m\u00b2 = 240,000 m\u00b2 = **24.0 ha**.\n\n### Bathtub interpretation\nThis is a simple bathtub count as requested: every valid cell at or below 5 m counts, regardless of connectivity to the sea along the southern edge. No flow/connectivity analysis was applied.\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names (`module scope`)\n- Not checked: these figures are not in any tool result, the question or the retrieved evidence: \"16N\", \"0.1 m\", \"19.9 m.\"",
+  "seconds": 162.3,
+  "route": [
+    "analyze",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 15,
+    "input_tokens": 216648,
+    "cached_input_tokens": 140800,
+    "output_tokens": 4561,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791511329-0",
+  "gate": [
+    {
+      "verdict": "none",
+      "checks": []
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

@@ -39,7 +39,9 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime import facts as turn_facts
 from agent_runtime import turn_log
+from agent_runtime import verdict as turn_verdict
 
 # Words that carry no retrieval signal — stripped when judging topical coverage and when building
 # a fallback query reformulation.
@@ -139,6 +141,7 @@ class SupervisorState(TypedDict, total=False):
                                    # turn is for, owned by the agent, rendered to every peer step
     turn_log_summary: Dict[str, Any]  # counts from the log, set by run_supervisor at the end
     bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
+    verdict: Dict[str, Any]        # {status, findings, numbers}: the single verdict (stage 44)
 
 
 
@@ -989,50 +992,6 @@ _REGROUND_DIRECTIVE = (
 )
 
 
-# --- claims no bound tool can produce ------------------------------------------------------
-#
-# The re-grounding pass assumes the peer CAN establish what the audit found missing. For some
-# claims no tool it holds ever could. Live, 2026-10-08 (thread sess-1e8e3edd-…): the synthesizer
-# added "roughly 460 km by road or ~340 km by the Eurostar rail line" to a correct 340.0 km
-# great-circle answer; the audit flagged both; analyze was re-run, ran execute_code again
-# (~28 s of a 72 s turn), and could not compute a road distance because there is no routing
-# tool. Such a claim is removed from the answer instead, and never becomes a re-run gap.
-#
-# Each entry: a label, the claim shape, the tool-name shape that WOULD produce it, and the line
-# the answer gets in its place. Kept narrow on purpose — a match removes text from the answer —
-# so "driving factors", "Google Drive" and "road network layer" are not routing claims.
-_ROUTING_CLAIM_RE = re.compile(
-    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle|foot)\b"
-    r"|\b(?:road|rail|railway|train|driving|walking|cycling)\s+(?:distance|time|route|journey|trip)s?\b"
-    r"|\b(?:drive|driving|travel|journey|transit|commute|walking|cycling)\s+times?\b"
-    r"|\btravel\s+distances?\b|\bdriving\s+directions?\b|\brail\s+line\b"
-    r"|\b(?:eurostar|amtrak|tgv)\b"
-    r"|\b\d+(?:[.,]\d+)?[\s-]*(?:h|hrs?|hours?|mins?|minutes?)[\s-]+"
-    r"(?:drive|walk|ride|flight|train\s+ride|bus\s+ride|journey|trip)\b",
-    re.I)
-_ROUTING_TOOL_RE = re.compile(r"rout|directions|isochrone|travel_time|osrm|valhalla|graphhopper",
-                              re.I)
-_UNPRODUCIBLE_CAPABILITIES = (
-    ("routing", _ROUTING_CLAIM_RE, _ROUTING_TOOL_RE,
-     re.compile(r"\b(?:rout(?:e|es|ing)|road|rail|driv(?:e|ing))\b", re.I),
-     "Road and rail travel distances and times are not included: no routing tool is "
-     "available here to compute them."),
-)
-
-
-def _unproducible_capability(claim: str, bound_tools: Optional[List[str]]) -> Optional[str]:
-    """The capability *claim* needs when no bound tool provides it, else None.
-
-    Stage 42: no longer decides re-runs or cuts (see `_producing_tools`). It survives only for
-    stage 39's travel scan, `_remove_unrecorded_travel`, which phase 4's number scan replaces.
-    """
-    text = str(claim or "")
-    for label, claim_re, tool_re, _mention, _note in _UNPRODUCIBLE_CAPABILITIES:
-        if claim_re.search(text) and not any(tool_re.search(str(t)) for t in bound_tools or []):
-            return label
-    return None
-
-
 # --- which bound tool could produce a missing claim ------------------------------------------
 # Stage 37 decided whether a re-run could establish an ungrounded claim with a list:
 # `_UNPRODUCIBLE_CAPABILITIES`, one entry (routing), a regex for the claim and a regex for the
@@ -1045,8 +1004,12 @@ def _unproducible_capability(claim: str, bound_tools: Optional[List[str]]) -> Op
 
 _PRODUCER_PROMPT = (
     "These claims appear in a draft answer, but no tool result recorded this turn contains "
-    "them. For each claim, name the ONE tool below that would compute or retrieve that value "
-    "from data, or NONE when none of these tools produces it.\n\nTools:\n{tools}\n\n"
+    "them. For each claim, name the ONE tool below that would compute or retrieve that value, "
+    "or NONE when the value needs data that none of these tools can obtain (a fact about the "
+    "world, such as a road distance or a population, that no tool here retrieves). A value "
+    "that is arithmetic on figures already in the answer or the question (a difference, a "
+    "count of combinations, a unit conversion) is produced by any tool here that computes."
+    "\n\nTools:\n{tools}\n\n"
     "Claims:\n{claims}\n\nRespond ONLY with JSON mapping each claim number to a tool name or "
     "\"NONE\", e.g. {{\"1\": \"execute_code\", \"2\": \"NONE\"}}.")
 
@@ -1270,67 +1233,6 @@ def _flagged_auditor_claims(audit: Optional[Dict[str, Any]]) -> List[str]:
     return out
 
 
-_NO_PRODUCER_NOTE = ("Some figures were left out of this answer: none of the tools available "
-                     "here can establish them.")
-
-
-def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
-                                bound_tools: Optional[List[str]],
-                                producers: Optional[Dict[str, Optional[str]]] = None) -> tuple:
-    """Cut flagged claims no bound tool can produce out of *answer*, and out of *audit*.
-
-    Returns ``(answer, audit, dropped)``. The answer gains one line per capability whose claims
-    were cut, unless it already talks about that capability, so the user is told what is missing
-    without being shown the unsupported figures. If no auditor issue survives, the audit stops
-    flagging; a gate finding is untouched, because cutting prose changes nothing it checked.
-    """
-    issues = [i for i in ((audit or {}).get("issues") or [])]
-    candidates: Dict[str, str] = {}
-    for claim in _flagged_auditor_claims(audit):
-        # Stage 42: "no bound tool produces it" is the producer check's answer (a claim mapped
-        # to None), not a match against a list of capability regexes.
-        if producers is not None and claim in producers and producers[claim] is None:
-            candidates[claim] = "no_tool"
-    if not candidates:
-        return answer, audit, []
-    new_answer, dropped = _drop_claims(answer, list(candidates))
-    if not dropped:
-        return answer, audit, []
-    if _NO_PRODUCER_NOTE not in new_answer:
-        new_answer = (f"{new_answer}\n\n{_NO_PRODUCER_NOTE}" if new_answer.strip()
-                      else _NO_PRODUCER_NOTE)
-    gone = set(dropped)
-    kept = [i for i in issues
-            if str(i.get("claim") if isinstance(i, dict) else i or "").strip() not in gone]
-    _LEDGER_LOG.info("dropped %d claim(s) no bound tool can produce: %s", len(dropped), dropped)
-    emit_trace_event(
-        "unproducible_claims_dropped",
-        {"stage": "synthesize", "claims": dropped,
-         "capabilities": sorted({candidates[c] for c in dropped}),
-         "message": f"removed {len(dropped)} claim(s) no available tool can produce: "
-                    f"{'; '.join(c[:80] for c in dropped[:3])}"},
-        node="synthesize",
-    )
-    return new_answer, _audit_without(audit, kept, dropped), dropped
-
-
-def _audit_without(audit: Optional[Dict[str, Any]], kept: List[Any], removed: List[str]) -> Dict:
-    """*audit* holding only the *kept* issues, after *removed* claims were cut from the answer.
-    If no auditor issue is left the audit stops flagging; a gate finding is untouched."""
-    auditor_left = [i for i in kept
-                    if not (isinstance(i, dict) and i.get("source") == "invariant_gate")]
-    new_audit = {**(audit or {}), "issues": kept,
-                 "removed_claims": [*((audit or {}).get("removed_claims") or []), *removed]}
-    if not auditor_left:
-        gate = str((audit or {}).get("invariant_gate") or "")
-        if gate:
-            new_audit["summary"] = (audit or {}).get("gate_headline") or new_audit.get("summary")
-        else:
-            new_audit.update({"hallucination_detected": False, "severity": "none",
-                              "summary": "Grounded: claims no available tool could produce were "
-                                         "removed from the answer."})
-    return new_audit
-
 
 # A number's edges in a JSON record. Not after a word character or a '.', so "450" is not found
 # in the coordinate 48.84502 or the id file_2272c8450ec9 — except after a JSON-escaped newline
@@ -1345,184 +1247,36 @@ def _number_in(number: str, record: str) -> bool:
         _NUM_EDGE_BEFORE + re.escape(number) + r"(?!\d)", record or "") is not None
 
 
-# --- travel figures the audit did not flag --------------------------------------------------
+# --- figures no bound tool produces (stage 44) ------------------------------------------------
 #
-# The cut above acts only on what the audit flags. Local replays, 2026-10-08, 2 of 2: the
-# answer still shipped "roughly 490 km by rail and ~450 km by road" (the flag was reconciled
-# away on a coordinate's digits) and "Driving is roughly 450–470 km" (the auditor passed it).
-# With no routing tool bound, a travel sentence carrying a distance or a time that is in no tool
-# result can only have come from the model's memory, so it is cut without asking the audit.
-#
-# The mode words are narrower than _ROUTING_CLAIM_RE's shapes allow ("Driving is …" is not a
-# "driving distance"), but they still exclude "driving factors", "Google Drive", "train the
-# model" and "as the crow flies". A bare "road" is not a mode either: "the road network layer
-# holds 3,400 km" is a measurement of a layer, not a journey.
-_TRAVEL_MODE_RE = re.compile(
-    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle)\b"
-    r"|\b(?:road|rail|railway|train|driving|walking|cycling|flight|flying)\s+"
-    r"(?:distance|time|route|journey|trip|ride)s?\b"
-    r"|(?<!google )(?<!hard )(?<!usb )(?<!shared )(?<!flash )(?<!disk )"
-    r"\bdriv(?:e|es|ing|en)\b"
-    r"(?!\s+(?:factors?|forces?|variables?|mechanisms?|causes?|process(?:es)?)\b)"
-    r"|\bflights?\b|\bflying\b|\btravel(?:l?ing|l?ed|s)?\b"
-    r"|\b(?:eurostar|amtrak|tgv)\b|\bhigh-speed\s+(?:rail|train)\b",
-    re.I)
-_QTY_NUM = r"\d[\d,]*(?:\.\d+)?"
-# A distance or a duration: "450 km", "450–470 km", "2 hours", "a 5-hour drive", "1 h 15 min".
-# Not a speed ("100 km/h") and not an area ("450 km²": no word boundary before the '²').
-_TRAVEL_QTY_RE = re.compile(
-    rf"(?<![\w.])({_QTY_NUM})(?:\s*(?:–|—|-|to)\s*({_QTY_NUM}))?[\s-]*"
-    r"(kilomet(?:er|re)s?|km|miles?|mi|met(?:er|re)s?|hours?|hrs?|hr|h|minutes?|mins?|min)"
-    r"\b(?!\s*/)",
-    re.I)
-_TIME_UNIT_RE = re.compile(r"^(?:h|hr|hrs|hours?|min|mins|minutes?)$", re.I)
-_TIME_CONTEXT_RE = re.compile(r"hour|hr|min|time|duration|eta|(?<![a-z])h(?![a-z])", re.I)
-_DIST_CONTEXT_RE = re.compile(r"km|kilomet|mile|(?<![a-z])mi(?![a-z])|dist|length|met(?:er|re)",
-                              re.I)
-_RECORD_NUM_RE = re.compile(_NUM_EDGE_BEFORE + r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)")
-_RECORD_FIELD_SEP_RE = re.compile(r"[,{}\[\];\n]|\\n")
+# Stage 37 cut flagged routing claims by a one-entry capability list; stage 39 added a scan for
+# travel figures the audit missed, keyed on travel-mode words. Both were one claim class of a
+# general question: a figure the turn did not record, that no tool bound this turn could
+# produce, can only have come from the model's memory. The number scan (agent_runtime/facts.py)
+# finds every unrecorded figure, of any kind; the producer check (stage 42) says whether a
+# bound tool could produce it; this cuts the ones none can.
 
+def _cut_unproducible_figures(answer: str, fact_set: Any, producers_fn: Callable[[List[str]], Dict[str, Optional[str]]]) -> tuple:
+    """`(answer, cut sentences, unresolved figures kept, resolutions)`."""
+    resolutions = turn_facts.resolve(answer, fact_set)
+    unresolved = [r for r in resolutions if not r.resolved and turn_facts.is_claim(r.quantity)]
+    # The producer check reads the whole sentence (context); the cut removes only the clause
+    # that holds the figure, so "(about 460 km by road; 343.6 km between centres)" keeps its
+    # second half.
+    sentences = list(dict.fromkeys(r.quantity.sentence for r in unresolved if r.quantity.sentence))
+    producers = producers_fn(sentences) if sentences else {}
+    def _placeable(r: Any) -> str:
+        clause = r.quantity.clause or r.quantity.sentence
+        # A clause too short to place safely ("~460 km" alone in parentheses) cuts its sentence.
+        return clause if _claim_pattern(clause) is not None else r.quantity.sentence
 
-def _tool_record_text(execution_context: Optional[Dict[str, Any]]) -> str:
-    """Every tool result of this turn, and the earlier turns' ledger — what a figure can come
-    from. Not a peer's summary: that is model prose, and may hold the same memorised figure."""
-    ctx = execution_context if isinstance(execution_context, dict) else {}
-    parts: List[str] = []
-    for key in ("analysis_results", "code_result"):
-        result = ctx.get(key)
-        if isinstance(result, dict):
-            parts += [str(r.get("content") or "") for r in result.get("tool_results") or []
-                      if isinstance(r, dict)]
-    parts.append(str(ctx.get("prior_actions") or ""))
-    return "\n".join(parts)
-
-
-def _quantity_recorded(number: str, unit: str, record: str) -> bool:
-    """Whether a tool result holds *number*, as a number of its own, to the answer's precision.
-
-    Rounded, so "about 464 km" is 463.8 and "340 km" is 340.0. A value under 100 also needs a
-    field or a unit of its kind beside it: "2 hours by Eurostar" is not grounded by "count": 2."""
-    n = number.replace(",", "")
-    try:
-        value = float(n)
-    except ValueError:
-        return False
-    places = len(n.split(".", 1)[1]) if "." in n else 0
-    context_re = _TIME_CONTEXT_RE if _TIME_UNIT_RE.match(unit) else _DIST_CONTEXT_RE
-    for m in _RECORD_NUM_RE.finditer(record or ""):
-        try:
-            found = float(m.group(0).replace(",", ""))
-        except ValueError:
-            continue
-        if abs(round(found, places) - value) > 1e-9:
-            continue
-        if value >= 100:
-            return True
-        seps_before = list(_RECORD_FIELD_SEP_RE.finditer(record, 0, m.start()))
-        lo = seps_before[-1].end() if seps_before else 0
-        after = _RECORD_FIELD_SEP_RE.search(record, m.end())
-        hi = after.start() if after else len(record)
-        if context_re.search(record[lo:m.start()] + " " + record[m.end():hi]):
-            return True
-    return False
-
-
-def _first_unrecorded_travel(text: str, record: str) -> Optional[tuple]:
-    """``(start, end, sentence)`` of the first travel claim in *text* whose distance or time is
-    in no tool result, or None. Fenced code is skipped."""
-    pos, fenced = 0, False
-    for line in text.split("\n"):
-        ls, pos = pos, pos + len(line) + 1
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced or not _TRAVEL_MODE_RE.search(line):
-            continue
-        body = _LINE_MARKER_RE.match(line).end()
-        bounds = [body, *[body + o for o in _sentence_ends(line[body:])], len(line)]
-        for a, b in zip(bounds, bounds[1:]):
-            sentence = line[a:b]
-            modes = list(_TRAVEL_MODE_RE.finditer(sentence))
-            if not modes:
-                continue
-            for q in _TRAVEL_QTY_RE.finditer(sentence):
-                nums = [x for x in (q.group(1), q.group(2)) if x]
-                if all(_quantity_recorded(x, q.group(3), record) for x in nums):
-                    continue
-                mode = min(modes, key=lambda m: min(abs(m.start() - q.end()),
-                                                    abs(q.start() - m.end())))
-                s, e = min(mode.start(), q.start()), max(mode.end(), q.end())
-                if "(" in sentence[s:e] or ")" in sentence[s:e]:
-                    s, e = 0, len(sentence)          # straddles a parenthesis: the sentence
-                return ls + a + s, ls + a + e, sentence.strip()
-    return None
-
-
-def _scan_unrecorded_travel(answer: str, execution_context: Optional[Dict[str, Any]],
-                            bound_tools: Optional[List[str]]) -> tuple:
-    """*answer* without its travel claims whose figures are in no tool result.
-
-    Returns ``(answer, cut)``. Does nothing when a routing tool is bound: its figures would be in
-    the record, and a figure that is not is the audit's to judge."""
-    if any(_ROUTING_TOOL_RE.search(str(t)) for t in bound_tools or []):
-        return answer, []
-    original = str(answer or "")
-    record = _tool_record_text(execution_context)
-    text, cut = original, []
-    for _ in range(16):
-        hit = _first_unrecorded_travel(text, record)
-        if not hit:
-            break
-        new = _cut_unit(text, hit[0], hit[1])
-        if new == text:
-            break
-        text = new
-        cut.append(hit[2])
-    if not cut:
-        return answer, []
-    return _tidy_after_cuts(text, before=original), cut
-
-
-def _remove_unrecorded_travel(answer: str, audit: Optional[Dict[str, Any]],
-                              bound_tools: Optional[List[str]],
-                              execution_context: Optional[Dict[str, Any]]) -> tuple:
-    """Cut unflagged memorised travel figures from *answer*; see _scan_unrecorded_travel.
-
-    Returns ``(answer, audit, cut)``. A flagged routing claim whose figures the cut removed from
-    the answer goes from the audit too: it is about text the user will not see. That is how an
-    issue the auditor paraphrased — which _drop_claims cannot place — stops leaving a caveat."""
-    new_answer, cut = _scan_unrecorded_travel(answer, execution_context, bound_tools)
-    if not cut:
-        return answer, audit, []
-    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
-        if label == "routing" and not mention_re.search(new_answer):
-            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
-    plain = new_answer.replace(",", "")
-    kept, moot = [], []
-    for item in (audit or {}).get("issues") or []:
-        claim = str(item.get("claim") if isinstance(item, dict) else item or "")
-        # Its travel quantities only: "A26" names a road, it is not a figure the cut removed.
-        nums = [n.replace(",", "") for q in _TRAVEL_QTY_RE.finditer(claim)
-                for n in (q.group(1), q.group(2)) if n]
-        if (not (isinstance(item, dict) and item.get("source") == "invariant_gate")
-                and _unproducible_capability(claim, bound_tools) and nums
-                and not any(_number_in(n, plain) for n in nums)):
-            moot.append(claim)
-        else:
-            kept.append(item)
-    _LEDGER_LOG.info("cut %d unrecorded travel claim(s) the audit did not remove: %s",
-                     len(cut), cut)
-    emit_trace_event(
-        "unproducible_claims_dropped",
-        {"stage": "synthesize", "claims": cut, "capabilities": ["routing"],
-         "source": "answer_scan",
-         "message": f"removed {len(cut)} travel figure(s) no tool result holds: "
-                    f"{'; '.join(c[:80] for c in cut[:3])}"},
-        node="synthesize",
-    )
-    if not moot or not audit:
-        return new_answer, audit, cut
-    return new_answer, _audit_without(audit, kept, [*cut, *moot]), cut
+    clauses = list(dict.fromkeys(_placeable(r) for r in unresolved
+                                 if producers.get(r.quantity.sentence, "unknown") is None))
+    dropped: List[str] = []
+    if clauses:
+        answer, dropped = _drop_claims(answer, clauses)
+    kept = [r for r in unresolved if r.quantity.text in answer and _placeable(r) not in dropped]
+    return answer, dropped, kept, resolutions, producers
 
 
 # After a re-grounding pass the answer is about to reach a user who never saw the draft it
@@ -1561,6 +1315,47 @@ def _reground_note(state: SupervisorState) -> Optional[str]:
     if not gaps:
         return None
     return _REGROUND_DIRECTIVE.format(gaps="\n".join(f"  - {g}" for g in gaps))
+
+
+def _scope_to_used_runs(exec_ctx: Dict[str, Any], resolutions: List[Any],
+                        answer: str) -> Dict[str, Any]:
+    """The execution context, holding only the code runs the answer uses.
+
+    A run is used when a number the answer states resolves to its output, or when it produced
+    a file or layer. A side run (a directory listing, a lookup that matched nothing, a failed
+    first attempt that a later run superseded) does not speak for the answer, so its gate
+    findings do not either. A figure that resolves nowhere does not widen the scope: no run
+    vouches for it, and the number scan reports it on its own. (Stage 44's first harness run
+    widened it to every run, and an exploratory `print(gdf.geometry.area)` in degrees then spoke
+    for an answer whose area came from a later, reprojected run.)
+    """
+    used = {getattr(f, "call_id", None)
+            for r in resolutions if r.resolved for f in (getattr(r, "parts", None) or [r.fact])}
+    code_ids = {res.get("tool_call_id")
+                for slot in ("analysis_results", "code_result")
+                for res in ((exec_ctx.get(slot) or {}).get("tool_results") or []
+                            if isinstance(exec_ctx.get(slot), dict) else [])
+                if isinstance(res, dict) and res.get("name") == "execute_code"}
+    # No stated number came from any code run (a list of names, a qualitative answer): the
+    # runs that succeeded are what it rests on. A failed attempt is still not.
+    numbers_from_code = bool(used & code_ids)
+
+    def keep(res: Dict[str, Any]) -> bool:
+        if not isinstance(res, dict) or res.get("name") != "execute_code":
+            return True
+        if res.get("tool_call_id") in used:
+            return True
+        parsed = turn_log.parse_result(res.get("content"))
+        if not numbers_from_code:
+            return parsed["ok"]
+        return parsed["ok"] and bool(parsed["artifacts"])
+
+    out = dict(exec_ctx)
+    for slot in ("analysis_results", "code_result"):
+        val = exec_ctx.get(slot)
+        if isinstance(val, dict) and val.get("tool_results"):
+            out[slot] = {**val, "tool_results": [r for r in val["tool_results"] if keep(r)]}
+    return out
 
 
 def _unsupported_claims(audit: Optional[Dict[str, Any]], limit: int = 6) -> List[str]:
@@ -2217,18 +2012,8 @@ def _with_feature_source(answer: str, state: SupervisorState) -> str:
 
 
 def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
-    """The user-visible statement that part of the turn did not run."""
-    names = []
-    for f in failures:
-        name = str(f.get("peer") or "a step")
-        if name not in names:
-            names.append(name)
-    label = {"search": "search", "analyze": "analysis", "code": "code execution",
-             "synthesize": "answer composition"}
-    pretty = [label.get(n, n) for n in names]
-    joined = pretty[0] if len(pretty) == 1 else ", ".join(pretty[:-1]) + f" and {pretty[-1]}"
-    return (f"⚠️ Partial answer: {joined} failed during this turn, so this reply is based on "
-            f"what completed before the failure. Re-running may produce a fuller answer.")
+    """The peer-failure part of the single verdict, rendered on its own (stage 44)."""
+    return turn_verdict.render("", turn_verdict.from_peer_failures(failures))
 
 def _available_actions(state: SupervisorState) -> List[str]:
     """The actions that are legal RIGHT NOW, in decider-menu order.
@@ -2412,55 +2197,15 @@ def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
 
 
 def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str:
-    """Append a clearly-marked grounding caveat to *answer* when the audit flags it.
+    """The audit's part of the single verdict, rendered (stage 44).
 
-    This is what makes the grounding audit non-cosmetic: a flagged verdict changes
-    the text the user actually sees, rather than being computed and discarded.
+    Kept as a function for callers that hold only an audit; synthesis itself renders every
+    check's findings together (synthesize_node). Before stage 44 this wrote its own banner, one of
+    five producers that never saw each other's verdicts.
     """
-    if not _audit_flagged(audit):
-        return answer
-    severity = str((audit or {}).get("severity") or "").strip().lower()
-    summary = str((audit or {}).get("summary") or "").strip()
-    gate = str((audit or {}).get("invariant_gate") or "").strip()
-
-    # A deterministic gate failure is NOT an evidence-support problem, and describing it as one
-    # understates it: a geographic-CRS buffer is a wrong number, not a claim that is merely
-    # under-cited. The two get different headlines.
-    if gate in {"fail", "cannot_determine"}:
-        # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
-        # rather than restating it -- two headlines in a row read as a template, not a warning.
-        icon = ("⛔" if gate == "fail"
-                else "ℹ️" if (audit or {}).get("gate_advisory_only") else "⚠️")
-        note = f"{icon} {summary}" if summary else (
-            f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
-            f"on this run, so its numeric results are not verified.")
-    else:
-        note = ("⚠️ Grounding check: parts of this answer may not be fully supported by "
-                "the retrieved evidence")
-        if severity:
-            note += f" (severity: {severity})"
-        note += f". {summary}" if summary else "."
-
-    # The specific findings, WITH their remedies. Only the summary was appended before, so the
-    # user was told a check failed and never told what failed or what to do -- and it is the
-    # gate's own message that carries "reproject to a local projected CRS (a UTM or state-plane
-    # zone in metres) before calling". Producing a remedy and then discarding it is worse than
-    # not computing one.
-    lines: List[str] = []
-    for issue in ((audit or {}).get("issues") or [])[:4]:
-        if not isinstance(issue, dict):
-            continue
-        claim = str(issue.get("claim") or "").strip()
-        reason = str(issue.get("reason") or "").strip()
-        if not reason:
-            continue
-        lines.append(f"- {claim}: {reason}" if claim else f"- {reason}")
-    extra = len([i for i in ((audit or {}).get("issues") or []) if isinstance(i, dict)]) - len(lines)
-    if lines:
-        note += "\n\n" + "\n".join(lines)
-        if extra > 0:
-            note += f"\n- …and {extra} more"
-    return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
+    findings = [*turn_verdict.from_gate(audit),
+                *turn_verdict.from_audit(audit, numeric_claims_resolved=False)]
+    return turn_verdict.render(answer, findings)
 
 
 def _correct_artifact_claims(answer: str, *contexts: Any,
@@ -2512,7 +2257,22 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
 
     if not notes:
         return answer
-    return text + "\n\n---\n\n" + "\n\n".join(f"⚠️ Correction: {n}" for n in notes)
+    return turn_verdict.render(text, [turn_verdict.Finding("correction", turn_verdict.PROBLEM,
+                                                           f"Correction: {n}") for n in notes])
+
+
+def _artifact_corrections(answer: str, *contexts: Any,
+                          prior_rows: Optional[List[Dict[str, Any]]] = None) -> tuple:
+    """`(answer without the banner, [correction notes])`: the same corrections as
+    `_correct_artifact_claims`, returned as findings for the single verdict (stage 44)."""
+    marker = "\n\n---\n\n"
+    rendered = _correct_artifact_claims(answer, *contexts, prior_rows=prior_rows)
+    if rendered == answer or marker not in rendered:
+        return rendered, []
+    body, banner = rendered.rsplit(marker, 1)
+    notes = [ln[len("- Problem: Correction: "):] for ln in banner.splitlines()
+             if ln.startswith("- Problem: Correction: ")]
+    return body, notes
 
 
 _SANDBOX_IMPORT_RE = re.compile(r"\bfrom\s+iguide_methods\b|\bimport\s+iguide_methods\b")
@@ -2943,7 +2703,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         # from an auditor's — they call for different things; see there.
         gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
-                        "source": "invariant_gate", "status": f.get("status")}
+                        "source": "invariant_gate", "status": f.get("status"),
+                        "check": f.get("check")}
                        for f in gate]
         # A finding the gate marks `advisory` says something was left unchecked, not that a
         # number may be wrong; when every unknown is advisory the banner says so. Stage 43's gate
@@ -5061,7 +4822,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "tool_results": artifacts.get("tool_results") or [],
             # What this peer COULD have called. analysis_node lifts it into state (it never
             # reaches synthesis's serialized analysis_results), where it decides whether an
-            # ungrounded claim is one a re-run could produce; see _unproducible_capability.
+            # ungrounded claim is one a re-run could produce; see _producing_tools.
             "bound_tools": sorted({str(getattr(t, "name", "")) for t in tools
                                    if getattr(t, "name", "")}),
             # Their own one-line descriptions, for `_producing_tools`.
@@ -6217,18 +5978,27 @@ def build_supervisor_graph(
                 update[key] = _with_feature_source(update[key], state)
         if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
             update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+        # ONE verdict (stage 44): every check's findings, including the peers that failed and
+        # were never made good, rendered as a single banner, or none.
         unresolved = _unresolved_peer_failures({**state, **update})
-        if unresolved:
-            note = _peer_failure_note(unresolved)
+        findings = [turn_verdict.Finding(**f) for f in
+                    ((update.get("verdict") or {}).get("findings") or [])]
+        findings += turn_verdict.from_peer_failures(unresolved)
+        if not update.get("reground"):
             for key in ("answer", "final_answer"):
                 if isinstance(update.get(key), str) and update[key].strip():
-                    update[key] = f"{update[key]}\n\n---\n\n{note}"
+                    update[key] = turn_verdict.render(update[key], findings)
             if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
-                update["distilled"]["answer"] = update["final_answer"]
+                update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+            update["verdict"] = {**(update.get("verdict") or {}),
+                                 "findings": [f.to_dict() for f in findings],
+                                 "status": turn_verdict.status(findings)}
         return update
 
     def _synthesize_core(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
+        verdict_findings: List[Any] = []
+        number_links: List[Dict[str, Any]] = []
         evidence = state.get("evidence") or []
         ar, cr = state.get("analysis_results"), state.get("code_result")
         # Scope artifacts to THIS turn: a plot/map shown in an earlier turn must not be
@@ -6308,6 +6078,20 @@ def build_supervisor_graph(
             _map_env = _map_environment_lines(_map_layer_was_delivered(
                 {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
             _note = _prior_actions_note(_rows)
+            # THE FACTS (stage 44): every number the turn recorded, typed ones listed for the
+            # writer with their units and where they were measured. The answer is then held to
+            # them, number by number, by a deterministic scan.
+            _log = turn_log.get_log(state.get("turn_log_id"))
+            _results = [*((ar or {}).get("tool_results") or [] if isinstance(ar, dict) else []),
+                        *((cr or {}).get("tool_results") or [] if isinstance(cr, dict) else [])]
+            fact_set = turn_facts.build(log=_log, results=_results, query=q, evidence=evidence,
+                                        prior_rows=_rows)
+            _facts_text = fact_set.render()
+            if _facts_text:
+                _note = (f"{_note}\n\n" if _note else "") + (
+                    "Measured values this turn recorded (the record the answer is checked "
+                    "against; each number stated is matched to one of these or to a tool "
+                    "result):\n" + _facts_text)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
@@ -6322,6 +6106,12 @@ def build_supervisor_graph(
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
                         "this_turn": _ledger_lines(_turn_rows),
                         "prior_actions": _ledger_text, "environment": _map_env}
+            # The gate speaks for the code runs the ANSWER USES. Live, 2026-10-08 21:34 UTC
+            # (sess-07bc717f): a correct 23-school answer showed COULD NOT VERIFY whose three
+            # findings all came from side runs (a directory listing, a 0-row lookup, a failed
+            # first attempt); the run that produced the numbers raised none.
+            resolutions = turn_facts.resolve(answer, fact_set)
+            gate_ctx = _scope_to_used_runs(exec_ctx, resolutions, answer)
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
@@ -6334,55 +6124,85 @@ def build_supervisor_graph(
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx,
+            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=gate_ctx,
                                                     prior_rows=_rows)
-            # A flagged claim no bound tool can produce (a road distance, with no routing tool)
-            # is cut from the answer: re-running a peer cannot establish it, and a caveat over
-            # a figure we know is unsupported is worse than not printing the figure.
-            _bound = state.get("bound_tools") or []
-            _producers = _producing_tools(
-                [c for c in (_flagged_auditor_claims(audit)) if c],
-                state.get("bound_tool_docs") or {}, llm) if _audit_flagged(audit) else {}
-            answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound, _producers)
-            # ... and one the audit did not flag, or that reconciliation let through.
-            answer, audit, _ = _remove_unrecorded_travel(answer, audit, _bound, exec_ctx)
+            # THE NUMBER SCAN (stage 44). Every stated figure that resolves to no recorded
+            # number is a finding, whatever it is about: an area, a population, a road distance.
+            # The producer check (stage 42) says whether some bound tool could produce it. If
+            # none can, it is cut: printing it under a caveat is worse than leaving it out. If
+            # one can, the work goes back once. Stage 39's travel scan and stage 37's routing
+            # list were two classes of this; reconciliation rule (2) was a substring version.
+            qualitative = [c for c in _unsupported_claims(audit)
+                           if not any(turn_facts.is_claim(x) for x in turn_facts.quantities(c))]
+            _producer_memo: Dict[str, Optional[str]] = {}
+
+            def _producers_for(sentences_: List[str]) -> Dict[str, Optional[str]]:
+                # One producer check for the figures and the qualitative claims together.
+                _producer_memo.update(_producing_tools(
+                    [*sentences_, *qualitative], state.get("bound_tool_docs") or {}, llm)
+                    if (sentences_ or qualitative) else {})
+                return _producer_memo
+
+            answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
+                answer, fact_set, _producers_for)
+            if qualitative and not _producer_memo:
+                _producers_for([])
+            _producers = _producer_memo
+            scan_findings: List[turn_verdict.Finding] = []
+            if dropped:
+                scan_findings.append(turn_verdict.Finding(
+                    "number_scan", turn_verdict.NOTE,
+                    f"{len(dropped)} statement(s) with figures that none of the tools available "
+                    f"here can produce were left out", evidence=dropped[:6]))
+                _LEDGER_LOG.info("number scan cut %d unproducible statement(s)", len(dropped))
             if state.get("grounding_retries"):
                 answer = _drop_draft_mentions(answer)
-            # THE GATE. A surviving flag means the audit still cannot find these claims in the
-            # record after all four deterministic drops — the shape of "answered from memory".
-            # Send the work back once instead of shipping a caveat over unfinished work.
-            _reground_to = _reground_target(state) if _audit_flagged(audit) else None
+            # A re-grounding pass, for figures and claims some bound tool could produce, plus
+            # anything the gate found wrong in the code the answer uses.
+            gate_fail = [g for g in _unsupported_claims(audit)
+                         if g.startswith("computed value from")]
+            gaps = [*[r.quantity.sentence for r in kept_unresolved],
+                    *[c for c in qualitative if _producers.get(c, "unknown") is not None],
+                    *gate_fail]
+            gaps = list(dict.fromkeys(g for g in gaps if g))[:6]
+            _reground_to = _reground_target(state) if gaps else None
             if _reground_to:
-                # A claim that could not be cut (paraphrased by the auditor) but still needs a
-                # tool nobody bound keeps its caveat and does not buy a re-run.
-                # A gap the producer check was not asked about (a gate finding: a wrong number
-                # the peer can fix) is producible by definition.
-                gaps = [g for g in _unsupported_claims(audit)
-                        if _producers.get(g, "not asked") is not None]
-                if gaps:
-                    emit_trace_event(
-                        "node_completed",
-                        {"stage": "synthesize",
-                         "message": f"answer not grounded — re-running {_reground_to} to "
-                                    f"establish: {'; '.join(g[:80] for g in gaps[:2])}"},
-                        node="synthesize",
-                    )
-                    _LEDGER_LOG.info("re-grounding pass: %d unsupported claim(s): %s",
-                                     len(gaps), gaps[:3])
-                    return {
-                        # Routed through the needs FIFO on purpose: the supervisor fulfils a
-                        # need BEFORE consulting the decider, and the decider is what already
-                        # said "done" on this state. A plain edge back would just be told done
-                        # again.
-                        "needs": [*(state.get("needs") or []),
-                                  {"capability": _reground_to, "by": "synthesize",
-                                   "reason": "answer was not grounded in the execution record"}],
-                        "grounding_gaps": gaps,
-                        "grounding_retries": state.get("grounding_retries", 0) + 1,
-                        "reground": True,
-                    }
-            # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
-            final = _apply_grounding_caveat(answer, audit)
+                emit_trace_event(
+                    "node_completed",
+                    {"stage": "synthesize",
+                     "message": f"answer not grounded — re-running {_reground_to} to "
+                                f"establish: {'; '.join(g[:80] for g in gaps[:2])}"},
+                    node="synthesize",
+                )
+                _LEDGER_LOG.info("re-grounding pass: %d unsupported claim(s): %s",
+                                 len(gaps), gaps[:3])
+                return {
+                    # Routed through the needs FIFO on purpose: the supervisor fulfils a
+                    # need BEFORE consulting the decider, and the decider is what already
+                    # said "done" on this state. A plain edge back would just be told done
+                    # again.
+                    "needs": [*(state.get("needs") or []),
+                              {"capability": _reground_to, "by": "synthesize",
+                               "reason": "answer was not grounded in the execution record"}],
+                    "grounding_gaps": gaps,
+                    "grounding_retries": state.get("grounding_retries", 0) + 1,
+                    "reground": True,
+                }
+            if kept_unresolved:
+                shown = list(dict.fromkeys(r.quantity.text.strip() for r in kept_unresolved))
+                scan_findings.append(turn_verdict.Finding(
+                    "number_scan", turn_verdict.UNVERIFIABLE,
+                    "these figures are not in any tool result, the question or the retrieved "
+                    "evidence: " + ", ".join(f"\"{t}\"" for t in shown[:6]),
+                    evidence=shown[:6]))
+            verdict_findings = [*turn_verdict.from_gate(audit),
+                                *turn_verdict.from_audit(audit, numeric_claims_resolved=True),
+                                *scan_findings]
+            number_links = [{"text": r.quantity.text, "fact": r.fact.id if r.fact else None,
+                             "source": r.fact.source if r.fact else None}
+                            for r in resolutions if turn_facts.is_claim(r.quantity)]
+            # The verdict is rendered ONCE, by synthesize_node, after peer failures are known.
+            final = answer
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
             final = _append_image_embeds(final, artifacts)
             # Defuse sandbox: pseudo-URLs, internal filesystem paths, and any link that merely
@@ -6433,7 +6253,10 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        final = _correct_artifact_claims(final, ar, cr, prior_rows=_rows)
+        final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        verdict_findings = [*verdict_findings,
+                            *[turn_verdict.Finding("correction", turn_verdict.PROBLEM, n)
+                              for n in corrections]]
         # Record what this turn DID before the state is discarded — the next turn's routing
         # decision is the only thing standing between a follow-up and a redundant search.
         _record_turn(state, ar, cr)
@@ -6445,6 +6268,8 @@ def build_supervisor_graph(
                 # Cleared so a second synthesize cannot re-route, and so the gaps do not leak
                 # into the client payload or a later turn's state.
                 "reground": False, "grounding_gaps": [],
+                "verdict": {"findings": [f.to_dict() for f in verdict_findings],
+                            "numbers": number_links},
                 "distilled": {**_distill(merged), "answer": final}}
 
     builder = StateGraph(SupervisorState)

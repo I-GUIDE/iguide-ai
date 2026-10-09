@@ -19,12 +19,36 @@ Fully stubbed, like test_supervisor_graph.py: no network, no keys.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from agent_runtime.supervisor_graph import run_supervisor
 
 QUERY = "what is the area of Champaign County, Illinois, and how far is London from Paris?"
+
+# A scripted stand-in for the producer check's model: it knows that a travel distance or time
+# needs a routing tool, and that anything else the agent computes, execute_code can. These two
+# patterns were the agent's own rules until stage 44 (stage 37's claim list, stage 39's travel
+# words); now they are only what this test's "model" believes.
+ROUTING_CLAIM_RE = re.compile(
+    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle)\b"
+    r"|\b(?:road|rail|railway|train|driving|walking|cycling|flight|flying)\s+"
+    r"(?:distance|time|route|journey|trip|ride)s?\b"
+    r"|(?<!google )(?<!hard )\bdriv(?:e|es|ing|en)\b"
+    r"(?!\s+(?:factors?|forces?|variables?|mechanisms?|causes?|process(?:es)?)\b)"
+    r"|\bflights?\b|\btravel(?:l?ing|l?ed|s)?\s+(?:distance|time)s?\b"
+    r"|\b(?:eurostar|amtrak|tgv)\b|\b\d+(?:[.,]\d+)?[\s-]*(?:h|hrs?|hours?|mins?|minutes?)[\s-]+"
+    r"(?:drive|walk|ride|flight|journey|trip)\b",
+    re.I)
+ROUTING_TOOL_RE = re.compile(r"rout|directions|isochrone|travel_time|osrm|valhalla|graphhopper",
+                             re.I)
+
+
+def scripted_producers(claims, tool_docs, llm=None):
+    routing = any(ROUTING_TOOL_RE.search(t) for t in tool_docs)
+    return {c: (None if ROUTING_CLAIM_RE.search(c) and not routing else "execute_code")
+            for c in claims}
 
 _ADMIN = json.dumps({"ok": True, "level": "county",
                      "matched": [{"geoid": "17019", "name": "Champaign County"}],
@@ -136,12 +160,7 @@ def _run(monkeypatch, audits, *, passes=(FIRST_PASS, SECOND_PASS), answers=(ANSW
     # Stage 42: whether a bound tool produces a flagged claim is the producer check's answer (a
     # model call in production). Scripted here as a model that knows only routing needs a
     # routing tool; the graph's reaction to that answer is what these tests hold.
-    def fake_producers(claims, tool_docs, llm):
-        routing = any(g._ROUTING_TOOL_RE.search(t) for t in tool_docs)
-        return {c: (None if g._ROUTING_CLAIM_RE.search(c) and not routing else "execute_code")
-                for c in claims}
-
-    monkeypatch.setattr(g, "_producing_tools", fake_producers)
+    monkeypatch.setattr(g, "_producing_tools", scripted_producers)
 
     def peer(q, ev, st):
         seen["analyze"].append(list(st.get("grounding_gaps") or []))
@@ -232,8 +251,9 @@ def test_routing_claims_are_dropped_and_nothing_re_runs(monkeypatch, ledger):
     assert "340.0 km" in final and "2,584.6 km²" in final
     assert "straight-line distance" in final and "interactive map" in final
     # no warning: every flagged claim is gone from the answer
-    assert "Grounding check" not in final and "COULD NOT VERIFY" not in final, final
-    assert not state["audit"].get("issues"), state["audit"]
+    assert "Check this answer" not in final and "could be checked" not in final, final
+    # Stage 44: the verdict, not the raw audit, decides; numeric claims are the number scan's.
+    assert state["verdict"]["status"] == "verified", state["verdict"]
 
 
 def test_a_routing_claim_with_a_routing_tool_bound_still_re_runs(monkeypatch, ledger):
@@ -266,23 +286,12 @@ def test_an_unproducible_claim_that_cannot_be_located_is_not_re_run(monkeypatch,
     answer = ANSWER_1 + " The quickest drive follows the A26 motorway."
     state, _ = _run(monkeypatch, [audit, GROUNDED], answers=(answer,))
     assert state["actions"].count("analyze") == 1
-    assert "Grounding check" in state["final_answer"]
+    assert "not supported by what the turn" in state["final_answer"]
 
 
-@pytest.mark.parametrize("claim", ["roughly 460 km by road", "~340 km by the Eurostar rail line",
-                                   "a 5 h drive", "about 2 hours by train", "the driving route",
-                                   "a travel time of 45 minutes", "a 3 hour flight"])
-def test_routing_claims_are_recognised(claim):
-    from agent_runtime.supervisor import graph as g
-    assert g._unproducible_capability(claim, []) == "routing", claim
-
-
-@pytest.mark.parametrize("claim", ["340.0 km as the crow flies", "GEOID 17019",
-                                   "the great-circle distance", "2,584.6 km²",
-                                   "the road network layer has 1,204 segments"])
-def test_ordinary_claims_are_not_routing(claim):
-    from agent_runtime.supervisor import graph as g
-    assert g._unproducible_capability(claim, []) is None, claim
+# Stage 44 deleted the routing classifier these two tests held (`_unproducible_capability`):
+# whether a bound tool produces a claim is the producer check's answer (stage 42), a model call,
+# scripted in these tests by `scripted_producers` below.
 
 
 # --- dropping a claim from the text -------------------------------------------------------------
@@ -424,7 +433,7 @@ def test_a_unit_that_does_not_parse_is_not_quietly_passed():
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["invariant_gate"] == "cannot_determine"
     note = g._apply_grounding_caveat("The rate is 12.", audit)
-    assert "COULD NOT VERIFY" in note and "km/hr^^" in note
+    assert "could be checked" in note and "km/hr^^" in note
     assert "hallucination" not in note.lower()
 
 
@@ -476,7 +485,7 @@ def test_any_other_gate_unknown_still_says_could_not_verify():
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is True
-    assert "COULD NOT VERIFY" in g._apply_grounding_caveat("x", audit)
+    assert "could be checked" in g._apply_grounding_caveat("x", audit)
 
 
 def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():

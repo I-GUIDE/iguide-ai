@@ -174,7 +174,7 @@ def test_a_gate_failure_is_not_described_as_an_evidence_problem():
                    "findings": [{"check": "projected_crs", "status": "fail", "target": "gdf",
                                  "message": REMEDY}]})
     assert "retrieved evidence" not in out
-    assert "not verified" in out
+    assert "Check this answer" in out and "Problem" in out
 
 
 def test_cannot_determine_reaches_the_user_at_all():
@@ -188,8 +188,8 @@ def test_cannot_determine_reaches_the_user_at_all():
                                  "target": "module scope",
                                  "message": "no frame was reachable at module scope"}]})
     assert out != ANSWER, "the caveat never reached the user"
-    assert "COULD NOT VERIFY" in out
-    assert "not the same as them being wrong" in out, (
+    assert "could be checked" in out
+    assert "not the same as wrong" in out, (
         "unverified must not read as wrong, or the label stops being believed")
     assert "no frame was reachable" in out
 
@@ -213,8 +213,9 @@ def test_the_issue_list_is_capped_so_the_answer_is_not_flooded():
     findings = [{"check": "projected_crs", "status": "fail", "target": f"gdf{i}",
                  "message": REMEDY} for i in range(9)]
     out = _caveat({"verdict": "fail", "counts": {"fail": 9}, "findings": findings})
-    assert out.count("- computed value") == 4
-    assert "and 5 more" in out
+    # Stage 44: one banner, at most six findings, the rest counted.
+    assert out.count("- Problem:") == 6
+    assert "and 3 more" in out
 
 
 # ------------------------------------------------------------------ supersession (stage 42)

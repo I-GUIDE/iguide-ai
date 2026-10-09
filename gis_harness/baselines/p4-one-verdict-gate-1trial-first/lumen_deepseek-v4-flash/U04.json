@@ -1,0 +1,121 @@
+{
+  "task": "U04",
+  "title": "Unsolvable: a destination off the network",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network (speed_kph per edge). What is the fastest travel time from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the point 41.95000\u00b0 N, 87.55000\u00b0 W along this network?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "U04",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "roads.geojson",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "is NOT reachable",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the `roads.geojson` network, here are the findings:\n\n## Result\n\n**The destination point (41.95000\u00b0 N, 87.55000\u00b0 W) is NOT reachable on this road network.**\n\nThe `roads.geojson` network only spans a small area around the start point:\n- **Longitude:** -87.651 to -87.627\n- **Latitude:** 41.874 to 41.892\n\nThe destination (41.95, -87.55) lies **about 9.0 km northeast** of the nearest point on the network \u2014 it is entirely outside the network's extent, so there is no path along the network that reaches it.\n\n### What could be computed instead\n\nThe fastest travel time **to the nearest reachable point on the network** to the destination (the network's northeast corner at -87.6268, 41.8922) is:\n\n- Path: start node \u2192 11 nodes \u2192 northeast corner node\n\n### Method\n- Built a graph from the 65 LineString edges (36 unique nodes), using each edge's true geodesic length (haversine) and its `speed_kph` to weight each edge by travel time (length/speed).\n- Ran Dijkstra's shortest-path algorithm on the travel-time-weighted graph.\n- The start coordinate (41.87408, -87.65075) is essentially a network node (0.4 m away). The destination is 9 km from the network, so the exact requested point is unreachable.\n\n**Bottom line:** The fastest travel time *along this network* to the exact destination cannot be computed because the network does not extend to that point.\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked. (`this run`)\n- Note: 7 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 129.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 192986,
+    "cached_input_tokens": 155648,
+    "output_tokens": 5802,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U04-deepseek-v4-flash-1791512318-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    }
+  ]
+}

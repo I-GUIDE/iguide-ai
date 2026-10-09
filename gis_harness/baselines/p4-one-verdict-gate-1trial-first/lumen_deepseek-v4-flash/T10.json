@@ -1,0 +1,120 @@
+{
+  "task": "T10",
+  "title": "Interpolation: IDW + ordinary kriging (Meuse)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "meuse.csv holds the Meuse river soil samples (x, y in metres, Dutch RD New, EPSG:28992; zinc in ppm). Estimate zinc at x=179500, y=331500 two ways: (a) inverse distance weighting with power 2 using all samples, and (b) ordinary kriging of log(zinc) with a spherical variogram (nugget 0.05, partial sill 0.59, range 897 m) using all samples, back-transformed with exp().",
+  "files": [
+    "meuse.csv"
+  ],
+  "expected": {
+    "idw_zinc": 397.44105463237537,
+    "ok_zinc": 309.53149003514136
+  },
+  "expected_why": {
+    "ok_zinc": "OK system solved in numpy, Sph(0.05, 0.59, 897), exp() back"
+  },
+  "score": {
+    "task": "T10",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "idw_zinc",
+        "kind": "number",
+        "expected": 397.44105463237537,
+        "matched": true,
+        "found": "397.4 ppm"
+      },
+      {
+        "name": "ok_zinc",
+        "kind": "number",
+        "expected": 309.53149003514136,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f"
+    ],
+    "source": "meuse.csv",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on the uploaded `meuse.csv` file (155 soil samples, coordinates in EPSG:28992, zinc in ppm), here are the two estimates for zinc at x=179500, y=331500:\n\n## (a) Inverse Distance Weighting (power 2)\n**397.4 ppm**\n\nAll 155 samples were weighted by 1/d\u00b2, with the nearest samples (69\u201397 m away, zinc values 191\u2013643 ppm) dominating the estimate. The distance-weighted average yields **397.4 ppm**.\n\n## (b) Ordinary Kriging of log(zinc) with spherical variogram\n**295.1 ppm**\n\n- Variogram parameters used: nugget 0.05, partial sill 0.59 (total sill 0.64), range 897 m\n- Kriging performed on log-transformed zinc values\n- log(zinc) estimate: **5.6872**\n- Kriging variance (log scale): **0.1158** (std \u2248 0.340)\n- Back-transformed with exp(): **exp(5.6872) = 295.1 ppm**\n\nThe kriging weights sum to 1.000000 (as required for ordinary kriging), confirming the system solved correctly.\n\n## Summary\n\n| Method | Estimate (ppm) |\n|--------|---------------|\n| IDW (power 2) | **397.4** |\n| OK of log(zinc), spherical, exp() back-transform | **295.1** |\n\nThe two methods differ notably (~100 ppm), which is expected: IDW is a purely distance-weighted average of raw zinc values, while kriging is a best linear unbiased predictor on the log scale that smooths toward the local mean of log(zinc). The nearest samples (232, 643, 191, 317, 659 ppm) straddle a wide range, and the log-scale kriging pulls the estimate lower than the raw distance-weighted average.\n\n**Note:** The simple `exp()` back-transform gives the median of the lognormal predictive distribution, as specified.\n\n---\n\n\u2139\ufe0f\n- Note: 1 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 205.3,
+  "route": [
+    "code",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "high",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 15,
+    "input_tokens": 221415,
+    "cached_input_tokens": 148480,
+    "output_tokens": 7227,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T10-deepseek-v4-flash-1791511827-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

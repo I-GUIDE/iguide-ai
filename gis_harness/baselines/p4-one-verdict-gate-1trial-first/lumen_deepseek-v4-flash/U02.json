@@ -1,0 +1,84 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "no near-infrared",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "I inspected the uploaded scene (`scene_red_only.tif`) and found that it contains **only the red band** \u2014 there is no near-infrared (NIR) band in the file. \n\nNDVI is defined as:\n\n**NDVI = (NIR \u2212 Red) / (NIR + Red)**\n\nThis formula requires **both** NIR and red reflectance values for every pixel. Since this raster has exactly **1 band** (described as `red`), a 60\u00d760 grid of uint16 values (400\u2013899) in UTM zone 16N, the NDVI cannot be computed from this file alone.\n\n### What I verified\n- **Band count:** 1 (single band, described as `red`)\n- **No NIR band present** \u2014 the file contains only red reflectance\n- **No nodata mask** \u2014 all 3,600 pixels are valid red values (mean red = 650.79)\n\n### What's needed to compute mean NDVI\nTo compute the mean NDVI of this scene, I need the **NIR band** for the same scene (same extent, same pixel grid). If you can provide the NIR band (e.g., a `scene_nir.tif` or a multi-band scene containing both NIR and red), I can immediately compute the mean NDVI.\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names (`module scope`)",
+  "seconds": 80.9,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 93050,
+    "cached_input_tokens": 60672,
+    "output_tokens": 2175,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U02-deepseek-v4-flash-1791512237-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

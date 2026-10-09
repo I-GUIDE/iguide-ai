@@ -53,19 +53,19 @@ def test_a_failed_analyze_answered_by_code_carries_no_banner():
 
 def test_the_banner_stays_when_the_later_peer_fails_too():
     out = _run(["analyze", "code", "done"], analyze_fn=_boom, code_fn=_boom)
-    assert "Partial answer" in out["final_answer"]
+    assert "failed during this turn" in out["final_answer"]
 
 
 def test_the_banner_stays_when_the_later_peer_returns_nothing():
     out = _run(["analyze", "code", "done"], analyze_fn=_boom,
                code_fn=lambda q, ev, st: {"answer": "", "executed": False})
-    assert "Partial answer" in out["final_answer"]
+    assert "failed during this turn" in out["final_answer"]
 
 
 def test_the_banner_stays_when_the_failure_came_last():
     """Code answered, THEN analyze failed: what the analysis was asked for never arrived."""
     out = _run(["code", "analyze", "done"], analyze_fn=_boom, code_fn=_code_answers)
-    assert "Partial answer" in out["final_answer"]
+    assert "failed during this turn" in out["final_answer"]
 
 
 def test_a_failure_with_no_position_keeps_its_banner():

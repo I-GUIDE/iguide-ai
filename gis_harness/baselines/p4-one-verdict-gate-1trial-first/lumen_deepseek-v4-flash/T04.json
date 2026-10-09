@@ -1,0 +1,168 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 10,
+      "duplicates": [
+        {
+          "index": 4,
+          "name": "inspect_vector",
+          "first": 0
+        }
+      ],
+      "failed": [],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`:\n\n**Fastest travel time:** Approximately **3.43 minutes** (3.4286 min) from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W.\n\n**Intersections reachable within 2 minutes:** **15 intersections**, counting the start intersection itself.\n\nThe analysis was performed by building a graph from the 65 road edges (36 unique intersections), computing each edge's travel time as `length / speed` in a projected CRS (UTM zone 16N, EPSG:26916) to ensure true meter measurements, and then running Dijkstra's shortest-path algorithm. The two target coordinates matched graph nodes exactly, confirming the correct start and destination intersections were used. The 15 reachable nodes have travel times ranging from 0.0 to 1.7143 minutes, with the next-closest node at 2.0571 minutes, confirming exactly 15 intersections fall within the 2-minute window.\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked. (`this run`)",
+  "seconds": 227.6,
+  "route": [
+    "code",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 19,
+    "input_tokens": 383512,
+    "cached_input_tokens": 307712,
+    "output_tokens": 8162,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791511053-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

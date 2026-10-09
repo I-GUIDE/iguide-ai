@@ -1,0 +1,150 @@
+{
+  "task": "T11",
+  "title": "Multi-criteria suitability",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?",
+  "files": [
+    "landcover.tif",
+    "road_distance_m.tif",
+    "slope_deg.tif"
+  ],
+  "expected": {
+    "suitable_ha": 103.85,
+    "best_cell_utm": [
+      390305.0,
+      4439325.0
+    ],
+    "best_cell_lonlat": [
+      -88.28689672461265,
+      40.097073108688406
+    ],
+    "best_score": 0.9812499992549419
+  },
+  "expected_why": {
+    "suitable_ha": "boolean overlay on the stored float32 values"
+  },
+  "score": {
+    "task": "T11",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "suitable_ha",
+        "kind": "number",
+        "expected": 103.85,
+        "matched": true,
+        "found": "103.85 hectares"
+      },
+      {
+        "name": "best_cell_lonlat",
+        "kind": "point",
+        "expected": [
+          -88.28689672461265,
+          40.097073108688406
+        ],
+        "matched": true,
+        "found": "-88.286897 / 40.097073"
+      }
+    ],
+    "steps": {
+      "tool_calls": 6,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": null, \"stdout\": \"Collecting gdal\\\\n Downloading gdal-3.13.3.tar.gz (940 kB)\\\\n \\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the three aligned 10 m rasters, here are the results:\n\n**Total suitable area: 103.85 hectares**\n\nOf the 14,400 cells (120\u00d7120 at 10 m resolution), **10,385 cells** met all three suitability criteria (slope < 8\u00b0, road distance \u2264 500 m, land cover not water/wetland). Each cell is 100 m\u00b2 = 0.01 ha, so 10,385 \u00d7 0.01 = **103.85 ha**.\n\n**Highest-scoring cell:**\n- **Max score: 0.98125**\n- **Centre coordinates (WGS84): lon = -88.286897, lat = 40.097073**\n\nThe winning cell is on the flattest ground in the raster directly on a road, which maximizes both score terms.\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names (`module scope`)\n- Note: 4 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 215.9,
+  "route": [
+    "analyze",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 17,
+    "input_tokens": 302371,
+    "cached_input_tokens": 218112,
+    "output_tokens": 6737,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T11-deepseek-v4-flash-1791512022-0",
+  "gate": [
+    {
+      "verdict": "none",
+      "checks": []
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}
