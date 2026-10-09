@@ -17,9 +17,9 @@ import sys
 
 MODULES = [
     # the import names behind _IMPORT_TO_PIP in agent_runtime/code_execution.py
-    "numpy", "pandas", "scipy", "matplotlib", "seaborn", "statsmodels", "sklearn",
+    "numpy", "pandas", "scipy", "shapely", "matplotlib", "seaborn", "statsmodels", "sklearn",
     "pyarrow", "networkx", "requests", "bs4", "PIL", "openpyxl",
-    "geopandas", "fiona", "rasterio", "pyproj", "mapclassify", "folium",
+    "geopandas", "fiona", "rasterio", "pyproj", "mapclassify", "folium", "pysheds",
     # plus the spatial-statistics stack
     "libpysal", "esda", "spreg", "pygeoda",
 ]

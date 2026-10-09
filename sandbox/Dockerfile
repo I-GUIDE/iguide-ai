@@ -72,6 +72,39 @@ RUN pip install --no-cache-dir \
     spreg \
     pygeoda
 
+# Hydrology: pysheds, for watersheds (fill, D8 flow direction, accumulation, catchment). Models
+# reach for it unprompted (GIS harness task T06). Before it was baked, a conversation installed
+# it, numba and llvmlite per run and then could not use it on this numpy; pysheds_support.py
+# has the whole story. Three things about this block are deliberate:
+#
+# - It installs against the image's own `pip freeze`, so pysheds' dependencies are resolved to
+#   fit the numpy already here and cannot move it. numpy is the package this image must not
+#   change: rasterio and geopandas were compiled against it, and every per-run install is pinned
+#   to it for the same reason (AGENTS.md, "Installs are pinned to the image's own versions").
+#
+# - numba and llvmlite are moved out of site-packages to /opt/pysheds-private, which
+#   pysheds_support puts on sys.path only once pysheds is imported. esda switches to numba
+#   whenever it can import it and then compiles its kernels on every run: 8.2 s for one
+#   400-unit Moran_Local, against 0.0 s without numba. The RUN's last line fails the build if
+#   numba is still importable without pysheds.
+#
+# - pysheds' numba kernels are compiled here, into /opt/numba-cache (by verify_imports and
+#   check_hydrology below), and pysheds_support copies them to the run's writable
+#   NUMBA_CACHE_DIR. Without that every run spent ~40 s of its 60 s compiling. NUMBA_CPU_NAME=
+#   generic keeps the cache valid on a CPU other than the one that built the image.
+ENV NUMBA_CPU_NAME=generic \
+    NUMBA_CACHE_DIR=/opt/numba-cache
+COPY pysheds_support.py pysheds_support.pth /tmp/support/
+RUN SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+ && pip freeze > /tmp/image-pins.txt \
+ && pip install --no-cache-dir -c /tmp/image-pins.txt pysheds==0.5 \
+ && mkdir -p /opt/pysheds-private \
+ && mv "$SITE"/numba "$SITE"/numba-*.dist-info "$SITE"/llvmlite "$SITE"/llvmlite-*.dist-info \
+       /opt/pysheds-private/ \
+ && cp /tmp/support/pysheds_support.py /tmp/support/pysheds_support.pth "$SITE"/ \
+ && rm -rf /tmp/support /tmp/image-pins.txt \
+ && python -c "import importlib.util as u, sys; sys.exit(u.find_spec('numba') is not None)"
+
 # The run container is --read-only with only /work writable and a /tmp tmpfs, and runs as a
 # uid that owns neither /root nor this image's HOME. Without these, matplotlib's font cache
 # and pyproj's scratch writes hit a read-only filesystem and fail naming the library rather
@@ -97,5 +130,13 @@ RUN python -c "import pyproj; [pyproj.CRS.from_epsg(e) for e in (4326, 3857, 326
 # `pip install` succeeding is not evidence of that, and why the executor's probe depends on it.
 COPY verify_imports.py /opt/verify_imports.py
 RUN python /opt/verify_imports.py
+
+# And that the hydrology libraries delineate a watershed, not just import: pysheds imports
+# cleanly on numpy 2.4 and then raises inside every accumulation. See check_hydrology.py. This
+# run also finishes compiling pysheds' kernels into /opt/numba-cache; after it, the cache dir
+# points at the run's tmpfs, where pysheds_support copies the compiled kernels.
+COPY check_hydrology.py /opt/check_hydrology.py
+RUN python /opt/check_hydrology.py
+ENV NUMBA_CACHE_DIR=/tmp/numba
 
 WORKDIR /work
