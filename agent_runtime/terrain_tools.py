@@ -60,41 +60,60 @@ _NODATA = -999999.0
 _UA = "iguide-agent/1.0 (+https://iguide.illinois.edu)"
 
 
-_PROJ_REPAIRED = False
-
-
-def _wgs84() -> Any:
-    """A WGS84 CRS for the GeoTIFF, repairing rasterio's PROJ lookup if it is broken. Or None.
-
-    MEASURED on the deployed container, and it would have shipped: PROJ_LIB and PROJ_DATA are
-    set to /usr/share/proj, whose proj.db is DATABASE.LAYOUT version 5, and rasterio's PROJ
-    needs >= 6 — so CRS.from_epsg(4326) raises there while passing on a laptop. The system
-    database is not a mistake; the QGIS worker subprocess needs exactly that copy, and it
-    inherits our environment. So the repair must NOT touch os.environ.
-
-    set_proj_data_search_path points the PROJ already loaded in THIS process at rasterio's own
-    bundled database, leaving the environment every child inherits alone. It is a private
-    rasterio API, hence the probe-first-then-repair shape and the None fallback: a GeoTIFF
-    carrying a transform but no CRS is still readable as WGS84, and losing the CRS is a far
-    smaller failure than losing the elevation request.
-    """
-    global _PROJ_REPAIRED
+def _proj_ok() -> bool:
+    """True when rasterio can resolve an EPSG code in THIS thread right now."""
     import rasterio.crs
 
     try:
-        return rasterio.crs.CRS.from_epsg(4326)
-    except Exception:  # noqa: BLE001 - the broken-PROJ case this exists for
-        pass
-    if not _PROJ_REPAIRED:
-        _PROJ_REPAIRED = True
-        try:
-            import rasterio
-            from rasterio._env import set_proj_data_search_path
+        rasterio.crs.CRS.from_epsg(4326)
+        return True
+    except Exception:  # noqa: BLE001 - the broken-PROJ case _ensure_proj exists for
+        return False
 
-            set_proj_data_search_path(
-                os.path.join(os.path.dirname(rasterio.__file__), "proj_data"))
-        except Exception:  # noqa: BLE001
-            return None
+
+def _ensure_proj() -> bool:
+    """Make rasterio's PROJ usable for the current call, repairing it if it is broken.
+
+    MEASURED on the deployed container, and it would have shipped: PROJ_LIB and PROJ_DATA are
+    set to /usr/share/proj, whose proj.db is DATABASE.LAYOUT minor version 5, and rasterio's
+    PROJ needs >= 6 — so CRS.from_epsg(4326) raises there while passing on a laptop. The system
+    database is not a mistake; the QGIS worker subprocess needs exactly that copy, and it
+    inherits our environment. So the repair must NOT touch os.environ.
+
+    set_proj_data_search_path points the PROJ already loaded in this process at rasterio's own
+    bundled database, leaving the environment every child inherits alone. It is a private
+    rasterio API, hence the probe-first-then-repair shape.
+
+    PROBED ON EVERY CALL, NOT ONCE PER PROCESS. The first version repaired once and remembered
+    that it had. Measured on prod 23cfd02 (2026-10-09): after a repair in the main thread, a
+    `rasterio.Env()` opened on a worker thread re-applies PROJ_LIB, and the NEXT fresh thread
+    finds PROJ broken again. The one-shot flag then refused to repair it a second time, so
+    _wgs84() returned None and add_raster_layer failed with "CRS is invalid: None" on a plain
+    WGS84 GeoTIFF. A probe is one dictionary lookup in PROJ, so doing it per call costs nothing.
+    """
+    if _proj_ok():
+        return True
+    try:
+        import rasterio
+        from rasterio._env import set_proj_data_search_path
+
+        set_proj_data_search_path(
+            os.path.join(os.path.dirname(rasterio.__file__), "proj_data"))
+    except Exception:  # noqa: BLE001
+        return False
+    return _proj_ok()
+
+
+def _wgs84() -> Any:
+    """A WGS84 CRS, repairing rasterio's PROJ lookup first if it is broken. Or None.
+
+    None rather than an exception: a GeoTIFF carrying a transform but no CRS is still readable
+    as WGS84, and losing the CRS is a far smaller failure than losing the elevation request.
+    """
+    import rasterio.crs
+
+    if not _ensure_proj():
+        return None
     try:
         return rasterio.crs.CRS.from_epsg(4326)
     except Exception:  # noqa: BLE001
@@ -252,15 +271,154 @@ def _clip_to(values: Any, transform: Any, file_id: str) -> Any:
 
 
 
-def _open_raster(raster_file_id: str, band: int = 1) -> Any:
-    """``(values, transform, bounds)`` for a stored raster, or an error dict.
+def _degree_like(bounds: Any) -> bool:
+    """Whether *bounds* could be longitude/latitude at all. PROJ-free on purpose."""
+    try:
+        left, bottom, right, top = (float(v) for v in bounds)
+    except (TypeError, ValueError):
+        return False
+    return -180.5 <= left <= 180.5 and -180.5 <= right <= 180.5 and \
+        -90.5 <= bottom <= 90.5 and -90.5 <= top <= 90.5
 
-    Reads src.transform and never src.crs, for the reason _wgs84 documents: the deployed
-    container's PROJ database is older than rasterio's PROJ accepts, so asking for a CRS these
-    tools already know is a failure that only ever happens in production. The sentinel sweep is
-    here rather than at each caller because a 3DEP raster can reach the store carrying -999999
-    instead of NaN, and one tool remembering that while another forgets is how a mean ends up
-    six orders of magnitude wrong.
+
+# WGS84 ellipsoid, for the metres in one pixel of a projected grid. See _ground_step_m.
+_WGS84_A = 6_378_137.0
+_WGS84_E2 = 0.00669437999014
+
+
+def _ground_step_m(lon0: float, lat0: float, lon1: float, lat1: float) -> float:
+    """Metres on the ground between two lon/lat points one pixel apart.
+
+    Uses the ellipsoid's local radii at their mid-latitude: exact to well under a millimetre at
+    pixel distances, with no PROJ geodesic call to fail.
+    """
+    phi = math.radians((lat0 + lat1) / 2.0)
+    w = 1.0 - _WGS84_E2 * math.sin(phi) ** 2
+    meridional = _WGS84_A * (1.0 - _WGS84_E2) / w ** 1.5
+    normal = _WGS84_A / math.sqrt(w)
+    north = meridional * math.radians(lat1 - lat0)
+    east = normal * math.cos(phi) * math.radians(lon1 - lon0)
+    return math.hypot(north, east)
+
+
+class _Grid:
+    """A stored raster, read once, with what every terrain tool needs to measure and draw it.
+
+    ``bounds`` and ``transform`` are in the raster's OWN CRS, which is what the arithmetic and
+    any GeoTIFF written back must use. ``lonlat_bounds`` is the extent in EPSG:4326, which is
+    what an answer quotes and what a map layer is placed by. ``dx_m``/``dy_m`` are the ground
+    size of one pixel in metres along a row and down a column.
+    """
+
+    __slots__ = ("values", "transform", "bounds", "crs", "crs_name", "projected",
+                 "lonlat_bounds", "dx_m", "dy_m")
+
+    def __init__(self, **kw: Any) -> None:
+        for k in self.__slots__:
+            setattr(self, k, kw.get(k))
+
+    def describe(self) -> Dict[str, Any]:
+        """The grid's frame, for a result: which CRS, and the native extent when it differs."""
+        out: Dict[str, Any] = {"crs": self.crs_name}
+        if self.projected:
+            out["native_bounds"] = [round(float(b), 3) for b in self.bounds]
+            out["pixel_size_native"] = [round(abs(float(self.transform.a)), 6),
+                                        round(abs(float(self.transform.e)), 6)]
+        return out
+
+
+def _crs_name(crs: Any) -> str:
+    try:
+        epsg = crs.to_epsg()
+        if epsg:
+            return f"EPSG:{epsg}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return str(crs.to_wkt()).split('"')[1]
+    except Exception:  # noqa: BLE001
+        return "unnamed CRS"
+
+
+def _grid_frame(values: Any, transform: Any, bounds: Any, crs: Any) -> Any:
+    """A :class:`_Grid`, or an error dict when the raster cannot be placed on the ground.
+
+    The rule that made an uploaded UTM DEM unusable is gone. These tools used to read only the
+    transform and treat every raster as EPSG:4326, because dem_for_region always writes 4326
+    and reading a CRS failed under the deployed PROJ. On prod 23cfd02, a 30 m DEM in EPSG:32616
+    came back with ground_resolution_m 3,339,600 and slopes of about 5e-5 degrees. Its UTM
+    numbers went out as lon/lat bounds, so the layer was listed on the map and drew nowhere.
+
+    Now:
+      * a geographic CRS, or none at all with bounds that fit in degrees, is measured as before
+        (degrees -> metres at the grid's latitude);
+      * a projected CRS is measured by carrying one pixel's step in each axis to lon/lat and
+        taking its length on the ellipsoid. That is right for UTM (about 0.03% off the nominal
+        30 m, the projection's own scale error), for Web Mercator (whose "metres" are
+        1/cos(lat) too long) and for a state-plane grid in feet;
+      * a raster with no CRS whose coordinates cannot be degrees is refused. Guessing would
+        reproduce the original failure.
+    """
+    from rasterio.warp import transform as warp_transform
+    from rasterio.warp import transform_bounds
+
+    bounds = tuple(float(b) for b in bounds)
+    geographic: Optional[bool] = None
+    if crs is not None:
+        try:
+            geographic = bool(crs.is_geographic)
+        except Exception:  # noqa: BLE001 - an unparsable CRS is judged by its numbers below
+            geographic = None
+
+    if geographic or (geographic is None and _degree_like(bounds)):
+        if not _degree_like(bounds):
+            return {"error": f"the raster says its CRS is geographic, but its bounds "
+                             f"{[round(b, 3) for b in bounds]} are not longitude/latitude",
+                    "hint": "the file's georeferencing is inconsistent; reproject or re-tag it "
+                            "with execute_code (rasterio) and pass the result"}
+        mid_lat = (bounds[1] + bounds[3]) / 2.0
+        return _Grid(values=values, transform=transform, bounds=bounds, crs=crs,
+                     crs_name=_crs_name(crs) if crs is not None else "EPSG:4326 (assumed)",
+                     projected=False, lonlat_bounds=list(bounds),
+                     dx_m=abs(transform.a) * 111_320.0 * math.cos(math.radians(mid_lat)),
+                     dy_m=abs(transform.e) * 110_540.0)
+
+    if crs is None:
+        return {"error": f"the raster has no CRS and its coordinates "
+                         f"{[round(b, 1) for b in bounds]} are not degrees, so there is no way "
+                         f"to tell where it is or how big a pixel is",
+                "hint": "assign the CRS it was made in (rasterio, with execute_code) and pass "
+                        "the re-tagged GeoTIFF; a UTM DEM usually carries EPSG:326xx"}
+    wgs = _wgs84()
+    if wgs is None:
+        return {"error": f"the raster is in a projected CRS ({_crs_name(crs)}) and this "
+                         f"deployment's PROJ cannot convert it to longitude/latitude",
+                "hint": "reproject it to EPSG:4326 with execute_code and pass the result"}
+    try:
+        lonlat = list(transform_bounds(crs, wgs, *bounds, densify_pts=21))
+        # One pixel's step along a row and down a column, from the grid's centre.
+        rows, cols = values.shape
+        r, c = rows / 2.0, cols / 2.0
+        pts = [transform * (c, r), transform * (c + 1, r), transform * (c, r + 1)]
+        lons, lats = warp_transform(crs, wgs, [p[0] for p in pts], [p[1] for p in pts])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"could not convert {_crs_name(crs)} to longitude/latitude: "
+                         f"{type(exc).__name__}: {exc}"[:300]}
+    dx_m = _ground_step_m(lons[0], lats[0], lons[1], lats[1])
+    dy_m = _ground_step_m(lons[0], lats[0], lons[2], lats[2])
+    return _Grid(values=values, transform=transform, bounds=bounds, crs=crs,
+                 crs_name=_crs_name(crs), projected=True, lonlat_bounds=lonlat,
+                 dx_m=dx_m, dy_m=dy_m)
+
+
+def _open_raster(raster_file_id: str, band: int = 1) -> Any:
+    """A :class:`_Grid` for a stored raster, or an error dict.
+
+    The CRS IS read now, after _ensure_proj. If reading it still fails, the bounds decide:
+    degree-shaped bounds are taken as EPSG:4326, which is what dem_for_region writes, and
+    anything else is refused by _grid_frame. The sentinel sweep is done here, not by each
+    caller: a 3DEP raster can reach the store carrying -999999 instead of NaN. If one tool
+    remembers that and another forgets, a mean comes out six orders of magnitude wrong.
     """
     import numpy as np
     import rasterio
@@ -271,6 +429,7 @@ def _open_raster(raster_file_id: str, band: int = 1) -> Any:
         path, _rec = _resolve(raster_file_id)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"could not resolve {raster_file_id!r}: {exc}"[:250]}
+    _ensure_proj()
     try:
         with rasterio.open(path) as src:
             if int(band) < 1 or int(band) > src.count:
@@ -280,22 +439,96 @@ def _open_raster(raster_file_id: str, band: int = 1) -> Any:
             transform = src.transform
             bounds = tuple(float(b) for b in src.bounds)
             nodata = src.nodata
+            try:
+                crs = src.crs
+            except Exception:  # noqa: BLE001 - PROJ still broken: the bounds decide instead
+                crs = None
     except Exception as exc:  # noqa: BLE001
         return {"error": f"could not read the raster: {type(exc).__name__}: {exc}"[:250]}
     if nodata is not None and np.isfinite(nodata):
         values[values == nodata] = np.nan
     values[values <= _NODATA + 1] = np.nan
-    return values, transform, bounds
+    return _grid_frame(values, transform, bounds, crs)
 
 
-def _write_grid(path: Path, grid: Any, transform: Any) -> None:
-    """A single-band float32 GeoTIFF, NaN for nodata, WGS84 when PROJ allows one."""
+def _write_grid(path: Path, grid: Any, frame: Any) -> None:
+    """A single-band float32 GeoTIFF on *frame*'s grid, NaN for nodata.
+
+    Written in the SOURCE raster's CRS. Before, every output was stamped EPSG:4326, so the slope
+    of a UTM DEM came out as a file claiming to be lon/lat with bounds of 390000..394500. Any
+    tool that trusted that label (QGIS, a later zonal_stats_for_raster) misplaced it too.
+    """
     import rasterio
 
+    crs = frame.crs if frame.crs is not None else _wgs84()
     with rasterio.open(path, "w", driver="GTiff", height=grid.shape[0], width=grid.shape[1],
-                       count=1, dtype="float32", crs=_wgs84(), transform=transform,
+                       count=1, dtype="float32", crs=crs, transform=frame.transform,
                        nodata=float("nan")) as dst:
         dst.write(grid.astype("float32"), 1)
+
+
+def _to_lonlat_grid(grid: Any, frame: Any) -> tuple:
+    """``(pixels, [minlon, minlat, maxlon, maxlat])`` ready to drape on the web map.
+
+    A layer is placed by four lon/lat numbers, and the image is stretched to fill them. A
+    geographic grid already is that shape. A projected one is not: UTM grid north is turned
+    from true north by the meridian convergence, about 0.8 degrees at T06's DEM, which moves
+    the far edge of a 6 km frame by about 90 m. Stretching it over its lon/lat box would
+    misplace the picture without anyone being able to tell. So it is resampled to EPSG:4326
+    first, with nearest neighbour because these are measurements, and blending two slopes
+    makes a third that was never measured. The returned bounds are the warped grid's own,
+    so they describe exactly these pixels.
+    """
+    if not frame.projected:
+        return grid, [float(b) for b in frame.lonlat_bounds]
+    import numpy as np
+    from rasterio.transform import array_bounds
+    from rasterio.warp import Resampling, calculate_default_transform, reproject
+
+    wgs = _wgs84()
+    rows, cols = grid.shape
+    dst_transform, w, h = calculate_default_transform(
+        frame.crs, wgs, cols, rows, *frame.bounds)
+    out = np.full((h, w), np.nan, dtype="float64")
+    reproject(source=grid.astype("float64"), destination=out,
+              src_transform=frame.transform, src_crs=frame.crs, src_nodata=np.nan,
+              dst_transform=dst_transform, dst_crs=wgs, dst_nodata=np.nan,
+              resampling=Resampling.nearest)
+    west, south, east, north = array_bounds(h, w, dst_transform)
+    return out, [float(west), float(south), float(east), float(north)]
+
+
+def drapable_geotiff(path: Any) -> Dict[str, Any]:
+    """``{"values", "bounds", "georeferenced", "crs"}`` for drawing a GeoTIFF, or an error.
+
+    add_raster_layer's GeoTIFF path, kept here so it shares _ensure_proj, _grid_frame and the
+    warp with the terrain tools. Before, that path compared the file's CRS with _wgs84(). When
+    the one-shot repair had gone stale, _wgs84() was None and every GeoTIFF failed with "CRS
+    is invalid: None". It also stretched a projected grid over its lon/lat box unwarped.
+    """
+    import numpy as np
+    import rasterio
+
+    _ensure_proj()
+    try:
+        with rasterio.open(str(path)) as src:
+            values = src.read(1, masked=True).astype("float64").filled(np.nan)
+            transform, bounds = src.transform, tuple(float(b) for b in src.bounds)
+            try:
+                crs = src.crs
+            except Exception:  # noqa: BLE001
+                crs = None
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"could not read the GeoTIFF: {type(exc).__name__}: {exc}"[:300]}
+    if crs is None and not _degree_like(bounds):
+        # No CRS and no way to place it: the caller's box is all there is.
+        return {"values": values, "bounds": list(bounds), "georeferenced": False, "crs": None}
+    frame = _grid_frame(values, transform, bounds, crs)
+    if isinstance(frame, dict):
+        return frame
+    pixels, box = _to_lonlat_grid(values, frame)
+    return {"values": pixels, "bounds": box, "georeferenced": crs is not None,
+            "crs": frame.crs_name}
 
 
 def _render_grid(grid: Any, path: Path, cmap: str, vmin: Optional[float] = None) -> None:
@@ -319,13 +552,14 @@ def _render_grid(grid: Any, path: Path, cmap: str, vmin: Optional[float] = None)
     Image.fromarray(rgba, mode="RGBA").save(path)
 
 
-def _read_zones(path: str) -> Any:
-    """The polygon layer as a GeoDataFrame in EPSG:4326, or an error dict.
+def _read_zones(path: str, frame: Any = None) -> Any:
+    """The polygon layer as a GeoDataFrame in the RASTER's frame, or an error dict.
 
-    The rasters here are written in EPSG:4326 — dem_for_region asks 3DEP for imageSR=4326 — so
-    the zones have to be in that frame to line up with a transform we never reproject. A layer
-    declaring something else is converted; one declaring NOTHING is taken as 4326 rather than
-    guessed at, which is what admin_boundary's output and every GeoJSON in this pipeline are.
+    The zones are rasterised onto the raster's own grid, so they must be in its CRS. That is
+    EPSG:4326 for everything dem_for_region writes, and the raster's projected CRS for an
+    uploaded UTM DEM, whose transform is in metres. The grid is never reprojected; the
+    polygons are. A layer declaring NOTHING is taken as 4326 rather than guessed at, which is
+    what admin_boundary's output and every GeoJSON in this pipeline are.
     """
     try:
         import geopandas as gpd
@@ -337,6 +571,16 @@ def _read_zones(path: str) -> Any:
         return {"error": f"could not read the polygon layer: {type(exc).__name__}: {exc}"[:300]}
     if gdf.empty:
         return {"error": "the polygon layer has no features"}
+    if frame is not None and frame.projected:
+        try:
+            if gdf.crs is None:
+                gdf = gdf.set_crs(4326)
+            # As WKT, so pyproj parses it with its own database rather than via rasterio's.
+            return gdf.to_crs(frame.crs.to_wkt())
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"could not reproject the polygons to the raster's CRS "
+                             f"({frame.crs_name}): {exc}"[:250],
+                    "hint": f"supply the polygons already in {frame.crs_name}"}
     try:
         if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(4326)
@@ -527,13 +771,13 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             attached = _index_attached(default_input_file_ids)
             poly_path, tmp = _stage_vector_source(polygons_file_id, sibling_file_ids, attached)
 
-            opened = _open_raster(raster_file_id, band=band)
-            if isinstance(opened, dict):
-                return json.dumps({"ok": False, **opened})
-            values, transform, bounds_t = opened
-            bounds = list(bounds_t)
+            frame = _open_raster(raster_file_id, band=band)
+            if isinstance(frame, dict):
+                return json.dumps({"ok": False, **frame})
+            values, transform = frame.values, frame.transform
+            bounds = list(frame.lonlat_bounds)
 
-            gdf = _read_zones(poly_path)
+            gdf = _read_zones(poly_path, frame)
             if isinstance(gdf, dict):
                 return json.dumps({"ok": False, **gdf})
             if zone_id_field and zone_id_field not in gdf.columns:
@@ -553,10 +797,12 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 return json.dumps({
                     "ok": False,
                     "raster_bounds": [round(b, 6) for b in bounds],
-                    "polygons_bounds": [round(float(b), 6) for b in gdf.total_bounds],
+                    "polygons_bounds": [round(float(b), 6) for b in
+                                        (gdf.to_crs(4326) if frame.projected
+                                         else gdf).total_bounds],
                     "error": "no polygon overlaps the raster — not one zone covered a pixel",
-                    "hint": "the two are in different places, or the layer is not in EPSG:4326 "
-                            "like the raster. Compare the two bounds above."})
+                    "hint": "the two are in different places, or the polygon layer declares no "
+                            "CRS and is not lon/lat. Compare the two lon/lat bounds above."})
 
             # One pass: sort the zone index once and slice, rather than build a boolean mask
             # per zone over the whole grid. embed_zones is built for 800-tract layers and this
@@ -572,8 +818,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             # simply has no pixels out there — count them and every such zone reports full
             # coverage while its mean comes from the half that happened to be inside. Measured:
             # a zone half outside the frame reported coverage 1.0. Pixel area and polygon area
-            # are both in degrees here, so the ratio needs no projection and the latitude
-            # distortion cancels within one zone. It stays APPROXIMATE — all_touched rounds a
+            # are both in the raster's own units (degrees, or a projected grid's metres), so
+            # the ratio needs no projection and any distortion cancels within one zone. It stays APPROXIMATE — all_touched rounds a
             # zone outwards — hence the clamp and the 0.95 threshold rather than 0.999.
             pixel_area = abs(transform.a) * abs(transform.e)
             rows: List[Any] = []
@@ -651,6 +897,7 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "zone_id_field": zone_id_field,
                 "geojson": _file_ref(rec),
                 "raster_bounds": [round(b, 6) for b in bounds],
+                **({"raster_frame": frame.describe()} if frame.projected else {}),
                 "on_map": True,
                 "map_layer": {
                     "url": rec.get("download_url"),
@@ -682,7 +929,9 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
         """SLOPE, aspect or hillshade from an elevation raster, on the map.
 
         Use for "how steep", "which way does it face", "show the terrain" — anything about the
-        SHAPE of the ground rather than its height. Takes the GeoTIFF dem_for_region wrote.
+        SHAPE of the ground rather than its height. Takes the GeoTIFF dem_for_region wrote, or
+        an uploaded DEM in any CRS. A projected one, such as UTM metres, is measured in its own
+        grid and drawn in the right place, so there is no need to reproject it first.
 
         `kind` is one of:
           slope     — degrees from horizontal, 0 flat to 90 vertical. Also reported in percent,
@@ -695,7 +944,10 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
         Slope is computed in METRES, from the pixel's real ground size at this latitude — a
         gradient taken in degrees of longitude would report a slope that changes with how far
         north the region is. Steepness on a resampled DEM is a property of the pixel size as
-        much as the ground, so the result states the ground resolution it worked at.
+        much as the ground, so the result states the ground resolution it worked at. Elevation
+        values are taken to be metres; a DEM in feet overstates slope by 3.28x. On a projected
+        grid, aspect is measured from the grid's north, which is within a degree or two of true
+        north inside a UTM zone.
         """
         import numpy as np
 
@@ -706,17 +958,15 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                     "ok": False, "error": f"unknown kind {kind!r}",
                     "hint": "kind is one of: slope, aspect, hillshade"})
 
-            opened = _open_raster(raster_file_id)
-            if isinstance(opened, dict):
-                return json.dumps({"ok": False, **opened})
-            values, transform, bounds = opened
+            frame = _open_raster(raster_file_id)
+            if isinstance(frame, dict):
+                return json.dumps({"ok": False, **frame})
+            values = frame.values
 
-            # Ground size of one pixel. The x spacing shrinks with the cosine of latitude and
-            # the y spacing does not, so a single "resolution" would be wrong in one axis; both
-            # are passed to the gradient separately.
-            mid_lat = (bounds[1] + bounds[3]) / 2.0
-            dx_m = abs(transform.a) * 111_320.0 * math.cos(math.radians(mid_lat))
-            dy_m = abs(transform.e) * 110_540.0
+            # Ground size of one pixel, from _grid_frame: degrees converted at this latitude
+            # for a geographic grid, the projected step measured on the ellipsoid otherwise.
+            # The two axes differ on a lon/lat grid, so both go to the gradient separately.
+            dx_m, dy_m = frame.dx_m, frame.dy_m
             if dx_m <= 0 or dy_m <= 0:
                 return json.dumps({"ok": False,
                                    "error": "the raster's pixel size works out to zero on the "
@@ -754,15 +1004,16 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 grid[holes] = np.nan
                 cmap, label, unit = "gray", "Hillshade", "0-255, not a measurement"
 
-            stem = _slug(name or _region_tag(None, list(bounds)) or "region") + f"_{kind}"
+            box = list(frame.lonlat_bounds)
+            stem = _slug(name or _region_tag(None, box) or "region") + f"_{kind}"
             tmp_dir = Path(tempfile.mkdtemp(prefix=f"{kind}_"))
             tif = tmp_dir / f"{stem}.tif"
-            _write_grid(tif, grid, transform)
+            _write_grid(tif, grid, frame)
             png = tmp_dir / f"{stem}.png"
-            _render_grid(grid, png, cmap)
+            shown, drawn = _to_lonlat_grid(grid, frame)
+            _render_grid(shown, png, cmap)
 
             from agent_runtime.file_store import create_output_file_from_path, file_content_key
-            box = list(bounds)
             # The raster it was computed FROM. Keyed on the bbox alone, the slope of a clipped
             # DEM and of the unclipped DEM of the same box were one layer: clipping keeps the
             # grid and its bounds and only blanks pixels. The sun angles shape only a
@@ -775,12 +1026,13 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 content_key=content_key(kind, _region_tag(None, box), **derived))
             png_rec = create_output_file_from_path(png, filename=png.name)
             layer = _raster_layer(
-                png_rec, box, f"{label} — {name or _region_tag(None, box)}",
+                png_rec, drawn, f"{label} — {name or _region_tag(None, box)}",
                 _layer_id(kind, _region_tag(None, box), **derived))
 
             finite = grid[np.isfinite(grid)]
             out: Dict[str, Any] = {
                 "ok": True, "kind": kind, "region_bbox": [round(float(b), 6) for b in box],
+                **frame.describe(),
                 "units": unit,
                 "ground_resolution_m": round(max(dx_m, dy_m), 2),
                 "geotiff": _file_ref(tif_rec),
@@ -837,10 +1089,10 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                     "hint": "pass level_m for an absolute elevation, or depth_above_min_m for "
                             "a depth above the region's own lowest point"})
 
-            opened = _open_raster(raster_file_id)
-            if isinstance(opened, dict):
-                return json.dumps({"ok": False, **opened})
-            values, transform, bounds = opened
+            frame = _open_raster(raster_file_id)
+            if isinstance(frame, dict):
+                return json.dumps({"ok": False, **frame})
+            values = frame.values
             finite = values[np.isfinite(values)]
             if finite.size == 0:
                 return json.dumps({"ok": False,
@@ -859,9 +1111,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                            f"point is {round(hi, 2)} m")
 
             wet = np.isfinite(values) & (values <= level)
-            mid_lat = (bounds[1] + bounds[3]) / 2.0
-            px_m2 = (abs(transform.a) * 111_320.0 * math.cos(math.radians(mid_lat))) * \
-                    (abs(transform.e) * 110_540.0)
+            # Ground area of one pixel, in square metres whatever the raster's CRS.
+            px_m2 = frame.dx_m * frame.dy_m
             wet_km2 = float(wet.sum()) * px_m2 / 1_000_000.0
             land_km2 = float(np.isfinite(values).sum()) * px_m2 / 1_000_000.0
 
@@ -869,15 +1120,16 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             # depth is what an exposure figure is usually multiplied by.
             depth = np.where(wet, level - values, np.nan)
 
-            stem = _slug(name or _region_tag(None, list(bounds)) or "region") + "_inundation"
+            box = list(frame.lonlat_bounds)
+            stem = _slug(name or _region_tag(None, box) or "region") + "_inundation"
             tmp_dir = Path(tempfile.mkdtemp(prefix="inund_"))
             tif = tmp_dir / f"{stem}.tif"
-            _write_grid(tif, depth, transform)
+            _write_grid(tif, depth, frame)
             png = tmp_dir / f"{stem}.png"
-            _render_grid(depth, png, "Blues", vmin=0.0)
+            shown, drawn = _to_lonlat_grid(depth, frame)
+            _render_grid(shown, png, "Blues", vmin=0.0)
 
             from agent_runtime.file_store import create_output_file_from_path, file_content_key
-            box = list(bounds)
             # The raster and the level as RESOLVED, so a depth above the minimum and the
             # absolute level it works out to are one layer. Keyed on the bbox and the level
             # alone, two different DEMs of one box flooded to one level shared a layer.
@@ -888,7 +1140,7 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 content_key=content_key("inundation", _region_tag(None, box), **flooded))
             png_rec = create_output_file_from_path(png, filename=png.name)
             layer = _raster_layer(
-                png_rec, box, f"Under {round(level, 2)} m — {name or _region_tag(None, box)}",
+                png_rec, drawn, f"Under {round(level, 2)} m — {name or _region_tag(None, box)}",
                 _layer_id("inundation", _region_tag(None, box), **flooded))
 
             wet_depths = depth[np.isfinite(depth)]
@@ -901,6 +1153,8 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "region_min_m": round(lo, 2), "region_max_m": round(hi, 2),
                 "flooded_km2": round(wet_km2, 4),
                 "region_km2": round(land_km2, 4),
+                "region_bbox": [round(float(b), 6) for b in box],
+                **frame.describe(),
                 "flooded_fraction": round(wet_km2 / land_km2, 4) if land_km2 else 0.0,
                 "mean_depth_m": (round(float(wet_depths.mean()), 2) if wet_depths.size else 0.0),
                 "max_depth_m": (round(float(wet_depths.max()), 2) if wet_depths.size else 0.0),

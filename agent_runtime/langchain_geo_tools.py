@@ -722,8 +722,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         requested bbox instead of the one actually served.
         """
         try:
-            import rasterio
-            from rasterio.warp import transform_bounds
+            import rasterio  # noqa: F401
         except ImportError:
             return {"ok": False,
                     "error": "this deployment cannot read GeoTIFFs (rasterio is not installed)",
@@ -732,26 +731,26 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         try:
             # Reuse the terrain renderer rather than a matplotlib figure: axes, margins and a
             # colorbar would become part of the image, and a draped layer is positioned by its
-            # bounds — so the pixels would stop lining up with the ground.
-            from agent_runtime.terrain_tools import _render, _wgs84
+            # bounds — so the pixels would stop lining up with the ground. drapable_geotiff
+            # also warps a projected grid to lon/lat, so the pixels match the bounds they are
+            # stretched over, and repairs PROJ for this call instead of trusting a stale repair.
+            from agent_runtime.terrain_tools import _render, drapable_geotiff
         except ImportError:
             return {"ok": False, "error": "raster rendering is unavailable in this deployment"}
         import tempfile
         try:
-            with rasterio.open(str(path)) as src:
-                values = src.read(1, masked=True).filled(float("nan"))
-                left, bottom, right, top = src.bounds
-                georeferenced = src.crs is not None
-                if georeferenced and src.crs != _wgs84():
-                    left, bottom, right, top = transform_bounds(
-                        src.crs, _wgs84(), left, bottom, right, top, densify_pts=21)
+            drawn = drapable_geotiff(path)
+            if "error" in drawn:
+                return {"ok": False, "error": f"could not place {name_on_disk}: {drawn['error']}",
+                        **({"hint": drawn["hint"]} if drawn.get("hint") else {})}
             out = Path(tempfile.mkdtemp()) / (Path(name_on_disk).stem + "_preview.png")
-            _render(values, out)
+            _render(drawn["values"], out)
             rec = create_output_file_from_path(str(out), filename=out.name)
         except Exception as exc:  # noqa: BLE001 - a bad raster is a tool error, not a dead turn
             return {"ok": False, "error": f"could not render {name_on_disk}: {exc}"}
-        return {"ok": True, "file_id": rec["file_id"], "georeferenced": georeferenced,
-                "bounds": [round(float(v), 6) for v in (left, bottom, right, top)]}
+        return {"ok": True, "file_id": rec["file_id"], "georeferenced": drawn["georeferenced"],
+                "crs": drawn.get("crs"),
+                "bounds": [round(float(v), 6) for v in drawn["bounds"]]}
 
     def add_raster_layer(file_id: str, bounds: Optional[List[float]] = None,
                          name: Optional[str] = None, opacity: float = 0.85) -> str:
