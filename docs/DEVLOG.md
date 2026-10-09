@@ -5234,7 +5234,12 @@ rather than from the previous one.
   input's name lost its output, and that already happened with an explicit `input_files`.
   Reasoning is in architecture S30.8.
 
-<!--REPLAY-M8.87-->
+**Measured** 15 new tests (`test_filename_named_in_code.py`). Five fail on `23cfd02`: the filename
+  read, the newest of two, the bounded match, the write under a listed input's name, and the
+  manifest hash. Both suites: 3918 passed, 19 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
+  The local replay has NOT been measured yet: on 2026-10-09 every Lumen call returned
+  `429 insufficient_quota`, on both builds, before any `execute_code` ran.
 
 **Not fixed** The claude and opencode peers do not scan. A writer that refuses an existing file
   (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input
