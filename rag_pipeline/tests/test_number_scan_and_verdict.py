@@ -212,3 +212,90 @@ def test_the_writer_is_shown_the_typed_facts(monkeypatch):
                            do_rerank=False, do_audit=False)
     assert "total_area = 6.273 km^2 (measured in EPSG:32616)" in seen["note"]
     assert state["verdict"]["numbers"][0]["fact"] is not None
+
+
+# --------------------------------------------------------------------------- the first harness run
+# Stage 44's first gate-on harness run (deepseek-v4-flash, 17 tasks) put a banner on 10 of 11
+# correct answers. Replaying the scan over 136 recorded answers found the classes below.
+
+def test_the_question_s_coordinates_ground_the_answer_s():
+    """`0.1281 W` in the question was read as 0.1281 watts and `41.8827 N` as newtons, so the
+    answer's "0.1281° W" resolved nowhere and its sentence was cut."""
+    fs = F.build(query="between Trafalgar Square (51.5080 N, 0.1281 W) and Notre-Dame")
+    res = F.resolve("Trafalgar Square (51.5080° N, 0.1281° W) is the start.", fs)
+    assert [r.resolved for r in res if F.is_claim(r.quantity)] == [True, True]
+
+
+def test_a_hemisphere_is_a_sign():
+    fs = F.build(results=_record("longitude -117.599333\n"))
+    (r,) = [r for r in F.resolve("The epicentre is at 117.5993°W.", fs) if F.is_claim(r.quantity)]
+    assert r.resolved
+    (r,) = [r for r in F.resolve("The epicentre is at 117.5993°E.", fs) if F.is_claim(r.quantity)]
+    assert not r.resolved
+
+
+@pytest.mark.parametrize("record,stated", [
+    ("area hectares: 24.0\n", "The flooded area is 24.0 hectares."),
+    ('{"watershed_area_km2": 16.2}', "The watershed is 16.20 km²."),
+    ('{"nearest_sample_distance_m": 69.28924880528002}', "The nearest sample is 69.29 m away."),
+])
+def test_a_recorded_number_is_named_by_the_words_beside_it(record, stated):
+    """The label used to be the first 60 characters of the whole output, so "24.0" never saw
+    the "hectares" written just before it."""
+    fs = F.build(results=_record(record))
+    (r,) = [r for r in F.resolve(stated, fs) if F.is_claim(r.quantity)]
+    assert r.resolved, stated
+
+
+def test_a_designation_glued_to_a_number_is_not_a_claim():
+    assert [q.text for q in F.quantities("Reprojected to UTM zone 16N first.")
+            if F.is_claim(q)] == []
+
+
+def test_a_difference_of_two_grounded_figures_resolves_to_both():
+    fs = F.build(results=_record("C1,C3 382254.14\nC2,C3 418879.72\n"))
+    answer = ("C1 and C3 give 382,254 person-km; C2 and C3 give 418,880 person-km. "
+              "The best pair wins by about 36,626 person-km.")
+    res = [r for r in F.resolve(answer, fs) if F.is_claim(r.quantity)]
+    assert all(r.resolved for r in res)
+    assert {f.value for f in res[-1].parts} == {382254.14, 418879.72}
+
+
+def test_a_short_figure_is_not_resolved_by_a_coincidental_ratio():
+    """Replayed, ratios matched mostly by coincidence ("0.3°" as 118 ÷ 470)."""
+    fs = F.build(results=_record("cells 118\ntotal 470\n"))
+    res = [r for r in F.resolve("118 of 470 cells qualify; the best is flat (0.3°).", fs)
+           if F.is_claim(r.quantity)]
+    assert [r.resolved for r in res] == [True, True, False]
+
+
+def test_a_run_with_nothing_geospatial_is_not_reported_as_unchecked():
+    """`not_applicable` means the gate's checks had nothing to apply to; `coverage` means
+    geospatial work it could not reach. Only the second is "not checked"."""
+    def audit(check):
+        return {"invariant_gate": "cannot_determine",
+                "issues": [{"source": "invariant_gate", "status": "cannot_determine",
+                            "check": check, "claim": "computed value from `this run`",
+                            "reason": f"invariant gate ({check}): x"}]}
+    assert V.from_gate(audit("not_applicable")) == []
+    assert [f.kind for f in V.from_gate(audit("coverage"))] == [V.UNVERIFIABLE]
+
+
+def test_a_banner_of_notes_has_a_heading():
+    out = V.render("x", [V.Finding("number_scan", V.NOTE, "1 statement was left out")])
+    assert "ℹ️ **Note:**" in out
+
+
+def test_an_unresolved_figure_does_not_make_side_runs_speak():
+    """The first harness run widened the gate's scope to every run whenever one figure resolved
+    nowhere, and a side run's finding then spoke for a correct answer."""
+    main = {"name": "execute_code", "tool_call_id": "main",
+            "content": json.dumps({"ok": True, "stdout": "schools within 1 mile: 23\n",
+                                   "verification": {"verdict": "pass", "counts": {"pass": 4},
+                                                    "findings": []}})}
+    side = {"name": "execute_code", "tool_call_id": "side",
+            "content": json.dumps({"ok": True, "stdout": "x",
+                                   "verification": SIDE_RUNS[1]})}
+    state = _turn("There are 23 schools within 1 mile; Earth's radius is 6,371.0088 km.",
+                  [side, main])
+    assert not any(f["check"] == "gate" for f in state["verdict"]["findings"]), state["verdict"]

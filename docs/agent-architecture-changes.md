@@ -7387,3 +7387,94 @@ numbers raised none.
   assertions in 7 files moved to the new wording.
 - **Suites:** `rag_pipeline/tests` 3849 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
   157 passed.
+
+**Measured with the harness, on one model.** By the user's budget decision, phases 4 and 5 ran on
+deepseek-v4-flash only, gate on, 1 trial, 17 tasks. The cross-model claim for this stage rests
+on the tests above and on gpt-5.6-luna's results up to stage 43. Stage 43's gate-on run
+(`p3-gate`) → this stage's first run (`p4-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| correct | 10/13 → 11/13 |
+| refused gracefully | 3/4 → 4/4 |
+| strict | 4/17 → 1/17 |
+| correct answers with a banner | 4 → 10 |
+| unproductive steps | 21 → 20 |
+| input tokens | 5.39M → 5.29M |
+
+`banners_total` counts banner lines, and this stage renders at most one banner per answer, so it
+falls by construction and is not reported. "Correct answers with a banner" counts answers.
+
+**The first run regressed on what this stage is for, and the records say why.** Reading all 10
+banners and replaying the number scan offline over every recorded answer (136 answers across
+`p3-gate`, `p3-after`, `p4-gate` and `p5-gate`, no model calls) found six defects. None was a
+class of claim; each was a reading error that a single list entry would have hidden.
+
+1. **A compass letter was read as a unit.** pint reads `N` as newtons and `W` as watts. The
+   question's "0.1281 W" therefore failed to ground the answer's "0.1281° W", and the sentence
+   holding the question's own coordinates was cut (T01, T02).
+   - **Fix:** a hemisphere letter after a number is read as a sign, so 117.5993°W equals a
+     recorded -117.599333 and does not equal 117.5993°E.
+   - **Also:** the question's own numbers ground a figure whatever unit the answer writes.
+2. **A recorded number was labelled by the first 60 characters of its whole output, not by the
+   words beside it.** "area hectares: 24.0" and `"watershed_area_km2": 16.2` never saw their own
+   unit names.
+   - **Fix:** the label is the 48 characters before the number, and a snake_case suffix
+     (`distance_m`) counts.
+   - **Fix:** the "small numbers coincide" guard now counts the digits a figure shows (three or
+     more ground it) instead of the magnitude (100 or more).
+3. **A unit was read across a line break.** `382254.14\nC2,C3 ...` gave the number the unit `C2`
+   (coulomb squared). A test written for the next fix found it.
+4. **Arithmetic on stated figures resolved nowhere and was cut.** Examples: "wins by 36,626
+   person-km" (418,880 − 382,254) and "all 28 pairs" (C(8,2)). The producer check answered
+   NONE although `execute_code` was bound.
+   - **Fix: one sum or difference of two figures the answer itself grounded resolves,** for a
+     figure shown to three or more significant digits.
+   - **Ratios and products were tried and dropped.** Audited over the replay, they matched mostly
+     by coincidence: "9 at p < 0.01" came out as 1.96 ÷ 0.2252, "0.3°" as 118 ÷ 470, "10 m" as
+     9975 ÷ 900. With sums and differences, every resolution in the replay is genuine or a
+     rounding of the true figure ("~2,584 km²" for 2,584.62).
+   - **Fix:** the producer prompt now says what NONE means: data no tool here can obtain. A
+     computation on values already present is produced by any tool that computes.
+5. **"Nothing in this run was geospatial" was reported as "not checked"** (T02, T03, T04).
+   `not_applicable` means the gate had nothing to apply its checks to, and the number scan still
+   holds the figures to the record. It is no longer a finding. `coverage` (geospatial work the
+   gate could not reach) still is.
+6. **One unresolved figure widened the gate's scope to every run,** so side runs spoke again.
+   Scope is now always the runs the answer's figures resolve to, including a derived figure's
+   operands, plus runs that produced a file or layer. A notes-only banner also lacked a heading.
+
+The ⚠️ heading now reads "A check found a problem". A gate failure is about the work behind the
+answer, not necessarily about something the answer states. That is T01's case: the run the answer
+used also printed an exploratory `gdf.geometry.area` in degrees, and scoping by run cannot
+separate two lines of one script.
+
+**Offline evidence for the fixes.** The share of figures in correct answers that resolve
+nowhere, on answers this stage never touched:
+
+| corpus | before the fixes | after |
+|---|---|---|
+| `p3-gate` (both models, gate on) | 37 / 325 (11.4%) | 10 / 316 (3.2%) |
+| `p3-after` (both models, 2 trials) | 97 / 824 (11.8%) | 37 / 804 (4.6%) |
+
+The claim count falls slightly because glued designations ("16N") are no longer claims. What
+remains is mostly figures the model computed in its head ("28 pairs", percentages, a 2.5× ratio)
+and so honestly unrecorded, plus English words pint knows as units ("20 are", "9 at",
+"0.53 in 2020").
+
+**Tests for the fixes:** 11 new tests in `test_number_scan_and_verdict.py`, 9 of which fail on the
+first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
+(the networkx pin); `tests/` 157 passed.
+
+**Not re-measured live.** A full re-run of the fixed stage would take Lumen past the program's 50M
+cap, so the fixed stage has the tests (9 of the 11 new ones fail on the first version) and the
+replay, not a second harness run.
+
+**Not fixed here.**
+- The gate's `all_nan` check fails a join whose OpenStreetMap attribute columns are sparse
+  (`old_operator`, `wikidata`), which is a sandbox heuristic.
+- English words read as units.
+- An exploratory measurement inside the run the answer used.
+
+**Spend:** `p4-gate` 5.41M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen
+(with stage 45's run).

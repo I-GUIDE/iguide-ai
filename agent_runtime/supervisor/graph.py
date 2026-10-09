@@ -1004,8 +1004,12 @@ _REGROUND_DIRECTIVE = (
 
 _PRODUCER_PROMPT = (
     "These claims appear in a draft answer, but no tool result recorded this turn contains "
-    "them. For each claim, name the ONE tool below that would compute or retrieve that value "
-    "from data, or NONE when none of these tools produces it.\n\nTools:\n{tools}\n\n"
+    "them. For each claim, name the ONE tool below that would compute or retrieve that value, "
+    "or NONE when the value needs data that none of these tools can obtain (a fact about the "
+    "world, such as a road distance or a population, that no tool here retrieves). A value "
+    "that is arithmetic on figures already in the answer or the question (a difference, a "
+    "count of combinations, a unit conversion) is produced by any tool here that computes."
+    "\n\nTools:\n{tools}\n\n"
     "Claims:\n{claims}\n\nRespond ONLY with JSON mapping each claim number to a tool name or "
     "\"NONE\", e.g. {{\"1\": \"execute_code\", \"2\": \"NONE\"}}.")
 
@@ -1320,11 +1324,13 @@ def _scope_to_used_runs(exec_ctx: Dict[str, Any], resolutions: List[Any],
     A run is used when a number the answer states resolves to its output, or when it produced
     a file or layer. A side run (a directory listing, a lookup that matched nothing, a failed
     first attempt that a later run superseded) does not speak for the answer, so its gate
-    findings do not either. When the answer states figures that resolve to no run at all, the
-    gate cannot tell which runs matter, and every run counts.
+    findings do not either. A figure that resolves nowhere does not widen the scope: no run
+    vouches for it, and the number scan reports it on its own. (Stage 44's first harness run
+    widened it to every run, and an exploratory `print(gdf.geometry.area)` in degrees then spoke
+    for an answer whose area came from a later, reprojected run.)
     """
-    used = {getattr(r.fact, "call_id", None) for r in resolutions if r.resolved}
-    unresolved = any(not r.resolved and turn_facts.is_claim(r.quantity) for r in resolutions)
+    used = {getattr(f, "call_id", None)
+            for r in resolutions if r.resolved for f in (getattr(r, "parts", None) or [r.fact])}
     code_ids = {res.get("tool_call_id")
                 for slot in ("analysis_results", "code_result")
                 for res in ((exec_ctx.get(slot) or {}).get("tool_results") or []
@@ -1347,7 +1353,7 @@ def _scope_to_used_runs(exec_ctx: Dict[str, Any], resolutions: List[Any],
     out = dict(exec_ctx)
     for slot in ("analysis_results", "code_result"):
         val = exec_ctx.get(slot)
-        if isinstance(val, dict) and val.get("tool_results") and not unresolved:
+        if isinstance(val, dict) and val.get("tool_results"):
             out[slot] = {**val, "tool_results": [r for r in val["tool_results"] if keep(r)]}
     return out
 
@@ -2697,7 +2703,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         # from an auditor's — they call for different things; see there.
         gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
-                        "source": "invariant_gate", "status": f.get("status")}
+                        "source": "invariant_gate", "status": f.get("status"),
+                        "check": f.get("check")}
                        for f in gate]
         # A finding the gate marks `advisory` says something was left unchecked, not that a
         # number may be wrong; when every unknown is advisory the banner says so. Stage 43's gate

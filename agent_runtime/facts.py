@@ -35,8 +35,9 @@ from agent_runtime.units import convert, parse_unit
 
 # A number, with thousands separators, and the unit-ish token right after it.
 _NUM_RE = re.compile(r"(?<![\w.\-/])(-|−)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?![\d])")
+# The unit is on the same line: "382254.14\nC2,C3 ..." is a number, then the next row.
 _UNIT_AFTER_RE = re.compile(
-    r"[\s-]?((?:square |sq\.? ?|cubic )?[A-Za-z°µ%][A-Za-z0-9°²³µ%/^.\-]*(?:\s?(?:per|/)\s?[A-Za-z0-9,]+)?)")
+    r"[ \t-]?((?:square |sq\.? ?|cubic )?[A-Za-z°µ%][A-Za-z0-9°²³µ%/^.\-]*(?:\s?(?:per|/)\s?[A-Za-z0-9,]+)?)")
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _LINK_TARGET_RE = re.compile(r"\]\([^)]*\)|https?://\S+|\bfile_[0-9a-f]{6,}\b|`[^`]*`")
 _LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s", re.M)
@@ -74,6 +75,7 @@ class Quantity:
 class Resolution:
     quantity: Quantity
     fact: Optional[Fact] = None
+    parts: List[Fact] = field(default_factory=list)   # a derived figure's operands
 
     @property
     def resolved(self) -> bool:
@@ -108,12 +110,38 @@ def _fmt(v: float) -> str:
 
 # --------------------------------------------------------------------------- building
 
-def _numbers_in(text: str) -> Iterable[Tuple[float, Optional[str]]]:
-    for m in _NUM_RE.finditer(text or ""):
+# A coordinate's hemisphere, right after the number: "41.88 N", "117.5993°W", "0.1281° W". Read
+# as a sign, not as a unit: pint would read "N" as newtons and "W" as watts, and "0.1281 W" in a
+# question then failed to ground "0.1281°" in the answer (stage 44's first harness run).
+_HEMISPHERE_RE = re.compile(r"\s?(°)?\s?([NSEW])(?![A-Za-z])")
+# A designation glued to an integer: "16N" (a UTM zone), "4G", "3D". It names, it does not measure.
+_GLUED_DESIGNATION_RE = re.compile(r"[A-Z](?![A-Za-z])")
+_CONTEXT_CHARS = 48
+
+
+def _hemisphere(text: str, end: int, value: float) -> Optional[Tuple[float, int]]:
+    """(signed value, end of the hemisphere mark) when a compass letter follows the number."""
+    m = _HEMISPHERE_RE.match(text, end)
+    if not m:
+        return None
+    sign = -1 if m.group(2) in "SW" else 1
+    return sign * abs(value), m.end()
+
+
+def _numbers_in(text: str) -> Iterable[Tuple[float, Optional[str], str]]:
+    """(value, unit written after it, the words just before it). The words before are what a
+    recorded number is called: "area hectares: 24.0", `"watershed_area_km2": 16.2`."""
+    text = text or ""
+    for m in _NUM_RE.finditer(text):
         raw = (m.group(2) or "").replace(",", "") + (m.group(3) or "")
         try:
             value = float(raw) * (-1 if m.group(1) else 1)
         except ValueError:
+            continue
+        context = text[max(0, m.start() - _CONTEXT_CHARS):m.start()]
+        hemi = _hemisphere(text, m.end(), value)
+        if hemi is not None:
+            yield hemi[0], None, context
             continue
         unit = None
         um = _UNIT_AFTER_RE.match(text, m.end())
@@ -121,7 +149,7 @@ def _numbers_in(text: str) -> Iterable[Tuple[float, Optional[str]]]:
             candidate = um.group(1).rstrip(".,;:")
             if parse_unit(candidate).kind == "unit":
                 unit = candidate
-        yield value, unit
+        yield value, unit, context
 
 
 def _walk_strings(node: Any, out: List[str], depth: int = 0) -> None:
@@ -130,7 +158,7 @@ def _walk_strings(node: Any, out: List[str], depth: int = 0) -> None:
     if isinstance(node, dict):
         for k, v in node.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool):
-                out.append(f"{k} {v}")
+                out.append(f"{k}: {v}")
             else:
                 _walk_strings(v, out, depth + 1)
     elif isinstance(node, (list, tuple)):
@@ -182,18 +210,18 @@ def build(*, log: Any = None, results: Sequence[Dict[str, Any]] = (), query: str
         strings: List[str] = []
         _walk_strings(res.get("content"), strings)
         for s in strings:
-            for value, unit in _numbers_in(s):
+            for value, unit, context in _numbers_in(s):
                 fs.add(value, unit=unit, source=str(res.get("name") or "tool"),
-                       call_id=res.get("tool_call_id"), label=s[:60])
-    for value, unit in _numbers_in(query):
-        fs.add(value, unit=unit, source="query")
+                       call_id=res.get("tool_call_id"), label=context)
+    for value, unit, context in _numbers_in(query):
+        fs.add(value, unit=unit, source="query", label=context)
     for doc in evidence or []:
         text = json.dumps(doc, default=str) if not isinstance(doc, str) else doc
-        for value, unit in _numbers_in(text[:20000]):
-            fs.add(value, unit=unit, source="evidence")
+        for value, unit, context in _numbers_in(text[:20000]):
+            fs.add(value, unit=unit, source="evidence", label=context)
     for row in prior_rows or []:
-        for value, unit in _numbers_in(json.dumps(row, default=str)):
-            fs.add(value, unit=unit, source="earlier turn")
+        for value, unit, context in _numbers_in(json.dumps(row, default=str)):
+            fs.add(value, unit=unit, source="earlier turn", label=context)
     return fs
 
 
@@ -223,13 +251,18 @@ def quantities(answer: str) -> List[Quantity]:
             digits = whole.replace(",", "")
             decimals = -(len(digits) - len(digits.rstrip("0"))) if digits != "0" else 0
         unit = None
-        um = _UNIT_AFTER_RE.match(masked, m.end())
+        hemi = _hemisphere(masked, m.end(), value)
+        glued = (not frac and _GLUED_DESIGNATION_RE.match(masked, m.end()) is not None)
+        um = None if (hemi or glued) else _UNIT_AFTER_RE.match(masked, m.end())
+        if hemi is not None:
+            value = hemi[0]
         if um:
             candidate = um.group(1).rstrip(".,;:")
             if parse_unit(candidate).kind == "unit":
                 unit = candidate
         s0 = max(masked.rfind(".", 0, m.start()), masked.rfind("\n", 0, m.start())) + 1
-        identifier = bool(_IDENTIFIER_BEFORE_RE.search(masked[max(0, m.start() - 12):m.start()]))
+        identifier = glued or bool(
+            _IDENTIFIER_BEFORE_RE.search(masked[max(0, m.start() - 12):m.start()]))
         e1 = min([i for i in (masked.find(". ", m.end()), masked.find("\n", m.end())) if i >= 0]
                  or [len(masked)])
         # The clause: inside parentheses, the ';'-separated segment; otherwise the sentence.
@@ -247,6 +280,21 @@ def quantities(answer: str) -> List[Quantity]:
     return out
 
 
+def _digits_shown(text: str) -> int:
+    digits = re.sub(r"\D", "", re.match(r"[-−]?[\d,.]*", text).group(0))
+    return len(digits.lstrip("0"))
+
+
+def _names_dimension(context: str, unit: str) -> bool:
+    """Whether the words before a recorded number name the dimension of *unit*: a unit word
+    ("hectares", "km2") or a snake_case suffix (`distance_m`, `area_m2`)."""
+    dim = parse_unit(unit).dimension
+    if not dim:
+        return False
+    words = re.findall(r"(?<=_)[A-Za-z]\d?(?![A-Za-z])|[A-Za-z²]{2,}\d?", context or "")
+    return any(parse_unit(w).kind == "unit" and parse_unit(w).dimension == dim for w in words)
+
+
 def _tolerance(q: Quantity, target: float) -> float:
     shown = 0.5 * 10 ** (-q.decimals)
     return max(shown, 1e-9 * abs(target))
@@ -254,14 +302,13 @@ def _tolerance(q: Quantity, target: float) -> float:
 
 def _matches(q: Quantity, f: Fact) -> bool:
     candidates = [f.value]
-    if q.unit and not f.unit:
-        # A figure with a unit against a bare recorded number: small numbers coincide
-        # ("a 5-hour drive" against `"n": 5`), so a bare number grounds a unit-bearing figure
-        # only when it is distinctive (>= 100) or its own context names that dimension.
-        dim = parse_unit(q.unit).dimension
-        named = any(parse_unit(w).dimension == dim for w in re.findall(r"[A-Za-z²]+", f.label)
-                    if len(w) > 1 and parse_unit(w).kind == "unit")
-        if abs(f.value) < 100 and not named:
+    if q.unit and not f.unit and f.source != "query":
+        # A figure with a unit against a bare recorded number: numbers written with few digits
+        # coincide ("a 5-hour drive" against `"n": 5`), so a bare number grounds a unit-bearing
+        # figure only when the figure shows three or more digits or the words before the
+        # recorded number name that dimension ("area hectares: 24.0", "watershed_area_km2").
+        # The user's own question is exempt: restating it is not a claim the record must back.
+        if _digits_shown(q.text) < 3 and not _names_dimension(f.label, q.unit):
             return False
     if q.unit and f.unit:
         converted = convert(f.value, f.unit, q.unit)
@@ -274,13 +321,58 @@ def _matches(q: Quantity, f: Fact) -> bool:
     return any(abs(q.value - c) <= _tolerance(q, c) for c in candidates)
 
 
+# Sums and differences only. Ratios and products were tried and, replayed over 136 recorded
+# answers, mostly matched by coincidence: "9 at p < 0.01" as 1.96 ÷ 0.2252, "0.3°" as 118 ÷ 470.
+_OPS = (("+", lambda a, b: a + b), ("−", lambda a, b: a - b))
+_DERIVED_MIN_SIGNIFICANT = 3
+
+
+def _significant(q: Quantity) -> int:
+    digits = re.sub(r"\D", "", re.match(r"[-−]?[\d,.]*", q.text).group(0)).lstrip("0")
+    if q.decimals < 0:
+        digits = digits[:q.decimals] if len(digits) > -q.decimals else digits[:1]
+    return len(digits)
+
+
+def _derived(q: Quantity, grounded: List[Fact]) -> Optional[Tuple[str, Fact, Fact]]:
+    """One sum or difference of two figures the answer itself grounded: "C1+C3 beats C2+C3 by
+    36,626" is 418,880 − 382,254. Only the answer's own grounded figures are operands, and only
+    a figure shown to three or more significant digits is tried, so a coincidence is unlikely."""
+    if _significant(q) < _DERIVED_MIN_SIGNIFICANT:
+        return None
+    for i, a in enumerate(grounded):
+        for b in grounded[i + 1:]:
+            for (sym, op) in _OPS:
+                for x, y in ((a, b), (b, a)):
+                    v = op(x.value, y.value)
+                    if math.isfinite(v) and abs(q.value - v) <= _tolerance(q, v):
+                        return sym, x, y
+    return None
+
+
 def resolve(answer: str, facts: FactSet) -> List[Resolution]:
-    """Each stated number and the fact that supports it, typed facts first."""
+    """Each stated number and the fact that supports it, typed facts first. A figure no fact
+    holds may still be one arithmetic step on two figures the answer grounded; it then resolves
+    to that derivation, with its operands as `parts`."""
     ordered = sorted(facts.facts, key=lambda f: (not f.typed,))
     out = []
     for q in quantities(answer):
         hit = next((f for f in ordered if _matches(q, f)), None)
         out.append(Resolution(quantity=q, fact=hit))
+    grounded: List[Fact] = []
+    for r in out:
+        if r.resolved and is_claim(r.quantity) and r.fact not in grounded:
+            grounded.append(r.fact)
+    grounded = grounded[:24]
+    for r in out:
+        if r.resolved or not is_claim(r.quantity) or len(grounded) < 2:
+            continue
+        d = _derived(r.quantity, grounded)
+        if d is not None:
+            sym, x, y = d
+            r.fact = Fact(id=f"{x.id}{sym}{y.id}", value=r.quantity.value, source="derived",
+                          label=f"{x.id} {sym} {y.id}")
+            r.parts = [x, y]
     return out
 
 

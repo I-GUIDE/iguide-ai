@@ -5256,7 +5256,20 @@ rather than from the previous one.
 **Why** Review flaws 2 and 7, and the live 21:34 UTC turn: a correct answer whose COULD NOT
   VERIFY came entirely from side runs.
 
-**Measured** See stage 44.
+**Measured** deepseek-v4-flash only (user's budget decision), gate on, 1 trial. The first run
+  regressed: correct answers with a banner went from 4 to 10. The records show six reading
+  errors, all fixed here:
+  - a compass letter read as a unit;
+  - a recorded number labelled by its whole output, not by the words beside it;
+  - a unit read across a line break;
+  - arithmetic on stated figures cut;
+  - `not_applicable` shown as "not checked";
+  - one unresolved figure widening the gate's scope.
 
-**Not fixed** A correct number attached to the wrong noun resolves. A memorised figure that
+  Replayed offline over the recorded answers, unresolved figures in correct answers fell from
+  11.4% to 3.2% (p3-gate) and from 11.8% to 4.6% (p3-after). Not re-run live, because of the
+  Lumen cap.
+
+**Not fixed** English words pint knows as units ("20 are"). The gate's `all_nan` check on sparse
+  OSM join columns. A correct number attached to the wrong noun resolves. A memorised figure that
   equals some recorded number resolves (the "~340 km by Eurostar" case).

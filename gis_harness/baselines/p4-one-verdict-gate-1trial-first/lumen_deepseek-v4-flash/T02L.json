@@ -1,0 +1,178 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "19"
+      }
+    ],
+    "steps": {
+      "tool_calls": 14,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f **Check this answer.** Something it states did not hold up:"
+    ],
+    "source": "OSM",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "### How this was computed\n1. **Fetched schools from OSM** (`amenity=school`) in a bounding box around the point enlarged by ~1 mile \u2014 returned 24 schools.\n2. **Created a metric 1-mile buffer** (1609.34 m) around the point using a projected CRS (EPSG:26916) so the distance is accurate in metres.\n3. **Counted schools inside the buffer** via a spatial join on each school's representative point, and cross-checked with a haversine distance calculation. Both methods agree on **19**.\n\n### The 19 schools within 1 mile\nLogan Square Elementary School, Jehovah School, Darwin Elementary School, Brentano Elementary Math and Science Academy, Chase Elementary School, Stowe Elementary School, Saint Sylvester School, Goethe Elementary School, Mozart Elementary School, Marine Leadership Academy, Funston Elementary School, Our Lady of Grace School, McAuliffe Elementary School, Yates Elementary School, Moos Elementary School, Avondale-Logandale Elementary School, St. Hyacinth Catholic School, ASPIRA Business & Finance High School, and one unnamed school building.\n\n### On your map\n- **\"Schools within 1 mile (19)\"** \u2014 the 19 in-range schools (clickable points)\n- **\"1-mile buffer\"** \u2014 the buffer polygon\n- **\"OSM Schools (within 1 mile)\"** \u2014 all 24 schools found in the search area, for context\n\n---\n\n\u26a0\ufe0f **Check this answer.** Something it states did not hold up:\n- Problem: the code check (all_nan): column(s) entirely null: old_operator, wikidata, wikipedia \u2014 this frame is a join result, so an all-null column means nothing matched; any count or ratio computed from it is wrong (`joined_full`)\n- Problem: the code check (all_nan): column(s) entirely null: old_operator, wikidata, wikipedia \u2014 this frame is a join result, so an all-null column means nothing matched; any count or ratio computed from it is wrong (`joined`)\n- Note: 1 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 308.9,
+  "route": [
+    "analyze",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "high",
+  "map_layers": 4,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "qgis_metric_buffer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 24,
+    "input_tokens": 601009,
+    "cached_input_tokens": 498688,
+    "output_tokens": 9926,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791510854-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "all_nan"
+      ]
+    }
+  ]
+}

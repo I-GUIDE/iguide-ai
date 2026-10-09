@@ -65,10 +65,10 @@ def render(answer: str, findings: List[Finding]) -> str:
         seen.add(key)
         items.append(f)
     st = status(items)
-    head = {"problem": "⚠️ **Check this answer.** Something it states did not hold up:",
+    head = {"problem": "⚠️ **Check this answer.** A check found a problem:",
             "unverified": ("ℹ️ **Not everything here could be checked.** Unchecked is not the "
                            "same as wrong:"),
-            "verified": "ℹ️"}[st]
+            "verified": "ℹ️ **Note:**"}[st]
     lines = [head]
     for f in items[:MAX_LINES]:
         tag = {PROBLEM: "Problem", UNVERIFIABLE: "Not checked", NOTE: "Note"}.get(f.kind, "Note")
@@ -87,6 +87,11 @@ def from_gate(audit: Optional[Dict[str, Any]]) -> List[Finding]:
     verdict = str((audit or {}).get("invariant_gate") or "")
     for issue in (audit or {}).get("issues") or []:
         if not (isinstance(issue, dict) and issue.get("source") == "invariant_gate"):
+            continue
+        if issue.get("check") == "not_applicable":
+            # Nothing in the run was geospatial work, so the gate's checks had nothing to apply
+            # to. That is not "could not check": the numbers are still held to the record by the
+            # number scan. A run whose geospatial work the gate could not reach ("coverage") is.
             continue
         status_ = issue.get("status") or ("fail" if verdict == "fail" else "cannot_determine")
         reason = str(issue.get("reason") or "").replace("invariant gate ", "the code check ")
