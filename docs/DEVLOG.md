@@ -5214,3 +5214,35 @@ rather than from the previous one.
   scanned, because a staged name is excluded from the run's artifacts, so a run that writes a file
   under an earlier file's name would lose its output. The claude and opencode peers stage the
   conversation's files once, at the start of a run. They do not scan.
+
+## 2026-10-09 · M8.87 · A conversation file the code names by filename is staged, and an input the run rewrites is kept
+
+**Change** `CodeExecutor.execute` (`agent_runtime/code_execution.py`) treats a staged name as an
+  input only while its bytes equal the source (`_rewritten_inputs`). A rewritten name is persisted
+  as an artifact and copied back to the workspace. `collect_inputs` hashes it from the source, so
+  the manifest records what the run read. Then `execute_code`
+  (`agent_runtime/langchain_exec_tools.py`) stages every file of THIS conversation and THIS owner
+  whose filename the code names as a whole name (`_conversation_files_named_in`), newest per name.
+  The lookup goes through `find_files` scoped to the session, with the owner compared exactly. It
+  skips the legacy pool, names already allocated to a listed or attached input, and names the
+  workspace holds. `_DESC_BUDGET` (claude peer) is raised from 3000 to 3500.
+
+**Why** S30.7 / M8.79 staged a file_id the code names and left the filename open:
+  `gpd.read_file('Champaign_County.geojson')` with no `input_files` still failed first runs, in the
+  local replay on `40356bd` and in PR #85's replays. The reason it was left open was a real bug.
+  A staged name was excluded from the outputs and the copy-back, so a run that wrote under an
+  input's name lost its output, and that already happened with an explicit `input_files`.
+  Reasoning is in architecture S30.8.
+
+**Measured** 15 new tests (`test_filename_named_in_code.py`). Five fail on `23cfd02`: the filename
+  read, the newest of two, the bounded match, the write under a listed input's name, and the
+  manifest hash. Both suites: 3918 passed, 19 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
+  **Replay PENDING**: the local Chrome replay on Lumen deepseek-v4-flash was started on both
+  builds on 2026-10-09 at 13:57 CDT (18:57 UTC). Every Lumen call returned
+  `429 insufficient_quota` ("Coin budget exhausted"), before any `execute_code` ran. No first-run
+  rate is claimed. It is to be measured on the same model once the quota resets.
+
+**Not fixed** The claude and opencode peers do not scan. A writer that refuses an existing file
+  (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input
+  the run deletes stays in the workspace.

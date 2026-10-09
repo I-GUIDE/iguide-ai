@@ -727,6 +727,40 @@ def _stage_inputs(work: Path,
     return staged, errors, shadowed
 
 
+def _rewritten_inputs(work: Path, input_files: Optional[List[Dict[str, str]]],
+                      staged: List[str]) -> Dict[str, Path]:
+    """The staged names the run WROTE: the file there now is not the input that was put there.
+
+    Returns ``{name: source}``, the source being the input's own copy in the store.
+
+    A staged name was left out of the outputs and out of the copy back to the workspace, so
+    uploads were not re-persisted as outputs. That also dropped a run's output whenever it was
+    written under an input's name: ``gdf.to_file('schools.geojson')`` over a staged
+    schools.geojson succeeded, and the file existed nowhere afterwards. A name is an input only
+    while it still holds the input's bytes. They are compared with the source, not by mtime:
+    a bind mount can report whole seconds, so a same-size rewrite inside one second would pass
+    as untouched. filecmp compares sizes first, so most rewrites cost a stat; and a run that
+    re-saves identical bytes has not made a new file.
+    """
+    import filecmp
+
+    sources = {str((s or {}).get("dest") or "").strip(): str((s or {}).get("source") or "").strip()
+               for s in input_files or []}
+    out: Dict[str, Path] = {}
+    for name in staged:
+        target = work / name
+        if not target.is_file():
+            continue  # deleted: nothing to keep
+        source = Path(sources.get(name) or "")
+        try:
+            same = source.is_file() and filecmp.cmp(source, target, shallow=False)
+        except OSError:
+            same = False
+        if not same:
+            out[name] = source
+    return out
+
+
 def _work_root() -> Optional[str]:
     """Directory under which per-run work dirs are created (None = system temp).
 
@@ -1198,7 +1232,10 @@ class CodeExecutor:
             exit_code, stdout, stderr, timed_out, error = self._run(
                 work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint)
             # Output files the run produced, plus the executed source itself (downloadable).
-            # Staged input files are excluded so uploads aren't re-persisted as outputs.
+            # Staged input files are excluded so uploads aren't re-persisted as outputs — but only
+            # while they still hold the input: a run that wrote under an input's name made a file.
+            rewritten = _rewritten_inputs(work, input_files, staged)
+            inputs_kept = [name for name in staged if name not in rewritten]
             unchanged = {rel for rel, sig in _stat_map(work).items()
                          if carried.get(rel) == sig}  # carried in and untouched -> not an output
             source_artifacts = _persist_source(code, label=label) if (code or "").strip() else []
@@ -1207,7 +1244,7 @@ class CodeExecutor:
             # offered as a download: the map UI listed both again after every run.
             artifacts = [*source_artifacts,
                          *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, ENVIRONMENT_FILENAME,
-                                                    DECLARED_FILENAME, *staged, *unchanged})]
+                                                    DECLARED_FILENAME, *inputs_kept, *unchanged})]
             verification = _note_printed_outputs(_read_checks(work), stdout, work)
             # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
             # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
@@ -1219,9 +1256,12 @@ class CodeExecutor:
                 _artifacts.emit(code=(code or ""), work=work,
                                 image=getattr(self, "image", ""), backend=self.backend,
                                 dependencies=deps, staged=sorted(staged),
+                                # A rewritten input is hashed from its source: the record says
+                                # which bytes the run READ, not what it left behind.
+                                input_sources=rewritten,
                                 verification=verification)
             if workspace:
-                _copy_tree(work, workspace, skip={"script.py", CHECKS_FILENAME, *staged})
+                _copy_tree(work, workspace, skip={"script.py", CHECKS_FILENAME, *inputs_kept})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if auto:
