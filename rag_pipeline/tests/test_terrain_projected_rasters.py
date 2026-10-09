@@ -96,6 +96,15 @@ def test_slope_on_a_utm_grid_matches_the_hand_computed_value(store, tmp_path):
     assert out["native_bounds"] == [WEST, SOUTH, EAST, NORTH]
 
 
+def test_aspect_of_an_east_rising_utm_ramp_faces_west(store, tmp_path):
+    rid = _write(tmp_path, _east_ramp(15.0))
+
+    out = json.loads(_tools()["terrain_derivative"].func(raster_file_id=rid, kind="aspect"))
+
+    assert out["ok"] is True, out
+    assert out["mean"] == pytest.approx(270.0, abs=0.5), out
+
+
 def test_flooded_area_on_a_utm_grid_is_in_square_kilometres(store, tmp_path):
     """150 x 200 pixels of 30 m is 27 km2. A level halfway up the ramp floods the western
     75 columns, so 13.5 km2. Read as degrees, a pixel was a 3,339 km square."""

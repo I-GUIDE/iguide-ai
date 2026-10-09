@@ -988,7 +988,12 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 grid[holes] = np.nan
                 cmap, label, unit = "YlOrRd", "Slope", "degrees from horizontal"
             elif kind == "aspect":
-                grid = (np.degrees(np.arctan2(dz_dy, -dz_dx)) + 360.0) % 360.0
+                # The compass bearing of the DOWNSLOPE direction (-dz_dx east, -dz_dy north),
+                # measured clockwise from north: atan2(east, north). The earlier
+                # atan2(dz_dy, -dz_dx) was a maths angle from east with the wrong north sign.
+                # It called a west-facing slope 180 and a south-facing one 90, wrong in every
+                # direction. Only the flat case was tested.
+                grid = (np.degrees(np.arctan2(-dz_dx, -dz_dy)) + 360.0) % 360.0
                 # Flat ground faces nowhere. Reporting 0 there would put a hard "due north"
                 # band across every plain in the region.
                 grid[np.hypot(dz_dx, dz_dy) < 1e-9] = np.nan
@@ -997,7 +1002,10 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
             else:
                 az, alt = math.radians(360.0 - float(azimuth) + 90.0), math.radians(float(altitude))
                 slope = np.arctan(np.hypot(dz_dx, dz_dy))
-                aspect = np.arctan2(dz_dy, -dz_dx)
+                # The standard (Burrough / ArcGIS) shading formula. Its aspect is a maths angle
+                # whose dz/dy runs SOUTHWARD, down the rows; dz_dy here runs north, hence the
+                # minus. Without it the light came from the mirror image of `azimuth`.
+                aspect = np.arctan2(-dz_dy, -dz_dx)
                 grid = 255.0 * ((np.sin(alt) * np.cos(slope)) +
                                 (np.cos(alt) * np.sin(slope) * np.cos(az - aspect)))
                 grid = np.clip(grid, 0.0, 255.0)
