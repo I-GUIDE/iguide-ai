@@ -587,6 +587,21 @@ find out. A named id goes through `get_file_record` only, the owner check a list
 (Stage 30), and never through the path fallback. Another user's id is refused with the same
 message as an id that was never minted. S30.7 has the trace.
 
+**A conversation file the code names by filename is an input too, and an input the run rewrites
+is an output.** A tool's answer names its file both ways, and `gpd.read_file("Champaign_County.geojson")`
+failed first runs exactly as the bare id did. `_conversation_files_named_in` stages every file of
+THIS conversation and THIS owner whose filename the code names as a whole name (`./x.geojson`
+counts, `my_x.geojson` does not), the newest per name. It looks only through `find_files` scoped
+to the session, with the owner compared exactly: never the unowned legacy pool, never another
+conversation of the same user, never a path. It never changes which file a name already means:
+a name a listed or attached input owns keeps its owner, and a name the conversation's workspace
+holds is left alone, because that file is one an earlier run wrote. Since a name in the code may
+be the file it is about to WRITE, `CodeExecutor.execute` treats a staged name as an input only
+while its bytes still equal the source (`_rewritten_inputs`, `filecmp` against the store copy).
+A rewritten one is persisted as an artifact, copied back to the workspace, and its manifest row
+hashes the bytes the run read. Before this, `gdf.to_file("schools.geojson")` over a staged
+schools.geojson succeeded and the file existed nowhere afterwards. S30.8 has the details.
+
 **Children start through `agent_runtime.fork_safe.run`, never `subprocess` directly.** On macOS,
 once the agent process has reprojected anything, a `fork()` of it can die before `exec`: PROJ's
 fork handler closes its proj.db handle in the child, Apple's SQLite reports the failed close

@@ -5671,6 +5671,79 @@ Names are not scanned. A name in the code may be a file the run is about to writ
 name is excluded from the run's artifacts and from the copy back to the workspace. Staging an
 earlier file under that name would silently drop the run's own output.
 
+### Stage S30.8 A filename the code names is an input, and a rewritten input is an output
+
+*2026-10-09. Branch `claude/filename-staging`, off `23cfd02` (S30.7 merged).*
+
+S30.7 left the filename half open, and for a stated reason. This sub-stage closes the reason
+first, then the gap.
+
+**The hazard, fixed first.** `CodeExecutor.execute` left every staged name out of
+`_persist_artifacts` and out of the copy back to the workspace, so that an upload was not stored
+again as an output. It also meant that a run writing under an input's name made a file that
+existed nowhere afterwards. A program given `schools.geojson` in `input_files` that ended in
+`gdf.to_file("schools.geojson")` succeeded, and its result was lost. A test now shows this on
+`23cfd02`. Scanning filenames would have made it common, since a name in the code is as often
+the file the run is about to write as the one it reads.
+
+A staged name is now an input only while it holds the input. After the run, `_rewritten_inputs`
+compares each staged file with its source in the store, using `filecmp` with `shallow=False`.
+It does not use mtime: a Docker Desktop bind mount can report whole seconds, so a same-size
+rewrite within one second would look untouched. filecmp compares sizes first, so most rewrites
+cost one stat. A rewritten name is persisted as an artifact and copied back to the workspace,
+and the next run reads it from there. A run that writes back identical bytes has made nothing
+new and still counts as an input. The artifact manifest (`collect_inputs`) hashes a rewritten
+input from its source, so `inputs.jsonl` records what the run read, not what it left behind.
+
+**The scan.** `_conversation_files_named_in` (`agent_runtime/langchain_exec_tools.py`) runs after
+the first `_build_staging` and adds a file when all of these hold:
+
+- its record is in THIS conversation (`find_files(session=…, include_unowned=False)`, the scoped
+  lookup of Stages 21 and 30) and its `owner_id` equals the caller's exactly. The unowned legacy
+  pool is never staged by a bare name in code: find_files offers that pool for deliberate reuse,
+  and a filename in a program is not a deliberate choice. Another conversation of the same user
+  is excluded as well, and so is another user's file stamped with a borrowed conversation id;
+- the code names its filename as a whole name. The match is bounded so that `my_data.csv`,
+  `data.csv.bak` and `data.csvx` do not name `data.csv`, while `./data.csv` and `out/data.csv`
+  do. Staging a file the path did not mean costs nothing;
+- the name is not already taken. A listed or attached input keeps the name it was allocated, and
+  a name the conversation's workspace holds is left to the workspace. Staged inputs are never
+  copied back unchanged, so a file there is one an earlier run wrote, and the program means that
+  file.
+
+With several records of one name it takes the newest, the one `find_files` and `resolve_file_ref`
+return. The file then goes through the same `_build_staging` (both names, caps) and
+`_stage_inputs` checks. Its `input_files` entry says `staged_because: "named in the code"`. With
+no conversation bound, nothing is scanned. Nothing is ever read as a host path: candidates come
+from store records, and their paths come from the records.
+
+**Why not scan the code's string literals and look each one up.** Names in the code are
+open-ended and the conversation's files are few. Testing each conversation file's name against
+the code needs one scoped store scan per run and no parsing, and it cannot match a file the
+conversation does not have.
+
+Tests (`test_filename_named_in_code.py`, 15). Five fail on `23cfd02`: the filename read, the
+newest-of-two choice, the bounded match, the write under a listed input's name, and the manifest
+hash. The other ten pass on both versions. Seven of them guard what the scan must not do: another
+conversation's file, another user's file under the same conversation id, another user's file end
+to end, the legacy pool, no conversation, a name the workspace holds, a name a listed input owns.
+The others cover an input only read and an identical rewrite, neither of which is an output, and a
+write under a name that only the scan staged.
+
+`execute_code`'s description now says a conversation file named by filename is staged and that a
+write under an input's name is kept. With extraction on, that took it to 3,035 characters, past
+the claude peer's 3,000-character clip budget (`_DESC_BUDGET`), and
+`test_the_longest_real_description_is_not_clipped` caught it. The wording was tightened to 2,955
+and the budget raised to 3,500, as that constant's comment asks.
+
+<!--REPLAY-S30.8-->
+
+**What it does not fix.** The claude and opencode peers stage the conversation's files once, at
+the start of a run, and do not scan. A writer that refuses an existing file (`open(name, "x")`)
+now fails where it used to succeed, when its name matches a file a tool made in this
+conversation; common writers (`to_file`, `to_csv`, `open(name, "w")`, rasterio) overwrite. A staged
+input the run deletes is not deleted from the workspace.
+
 ---
 
 ## Stage 31 — Published to the host, not the network {#stage-31}
