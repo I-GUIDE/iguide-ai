@@ -2475,6 +2475,119 @@ S12.9's rule held: **anything the runtime reads relative to `REPO_ROOT` is a dep
 The one path that looked like an exception was not one. What showed that was another branch's
 commit messages, not this branch's code or docs.
 
+### Stage S12.11 A library that imports and then cannot run
+
+S12.9 found a directory the image never carried. This one is a library the sandbox could install
+and import but not run. GIS harness task T06 (DEM slope + the watershed draining to an outlet,
+`gis_harness/tasks.py` in #90) thrashed on deepseek-v4-flash with the invariant gate on: 29 of
+30 steps in p4-gate, 45 calls in p3-gate, about 2M Lumen tokens across the two. Most of the
+failed runs were the model rewriting the same pysheds code around one traceback:
+
+```
+File "/work/.deps/pysheds/sgrid.py", line 904, in _d8_accumulation
+    invalid_cells = ~np.in1d(fdir.ravel(), dirmap).reshape(fdir.shape)
+AttributeError: module 'numpy' has no attribute 'in1d'. Did you mean: 'int16'?
+```
+
+**What was actually wrong.** pysheds was not in `sandbox/Dockerfile`. The model declared it, the
+install phase put pysheds 0.5 and numba 0.68 into `/work/.deps`, and the pins (AGENTS.md,
+"Installs are pinned to the image's own versions") held numpy at the image's 2.4.6, as they
+should. numpy deprecated `in1d` in 2.0 and removed it in 2.4. pysheds 0.5 is the newest release
+(2025-08-14) and still calls it in nine places: accumulation, flow distance, HAND, river
+network, profiles, stream order, distance to ridge and two cell-distance helpers. There is no
+fixed release to move to, and moving numpy is the one fix the pins exist to forbid.
+
+**The fix** (`sandbox/pysheds_support.py`, loaded by `sandbox/pysheds_support.pth`) is a finder
+on `sys.meta_path` that loads nothing itself. When `pysheds` is looked up it puts `in1d` back on
+numpy, as `isin` over the flattened input (numpy's own `in1d` contract), and steps aside. A
+`.pth` file in site-packages is read at every interpreter start whatever `PYTHONPATH` says. So
+the hook fires on the name, and it also covers a pysheds already sitting in a conversation's
+`/work/.deps` from before this image. A numpy that still has `in1d` is left alone. Two
+alternatives were rejected. A pysheds release that supports numpy 2.4 does not exist. whitebox
+fetches its binary from the internet on first use, which a `--network none` run cannot do.
+richdem was not tried, because pysheds is what the model reaches for unprompted.
+
+**Baking pysheds turned up two costs that had been hiding inside the failure.** Fixing in1d
+alone would have left both in place:
+
+| measured | without | with |
+| --- | --- | --- |
+| `from pysheds.grid import Grid`, a fresh run (native arm64) | 39.5 s cold | 5.7 s from a cache |
+| the same, the built image in run posture (amd64, emulated) | 48.3 to 66.0 s cold | 3.6 to 5.8 s |
+| a 400-unit `esda.Moran_Local`, 999 permutations (native arm64) | 0.0 s, numba absent | 8.2 s, numba importable |
+| `esda.G_Local`, same data | 0.0 s | 0.9 s |
+
+The first is pysheds compiling about eighty numba kernels at import. They are `cache=True`, but
+a run's root filesystem is read-only, numba refuses a cache directory it cannot write, and the
+`/tmp` tmpfs starts empty every run. So each run spent about 40 s of its 60 s timeout compiling.
+The image now compiles them at build into `/opt/numba-cache`, and the hook copies that to the
+run's `NUMBA_CACHE_DIR` before pysheds loads. Build and run both set `NUMBA_CPU_NAME=generic`, so
+the cache is valid on a CPU other than the one that built the image.
+
+The second is esda. It uses numba whenever it can import it, and its kernels are `@njit`
+without `cache=True`, so they compile in every process. Putting numba in site-packages would
+have slowed every local spatial statistic to make watersheds work. So the build moves numba and
+llvmlite to `/opt/pysheds-private`, which the hook appends to `sys.path` only once pysheds is
+imported. The build fails if numba is still importable without pysheds. Measured in the built
+image: `find_spec('numba')` is `None`, and after `import pysheds.grid` numba loads from the
+private directory. `Moran_Local` is back to 0.0 s with the same 39 significant units.
+
+**Proved inside the rebuilt image** (amd64, `--network none --read-only`, a non-root uid), on
+the harness's own `dem.tif` from `gis_harness/datasets.py` `dem_watershed`. The basin there is
+150 x 120 cells x 900 m² = 16.2 km² by construction.
+
+| image | through | result |
+| --- | --- | --- |
+| `prototype`'s `sandbox/Dockerfile` | `DockerCodeExecutor.execute(..., dependencies=["pysheds"])` | installs pysheds, 79.1 s, `AttributeError: ... 'in1d'` |
+| this change | the same call | probe reports pysheds 0.5, nothing installed, 8.7 s, 16.2 km² |
+| this change | `check_hydrology.py dem.tif 392265 4434015 16.2` | accumulation 18,000 cells = 16.2 km² (0%); catchment 15.85 km² (-2.2%) |
+| this change | the same, with a pysheds 0.5 from `.deps` shadowing the baked one | 16.2 km²; that copy compiles cold (31 s), since the cache is keyed by path |
+
+`pip freeze` before and after differs only by additions (pysheds, scikit-image, imageio,
+tifffile, geojson, looseversion, lazy-loader; numba and llvmlite are in the private directory,
+where pip does not look, so `pip check` reports pysheds' numba as missing). Every package already
+in the image keeps its version, numpy 2.4.6 included, because the install runs with `-c` against
+the image's own freeze. The image grows from 1.72 GB to 2.07 GB.
+
+**Two pysheds behaviours that cost T06 steps even when the call worked.** The fix does not
+change either. Both are recorded in `check_hydrology.py`, which avoids them:
+
+- The outlet is the lowest cell on the grid's south edge, so its D8 direction is -2 (a pit).
+  `catchment(xytype="coordinate")` maps a cell-centre coordinate by rounding 75.5 cells up to
+  76, which is a hillslope column. `snap_to_mask` returns cell corners. deepseek's snapped
+  outlets (392250 and 392280 against a valley at 392265) and its one-cell catchment in p4-gate
+  are both this. Address the cell by `nearest_cell(x, y, snap="center")` and `xytype="index"`.
+- `catchment` leaves out the cells on the grid's border, 17,613 of 18,000 here. That is the
+  15.85 km² deepseek reported in p3-gate. `accumulation` at the outlet counts all 18,000.
+
+**The guard** has three parts. `sandbox/check_hydrology.py` runs at build, after
+`verify_imports.py`. It delineates T06's basin with each hydrology library in `CHECKS` and
+fails the build unless the accumulation area is exact, the catchment is within 3%, and a river
+network comes back. That is the import-and-call check that would have caught this.
+`rag_pipeline/tests/test_sandbox_hydrology.py` tests the hook against a numpy without `in1d`,
+and holds the Dockerfile to its ordering: install under the freeze, hide numba, compile into the
+baked cache, then point runs at the tmpfs. Its integration test runs the check inside a built
+image (`-m integration`). `verify_imports.py` now imports pysheds, and shapely, which the probe
+asked about but the build never imported. `_IMPORT_TO_PIP` names pysheds, so the probe sees the
+baked copy and a declared `pysheds` is no longer reinstalled with numba and llvmlite on every
+conversation. The cost is that the probe, which really imports each module, now loads pysheds'
+cached kernels too, a few seconds once per process (probe plus the whole T06 run above: 8.7 s).
+
+Not fixed here:
+
+- **The deployed sandbox is unchanged** until its image is rebuilt from this Dockerfile, and
+  that rebuild is a deploy. Until then T06 fails exactly as before.
+- A deployment whose `AGENT_CODE_EXEC_IMAGE` is not this image gets none of it, and
+  `docker-compose.yml` defaults that variable to `python:3.11-slim`.
+- Nothing tells the model about the edge-pit and border behaviours above. A skill or a line in
+  the code peer's brief would save the steps they cost.
+- An arm64 build of `sandbox/Dockerfile` fails at the geospatial layer: fiona 1.10.1 resolves to
+  an sdist with no GDAL to build against. This predates the change and does not affect the amd64
+  VM. Every image measured here was built for `linux/amd64`.
+- Drop the in1d part of the hook once a pysheds release stops calling `in1d`.
+  `check_hydrology.py` reports `numpy_in1d_shimmed`, which says whether the shim was what made
+  it work.
+
 ---
 
 ## Stage 13 — Shapes nobody owned {#stage-13}

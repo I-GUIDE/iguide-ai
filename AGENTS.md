@@ -635,6 +635,17 @@ not just names, and every install carries a constraints file built from it
 (`_constraints_text`, `AGENT_CODE_EXEC_PIN_IMAGE=0` to disable): a genuine conflict now fails
 with pip naming it, which beats a segfault three tools later.
 
+**A library that cannot follow numpy is adapted at its import, not by moving numpy.** pysheds
+0.5, the newest release, calls `numpy.in1d`, which numpy 2.4 removed, so every D8 routine failed
+in the sandbox while the pins above held numpy where it belongs. `sandbox/pysheds_support.py`
+(loaded by a `.pth` file, so it reaches a pysheds in `/work/.deps` too) acts only when
+`pysheds` is imported. It restores `in1d`, puts numba on `sys.path`, and copies in numba kernels
+compiled at build. numba lives in `/opt/pysheds-private`, not site-packages, because esda uses
+numba whenever it can import it and recompiles on every run (a `Moran_Local` went from 0.0 s to
+8.2 s). Without the baked cache, pysheds spent ~40 s of a 60 s run compiling.
+`sandbox/check_hydrology.py` fails the build unless each hydrology library delineates a basin
+of known area. An import check would have passed. Architecture S12.11.
+
 **A cache entry is only trusted if its install finished.** `cached_dep_names` requires a
 `RECORD` inside the `.dist-info`, and a failed or timed-out install evicts the cache
 (`_evict_torn_cache`). pip moves the package tree and its metadata into `--target` as separate

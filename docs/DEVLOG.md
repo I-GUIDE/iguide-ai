@@ -5214,3 +5214,37 @@ rather than from the previous one.
   scanned, because a staged name is excluded from the run's artifacts, so a run that writes a file
   under an earlier file's name would lose its output. The claude and opencode peers stage the
   conversation's files once, at the start of a run. They do not scan.
+
+## 2026-10-09 · M8.85 · pysheds runs in the sandbox, on the image's numpy, without slowing esda
+
+**Change** `sandbox/Dockerfile` bakes pysheds 0.5, installed with `-c` against the image's own
+  `pip freeze` so nothing already there moves (numpy stays 2.4.6). `sandbox/pysheds_support.py`,
+  loaded from a `.pth` file, is a meta-path hook that acts only when `pysheds` is imported. It
+  puts `numpy.in1d` back as `isin` over the flattened input, appends `/opt/pysheds-private`
+  (numba and llvmlite, moved out of site-packages) to `sys.path`, and copies the numba cache
+  compiled at build into the run's tmpfs. `sandbox/check_hydrology.py` runs at build and
+  delineates GIS harness T06's basin. `_IMPORT_TO_PIP` names pysheds, and `verify_imports.py`
+  imports it, plus shapely, which the probe asked about but nothing imported.
+
+**Why** T06 (slope + watershed) spent 29 of 30 steps and about 2M Lumen tokens on deepseek with
+  the gate on. The model kept rewriting pysheds code around `AttributeError: module 'numpy' has
+  no attribute 'in1d'`: numpy 2.4 removed it, pysheds 0.5, the newest release, still calls it in
+  nine routines, and numpy is pinned to the image on purpose. The private numba and the baked
+  cache fix two costs that the fix itself exposed. pysheds compiles ~80 kernels at import (39.5 s
+  of a 60 s run, cold, native). And with numba importable esda recompiles its own kernels every
+  run (a 400-unit `Moran_Local` went from 0.0 s to 8.2 s). Architecture S12.11 has the reasoning.
+
+**Measured** amd64 images, `--network none --read-only`, a non-root uid. Through
+  `DockerCodeExecutor` with `dependencies=["pysheds"]`: prototype's image installed pysheds and
+  failed on in1d in 79.1 s; this one installed nothing and returned 16.2 km² in 8.7 s. On the
+  harness's own `dem.tif`, accumulation gives 18,000 cells = 16.2 km² (exact) and catchment gives
+  15.85 km² (-2.2%, it drops border cells). A pysheds already in a conversation's `.deps` works
+  too. pysheds import in run posture: 3.6 to 5.8 s, against 48 to 66 s cold. Image 1.72 to 2.07 GB. `Moran_Local`
+  stays at 0.0 s. 14 new tests in `test_sandbox_hydrology.py` (one is `-m integration`, run
+  against the built image). Suite on the Mac: 3781 passed, 19 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
+
+**Not fixed** The VM's sandbox image needs a rebuild to get any of this, and that is a deploy.
+  The model is not told about pysheds' edge-pit and border-cell behaviours, which cost T06 steps
+  even when the calls worked. An arm64 build of `sandbox/Dockerfile` fails at fiona (sdist, no
+  GDAL), and that predates this change.
