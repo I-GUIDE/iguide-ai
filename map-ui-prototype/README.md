@@ -62,6 +62,40 @@ the deployed server, which does not have your locally-created files — download
 `{"error":"unknown file_id: ..."}`. Empty keeps URLs host-relative so they resolve through the
 Vite proxy.
 
+## Replaying a recorded turn
+
+The GIS harness (`gis_harness/`) records every turn's server events as `<task>.events.jsonl`.
+A replay runs one of them through this page instead of a live stream: the recorded query is sent
+as if typed, `/agent/chat/stream` answers with the recorded events, and each layer is served
+from the file the harness captured with the run. `streamChat`, `collectDownloads` and the
+`map_layer` drawing are the same code as live. That is the reason for doing it this way: a
+re-implementation of what the UI shows would be a second opinion, and this is the UI.
+
+```sh
+# screenshots: <task>.png beside every events file under the paths (absolute paths)
+npm run replay:shots -- /abs/path/to/gis_harness_runs_archive/p5-gate [--force] [--parallel 4]
+# by hand: open http://localhost:5173/?replay=p5-gate/lumen_deepseek-v4-flash/T02L.events.jsonl
+REPLAY_ROOT=/abs/path/to/gis_harness_runs_archive npm run dev
+npm run check:replay     # the reducer, the server, and a recording through the real streamChat
+```
+
+- **Only dev and `VITE_REPLAY=1` builds have it.** `REPLAY_KEY` folds to `null` in a production
+  build, so `npm run build` ships none of it.
+- **A layer the replay cannot draw is said on the picture.** A strip above the page names the
+  run, model and turn, counts the stream's map layers against the ones the page actually holds
+  when the turn ends, and gives a line per layer that did not make it: its file was never
+  captured, its inline GeoJSON arrived as a string, or a raster's bounds are projected metres so
+  it lands off the map. The strip turns red when there is any such line.
+- **The screenshot holds the whole transcript.** In replay the page grows to fit it and the map
+  keeps a fixed 820 px height at the top, so its framing is the one a user saw.
+- What the replay changes in a recording, each named on the strip: absolute agent-file urls
+  become host-relative (nothing is fetched from the deployment), geojson stored as JSON text by
+  `chat_traces` is parsed back, and a recording with no answer event gets its record's answer.
+- A replay never saves itself to History.
+- Headless Chrome is the installed Google Chrome (`playwright-core`, no browser download), or
+  `REPLAY_CHROME=<binary>`. Basemap tiles come from tile.openstreetmap.org as they do live,
+  through a persistent profile in `node_modules/.cache/replay-profile` so each area is fetched once.
+
 ## Two visualization routes
 
 - **Interactive map** — vector data (GeoJSON) is plotted as a layer. Geometry streamed via the

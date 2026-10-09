@@ -39,6 +39,42 @@ Output: `gis_harness/runs/<label>/<provider>_<model>/<task>.json` (score, answer
 tokens, cost) and `<task>.events.jsonl` (every SSE event), plus `summary.json`. `runs/` is
 gitignored. Baselines worth keeping are copied to `baselines/`.
 
+## Screenshots
+
+`--screenshots` replays every turn of the run through the map UI at the end and writes
+`<task>.png` beside its events file. The picture shows what the user would have seen: the answer,
+its banners, the Downloads panel, and the map with the turn's layers. The replay is the page's own
+client reading the recorded stream (see "Replaying a recorded turn" in
+`map-ui-prototype/README.md`). For older runs, backfill:
+
+```bash
+python -m gis_harness.screenshots /abs/path/to/gis_harness_runs_archive          # skips turns that have a .png
+python -m gis_harness.screenshots gis_harness/runs/<label> --force               # redo them
+```
+
+A turn's map layers are fetched by url from a server that is gone by the time anyone replays
+it, so the harness saves each one while the server is up, as `layers/<task>__NN__<label>.<ext>`,
+NN being its place among the turn's `map_layer` events. That is the layout
+`gis_harness_runs_archive/tools/dump_layers.py` gave the older runs, and the replay serves from
+it. `<task>.json` counts them under `layer_files`. A layer with no file is named on the
+screenshot, in red. Each directory also gets `screenshots.jsonl`: per turn, layers drawn of
+total, why any were not, seconds and bytes. It is `.jsonl` because `--summarise` and
+`--compare` read every `.json` under a run as a turn.
+
+Cost, measured on the 460-turn archive on 2026-10-09 (Mac, 4 pages at once, warm tile cache):
+168 s for all 460, about 0.37 s of wall time per turn, plus a 4–5 s build once per call. A
+page takes 0.9 s at the median: 0.8 s with no map, 2.6 s with layers, which waits for the
+basemap tiles and the fit's ease to finish. The p90 is 2.7 s and the worst is 3.3 s. A PNG is
+0.27 MB at the median (0.22 MB with no map, 0.97 MB with one) and 1.9 MB at most, 239 MB for
+the archive. The largest process peaked at 0.9 GB.
+
+What a replay changes, each named on the strip: agent-file urls are made host-relative, so a
+turn recorded against agent.i-guide.io is served from the capture and never asks production.
+A layer's geojson stored as JSON text by `chat_traces` is parsed back. A recording with no
+answer event (live rounds pulled from `chat_traces`) gets its record's answer as the final
+`result`. Files other than layers (inline images, downloads) are served only if the run kept
+its `server_files/`, so a live round's images show as broken.
+
 ## What is scored
 
 | | from | means |

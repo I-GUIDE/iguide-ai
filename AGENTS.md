@@ -786,6 +786,11 @@ delivered three times buried a density surface under raw points. `"tests pass"` 
 stream contains the event"` are necessary, not sufficient — count the layers on screen and
 confirm the render mode.
 
+A recorded turn can be put back on screen without the server that produced it:
+`python -m gis_harness.screenshots <run dir>` replays each `<task>.events.jsonl` through the
+page's own client and writes `<task>.png` (`map-ui-prototype/README.md`, "Replaying a recorded
+turn"). That is evidence of what the user saw. It does not replace driving a live change.
+
 ## Who is calling, and which deployment this is
 
 Three named modes, exactly one active (`AGENT_MODE=dev|demo|token`,
