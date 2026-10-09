@@ -169,16 +169,17 @@ _EXTRACTION_NOTE = (
     # package name: one run guessed `from method_library import ...` (the host
     # directory name) and failed with ModuleNotFoundError. The importable package is
     # `iguide_methods`, whatever the mount is called.
-    # The gate can only check a UNIT if the run declares one; nothing in a frame
-    # distinguishes 21500 metres from 21500 feet.
+    # No declaration is asked for: no model in the GIS harness ever made one (0 of 96 gate
+    # reports), so the gate types what the run prints and what its measuring calls return
+    # (agent_runtime/measured_outputs.py). IGUIDE_OUTPUTS stays optional, for range checks.
     "VERIFICATION: a deterministic invariant gate inspects your live frames after the "
     "run (projected-CRS-before-measuring, entirely-null columns, join cardinality) and "
     "returns findings in `verification`. If it reports a failure, FIX AND RE-RUN — a "
     "failed gate means the reported numbers are not verified and the answer will say "
-    "so. For any number your answer will quote, ASSIGN a module-level dict "
-    "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\"}} "
-    "(optional \"min\"/\"max\" get range-checked); the gate reads the variable, so "
-    "printing it checks nothing, and a null unit blocks verification. "
+    "so. Numbers you print with their unit, and the areas, lengths and distances geopandas "
+    "measures, are recorded with the CRS they were measured in. Optionally, a module-level "
+    "IGUIDE_OUTPUTS = {\"name\": {\"value\": 25000, \"unit\": \"metres\", \"min\": 0}} "
+    "range-checks a value. "
     "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
     "`iguide_methods` — extracted, independently callable functions from platform "
     "elements, already present with NO install and NO network. Get an exact, "

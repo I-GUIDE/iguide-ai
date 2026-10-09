@@ -35,17 +35,18 @@ def test_a_printed_figure_carries_the_unit_printed_with_it(line, value, unit):
     assert [(q["value"], q["unit"]) for q in got] == [(value, unit)]
 
 
-@pytest.mark.parametrize("line", [
-    "TOTAL schools within 1 mile: 19",          # the unit belongs to the 1, not the 19
-    "Events within 7 days AND within 25 km: 673",
-    "band 2: min=0, max=5343, dtype=uint16",     # min is a minimum, not minutes
-    "C1 + C2: 516771.47",                        # a site label, not coulombs squared
-    "crs EPSG:32616",                            # an identifier
-    "(199,75) acc=18000 elev=200.3",
+@pytest.mark.parametrize("line,value", [
+    ("TOTAL schools within 1 mile: 19", 19),     # the unit belongs to the 1, not the 19
+    ("Events within 7 days AND within 25 km: 673", 673),
+    ("band 2: min=0, max=5343, dtype=uint16", 0),  # min is a minimum, not minutes
+    ("C1 + C2: 516771.47", 516771.47),           # a site label, not coulombs squared
+    ("crs EPSG:32616", 32616),                   # an identifier
+    ("(199,75) acc=18000 elev=200.3", 18000),
+    ("nearest school 41.8796 N, 87.6261 W", 41.8796),  # a latitude, not newtons
 ])
-def test_a_label_is_not_read_as_the_unit_of_a_number_it_does_not_measure(line):
+def test_a_label_is_not_read_as_the_unit_of_a_number_it_does_not_measure(line, value):
     got = measured_outputs.printed_quantities(line)
-    assert not [q for q in got if q["dimension"] in ("[length]", "[length] ** 2")], got
+    assert not [q for q in got if q["value"] == value], got
 
 
 # --------------------------------------------------------------------------- through the sandbox
@@ -125,13 +126,15 @@ print(f"Area: {a / 1e6:,.2f} km²")
 def test_a_printed_figure_measured_in_degrees_is_named(tmp_path, monkeypatch):
     report, _ = _run(tmp_path, monkeypatch, COUNTY + '''
 import warnings
+from shapely.geometry import Point
 warnings.filterwarnings("ignore")
-a = g.area.sum()
-print(f"Area: {a:.4f} km²")
+d = g.distance(Point(-87.0, 41.0)).min()
+print(f"Distance to the gauge: {d:.4f} m")
 ''')
     assert report["verdict"] == "fail"
     named = [f for f in report["findings"] if f["check"] == "measured_in"]
-    assert named and "km²" in named[0]["target"]
+    assert named and named[0]["status"] == "fail" and " m" in named[0]["target"]
+    assert "EPSG:4326" in named[0]["message"]
 
 
 def test_the_model_sees_a_bounded_record(tmp_path, monkeypatch):
