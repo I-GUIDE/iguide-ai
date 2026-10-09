@@ -11,7 +11,10 @@ from agent_runtime.tool_args import accept_null_defaults
 from agent_runtime.extraction_flag import extraction_enabled
 
 # Bounds on how much gets auto-staged into a sandbox run (conversation files +
-# explicitly requested files). Keeps a large session from blowing up disk/time.
+# explicitly requested files). Keeps a large session from blowing up disk/time on a shared
+# deployment. A local experiment (AGENT_MODE=local) has no size cap unless one is set: the
+# budget protects a server other people use, and on a laptop it only refused a 306 MB raster
+# the user had chosen to analyse.
 DEFAULT_MAX_INPUT_FILES = 20
 DEFAULT_MAX_INPUT_MB = 200
 
@@ -23,11 +26,32 @@ def _max_input_files() -> int:
         return DEFAULT_MAX_INPUT_FILES
 
 
-def _max_input_bytes() -> int:
+def _local_mode() -> bool:
     try:
-        mb = float(os.getenv("AGENT_CODE_EXEC_MAX_INPUT_MB", str(DEFAULT_MAX_INPUT_MB)))
+        from agent_runtime import deployment_mode
+        return deployment_mode.is_local()
+    except Exception:  # noqa: BLE001 — an unreadable mode keeps the cap
+        return False
+
+
+def _max_input_bytes() -> Optional[int]:
+    """Total bytes one run may stage, or None for no cap.
+
+    An explicit AGENT_CODE_EXEC_MAX_INPUT_MB always wins. Unset, a deployment gets
+    DEFAULT_MAX_INPUT_MB and a local experiment gets no cap."""
+    raw = (os.getenv("AGENT_CODE_EXEC_MAX_INPUT_MB") or "").strip()
+    if not raw:
+        if _local_mode():
+            return None
+        raw = str(DEFAULT_MAX_INPUT_MB)
+    try:
+        mb = float(raw)
     except (TypeError, ValueError):
         mb = DEFAULT_MAX_INPUT_MB
+    if mb != mb:            # nan: not a budget
+        mb = DEFAULT_MAX_INPUT_MB
+    if mb == float("inf"):  # "inf" says no cap; int() of it would raise mid-staging
+        return None
     return int(max(1.0, mb) * 1024 * 1024)
 
 
@@ -110,7 +134,7 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
         if len(resolved) >= max_files:
             skipped.append({"ref": str(ref), "reason": "max input files exceeded", "limit": max_files})
             continue
-        if total_bytes + size > max_bytes:
+        if max_bytes is not None and total_bytes + size > max_bytes:
             skipped.append({"ref": str(ref), "reason": "max total input size exceeded",
                             "limit_bytes": max_bytes, "size_bytes": size})
             continue
