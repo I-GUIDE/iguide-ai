@@ -205,7 +205,7 @@ def make_code_execution_tools(
     """
     from langchain_core.tools import StructuredTool
 
-    from agent_runtime.code_execution import get_code_executor
+    from agent_runtime.code_execution import get_code_executor, sandbox_capability_note
 
     default_ids = [str(x).strip() for x in (default_input_file_ids or []) if str(x).strip()]
 
@@ -383,6 +383,8 @@ def make_code_execution_tools(
             "`entrypoint` (e.g. entrypoint=\"main.py\", no `code`), and fix it with "
             "edit_workspace_file between runs. "
             + (_EXTRACTION_NOTE if extraction_enabled() else "")
+            # Network in the run phase, or the tool bridge: said only while one is really on.
+            + sandbox_capability_note()
         ),
     )
     tools = [tool]

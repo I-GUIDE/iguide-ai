@@ -55,6 +55,41 @@ DEFAULT_HOSTS: Tuple[Tuple[str, str], ...] = (
     ("data.cityofchicago.org", "City of Chicago open data (Socrata)"),
 )
 
+#: Added for the code bridge only (agent_runtime/tool_bridge.py): the hosts the 2026-10-09 live
+#: sweep's failed questions needed. The fetch_public_data TOOL keeps DEFAULT_HOSTS, so turning
+#: the bridge on changes nothing for it. AGENT_CODE_BRIDGE_HOSTS replaces the whole bridge list.
+BRIDGE_EXTRA_HOSTS: Tuple[Tuple[str, str], ...] = (
+    ("api.water.usgs.gov", "USGS NLDI: upstream basin of a gauge, /nldi/linked-data/nwissite/USGS-<id>/basin"),
+    ("api.waterdata.usgs.gov", "USGS Water Data OGC API: monitoring locations, drainage area"),
+    ("waterdata.usgs.gov", "USGS monitoring-location pages"),
+    ("planetarycomputer.microsoft.com", "Planetary Computer: STAC search /api/stac/v1/search?collections=sentinel-2-l2a&bbox=..&datetime=..; "
+     "data API /api/data/v1/item/bbox/{minx},{miny},{maxx},{maxy}.tif?collection=..&item=..&assets=..&asset_as_band=true&max_size=1024 "
+     "returns a GeoTIFF; without max_size a county is over the size cap"),
+    ("sentinel2l2a01.blob.core.windows.net", "Sentinel-2 L2A assets (signed with a token from planetarycomputer.microsoft.com/api/sas/v1/token/sentinel-2-l2a; files are 50-200 MB, over the cap: prefer the data API)"),
+    ("z.overpass-api.de", "OpenStreetMap Overpass mirror"),
+    ("lz4.overpass-api.de", "OpenStreetMap Overpass mirror"),
+    ("overpass.kumi.systems", "OpenStreetMap Overpass mirror"),
+    ("router.project-osrm.org", "OSRM routing: /route/v1/driving/lon,lat;lon,lat?overview=full&geometries=geojson"),
+    ("api.censusreporter.org", "Census Reporter: ACS tables without a key, "
+     "/1.0/data/show/latest?table_ids=B19013&geo_ids=140|05000US17019 (tracts in a county)"),
+)
+
+#: One-line hints the bridge gives the model for each host.
+BRIDGE_HOST_NOTES: Dict[str, str] = {
+    **{h: why for h, why in DEFAULT_HOSTS},
+    **{h: why for h, why in BRIDGE_EXTRA_HOSTS},
+    "tigerweb.geo.census.gov": "Census TIGERweb; tigerWMS_Census2020/MapServer/6 tracts carry POP100",
+}
+
+
+def bridge_hosts() -> List[str]:
+    """The code bridge's allowlist: the tool's defaults plus BRIDGE_EXTRA_HOSTS."""
+    raw = os.getenv("AGENT_CODE_BRIDGE_HOSTS")
+    if raw is not None:
+        return [h.strip().lower() for h in raw.split(",") if h.strip()]
+    return [*(h for h, _ in DEFAULT_HOSTS), *(h for h, _ in BRIDGE_EXTRA_HOSTS)]
+
+
 _MAX_REDIRECTS = 5
 _CONNECT_TIMEOUT_S = 10
 _READ_TIMEOUT_S = 60
@@ -351,5 +386,5 @@ def make_public_data_tools(*, per_turn: Optional[int] = None) -> List[Any]:
                                          name="fetch_public_data", description=description)]
 
 
-__all__ = ["DEFAULT_HOSTS", "ENABLE_ENV", "Refused", "allowed_hosts", "check_url", "fetch",
+__all__ = ["BRIDGE_EXTRA_HOSTS", "DEFAULT_HOSTS", "bridge_hosts", "ENABLE_ENV", "Refused", "allowed_hosts", "check_url", "fetch",
            "is_enabled", "make_public_data_tools", "resolve_public"]

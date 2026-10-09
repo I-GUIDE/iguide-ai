@@ -296,6 +296,61 @@ def _drop_preinstalled(deps: List[str], have: frozenset) -> Tuple[List[str], Lis
     return kept, skipped
 
 
+# A run phase WITH network, for measurement only. The comparison of 2026-10-09 (stage
+# "Three ways to reach public data") needed the same peer with one difference, the run
+# container's network, so this flag changes the run phase's `--network` and nothing else.
+# Refused unless AGENT_MODE is explicitly `local` or `dev`: on any other mode, and with
+# AGENT_MODE unset (which defaults to dev), the run stays `--network none` and a warning
+# says why. A networked run reaches whatever its host reaches (the services beside it, the
+# cloud metadata endpoint, the LAN), so it is never a deployment setting.
+EXEC_NETWORK_ENV = "AGENT_CODE_EXEC_NETWORK"
+_EXEC_NETWORK_MODES = ("local", "dev")
+
+
+def exec_network() -> Optional[str]:
+    """The docker network for the run phase, or None for ``--network none``.
+
+    ``AGENT_CODE_EXEC_NETWORK``: unset/0/false/off/none = no network; 1/true/on = the default
+    ``bridge``; any other value names a docker network.
+    """
+    raw = (os.getenv(EXEC_NETWORK_ENV) or "").strip()
+    if raw.lower() in ("", "0", "false", "off", "no", "none"):
+        return None
+    mode = (os.getenv("AGENT_MODE") or "").strip().lower()
+    if mode not in _EXEC_NETWORK_MODES:
+        _LOG.warning("%s=%s REFUSED: AGENT_MODE must be set to one of %s (it is %r); the "
+                       "sandbox run phase stays --network none", EXEC_NETWORK_ENV, raw,
+                       "/".join(_EXEC_NETWORK_MODES), mode or "unset")
+        return None
+    if raw.lower() in ("1", "true", "on", "yes"):
+        return "bridge"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", raw):
+        _LOG.warning("%s=%r is not a docker network name; the run stays --network none",
+                       EXEC_NETWORK_ENV, raw)
+        return None
+    return raw
+
+
+# Told to the model only while the run phase really has network: every prompt and tool
+# description here says the sandbox has none, and a model told so never tries.
+EXEC_NETWORK_NOTE = (
+    "NETWORK (this deployment only): the code's RUN phase HAS outbound network. Code may "
+    "download public data itself (requests, urllib, geopandas.read_file(url), pystac-client, "
+    "rasterio on an https URL). This overrides any instruction elsewhere that says the "
+    "sandbox has no network. Credentials are not available inside the sandbox. "
+)
+
+
+def sandbox_capability_note() -> str:
+    """What the code can reach beyond its files, for the peers' prompts and execute_code."""
+    from agent_runtime import tool_bridge
+
+    note = EXEC_NETWORK_NOTE if exec_network() else ""
+    if tool_bridge.enabled():
+        note += tool_bridge.model_note()
+    return note
+
+
 def is_code_exec_enabled() -> bool:
     """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
     value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
@@ -520,6 +575,8 @@ class ExecResult:
     installed: List[str] = field(default_factory=list)  # pip deps installed before the run
     # Findings from the in-sandbox invariant gate. Empty dict = the gate did not run.
     verification: Dict[str, Any] = field(default_factory=dict)
+    # Calls the code made through the tool bridge (agent_runtime/tool_bridge.py), in order.
+    bridge_calls: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -540,6 +597,7 @@ class ExecResult:
             # Surfaced INSIDE the tool result, not appended to the answer afterwards, so the
             # model can react in-loop: reproject and re-run rather than caveat a wrong number.
             "verification": self.verification,
+            **({"bridge_calls": self.bridge_calls} if self.bridge_calls else {}),
         }
 
 
@@ -1220,8 +1278,26 @@ class CodeExecutor:
                 (work / CHECKS_FILENAME).unlink()
             except OSError:
                 pass
-            exit_code, stdout, stderr, timed_out, error = self._run(
-                work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint)
+            # The tool bridge, when on: a host thread answers the code's capability calls for
+            # the length of this run (agent_runtime/tool_bridge.py). Passed only when present,
+            # so an executor written against the older _run signature still works.
+            bridge = None
+            extra_run: Dict[str, Any] = {}
+            from agent_runtime import tool_bridge
+            if tool_bridge.enabled():
+                broot = tool_bridge.bridge_root_for(work)
+                bridge = tool_bridge.BridgeServer(
+                    broot, container_root=(tool_bridge.CONTAINER_ROOT if self.backend == "docker"
+                                           else str(broot)), session=session)
+                bridge.start()
+                extra_run["bridge_dir"] = broot
+            try:
+                exit_code, stdout, stderr, timed_out, error = self._run(
+                    work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint, **extra_run)
+            finally:
+                if bridge is not None:
+                    bridge.stop()
+                    bridge.cleanup()
             # Output files the run produced, plus the executed source itself (downloadable).
             # Staged input files are excluded so uploads aren't re-persisted as outputs.
             unchanged = {rel for rel, sig in _stat_map(work).items()
@@ -1270,14 +1346,16 @@ class CodeExecutor:
             error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps,
-                              verification=verification)
+                              verification=verification,
+                              bridge_calls=(bridge.calls if bridge is not None else []))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
     def _run(self, work: Path, timeout: int,
              dependencies: Optional[List[str]] = None,
              deps_cache: Optional[Path] = None,
-             entrypoint: Optional[str] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
+             entrypoint: Optional[str] = None,
+             bridge_dir: Optional[Path] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
         raise NotImplementedError
 
 
@@ -1371,11 +1449,14 @@ class DockerCodeExecutor(CodeExecutor):
 
     def build_argv(self, work: Path, name: str,
                    deps_cache: Optional[Path] = None,
-                   entrypoint: Optional[str] = None) -> List[str]:
+                   entrypoint: Optional[str] = None,
+                   bridge_dir: Optional[Path] = None) -> List[str]:
         """Execution phase: NO network, read-only rootfs, deps importable via PYTHONPATH."""
         argv = [
             "docker", "run", "--rm", "--init", "--name", name,
-            "--network", "none",            # no network during execution
+            # No network during execution, unless the local-only measurement flag says
+            # otherwise (exec_network); the install phase below is unchanged either way.
+            "--network", exec_network() or "none",
             "--read-only",                  # read-only root fs
             "--cap-drop", "ALL",            # drop all capabilities
             "--security-opt", "no-new-privileges",
@@ -1393,6 +1474,14 @@ class DockerCodeExecutor(CodeExecutor):
         if lib:
             argv += ["-v", f"{lib}:{METHOD_LIBRARY_MOUNT}:ro"]
             pythonpath = f"{METHOD_LIBRARY_MOUNT}:{pythonpath}"
+        if bridge_dir is not None:
+            # Requests go out through `in`; answers, data and the client module come back
+            # through `out`, which the container cannot write (agent_runtime/tool_bridge.py).
+            from agent_runtime.tool_bridge import CONTAINER_ROOT
+            argv += ["-v", f"{bridge_dir}/in:{CONTAINER_ROOT}/in:rw",
+                     "-v", f"{bridge_dir}/out:{CONTAINER_ROOT}/out:ro",
+                     "--env", f"IGUIDE_BRIDGE={CONTAINER_ROOT}"]
+            pythonpath = f"{pythonpath}:{CONTAINER_ROOT}/out"
         argv += ["--env", f"PYTHONPATH={pythonpath}"]
         if deps_cache is not None:
             # READ-ONLY on purpose. The cache outlives the run, so code that could write to it
@@ -1441,7 +1530,8 @@ class DockerCodeExecutor(CodeExecutor):
         return argv
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None,
+             bridge_dir: Optional[Path] = None):
         # Phase 1 (deps): a separate container WITH network installs into /work/.deps.
         # Nothing to install is the common case once the image is baked and the cache is warm,
         # and then this phase — a whole container start — is skipped entirely.
@@ -1473,7 +1563,8 @@ class DockerCodeExecutor(CodeExecutor):
         # Phase 2 (exec): NO network.
         name = f"agentexec_{uuid.uuid4().hex[:12]}"
         try:
-            proc = fork_safe.run(self.build_argv(work, name, deps_cache, entrypoint),
+            proc = fork_safe.run(self.build_argv(work, name, deps_cache, entrypoint,
+                                                 **({"bridge_dir": bridge_dir} if bridge_dir else {})),
                                  capture_output=True, text=True, timeout=timeout + 5)
             return proc.returncode, proc.stdout, proc.stderr, False, None
         except subprocess.TimeoutExpired as exc:
@@ -1517,7 +1608,8 @@ class LocalSubprocessExecutor(CodeExecutor):
         return found
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None,
+             bridge_dir: Optional[Path] = None):
         # No container to mount into, so the durable cache IS the target directory.
         deps_dir = deps_cache if deps_cache is not None else (work / DEPS_DIRNAME)
         if dependencies:
@@ -1539,6 +1631,9 @@ class LocalSubprocessExecutor(CodeExecutor):
             paths.append(str(lib))
         if dependencies or deps_cache is not None:
             paths.append(str(deps_dir))
+        if bridge_dir is not None:
+            env["IGUIDE_BRIDGE"] = str(bridge_dir)
+            paths.append(str(Path(bridge_dir) / "out"))
         if paths:
             env["PYTHONPATH"] = os.pathsep.join(paths)
         try:
@@ -1562,7 +1657,8 @@ class DisabledExecutor(CodeExecutor):
         self._reason = reason
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
-             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None):
+             deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None,
+             bridge_dir: Optional[Path] = None):
         return None, "", "", False, self._reason
 
 
