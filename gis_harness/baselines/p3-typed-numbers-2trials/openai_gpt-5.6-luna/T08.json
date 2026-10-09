@@ -1,0 +1,94 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"2020 2 100 100 EPSG:32616 | 10.00, 0.00, 390000.00|\\\\n| 0.00,-10.00, 4440000.00|\\\\n| 0.00, 0.00, 1.00| BoundingBox(left=390000.0, bottom=4439000.0, ri"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using \\(NDVI=(NIR-Red)/(NIR+Red)\\), with band 1 as red and band 2 as near-infrared:\n\n- **Mean NDVI in 2020:** **0.5326**\n- **Mean NDVI in 2024:** **0.4998**\n- **Pixels losing more than 0.2 NDVI:** **900**\n- **Area affected:** **9.00 hectares**\n\nThe area calculation uses 10 m \u00d7 10 m pixels, or **0.01 hectares per pixel**. NDVI rasters were also produced for both dates:\n\n- [NDVI 2020 GeoTIFF](/agent/files/file_67125e7bc079/download)\n- [NDVI 2024 GeoTIFF](/agent/files/file_5eca8a6a5dbc/download)\n- [Summary JSON](/agent/files/file_e7449e676b82/download)",
+  "seconds": 59.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 73710,
+    "cached_input_tokens": 0,
+    "output_tokens": 2967,
+    "usage_absent": 0,
+    "cost_usd": 0.0183,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T08-gpt-5.6-luna-1791501150-0"
+}

@@ -1,0 +1,106 @@
+{
+  "task": "T10",
+  "title": "Interpolation: IDW + ordinary kriging (Meuse)",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "meuse.csv holds the Meuse river soil samples (x, y in metres, Dutch RD New, EPSG:28992; zinc in ppm). Estimate zinc at x=179500, y=331500 two ways: (a) inverse distance weighting with power 2 using all samples, and (b) ordinary kriging of log(zinc) with a spherical variogram (nugget 0.05, partial sill 0.59, range 897 m) using all samples, back-transformed with exp().",
+  "files": [
+    "meuse.csv"
+  ],
+  "expected": {
+    "idw_zinc": 397.44105463237537,
+    "ok_zinc": 309.53149003514136
+  },
+  "expected_why": {
+    "ok_zinc": "OK system solved in numpy, Sph(0.05, 0.59, 897), exp() back"
+  },
+  "score": {
+    "task": "T10",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "idw_zinc",
+        "kind": "number",
+        "expected": 397.44105463237537,
+        "matched": true,
+        "found": "397.441 ppm"
+      },
+      {
+        "name": "ok_zinc",
+        "kind": "number",
+        "expected": 309.53149003514136,
+        "matched": true,
+        "found": "309.531 ppm"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 971, in <module>\\\\n df=pd.read_csv(path)\\\\n ^^^^^^^^^^^^^^^^^\\\\n "
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": "meuse.csv",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using all 155 samples in `meuse.csv`, with coordinates interpreted as Dutch RD New (EPSG:28992), the estimated zinc concentration at **(x, y) = (179500, 331500)** is:\n\n| Method | Estimated zinc |\n|---|---:|\n| **(a) IDW, power 2** | **397.441 ppm** |\n| **(b) Ordinary kriging of log(zinc), back-transformed with `exp()`** | **309.531 ppm** |\n\nKriging parameters used: spherical variogram with nugget **0.05**, partial sill **0.59**, and range **897 m**. The estimated log(zinc) was **5.73506**, with kriging weights summing to **1.0**. The nearest sample is approximately **69.29 m** from the target.\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `this run`: invariant gate (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked.\n- computed value from `IGUIDE_OUTPUTS`: invariant gate (declared_outputs): IGUIDE_OUTPUTS was printed, not assigned: the gate reads a module-level variable, so none of the printed numbers was checked. Assign IGUIDE_OUTPUTS = {...} at module scope.",
+  "seconds": 58.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 92048,
+    "cached_input_tokens": 0,
+    "output_tokens": 2420,
+    "usage_absent": 0,
+    "cost_usd": 0.0213,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T10-gpt-5.6-luna-1791502770-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "declared_outputs"
+      ]
+    }
+  ]
+}

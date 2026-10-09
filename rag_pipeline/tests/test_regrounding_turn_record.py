@@ -372,18 +372,29 @@ def test_the_directive_does_not_invite_restating_or_mentioning_a_draft():
 
 # --- 2. the units gate reads the units a run actually writes ------------------------------------
 
+def _unit_findings(outputs):
+    """Stage 43: units are judged agent-side with a unit library, from the sandbox's report."""
+    from agent_runtime import declared_outputs
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS, run_checks
+
+    rep = run_checks({DECLARED_OUTPUTS: outputs})
+    extra, _ = declared_outputs.evaluate(rep)
+    return [f for f in [*rep["findings"], *extra]
+            if f["check"] in ("declared_units", "finite_value", "measured_in")]
+
+
 @pytest.mark.parametrize("unit", ["square_miles", "square miles", "mi2", "mi²", "sq mi", "km2",
                                   "acres", "hectares", "m", "km", "mi", "miles", "mile", "ft",
                                   "sq ft", "square_feet", "ft2", "yards", "nautical miles"])
 def test_common_area_and_length_units_are_recognised(unit):
-    from agent_runtime.sandbox_verify import PASS, check_declared_units
-    out = check_declared_units({"v": {"value": 997.93, "unit": unit}})
+    from agent_runtime.sandbox_verify import PASS
+    out = _unit_findings({"v": {"value": 997.93, "unit": unit}})
     statuses = {f["check"]: f["status"] for f in out}
     assert statuses.get("declared_units") == PASS, (unit, out)
 
 
 def test_the_live_runs_declared_outputs_all_pass():
-    from agent_runtime.sandbox_verify import PASS, check_declared_units
+    from agent_runtime.sandbox_verify import PASS
     for outputs in (
             {"champaign_area_km2": {"value": 2584.62, "unit": "km2"},
              "champaign_area_mi2": {"value": 997.93, "unit": "mi2"},
@@ -393,25 +404,28 @@ def test_the_live_runs_declared_outputs_all_pass():
              "champaign_area_mi2": {"value": 997.93, "unit": "square_miles"},
              "london_paris_km": {"value": 340.0, "unit": "km"},
              "london_paris_mi": {"value": 211.3, "unit": "miles"}}):
-        bad = [f for f in check_declared_units(outputs) if f["status"] != PASS]
+        bad = [f for f in _unit_findings(outputs) if f["status"] != PASS]
         assert not bad, bad
 
 
-def test_an_unrecognised_unit_alone_is_a_quiet_note_not_an_alarm():
-    """A unit the gate cannot read is "not checked", not evidence of a hallucination."""
+def test_a_unit_that_does_not_parse_is_not_quietly_passed():
+    """Stage 43: units parse with a unit library, so `furlongs2`, `square_miles` and `schools`
+    no longer reach here (test_invariant_gate.py holds that). What does is a unit nobody can
+    read, and that is a number nobody can check: it says COULD NOT VERIFY, without calling it
+    a hallucination."""
     from agent_runtime.supervisor import graph as g
     report = {"verdict": "cannot_determine", "counts": {"pass": 6, "cannot_determine": 1},
               "findings": [{"check": "declared_units", "status": "cannot_determine",
-                            "target": "area_furlongs2",
-                            "message": "unrecognised unit 'furlongs2'; not checked"}]}
+                            "target": "rate", "unit": "km/hr^^",
+                            "message": "unit 'km/hr^^' does not parse as a unit; the number "
+                                       "cannot be checked"}]}
     ctx = {"analysis_results": {"tool_results": [_result(
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["invariant_gate"] == "cannot_determine"
-    assert audit["hallucination_detected"] is False
-    note = g._apply_grounding_caveat("The area is 12 furlongs².", audit)
-    assert "COULD NOT VERIFY" not in note and "hallucination" not in note.lower()
-    assert "furlongs2" in note and "not checked" in note
+    note = g._apply_grounding_caveat("The rate is 12.", audit)
+    assert "COULD NOT VERIFY" in note and "km/hr^^" in note
+    assert "hallucination" not in note.lower()
 
 
 def test_a_gate_unknown_does_not_disable_reconciling_a_number_another_tool_returned():
@@ -466,16 +480,17 @@ def test_any_other_gate_unknown_still_says_could_not_verify():
 
 
 def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():
-    """Live 19:42 UTC: a metres column carried back to WGS84 that the gate cannot trace is not a
-    reason to say COULD NOT VERIFY (with or without an unrecognised unit beside it)."""
+    """A finding the gate marks advisory is "left unchecked", not a reason to say COULD NOT
+    VERIFY. (Stage 43's gate no longer emits the two advisory classes this was written for; the
+    flag stays the general mechanism.)"""
     from agent_runtime.supervisor import graph as g
     report = {"verdict": "cannot_determine", "counts": {"pass": 9, "cannot_determine": 2},
               "findings": [
                   {"check": "projected_crs", "status": "cannot_determine",
                    "target": "schools_within_4326", "advisory": True,
                    "message": "EPSG:4326 frame holds a measurement column ('distance_m') …"},
-                  {"check": "declared_units", "status": "cannot_determine", "target": "x",
-                   "message": "unrecognised unit 'furlongs'; not checked"}]}
+                  {"check": "coverage", "status": "cannot_determine", "target": "x",
+                   "advisory": True, "message": "left unchecked"}]}
     ctx = {"analysis_results": {"tool_results": [_result(
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)

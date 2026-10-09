@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from agent_runtime.sandbox_verify import (prologue_source, check_declared_units, FAIL, PASS, UNKNOWN, check_join_cardinality,
+from agent_runtime.sandbox_verify import (prologue_source, FAIL, PASS, UNKNOWN, check_join_cardinality,
                                           check_not_all_nan, check_projected_crs,
                                           epilogue_source, run_checks)
 
@@ -43,8 +43,12 @@ def _status(findings, target, check):
 
 # ------------------------------------------------------------------ CRS: the motivating bug
 
-def test_a_geographic_frame_fails_the_crs_check():
-    assert check_projected_crs("gdf", _geo("EPSG:4326"))["status"] == FAIL
+def test_a_geographic_frame_alone_is_decided_by_what_was_measured_in_it():
+    """Stage 43: the frame alone cannot say whether anything was measured in degrees (data
+    arrives in 4326 and is reprojected); the operations decide. On its own it is marked
+    geographic and left undecided."""
+    f = check_projected_crs("gdf", _geo("EPSG:4326"))
+    assert f["status"] == UNKNOWN and f["geographic"] is True
 
 
 def test_a_projected_frame_passes():
@@ -62,8 +66,10 @@ def test_a_frame_with_no_crs_is_unknown_not_a_pass():
     assert check_projected_crs("gdf", frame)["status"] == UNKNOWN
 
 
-def test_the_failure_message_says_how_to_fix_it():
-    msg = check_projected_crs("gdf", _geo("EPSG:4326"))["message"]
+def test_the_failure_message_says_how_to_fix_it(tracked, tmp_path):
+    tracked["gdf"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "out = gdf.buffer(0.1)\n")
+    msg = next(f["message"] for f in report["findings"] if f["status"] == FAIL)
     assert "degrees" in msg and "to_crs" in msg
 
 
@@ -165,9 +171,9 @@ def test_a_correct_run_produces_no_failures():
     assert report["counts"][FAIL] == 0
 
 
-def test_a_wrong_run_fails_the_whole_report():
-    report = run_checks({"gdf": _geo("EPSG:4326")})
-    assert report["verdict"] == FAIL
+def test_a_wrong_run_fails_the_whole_report(tracked, tmp_path):
+    tracked["gdf"] = _geo("EPSG:4326")
+    assert _run(tracked, tmp_path, "out = gdf.buffer(0.1)\n")["verdict"] == FAIL
 
 
 def test_one_unknown_downgrades_the_whole_verdict():
@@ -181,11 +187,11 @@ def test_one_unknown_downgrades_the_whole_verdict():
     assert report["verdict"] == UNKNOWN
 
 
-def test_a_failure_outranks_an_unknown():
+def test_a_failure_outranks_an_unknown(tracked, tmp_path):
     frame_unknown = _geo()
     frame_unknown.crs = None
-    report = run_checks({"unknown": frame_unknown, "bad": _geo("EPSG:4326")})
-    assert report["verdict"] == FAIL
+    tracked.update({"unknown": frame_unknown, "bad": _geo("EPSG:4326")})
+    assert _run(tracked, tmp_path, "out = bad.buffer(0.1)\n")["verdict"] == FAIL
 
 
 def test_non_frame_bindings_are_ignored():
@@ -392,9 +398,29 @@ def test_a_clean_run_with_no_audit_is_left_completely_alone():
 
 # ------------------------------------------------------------------ declared units + bounds
 
-def _declared(outputs):
+def _declared(outputs, **namespace):
+    """The whole path a declaration takes since stage 43: the sandbox reports it as written,
+    and the agent side (declared_outputs.py, with a unit library) judges the unit."""
+    from agent_runtime import declared_outputs
     from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
-    return run_checks({DECLARED_OUTPUTS: outputs})
+
+    rep = run_checks({DECLARED_OUTPUTS: outputs, **namespace})
+    extra, typed = declared_outputs.evaluate(rep)
+    return {**rep, "findings": [*rep["findings"], *extra], "outputs": typed,
+            **declared_outputs.merge_verdict(rep, extra)}
+
+
+def check_declared_units(outputs):
+    """Stage 43: the declared-output findings, through the sandbox AND the agent-side unit
+    check, since units are no longer judged inside the sandbox."""
+    return [f for f in _declared(outputs)["findings"]
+            if f["check"] in ("declared_units", "declared_value", "finite_value", "output_bounds",
+                              "measured_in")]
+
+
+def check_count_population(outputs, namespace, max_frames=12):
+    return [f for f in _declared(outputs, **namespace)["findings"]
+            if f["check"] == "count_population"]
 
 
 def test_a_declared_output_with_a_unit_passes():
@@ -425,8 +451,11 @@ def test_a_nan_output_fails():
     assert _declared({"mean": {"value": float("nan"), "unit": "metres"}})["verdict"] == FAIL
 
 
-def test_an_unrecognised_unit_is_unknown_not_a_failure():
-    assert _declared({"x": {"value": 1, "unit": "furlongs"}})["verdict"] == UNKNOWN
+def test_a_unit_that_does_not_parse_is_unknown_not_a_failure():
+    """Stage 43: "unrecognised" now means "a unit library cannot parse it". `furlongs` parses
+    (it is a length); `km/hr^^` does not."""
+    assert _declared({"x": {"value": 1, "unit": "km/hr^^"}})["verdict"] == UNKNOWN
+    assert _declared({"x": {"value": 1, "unit": "furlongs"}})["verdict"] == PASS
 
 
 def test_no_declared_outputs_adds_no_findings():
@@ -436,12 +465,16 @@ def test_no_declared_outputs_adds_no_findings():
 
 
 def test_declared_outputs_survive_the_epilogue(tmp_path, monkeypatch):
+    """The sandbox reports the declaration as written; the agent side judges its unit."""
+    from agent_runtime.code_execution import _read_checks
     from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
 
     monkeypatch.chdir(tmp_path)
     ns = {DECLARED_OUTPUTS: {"radius": {"value": 25000, "unit": None}}, "__name__": "__main__"}
     exec(compile(prologue_source(None) + epilogue_source(), "<script>", "exec"), ns)
-    report = json.loads((tmp_path / "checks.json").read_text())
+    raw = json.loads((tmp_path / "checks.json").read_text())
+    assert raw["declared"] == [{"name": "radius", "value": 25000, "unit": None}]
+    report = _read_checks(tmp_path)
     assert report["verdict"] == FAIL
     assert any(f["check"] == "declared_units" for f in report["findings"])
 
@@ -545,7 +578,7 @@ def test_a_geometry_column_that_is_not_named_geometry_is_still_found():
 
     gdf = _geo("EPSG:4326").rename_geometry("geom")
     assert _geometry_column(gdf) == "geom"
-    assert check_projected_crs("gdf", gdf)["status"] == FAIL
+    assert check_projected_crs("gdf", gdf)["geographic"] is True
 
 
 def test_geometry_bearing_frames_are_inspected_before_plain_ones():
@@ -555,8 +588,8 @@ def test_geometry_bearing_frames_are_inspected_before_plain_ones():
     ns = {f"df{i}": _pd().DataFrame({"a": [1, 2]}) for i in range(14)}
     ns["result_gdf"] = _geo("EPSG:4326")          # defined LAST, would have been cut
     report = run_checks(ns)
-    assert report["verdict"] == FAIL
     assert "result_gdf" in report["inspected"]
+    assert _find(report, "result_gdf", "projected_crs")["geographic"] is True
 
 
 def test_a_truncated_inspection_says_so():
@@ -585,12 +618,11 @@ def _pd():
     ("EPSG:3435", "feet", PASS),
 ])
 def test_a_projected_crs_in_the_wrong_unit_fails_a_declared_unit(epsg, declared, expected):
-    from agent_runtime.sandbox_verify import _crs_unit, _unit_matches
+    from agent_runtime.sandbox_verify import _unit_matches
 
     gdf = _geo(epsg)
-    actual = _crs_unit(gdf.crs)
-    matched = _unit_matches(declared, actual)
-    assert matched is not None, f"{epsg} axis unit was unreadable ({actual!r})"
+    matched = _unit_matches(declared, gdf.crs)
+    assert matched is not None, f"{epsg} axis unit was unreadable"
     assert (PASS if matched else FAIL) == expected
 
 
@@ -708,40 +740,35 @@ def test_the_null_check_discriminates_in_a_real_run(tmp_path, body, expect_clean
 
 # ------------------------------------------- reproject-then-measure is the CORRECT workflow
 
-def test_an_input_frame_that_was_reprojected_before_measuring_is_not_a_failure():
-    """Found by a live prototype run, and it is the flooding case.
-
-    The agent reprojected three Chicago points to EPSG:32616, buffered by 25 km, and produced
-    areas accurate to 0.16% of the analytic value — a completely correct run. The answer was
-    stamped "⛔ A deterministic invariant check FAILED, numeric results are not verified",
-    because the untouched 4326 input frame was still bound at module scope.
-
-    Data arrives in 4326 and you reproject it, so an input frame in a geographic CRS is present
-    in almost every correct geospatial script. Failing on it fails the standard workflow, and a
-    ⛔ on a right answer teaches the reader to ignore ⛔.
-    """
-    ns = {"gdf_wgs84": _geo("EPSG:4326"),
-          "gdf_utm": _geo("EPSG:32616").assign(area_km2=[1960.34, 1960.34])}
-    report = run_checks(ns)
+def test_an_input_frame_that_was_reprojected_before_measuring_is_not_a_failure(tracked,
+                                                                                 tmp_path):
+    """Found by a live prototype run, and it is the flooding case: a correct reproject-then-
+    measure run was stamped ⛔ because the untouched 4326 input was still bound. Stage 43: with
+    the operations recorded, the input is an input, whatever its columns are called."""
+    tracked["gdf_wgs84"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path,
+                  "gdf_utm = gdf_wgs84.to_crs('EPSG:32616')\n"
+                  "gdf_utm['area_km2'] = gdf_utm.buffer(25000).area / 1e6\n")
     assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
-    assert "reprojected before measuring" in _find(report, "gdf_wgs84", "projected_crs")["message"]
+    assert "an input" in _find(report, "gdf_wgs84", "projected_crs")["message"]
 
 
-def test_a_bare_geographic_frame_still_fails():
-    """The relaxation is driven by POSITIVE evidence of reprojection, not by the absence of a
-    measurement column. `gdf.buffer(25000)` on a 4326 frame produces a wrong GEOMETRY and no
-    numeric column at all, so keying on a measurement column would miss the motivating case."""
-    assert run_checks({"gdf": _geo("EPSG:4326")})["verdict"] == FAIL
-
-
-def test_a_measurement_computed_in_degrees_fails_even_beside_a_projected_frame():
-    """A number computed in a geographic CRS is wrong regardless of what else the run got right.
-    Only a frame carrying no measurement of its own can be an untouched input."""
-    ns = {"bad": _geo("EPSG:4326").assign(area_km2=[0.196, 0.196]),
-          "good": _geo("EPSG:32616").assign(area_km2=[1960.34, 1960.34])}
-    report = run_checks(ns)
+def test_the_motivating_degree_buffer_fails(tracked, tmp_path):
+    """`gdf.buffer(25000)` on a 4326 frame produces a wrong GEOMETRY and no numeric column at
+    all. The operation is what fails it, not the frame."""
+    tracked["gdf"] = _geo("EPSG:4326")
+    report = _run(tracked, tmp_path, "out = gdf.buffer(25000)\n")
     assert report["verdict"] == FAIL
-    assert _find(report, "bad", "projected_crs")["metric_column"] == "area_km2"
+
+
+def test_a_measurement_computed_in_degrees_fails_even_beside_a_projected_frame(tracked,
+                                                                                tmp_path):
+    """A number computed in a geographic CRS is wrong regardless of what else the run got right."""
+    tracked.update({"bad": _geo("EPSG:4326"), "good": _geo("EPSG:32616")})
+    report = _run(tracked, tmp_path, "good['a'] = good.area\nbad['a'] = bad.area\n")
+    assert report["verdict"] == FAIL
+    failed = [f for f in report["findings"] if f["status"] == FAIL]
+    assert failed and "bad.area" in failed[0]["message"]
 
 
 # ------------------------------------------- the OPERATION decides, not the frame inventory
@@ -808,17 +835,21 @@ def test_a_centroid_or_a_zero_buffer_in_4326_is_not_a_measurement(tracked, tmp_p
     assert report["verdict"] != FAIL, [f for f in report["findings"] if f["status"] == FAIL]
 
 
-def test_an_unexplained_metric_column_in_4326_is_unknown_not_a_failure(tracked, tmp_path):
-    """Suspicious, not proven: no tracked operation produced it, and a FAIL the gate cannot tie
-    to a measurement reaches the user as ⛔."""
-    tracked["gdf"] = _geo("EPSG:4326").assign(area_km2=[0.196, 0.196])
+def test_a_column_name_is_not_evidence_of_a_measurement(tracked, tmp_path):
+    """Stage 43 removed the column-name inference (`area`, `dist`, `_m`, which also matched
+    `pop_male` and `district_id`). With the operations recorded and none on a geographic frame,
+    a 4326 frame is an input whatever its columns are called."""
+    tracked["gdf"] = _geo("EPSG:4326").assign(area_km2=[0.196, 0.196], pop_male=[1, 2])
     report = _run(tracked, tmp_path, "x = 1\n")
-    assert _status(report["findings"], "gdf", "projected_crs") == UNKNOWN
+    assert _status(report["findings"], "gdf", "projected_crs") == PASS
 
 
-def test_without_the_tracker_the_frame_rules_still_apply():
-    """run_checks called on its own (no live tracker) keeps the old semantics."""
-    assert run_checks({"gdf": _geo("EPSG:4326")})["verdict"] == FAIL
+def test_without_the_tracker_a_geographic_frame_is_undecided():
+    """run_checks on its own (no live tracker) cannot tell an input from a measured frame, and
+    says so rather than guessing either way."""
+    report = run_checks({"gdf": _geo("EPSG:4326")})
+    assert report["verdict"] == UNKNOWN
+    assert "tracking was not live" in _find(report, "gdf", "projected_crs")["message"]
 
 
 def test_the_ui_script_passes_through_the_assembled_gate(tmp_path, monkeypatch):
@@ -860,10 +891,12 @@ def test_an_areal_unit_is_recognised(unit):
     assert UNKNOWN not in statuses, f"{unit!r} was not recognised"
 
 
-def test_a_genuinely_unknown_unit_is_still_flagged():
-    """Widening the vocabulary must not turn it into "accept anything"."""
-    findings = check_declared_units({"x": {"value": 1, "unit": "bananas"}})
+def test_a_unit_nobody_can_parse_is_still_flagged():
+    """Parsing with a unit library must not turn into "accept anything": an expression that is
+    not a unit stays cannot_determine, and a plural word is a count, checked as one."""
+    findings = check_declared_units({"x": {"value": 1, "unit": "km/hr^^"}})
     assert any(f["status"] == UNKNOWN for f in findings)
+    assert _declared({"x": {"value": 1.5, "unit": "bananas"}})["verdict"] == FAIL
 
 
 # ------------------------------------------------------------- counts are checkable numbers
@@ -875,8 +908,6 @@ def test_the_words_people_actually_use_for_a_count_are_recognised(unit):
     {'value': 27824, 'unit': 'records'} — the natural word for what it was counting — came back
     "unrecognised unit 'records'; not checked", and that single unknown downgraded a correct
     answer to unverified."""
-    from agent_runtime.sandbox_verify import check_declared_units
-
     findings = check_declared_units({"n_rows": {"value": 27824, "unit": unit}})
     statuses = {f["status"] for f in findings if f["check"] == "declared_units"}
     assert statuses == {"pass"}, (unit, findings)
@@ -885,8 +916,6 @@ def test_the_words_people_actually_use_for_a_count_are_recognised(unit):
 def test_recognising_a_count_is_not_the_same_as_checking_it():
     """A negative or fractional count is wrong whatever produced it. Recognising the unit and then
     passing is how 'unit count' would score a pass for a value of -3."""
-    from agent_runtime.sandbox_verify import check_declared_units
-
     negative = check_declared_units({"n": {"value": -3, "unit": "records"}})
     assert any(f["check"] == "declared_units" and f["status"] == "fail" for f in negative)
 
@@ -899,8 +928,6 @@ def test_recognising_a_count_is_not_the_same_as_checking_it():
 
 def test_a_whole_float_count_is_accepted():
     """`int(len(df))` is the common form, but `df.shape[0] * 1.0` reaches here as 27824.0."""
-    from agent_runtime.sandbox_verify import check_declared_units
-
     findings = check_declared_units({"n": {"value": 27824.0, "unit": "records"}})
     assert any(f["check"] == "declared_units" and f["status"] == "pass" for f in findings)
 
@@ -911,9 +938,6 @@ def test_a_count_larger_than_every_frame_in_the_run_fails():
     """The case that is impossible on any reading. Motivated by a live run that answered a
     question about 128,886 records with counts from a 49,789-row spatially-joined subset."""
     pd = pytest.importorskip("pandas")
-
-    from agent_runtime.sandbox_verify import check_count_population
-
     namespace = {"df": pd.DataFrame({"a": range(40000)})}
     findings = check_count_population({"total": {"value": 128886, "unit": "records"}}, namespace)
     assert [f["status"] for f in findings] == ["fail"]
@@ -925,9 +949,6 @@ def test_a_plausible_count_reports_the_population_it_came_from():
     It records the sizes present, which is what lets a reader see 9,993-of-49,789 and ask the
     right question."""
     pd = pytest.importorskip("pandas")
-
-    from agent_runtime.sandbox_verify import check_count_population
-
     namespace = {"df": pd.DataFrame({"a": range(128886)})}
     findings = check_count_population({"theft": {"value": 27824, "unit": "records"}}, namespace)
     assert findings[0]["status"] == "pass"
@@ -939,16 +960,11 @@ def test_a_non_count_output_is_not_population_checked():
     """A buffer radius in metres has no population, and comparing it to a row count would be
     nonsense that fires on every geospatial run."""
     pd = pytest.importorskip("pandas")
-
-    from agent_runtime.sandbox_verify import check_count_population
-
     namespace = {"df": pd.DataFrame({"a": range(10)})}
     assert check_count_population({"radius": {"value": 25000, "unit": "metres"}}, namespace) == []
 
 
 def test_population_checking_needs_a_frame_to_compare_against():
-    from agent_runtime.sandbox_verify import check_count_population
-
     assert check_count_population({"n": {"value": 5, "unit": "count"}}, {}) == []
 
 
@@ -1065,16 +1081,17 @@ def test_no_non_numeric_value_moves_the_verdict(value):
 def test_a_numeric_string_is_still_a_measurement():
     """`"10.0"` is a model reporting a number; it keeps every check the number would get."""
     assert _declared({"r": {"value": "10.0", "unit": "km"}})["verdict"] == PASS
-    assert _declared({"r": {"value": "10.0", "unit": "furlongs"}})["verdict"] == UNKNOWN
+    assert _declared({"r": {"value": "10.0", "unit": "km/hr^^"}})["verdict"] == UNKNOWN
     assert _declared({"r": {"value": "10.0", "unit": None}})["verdict"] == FAIL
     assert _declared({"n": {"value": "-3", "unit": "points"}})["verdict"] == FAIL
 
 
-def test_a_number_with_a_genuinely_unknown_unit_is_still_unknown():
-    """The label fix must not become "accept anything": a NUMBER in an unrecognised unit is a
-    measurement nobody can read, and stays cannot_determine."""
-    assert _declared({"r": {"value": 10.0, "unit": "crs"}})["verdict"] == UNKNOWN
-    assert _declared({"r": {"value": 10.0, "unit": "furlongs"}})["verdict"] == UNKNOWN
+def test_a_number_with_an_unparseable_unit_is_still_unknown():
+    """A NUMBER in a unit nobody can read is a measurement nobody can check. A single word the
+    library does not know is a name ("index", "ratio"), a dimensionless measure, not an error:
+    NDVI declared as an "index" is correct."""
+    assert _declared({"r": {"value": 10.0, "unit": "EPSG:4326"}})["verdict"] == UNKNOWN
+    assert _declared({"ndvi": {"value": 0.53, "unit": "index"}})["verdict"] == PASS
 
 
 def test_a_degree_buffer_still_fails_beside_a_label(tracked, tmp_path):
@@ -1142,22 +1159,21 @@ def test_a_count_named_as_one_is_a_count_whatever_was_counted():
         assert _declared({key: {"value": 4, "unit": key.split("_")[-1]}})["verdict"] == PASS, key
 
 
-def test_an_inferred_count_needs_a_count_name_and_a_whole_number():
-    """Guards: the old unknowns stay unknown, and an inferred count is never a FAIL."""
-    assert _declared({"x": {"value": 1, "unit": "furlongs"}})["verdict"] == UNKNOWN
-    assert _declared({"distance_furlongs": {"value": 3, "unit": "furlongs"}})["verdict"] == UNKNOWN
-    assert _declared({"num_schools": {"value": 2.5, "unit": "schools"}})["verdict"] == UNKNOWN
-    assert _declared({"num_schools": {"value": -1, "unit": "schools"}})["verdict"] == UNKNOWN
-    assert _declared({"num_x": {"value": 3, "unit": "km/h"}})["verdict"] == UNKNOWN
+def test_a_count_needs_a_whole_non_negative_number_whatever_it_is_called():
+    """Stage 43: the output's NAME no longer decides anything. A plural unit word is a count
+    and must be whole and non-negative; a real unit is a measurement."""
+    assert _declared({"x": {"value": 2.5, "unit": "schools"}})["verdict"] == FAIL
+    assert _declared({"x": {"value": -1, "unit": "schools"}})["verdict"] == FAIL
+    assert _declared({"distance": {"value": 3, "unit": "furlongs"}})["verdict"] == PASS
+    assert _declared({"num_x": {"value": 3, "unit": "km/h"}})["verdict"] == PASS
 
 
-def test_an_unrecognised_unit_is_marked_advisory():
-    findings = check_declared_units({"x": {"value": 1, "unit": "furlongs"}})
-    assert [f.get("advisory") for f in findings if f["status"] == UNKNOWN] == [True]
 
 
-def test_a_metres_column_carried_back_to_wgs84_is_credited_to_its_projected_frame(tracked,
-                                                                                  tmp_path):
+def test_a_metres_column_carried_back_to_wgs84_passes(tracked, tmp_path):
+    """Live 2026-10-08: `distance_m`, measured in EPSG:26916 and carried back with to_crs(4326),
+    sat on a WGS84 frame. Stage 37 credited it to a projected frame with the same column name;
+    stage 43 needs no credit: no metric operation ran on a geographic frame."""
     tracked["schools"] = _schools()
     tracked["center"] = gpd.GeoSeries([Point(-88.24, 40.11)], crs="EPSG:4326")
     report = _run(tracked, tmp_path,
@@ -1167,21 +1183,20 @@ def test_a_metres_column_carried_back_to_wgs84_is_credited_to_its_projected_fram
                   "schools_within = schools_proj[schools_proj['distance_m'] <= 1609.344]\n"
                   "schools_within_4326 = schools_within.to_crs('EPSG:4326')\n")
     assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
-    carried = [f for f in report["findings"] if f.get("target") == "schools_within_4326"
-               and f["check"] == "projected_crs"]
-    assert carried and carried[0]["status"] == PASS and carried[0].get("measured_in"), carried
+    assert {o["crs"] for o in report["metric_ops"]} == {"EPSG:26916"}
 
 
-def test_a_carried_column_with_no_projected_frame_in_scope_is_advisory(tracked, tmp_path):
+def test_a_chained_reproject_measure_reproject_passes(tracked, tmp_path):
+    """Stage 37 could find no projected frame in scope for a chained expression and left an
+    advisory unknown. The operation itself says where it was measured."""
     tracked["schools"] = _schools()
     tracked["center"] = gpd.GeoSeries([Point(-88.24, 40.11)], crs="EPSG:4326")
     report = _run(tracked, tmp_path,
                   "c = center.to_crs('EPSG:26916').iloc[0]\n"
                   "out = (schools.to_crs('EPSG:26916')\n"
                   "       .assign(distance_m=lambda d: d.distance(c)).to_crs('EPSG:4326'))\n")
-    assert report["verdict"] == UNKNOWN
-    unknown = [f for f in report["findings"] if f["status"] == UNKNOWN]
-    assert unknown and all(f.get("advisory") for f in unknown), unknown
+    assert report["verdict"] == PASS, [f for f in report["findings"] if f["status"] != PASS]
+    assert [o["op"] for o in report["metric_ops"]] == ["distance"]
 
 
 def test_a_distance_measured_on_the_wgs84_frame_still_fails(tracked, tmp_path):

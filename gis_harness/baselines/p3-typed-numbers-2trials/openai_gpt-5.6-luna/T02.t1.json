@@ -1,0 +1,119 @@
+{
+  "task": "T02",
+  "title": "Buffer/overlay: schools within a mile (pinned upload)",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "The attached schools.geojson has school locations. How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?",
+  "files": [
+    "schools.geojson"
+  ],
+  "expected": {
+    "count_within_mile": 20,
+    "names_within_mile": [
+      "School 01",
+      "School 02",
+      "School 04",
+      "School 07",
+      "School 08",
+      "School 09",
+      "School 12",
+      "School 13",
+      "School 15",
+      "School 19",
+      "School 20",
+      "School 21",
+      "School 25",
+      "School 29",
+      "School 30",
+      "School 31",
+      "School 32",
+      "School 33",
+      "School 34",
+      "School 35"
+    ],
+    "nearest_school": "School 08",
+    "nearest_m": 412.6788919857677
+  },
+  "expected_why": {
+    "count_within_mile": "brute-force geodesic distance, pyproj Geod(WGS84)"
+  },
+  "score": {
+    "task": "T02",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "20"
+      },
+      {
+        "name": "nearest_school",
+        "kind": "text",
+        "expected": "School 08",
+        "matched": true,
+        "found": "School 08"
+      },
+      {
+        "name": "nearest_m",
+        "kind": "number",
+        "expected": 412.6788919857677,
+        "matched": true,
+        "found": "412.53 metres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 12, in <module>\\\\n s=pd.GeoSeries([site],crs=\\'EPSG:4326\\').to_cr"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using metric distances in UTM Zone 16N, there are **20 schools within 1 mile** of **41.8827\u00b0 N, 87.6233\u00b0 W**.\n\nThe nearest is **School 08**, at **412.53 metres** away \u2014 approximately **413 metres**.",
+  "seconds": 54.4,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 87279,
+    "cached_input_tokens": 0,
+    "output_tokens": 1111,
+    "usage_absent": 0,
+    "cost_usd": 0.0188,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T02-gpt-5.6-luna-1791501355-1"
+}

@@ -44,6 +44,7 @@ from agent_runtime.map_layers import content_key
 from agent_runtime.rs_embed_tools import (_layer_id, _layer_label, _raster_layer, _region_tag,
                                           _resolve_bbox, _round_bbox, _slug)
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.units import typed_value
 
 _3DEP_URL = ("https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation"
              "/ImageServer/exportImage")
@@ -792,6 +793,11 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                             "max": round(float(finite.max()), 2),
                             "mean": round(float(finite.mean()), 2)})
                 if kind == "slope":
+                    out["outputs"] = [typed_value("mean_slope", out["mean"], "degree",
+                                                  source="terrain_derivative", op="slope"),
+                                      typed_value("ground_resolution", out["ground_resolution_m"],
+                                                  "m", source="terrain_derivative")]
+                if kind == "slope":
                     out["mean_percent"] = round(
                         float(np.tan(np.radians(finite.mean())) * 100.0), 2)
                     out["steep_over_15_deg_fraction"] = round(
@@ -904,6 +910,13 @@ def make_terrain_tools(*, default_input_file_ids: Optional[List[str]] = None) ->
                 "flooded_fraction": round(wet_km2 / land_km2, 4) if land_km2 else 0.0,
                 "mean_depth_m": (round(float(wet_depths.mean()), 2) if wet_depths.size else 0.0),
                 "max_depth_m": (round(float(wet_depths.max()), 2) if wet_depths.size else 0.0),
+                # Typed where the number is made (stage 43).
+                "outputs": [
+                    typed_value("level", round(level, 2), "m", source="inundation_at_level"),
+                    typed_value("flooded_area", round(wet_km2, 4), "km^2",
+                                source="inundation_at_level", op="area"),
+                    typed_value("region_area", round(land_km2, 4), "km^2",
+                                source="inundation_at_level", op="area")],
                 "depth_geotiff": _file_ref(tif_rec),
                 "image": _file_ref(png_rec),
                 "on_map": True, "map_layer": layer,

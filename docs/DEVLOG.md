@@ -5219,3 +5219,26 @@ rather than from the previous one.
 
 **Not fixed** A step that adds a wrong fact counts as productive (phases 3–4). The producer check
   is a model call: a wrong "yes" costs one bounded re-run.
+
+## 2026-10-08 · M8.81 · A number carries its unit and where it was measured (architecture stage 43)
+
+**Change** `agent_runtime/units.py` parses units with pint. The sandbox gate reports
+  declarations, metric operations with their CRS, and frame sizes. `declared_outputs.py` judges
+  them agent-side and returns typed outputs. Tools that measure emit typed outputs, and the turn
+  log records them as facts. The unit vocabularies and the column- and variable-name heuristics
+  are deleted.
+
+**Why** Class A of the review's catalogue: 17 incidents, 8 fixed by adding a word to a list,
+  most of them a correct answer marked unverified.
+
+**Measured** Harness, gate off (2 trials) and on (1 trial), both models: correct answers
+  unchanged (deepseek 23/26 and 10/13, luna 26/26 and 13/13). No model declared `IGUIDE_OUTPUTS`
+  in 96 gate reports, so the new declaration checks never ran. deepseek's rise in
+  `cannot_determine` (26 → 44) is one task, T06, a pysheds thrash (numpy 2 removed `in1d`); the
+  `coverage` rate per run is unchanged. Stage 42's progress rule did not stop it, because every
+  step printed something new. Details in stage 43.
+
+**Not fixed** Models are not asked to declare outputs, so the declaration checks are idle in
+  practice. A number typed by hand into a script with the wrong unit still parses. Shapely-level
+  operations on raw coordinates bypass the operation tracker. The agent image needs rebuilding
+  to get pint; until then declared units are explicit unknowns.

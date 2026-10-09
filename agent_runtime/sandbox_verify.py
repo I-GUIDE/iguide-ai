@@ -92,96 +92,38 @@ def _crs_unit(crs: Any) -> Optional[str]:
     return None
 
 
-_UNIT_ALIASES = {
-    "metre": "metres", "meter": "metres", "metres": "metres", "meters": "metres", "m": "metres",
-    "us survey foot": "feet", "foot": "feet", "feet": "feet", "ft": "feet",
-    "kilometre": "kilometres", "kilometer": "kilometres", "km": "kilometres",
-    # AREAL units. Their absence was found by a live run: an agent declared `km²` for a buffer
-    # area — correctly — and the gate answered "unrecognised unit 'km²'; not checked". A unit
-    # the system asked for, got, and then could not read is worse than not asking.
-    "m2": "square_metres", "m^2": "square_metres", "m²": "square_metres",
-    "sq m": "square_metres", "sqm": "square_metres",
-    "square metre": "square_metres", "square meter": "square_metres",
-    "square metres": "square_metres", "square meters": "square_metres",
-    "square_metres": "square_metres", "square_meters": "square_metres",
-    "km2": "square_kilometres", "km^2": "square_kilometres", "km²": "square_kilometres",
-    "sq km": "square_kilometres", "sqkm": "square_kilometres",
-    "square kilometre": "square_kilometres", "square kilometer": "square_kilometres",
-    "square kilometres": "square_kilometres", "square kilometers": "square_kilometres",
-    "square_kilometres": "square_kilometres", "square_kilometers": "square_kilometres",
-    # COUNTS. `count` was in the known set and `records` was not, so a live run declaring
-    # {"value": 27824, "unit": "records"} — the natural word for what it was counting — came back
-    # "unrecognised unit 'records'; not checked", and that single UNKNOWN downgraded a correct
-    # answer to unverified. The vocabulary has to cover how the number is actually described, not
-    # only the token we would have chosen.
-    "record": "count", "records": "count", "row": "count", "rows": "count",
-    "counts": "count", "n": "count", "number": "count", "observation": "count",
-    "observations": "count", "feature": "count", "features": "count",
-    "item": "count", "items": "count", "event": "count", "events": "count",
-    "incident": "count", "incidents": "count", "occurrence": "count", "occurrences": "count",
-    # The nouns a geospatial run counts. `points` was missing while `features` was present, so a
-    # live run declaring {"value": 4, "unit": "points"} (Champaign, 2026-10-08) came back
-    # "unrecognised unit 'points'" and the turn was re-run in full. Explicit on purpose: a
-    # plural-stripping rule would also accept "metres" -> "metre" as a count.
-    "point": "count", "points": "count", "polygon": "count", "polygons": "count",
-    "zone": "count", "zones": "count", "tract": "count", "tracts": "count",
-    "county": "count", "counties": "count", "cell": "count", "cells": "count",
-    "pixel": "count", "pixels": "count", "region": "count", "regions": "count",
-    "site": "count", "sites": "count", "building": "count", "buildings": "count",
-    # IMPERIAL lengths and areas. Live, 2026-10-08 (Champaign area + London–Paris): one run
-    # declared `mi2` and `mi`, its re-run declared `square_miles` and `miles` for the same two
-    # numbers, and neither area unit was in this table — so a correct 997.93 came back
-    # "unrecognised unit 'square_miles'; not checked" and put COULD NOT VERIFY on the answer.
-    # `miles` and `mi` were in _KNOWN_UNITS but not here, so `mile` (singular) was unknown.
-    "mile": "miles", "miles": "miles", "mi": "miles",
-    "yard": "yards", "yards": "yards", "yd": "yards", "yds": "yards",
-    "nautical mile": "nautical_miles", "nautical miles": "nautical_miles",
-    "nautical_miles": "nautical_miles", "nmi": "nautical_miles",
-    "mi2": "square_miles", "mi^2": "square_miles", "mi²": "square_miles",
-    "sq mi": "square_miles", "sqmi": "square_miles", "sq_mi": "square_miles",
-    "square mile": "square_miles", "square miles": "square_miles",
-    "square_mile": "square_miles", "square_miles": "square_miles",
-    "ft2": "square_feet", "ft^2": "square_feet", "ft²": "square_feet",
-    "sq ft": "square_feet", "sqft": "square_feet", "sq_ft": "square_feet",
-    "square foot": "square_feet", "square feet": "square_feet",
-    "square_foot": "square_feet", "square_feet": "square_feet",
-    "hectare": "hectares", "hectares": "hectares", "ha": "hectares",
-    "acre": "acres", "acres": "acres",
-    "degree": "degrees", "degrees": "degrees", "deg": "degrees", "°": "degrees",
-}
+# The units a CONTRACT may declare for a length (extractors/contracts.py `declared_unit`), in
+# metres. This vocabulary is the extractor's own, written by our code, so it is closed: it is
+# not the open-ended list of spellings a model might choose for an output, which stage 43 moved
+# out of the sandbox and into a unit library (agent_runtime/units.py). The CRS side is compared
+# by pyproj's own conversion factor, not by the axis unit's name.
+_CONTRACT_LENGTH_METRES = {"metres": 1.0, "meters": 1.0, "metre": 1.0, "meter": 1.0, "m": 1.0,
+                           "kilometres": 1000.0, "kilometers": 1000.0, "km": 1000.0,
+                           "feet": 0.3048, "foot": 0.3048, "ft": 0.3048,
+                           "us survey foot": 1200 / 3937}
 
 
-def _unit_matches(declared: Any, actual: Optional[str]) -> Optional[bool]:
-    """True/False, or None when either side is unknown."""
-    want = _UNIT_ALIASES.get(str(declared or "").strip().lower())
-    got = _UNIT_ALIASES.get(str(actual or "").strip().lower())
-    if not want or not got:
-        return None
-    return want == got
-
-
-# Column names that mean "a distance or area was computed and stored here". A geographic frame
-# carrying one of these is evidence that the number in it is in degrees.
-_METRIC_COLUMN_HINTS = ("area", "length", "dist", "perimeter", "buffer", "radius", "km", "_m",
-                        "acre", "hectare", "sqm", "sq_")
-
-
-def _has_metric_column(frame: Any) -> Optional[str]:
-    """A numeric column whose NAME says it holds a measurement, or None."""
+def _crs_unit_factor(crs: Any) -> Optional[float]:
+    """Metres per unit of the CRS's first axis, from pyproj, or None."""
     try:
-        columns = list(frame.columns)
+        for axis in getattr(crs, "axis_info", None) or []:
+            factor = getattr(axis, "unit_conversion_factor", None)
+            if isinstance(factor, (int, float)) and factor > 0:
+                return float(factor)
     except Exception:
-        return None
-    for col in columns:
-        low = str(col).lower()
-        if not any(h in low for h in _METRIC_COLUMN_HINTS):
-            continue
-        try:
-            if frame[col].dtype.kind in "iuf":
-                return str(col)
-        except Exception:
-            continue
+        pass
     return None
+
+
+def _unit_matches(declared: Any, crs: Any) -> Optional[bool]:
+    """Whether a contract's declared length unit is the CRS's axis unit. None when unknown."""
+    want = _CONTRACT_LENGTH_METRES.get(str(declared or "").strip().lower())
+    got = _crs_unit_factor(crs)
+    if want is None or got is None:
+        return None
+    # Relative 1e-5: the US survey foot and the international foot differ by 2 ppm, and either
+    # is "feet" to a contract. A metre-vs-foot mix is a factor of 3.28.
+    return abs(want - got) <= 1e-5 * max(want, got)
 
 
 def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
@@ -202,27 +144,16 @@ def check_projected_crs(name: str, frame: Any) -> Dict[str, Any]:
     if projected:
         return _finding("projected_crs", PASS, name, f"projected CRS {crs!s}", crs=str(crs))
 
-    # Geographic. Whether that is WRONG depends on what was computed from it, and a scan of
-    # module scope cannot see that — which is exactly why the call-time contract guard exists.
-    #
-    # Failing on the mere presence of a 4326 frame fails the STANDARD CORRECT WORKFLOW: data
-    # arrives in 4326 and you reproject it, so the input frame is still bound when the run ends.
-    # Observed live — an agent reprojected to EPSG:32616, buffered correctly, produced areas
-    # accurate to 0.16% of the analytic value, and the answer was stamped "⛔ invariant check
-    # FAILED, numeric results are not verified". A ⛔ on a correct answer teaches the reader to
-    # ignore ⛔.
-    metric_column = _has_metric_column(frame)
-    detail = (f" This frame holds a computed measurement ({metric_column!r}), which is therefore "
-              f"in degrees." if metric_column else "")
-    # Still a FAIL on its own. `gdf.buffer(25000)` on a 4326 frame produces a wrong GEOMETRY with
-    # no numeric column at all, so keying the verdict on a measurement column would miss the
-    # motivating case entirely. `run_checks` relaxes this only on positive evidence that the run
-    # reprojected before measuring — see there.
-    return _finding("projected_crs", FAIL, name,
-                    f"{crs!s} is GEOGRAPHIC: distances and areas computed from this frame are "
-                    f"in degrees, not metres.{detail} Reproject (e.g. .to_crs(3857) or a local "
-                    f"UTM zone) before buffering or measuring.",
-                    crs=str(crs), metric_column=metric_column)
+    # Geographic. Whether that is wrong depends on what was MEASURED in it, and the frame alone
+    # cannot say: data arrives in EPSG:4326 and the correct workflow reprojects it, so the input
+    # is still bound when the run ends. Stage 41's gate inferred "this frame holds a measurement"
+    # from column names (`area`, `dist`, `_m`, ...), which matched `pop_male` and `district_id`
+    # and missed `a`; stage 43 removed that. The operations that ran decide (see run_checks and
+    # install_operation_tracker): a metric operation on a geographic receiver is a FAIL named by
+    # its line, and a geographic frame nothing measured is an input.
+    return _finding("projected_crs", UNKNOWN, name,
+                    f"{crs!s} is geographic; whether anything was measured in it is decided by "
+                    f"the operations that ran", crs=str(crs), geographic=True)
 
 
 def _looks_like_join_result(frame: Any) -> bool:
@@ -351,106 +282,6 @@ def check_finite(name: str, value: Any) -> Dict[str, Any]:
 # distinguish them.
 DECLARED_OUTPUTS = "IGUIDE_OUTPUTS"
 
-_KNOWN_UNITS = {"metres", "meters", "m", "kilometres", "kilometers", "km", "feet", "ft",
-                "miles", "mi", "degrees", "deg", "count", "percent", "%", "ratio",
-                "square_metres", "m2", "square_kilometres", "km2", "hectares", "acres",
-                "index", "none", "dimensionless"}
-
-
-
-def _count_finding(target: str, value: Any, unit: Any) -> Dict[str, Any]:
-    """A declared count must be a non-negative whole number."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return _finding("declared_units", UNKNOWN, target,
-                        f"unit {unit} but the value is {type(value).__name__}, not a number",
-                        unit=str(unit))
-    try:
-        if isinstance(value, float) and not float(value).is_integer():
-            return _finding("declared_units", FAIL, target,
-                            f"declared as a count but the value is fractional ({value})",
-                            unit=str(unit))
-        if value < 0:
-            return _finding("declared_units", FAIL, target,
-                            f"declared as a count but the value is negative ({value})",
-                            unit=str(unit))
-    except Exception:                                       # pragma: no cover - defensive
-        return _finding("declared_units", UNKNOWN, target, f"unit {unit}; value not comparable",
-                        unit=str(unit))
-    return _finding("declared_units", PASS, target,
-                    f"unit {unit}: a non-negative whole count ({int(value)})", unit=str(unit))
-
-
-def _inferred_count(target: Any, value: Any) -> bool:
-    """Whether a declared output with an UNRECOGNISED unit word is, by its name, a count.
-
-    Live, 2026-10-08 19:42 UTC: {"num_schools_within_1mile": {"value": 18, "unit": "schools"}}
-    came back "unrecognised unit 'schools'; not checked" and put COULD NOT VERIFY on a correct
-    answer. A count of things has no physical unit, and the noun is whatever was counted, so no
-    vocabulary of nouns can ever be complete. The output's NAME says it is a count (`num_`,
-    `n_`, `count`, `number`, `total`), and the value must be a whole number >= 0. Both are
-    required: `{"x": {"value": 1, "unit": "furlongs"}}` stays unknown, and so does a distance
-    whose name happens to contain the unit word. Only the unit word must look like a noun.
-    """
-    import re as _re
-    if value is None or value < 0 or not float(value).is_integer():
-        return False
-    key = str(target or "").strip().lower()
-    return bool(_re.search(r"(?:^|_)(?:num|n|nb|count|counts|number|total)(?:_|$)", key))
-
-
-def check_count_population(outputs: Any, namespace: Dict[str, Any],
-                           *, max_frames: int = 12) -> List[Dict[str, Any]]:
-    """Report the population each declared count could have come from, and fail an impossible one.
-
-    Motivated by a live run that answered a question about a 128,886-record dataset with counts
-    computed from a 49,789-row spatially-joined subset — reporting THEFT as 9,993 where the file
-    says 27,824. Every individual number was real; the POPULATION was different from the one the
-    question named, and nothing in the report made that visible.
-
-    This does not guess which frame is "the" population — that would be a false-positive
-    generator. It records the frame sizes present, which is what lets a reader see 9,993-of-49,789
-    and ask the right question, and it FAILS only the case that is impossible on any reading: a
-    count larger than every frame in the run.
-    """
-    if not isinstance(outputs, dict) or not outputs:
-        return []
-    sizes: Dict[str, int] = {}
-    for name, obj in list(namespace.items()):
-        if name.startswith("_") or len(sizes) >= max_frames:
-            continue
-        try:
-            if _looks_like_frame(obj):
-                sizes[name] = int(len(obj))
-        except Exception:
-            continue
-    if not sizes:
-        return []
-
-    largest = max(sizes.values())
-    findings: List[Dict[str, Any]] = []
-    for key, spec in list(outputs.items())[:24]:
-        if not isinstance(spec, dict):
-            continue
-        unit = str(spec.get("unit") or "").strip().lower()
-        if unit != "count" and _UNIT_ALIASES.get(unit) != "count":
-            continue
-        value = spec.get("value")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        summary = ", ".join(f"{n}={c}" for n, c in sorted(sizes.items())[:6])
-        if value > largest:
-            findings.append(_finding(
-                "count_population", FAIL, str(key),
-                f"declared count {int(value)} exceeds every frame in this run ({summary}), so it "
-                f"cannot have been counted from any of them", frames=sizes))
-        else:
-            findings.append(_finding(
-                "count_population", PASS, str(key),
-                f"count {int(value)} is within the run's frames ({summary}) — confirm this is the "
-                f"population the question asked about", frames=sizes))
-    return findings
-
-
 def _declared_number(value: Any) -> Optional[float]:
     """The declared value as a number, or None when it is not one.
 
@@ -471,39 +302,32 @@ def _declared_number(value: Any) -> Optional[float]:
     return None
 
 
-def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
-    """Every numeric output the run declares must carry a unit and be in a plausible range.
+def check_declared_values(outputs: Any) -> List[Dict[str, Any]]:
+    """The checks on a declared output that need no unit library: a value, finite, in bounds.
 
-    ``IGUIDE_OUTPUTS`` is expected to look like::
+    ``IGUIDE_OUTPUTS`` looks like::
 
-        IGUIDE_OUTPUTS = {"buffer_radius": {"value": 25000, "unit": "metres"},
-                          "areas_covered": {"value": 77, "unit": "count",
-                                            "min": 0, "max": 100}}
+        IGUIDE_OUTPUTS = {"buffer_area": {"value": 25.1, "unit": "km^2", "crs": "EPSG:32616"},
+                          "schools": {"value": 31, "unit": "count", "min": 0}}
 
-    A ``unit`` of ``None`` is a FAIL rather than an omission: the plan's rule is that a null
-    unit blocks "verified", because the number most likely to be wrong is exactly the one whose
-    unit nobody wrote down. ``min``/``max`` are optional and only checked when given — an
-    invented plausible range would be a false positive generator.
+    What the UNIT means is decided outside the sandbox, by a unit library
+    (agent_runtime/declared_outputs.py). This used to be decided here, by two hand-kept
+    vocabularies, and every spelling they lacked came back "unrecognised unit; not checked"
+    (stage 43). The sandbox reports the declarations as written; ``run_checks`` puts them in
+    the report raw.
     """
     findings: List[Dict[str, Any]] = []
-    if outputs is None:
-        return findings
-    if not isinstance(outputs, dict):
-        return [_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
-                         f"expected a dict, got {type(outputs).__name__}")]
-    if not outputs:
+    if not isinstance(outputs, dict) or not outputs:
+        if outputs is not None and not isinstance(outputs, dict):
+            findings.append(_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
+                                     f"expected a dict, got {type(outputs).__name__}"))
         return findings
     for key, spec in list(outputs.items())[:24]:
         target = str(key)
         value = spec.get("value") if isinstance(spec, dict) else spec
         if _declared_number(value) is None:
-            # NOT A MEASUREMENT. A run reports labels beside its numbers — the CRS it worked in,
-            # a method name, a flag — and IGUIDE_OUTPUTS is where it was told to report. Live,
-            # 2026-10-08: {"output_crs": {"value": "EPSG:26916", "unit": "crs"}} beside two
-            # numbers that passed, and the label scored TWO cannot_determine ("not a numeric
-            # scalar", "unrecognised unit 'crs'") that put "COULD NOT VERIFY" on a correct
-            # answer. There is no number here for a unit, range or finiteness check to be about,
-            # so none runs; it is recorded, with its type, so the report still shows it.
+            # NOT A MEASUREMENT: a label beside the numbers (a CRS, a method name). Recorded, so
+            # the report shows it, with no numeric check (stage 36).
             unit = spec.get("unit") if isinstance(spec, dict) else None
             findings.append(_finding("declared_value", PASS, target,
                                      f"not a measurement ({type(value).__name__} {value!r:.60}"
@@ -511,46 +335,9 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
                                      f"declared; numeric checks do not apply",
                                      measurement=False))
             continue
-        if not isinstance(spec, dict):
-            findings.append(check_finite(target, spec))
-            findings.append(_finding("declared_units", FAIL, target,
-                                     "declared without a unit — give "
-                                     "{'value': x, 'unit': 'metres'}"))
-            continue
         findings.append(check_finite(target, value))
-        unit = spec.get("unit")
-        if unit is None or str(unit).strip() == "":
-            findings.append(_finding("declared_units", FAIL, target,
-                                     "unit is null: a number whose unit is unrecorded cannot "
-                                     "be verified (25000 is right in metres, wrong in feet)"))
-        elif (str(unit).strip().lower() not in _KNOWN_UNITS
-              and _UNIT_ALIASES.get(str(unit).strip().lower()) is None):
-            # Checked against the ALIAS table as well as the literal set. `km²` — which is how a
-            # model actually writes it, observed live — was in neither, so a correctly declared
-            # unit came back "unrecognised; not checked" and downgraded the whole run.
-            if (str(unit).strip().replace(" ", "").replace("_", "").isalpha()
-                    and _inferred_count(target, _declared_number(value))):
-                findings.append(_finding("declared_units", PASS, target,
-                                         f"unit {unit!r} names what is counted ({target!r} is "
-                                         f"a count): a non-negative whole number "
-                                         f"({int(_declared_number(value))})", unit=str(unit),
-                                         inferred_count=True))
-            else:
-                # Advisory: a unit name the gate cannot read says nothing about whether the
-                # number is right, so the supervisor reports it as a note, not as COULD NOT
-                # VERIFY (architecture stage S37.2).
-                findings.append(_finding("declared_units", UNKNOWN, target,
-                                         f"unrecognised unit {unit!r}; not checked",
-                                         unit=str(unit), advisory=True))
-        elif _UNIT_ALIASES.get(str(unit).strip().lower()) == "count" or \
-                str(unit).strip().lower() == "count":
-            # A count is the one unit whose VALUE the gate can judge on its own: a negative or
-            # fractional count is wrong whatever produced it. Recognising the unit and then not
-            # checking it is how "unit count" passed for a value of -3.
-            findings.append(_count_finding(target, _declared_number(value), unit))
-        else:
-            findings.append(_finding("declared_units", PASS, target, f"unit {unit}",
-                                     unit=str(unit)))
+        if not isinstance(spec, dict):
+            continue
         lo, hi = spec.get("min"), spec.get("max")
         try:
             f = float(value)
@@ -562,10 +349,26 @@ def check_declared_units(outputs: Any) -> List[Dict[str, Any]]:
         elif hi is not None and f > float(hi):
             findings.append(_finding("output_bounds", FAIL, target,
                                      f"{f} is above the declared maximum {hi}"))
-        elif lo is not None or hi is not None:
-            findings.append(_finding("output_bounds", PASS, target,
-                                     f"{f} within [{lo}, {hi}]"))
     return findings
+
+
+def declared_entries(outputs: Any) -> List[Dict[str, Any]]:
+    """The declarations as written, for the report."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(outputs, dict):
+        return out
+    for key, spec in list(outputs.items())[:24]:
+        if isinstance(spec, dict):
+            entry = {"name": str(key), "value": spec.get("value"), "unit": spec.get("unit")}
+            for extra in ("crs", "measured_in", "min", "max", "of"):
+                if spec.get(extra) is not None:
+                    entry[extra] = spec.get(extra)
+        else:
+            entry = {"name": str(key), "value": spec, "unit": None}
+        if not isinstance(entry["value"], (int, float, str, bool, type(None))):
+            entry["value"] = repr(entry["value"])[:80]
+        out.append(entry)
+    return out
 
 
 
@@ -579,6 +382,10 @@ VIOLATIONS_GLOBAL = "_IGUIDE_CONTRACT_VIOLATIONS"
 # install_operation_tracker; OP_TRACKING_GLOBAL says the tracker was live, which is what lets
 # run_checks trust the ABSENCE of a record.
 GEOGRAPHIC_OPS_GLOBAL = "_IGUIDE_GEOGRAPHIC_OPS"
+# EVERY metric operation geopandas ran, projected receivers included, with the receiver's CRS:
+# where a measurement was made, as a fact about the call (stage 43), not inferred afterwards
+# from which frames are in scope or what their columns are called.
+METRIC_OPS_GLOBAL = "_IGUIDE_METRIC_OPS"
 OP_TRACKING_GLOBAL = "_IGUIDE_OP_TRACKING"
 # The operations whose result is a distance, length or area, or is built from one. geopandas warns
 # on these (and on `centroid`, which is a location and is not counted). buffer(0), the
@@ -649,7 +456,7 @@ def _check_one_arg(unit: str, invariant: Dict[str, Any], value: Any,
         # while making every length 3.28x wrong — the original degrees-vs-metres error class,
         # in feet, blessed by the check built to catch it.
         actual_unit = _crs_unit(crs)
-        matches = _unit_matches(declared_unit, actual_unit)
+        matches = _unit_matches(declared_unit, crs)
         if matches is False:
             return _finding(check, FAIL, where,
                             f"{unit} declares {target} in {declared_unit}, but {crs!s} measures "
@@ -833,8 +640,10 @@ def install_operation_tracker(namespace: Dict[str, Any]) -> bool:
                 op = text[len(marker):].split("'", 1)[0]
                 code = ""
                 frame = sys._getframe(1)
+                helpers = (getattr(sys, "_iguide_tracker_state", None) or {}).get("codes") or ()
                 while frame is not None and ("geopandas" in (frame.f_code.co_filename or "")
-                                             or "pandas" in (frame.f_code.co_filename or "")):
+                                             or "pandas" in (frame.f_code.co_filename or "")
+                                             or frame.f_code in helpers):
                     frame = frame.f_back
                 if frame is not None:
                     code = linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
@@ -848,9 +657,125 @@ def install_operation_tracker(namespace: Dict[str, Any]) -> bool:
         warn._iguide_ops = ops
         _warnings.warn = warn
         namespace[OP_TRACKING_GLOBAL] = True
-        return True
     except Exception:
         return False
+    _install_metric_op_recorder(namespace)
+    return True
+
+
+def _install_metric_op_recorder(namespace: Dict[str, Any]) -> None:
+    """Record every metric operation with the CRS of its receiver, projected or not.
+
+    geopandas warns only for GEOGRAPHIC receivers, so the warning path says nothing about where
+    a correct measurement was made. This wraps the operations on ``GeoPandasBase`` (which both
+    GeoSeries and GeoDataFrame use) the first time geopandas is imported, by hooking
+    ``__import__``: importing geopandas up front would cost every run that never uses it. The
+    wrapper records, then calls the original, so results are unchanged. Never raises.
+    """
+    import builtins
+    import linecache
+    import sys
+
+    record = namespace.setdefault(METRIC_OPS_GLOBAL, [])
+    # The patch is process-wide (it is on a geopandas class), so its state is too: which list
+    # records go to, and which code objects are the gate's own. A second install, another run
+    # in the same process, re-points the list, as install_operation_tracker re-points its
+    # warnings wrapper. The gate's own wrappers run in the user's file (the prologue is inlined),
+    # so a frame walk that skips only library files would name the wrapper's line.
+    state = sys.__dict__.setdefault("_iguide_tracker_state",
+                                    {"done": False, "codes": set(), "record": record})
+    state["record"] = record
+    helpers = state["codes"]
+
+    def code_line() -> str:
+        frame = sys._getframe(1)
+        while frame is not None and (any(p in (frame.f_code.co_filename or "")
+                                         for p in ("geopandas", "pandas", "shapely"))
+                                     or frame.f_code in helpers):
+            frame = frame.f_back
+        if frame is None:
+            return ""
+        return linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()[:160]
+
+    def note(op: str, obj: Any) -> None:
+        try:
+            record = state["record"]
+            if len(record) >= 200:
+                return
+            crs = getattr(obj, "crs", None)
+            entry = {"op": op, "crs": None if crs is None else str(crs.to_string()
+                                                                   if hasattr(crs, "to_string")
+                                                                   else crs),
+                     "projected": _is_projected(crs), "code": code_line()}
+            record.append(entry)
+        except Exception:
+            pass
+
+    def patch() -> None:
+        if state["done"]:
+            return
+        mod = sys.modules.get("geopandas.base")
+        cls = getattr(mod, "GeoPandasBase", None) if mod is not None else None
+        if cls is None:
+            return
+        state["done"] = True
+        for prop in ("area", "length"):
+            original = getattr(cls, prop, None)
+            if isinstance(original, property) and not getattr(original.fget, "_iguide", False):
+                def make(op, fget):
+                    def getter(self):
+                        note(op, self)
+                        return fget(self)
+                    getter._iguide = True
+                    helpers.add(getter.__code__)
+                    return property(getter)
+                setattr(cls, prop, make(prop, original.fget))
+        for meth in ("buffer", "distance", "dwithin", "hausdorff_distance"):
+            original = getattr(cls, meth, None)
+            if callable(original) and not getattr(original, "_iguide", False):
+                def wrap(op, fn):
+                    def method(self, *args, **kwargs):
+                        if not (op == "buffer" and args and args[0] == 0):
+                            note(op, self)
+                        return fn(self, *args, **kwargs)
+                    method._iguide = True
+                    helpers.add(method.__code__)
+                    method.__name__ = fn.__name__
+                    method.__doc__ = fn.__doc__
+                    return method
+                setattr(cls, meth, wrap(meth, original))
+
+    helpers.update({note.__code__, code_line.__code__})
+
+    if "geopandas.base" in sys.modules:
+        patch()
+        return
+    original_import = builtins.__import__
+
+    def hooked(name, *args, **kwargs):
+        module = original_import(name, *args, **kwargs)
+        if not state["done"] and name.startswith("geopandas"):
+            try:
+                patch()
+            except Exception:
+                pass
+        return module
+
+    try:
+        builtins.__import__ = hooked
+    except Exception:
+        pass
+
+
+def _dedup_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen, out = set(), []
+    for o in ops:
+        key = (o.get("op"), o.get("crs"), o.get("code"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(o)
+    return out[:50]
 
 
 # --------------------------------------------------------------------------- #
@@ -992,78 +917,30 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                                      "checked — work done inside a function cannot be "
                                      "verified; assign results to module-level names"))
 
-    # Reproject-then-measure is the CORRECT workflow, and it necessarily leaves the original
-    # geographic frame bound. A per-frame check cannot see that; run_checks can, because it sees
-    # them all. So when some frame is projected AND carries a computed measurement, an unmeasured
-    # geographic frame is an input that was reprojected — which is the right thing to have done,
-    # not a caveat to put on the answer.
-    reprojected = any(f.get("check") == "projected_crs" and f.get("status") == PASS
-                      and _has_metric_column(namespace.get(f.get("target")))
-                      for f in findings if isinstance(f, dict))
-    if reprojected:
-        for f in findings:
-            # Only a geographic frame that holds NO measurement of its own. One that does is a
-            # number computed in degrees regardless of what else the run got right.
-            if (isinstance(f, dict) and f.get("check") == "projected_crs"
-                    and f.get("status") == FAIL and not f.get("metric_column")):
-                f["status"] = PASS
-                f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but this run "
-                                f"reprojected before measuring — the measurements live in a "
-                                f"projected frame, so this is an untouched input.")
-
-    # The OPERATION carries the verdict when the prologue's tracker was live: a metric operation
-    # that ran on a geographic receiver is a FAIL, named by the line that ran it. Which frames
-    # happen to sit in EPSG:4326 when the run ends no longer decides anything (see
-    # install_operation_tracker). A geographic frame with no such operation is an input. One that
-    # holds a measurement column no tracked operation produced is SUSPICIOUS, not proven wrong,
-    # and a FAIL the gate cannot tie to a measurement reached the user as "⛔ not verified",
-    # which teaches the reader to ignore ⛔. So it becomes a named cannot_determine.
-    if namespace.get(OP_TRACKING_GLOBAL):
+    # The OPERATIONS decide whether anything was measured in degrees (install_operation_tracker).
+    # A metric operation that ran on a geographic receiver is a FAIL, named by the line that ran
+    # it. A geographic frame with no such operation is an input: reprojecting it and measuring
+    # in the projected copy is the correct workflow, and it leaves the input bound. Until stage
+    # 43 this was inferred from frame inventory and column names (a "reprojected" rescue keyed
+    # on `area`/`dist`/`_m` columns, and a "twin frame" credit for a column of the same name),
+    # each added after a correct run was flagged. Without a live tracker the gate cannot tell,
+    # and says so.
+    tracking = bool(namespace.get(OP_TRACKING_GLOBAL))
+    geographic_frames = [f for f in findings if isinstance(f, dict)
+                         and f.get("check") == "projected_crs" and f.get("geographic")]
+    for f in geographic_frames:
+        if tracking:
+            f["status"] = PASS
+            f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but no metric "
+                            f"operation ran on it: an input.")
+        else:
+            f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic and operation "
+                            f"tracking was not live, so whether anything was measured in it "
+                            f"cannot be determined.")
+    all_ops = [o for o in (namespace.get(METRIC_OPS_GLOBAL) or []) if isinstance(o, dict)]
+    if tracking:
         metric_ops = [o for o in (namespace.get(GEOGRAPHIC_OPS_GLOBAL) or [])
                       if isinstance(o, dict) and o.get("op") in _METRIC_OPS]
-        for f in findings:
-            if not (isinstance(f, dict) and f.get("check") == "projected_crs"
-                    and f.get("status") == FAIL and "op" not in f):
-                continue
-            if f.get("metric_column"):
-                # Measure in a projected frame, then `to_crs(4326)` for GeoJSON output: the
-                # column rides along and the WGS84 frame now "holds a measurement". Live,
-                # 2026-10-08 19:42 UTC: `distance_m` computed in EPSG:26916, carried back to
-                # 4326, every distance right to within 4 m, and the banner said COULD NOT VERIFY.
-                # With the tracker live and no metric operation on a geographic frame, a
-                # projected frame in scope holding the SAME column is where it was measured.
-                source = None
-                for other_name, other in list(namespace.items()):
-                    if other_name.startswith("_") or other_name == f.get("target"):
-                        continue
-                    try:
-                        if (_looks_like_frame(other) and _is_projected(_crs_of(other))
-                                and f["metric_column"] in [str(c) for c in other.columns]):
-                            source = other_name
-                            break
-                    except Exception:
-                        continue
-                if source:
-                    f["status"] = PASS
-                    f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds "
-                                    f"{f['metric_column']!r}, which the projected frame "
-                                    f"{source!r} also holds and no metric operation ran on a "
-                                    f"geographic frame: measured in {source!r} and carried "
-                                    f"back for output.")
-                    f["measured_in"] = source
-                else:
-                    f["status"] = UNKNOWN
-                    f["advisory"] = True
-                    f["message"] = (f"{f.get('crs', 'geographic CRS')} frame holds a measurement "
-                                    f"column ({f['metric_column']!r}) that no tracked operation "
-                                    f"produced in this run and no projected frame in scope "
-                                    f"holds, so whether it is in degrees cannot be determined "
-                                    f"(usually it was measured in a projected frame and carried "
-                                    f"back with to_crs for output).")
-            else:
-                f["status"] = PASS
-                f["message"] = (f"{f.get('crs', 'geographic CRS')} is geographic, but no metric "
-                                f"operation ran on a geographic frame in this run: an input.")
         seen = set()
         for o in metric_ops:
             key = (o.get("op"), o.get("code"))
@@ -1077,20 +954,24 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                 f"not metres. Reproject (e.g. .to_crs(3857) or a local UTM zone) before this "
                 f"operation.", op=o.get("op")))
 
-    # Declared numeric outputs, if the run published any. Checked outside the frame loop
-    # because they are scalars the ANSWER will quote, not frames.
+    # Declared numeric outputs, if the run published any. Their UNITS are judged outside the
+    # sandbox (agent_runtime/declared_outputs.py); here only what needs no unit library.
     declared = None
     try:
         declared = namespace.get(DECLARED_OUTPUTS)
-        findings.extend(check_declared_units(declared))
+        findings.extend(check_declared_values(declared))
     except Exception as exc:
         findings.append(_finding("declared_units", UNKNOWN, DECLARED_OUTPUTS,
                                  f"check errored: {exc}"))
-    try:
-        findings.extend(check_count_population(declared, namespace, max_frames=max_frames))
-    except Exception as exc:
-        findings.append(_finding("count_population", UNKNOWN, DECLARED_OUTPUTS,
-                                 f"check errored: {exc}"))
+    frame_sizes: Dict[str, int] = {}
+    for name, obj in list(namespace.items()):
+        if name.startswith("_") or len(frame_sizes) >= max_frames:
+            continue
+        try:
+            if _looks_like_frame(obj):
+                frame_sizes[name] = int(len(obj))
+        except Exception:
+            continue
 
     if skipped:
         # Never a silent cap: an uninspected frame is an unknown, not a pass.
@@ -1099,7 +980,7 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
                                  f"budget of {max_frames} and were NOT checked",
                                  skipped=skipped[:24]))
 
-    if not findings:
+    if not findings and not declared_entries(declared):
         # A run with no frames, no geospatial import and no declared outputs checked NOTHING, and
         # an empty report reached the reader as "cannot_determine (counts all zero) but its
         # findings were not retained" — which reads as evidence lost in transit. There was never
@@ -1116,10 +997,17 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
     for f in findings:
         counts[f["status"]] = counts.get(f["status"], 0) + 1
     return {
-        "schema": 1,
+        "schema": 2,
         "inspected": inspected,
         "findings": findings,
         "counts": counts,
+        # Raw material for the checks that need a unit library (declared_outputs.py): the
+        # declarations as written, every metric operation with the CRS it ran in, and the size
+        # of every frame a declared count could have been counted from.
+        "declared": declared_entries(declared),
+        "metric_ops": _dedup_ops(all_ops),
+        "frame_sizes": frame_sizes,
+        "op_tracking": tracking,
         # The single field a reader should branch on, with precedence fail > unknown > pass.
         #
         # A single cannot_determine downgrades the whole run, even when everything else
@@ -1222,29 +1110,25 @@ except Exception:
 def _inlined_helpers() -> str:
     """This module's own check functions, indented for injection into the sandbox."""
     parts: List[str] = []
-    for obj in (_finding, _crs_of, _is_projected, _crs_unit, _unit_matches, check_projected_crs,
-                check_not_all_nan, _looks_like_join_result, _has_metric_column,
-                check_join_cardinality,
-                check_finite, _count_finding, _declared_number, _inferred_count,
-                check_declared_units,
-                check_count_population,
-                capture_environment, check_contract_arg, _check_one_arg, _geometry_column,
-                _looks_like_frame, _has_geometry, install_contract_guards,
-                install_operation_tracker, run_checks):
+    for obj in (_finding, _crs_of, _is_projected, _crs_unit, _crs_unit_factor, _unit_matches,
+                check_projected_crs, check_not_all_nan, _looks_like_join_result,
+                check_join_cardinality, check_finite, _declared_number, check_declared_values,
+                declared_entries, capture_environment, check_contract_arg, _check_one_arg,
+                _geometry_column, _looks_like_frame, _has_geometry, install_contract_guards,
+                install_operation_tracker, _install_metric_op_recorder, _dedup_ops, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))
     return ("    PASS, FAIL, UNKNOWN = 'pass', 'fail', 'cannot_determine'\n"
             f"    DECLARED_OUTPUTS = {DECLARED_OUTPUTS!r}\n"
-            f"    _KNOWN_UNITS = {_KNOWN_UNITS!r}\n"
-            f"    _UNIT_ALIASES = {_UNIT_ALIASES!r}\n"
+            f"    _CONTRACT_LENGTH_METRES = {_CONTRACT_LENGTH_METRES!r}\n"
             f"    VIOLATIONS_GLOBAL = {VIOLATIONS_GLOBAL!r}\n"
             f"    GEOGRAPHIC_OPS_GLOBAL = {GEOGRAPHIC_OPS_GLOBAL!r}\n"
             f"    OP_TRACKING_GLOBAL = {OP_TRACKING_GLOBAL!r}\n"
             f"    _METRIC_OPS = {tuple(_METRIC_OPS)!r}\n"
             f"    _GEOGRAPHIC_WARNING = {_GEOGRAPHIC_WARNING!r}\n"
             f"    _GEO_MODULES = {set(_GEO_MODULES)!r}\n"
-            f"    _METRIC_COLUMN_HINTS = {tuple(_METRIC_COLUMN_HINTS)!r}\n"
+            f"    METRIC_OPS_GLOBAL = {METRIC_OPS_GLOBAL!r}\n"
             "    import math\n"
             "    from types import ModuleType\n"
             "    from typing import Any, Dict, List, Optional\n" + "\n".join(parts))
@@ -1316,4 +1200,4 @@ __all__ = ["run_checks", "write_checks", "epilogue_source", "capture_environment
            "CHECKS_FILENAME", "ENVIRONMENT_FILENAME", "DECLARED_FILENAME",
            "PASS", "FAIL", "UNKNOWN", "DECLARED_OUTPUTS", "check_projected_crs",
            "check_not_all_nan", "check_join_cardinality", "check_finite",
-           "check_declared_units"]
+           "check_declared_values", "declared_entries", "METRIC_OPS_GLOBAL"]

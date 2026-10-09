@@ -1,0 +1,108 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254.14 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed, the optimal solution to your facility location problem is:\n\n**The two sites to choose are C1 and C3.**\n\n**Total population-weighted straight-line distance: 382,254.14 person-kilometres.**\n\n### How it was computed\n- **40 demand points** each with a population (total population = 108,785).\n- **8 candidate sites** \u2192 all C(8,2) = 28 possible pairs were evaluated.\n- For each pair, every demand point was assigned to its **nearest** of the two sites, and the straight-line (great-circle) distance in km was multiplied by that demand point's population, then summed.\n\n### Results\n| Rank | Sites | Total (person-km) |\n|------|-------|-------------------|\n| **1** | **C1 & C3** | **382,254.14** |\n| 2 | C2 & C3 | 418,879.72 |\n| 3 | C7 & C8 | 420,410.88 |\n| 4 | C1 & C7 | 423,999.04 |\n| 5 | C3 & C7 | 428,722.67 |\n\nThe best pair **C1 & C3** beats the runner-up (C2 & C3) by about 36,626 person-km. The mean population-weighted distance under this choice is **3.51 km** per person.\n\n**Answer: Sites C1 and C3, with a total of 382,254.14 person-kilometres.**",
+  "seconds": 118.9,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 120609,
+    "cached_input_tokens": 88064,
+    "output_tokens": 3314,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T05-deepseek-v4-flash-1791501959-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

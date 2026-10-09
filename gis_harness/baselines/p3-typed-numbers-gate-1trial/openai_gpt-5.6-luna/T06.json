@@ -1,0 +1,112 @@
+{
+  "task": "T06",
+  "title": "DEM: slope + watershed",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "dem.tif is a 30 m elevation model. What is its mean slope in degrees? And what is the area, in km\u00b2, of the watershed draining to the outlet at 40.04950\u00b0 N, 88.26302\u00b0 W (UTM 16N x=392265, y=4434015)?",
+  "files": [
+    "dem.tif"
+  ],
+  "expected": {
+    "mean_slope_deg": 5.79043106550576,
+    "analytic_slope_deg": 5.822915528381649,
+    "watershed_km2": 16.2,
+    "outlet_utm": [
+      392265.0,
+      4434015.0
+    ],
+    "outlet_lonlat": [
+      -88.263024,
+      40.049496
+    ]
+  },
+  "expected_why": {
+    "watershed_km2": "by construction: 150 cols x 120 rows x 900 m^2",
+    "mean_slope_deg": "Horn 3x3 over interior cells; analytic 5.823 elsewhere"
+  },
+  "score": {
+    "task": "T06",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_slope_deg",
+        "kind": "number",
+        "expected": 5.79043106550576,
+        "matched": true,
+        "found": "5.7909\u00b0"
+      },
+      {
+        "name": "watershed_km2",
+        "kind": "number",
+        "expected": 16.2,
+        "matched": true,
+        "found": "16.20 km\u00b2"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"CRS EPSG:32616 shape (200, 150) res (30.0, 30.0) bounds BoundingBox(left=390000.0, bottom=4434000.0, right=394500.0, top=4440000.0) nodata None\\\\nmean"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": "dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using `dem.tif` (30 m resolution, EPSG:32616):\n\n- **Mean slope:** **5.7909\u00b0**\n- **Watershed area draining to the outlet:** **16.20 km\u00b2**\n\nThe outlet coordinates `(392265, 4434015)` fall exactly at a raster cell center. The watershed was delineated using sink filling and 8-direction D8 flow routing.\n\n[Download the watershed mask GeoTIFF](/agent/files/file_0cb34d6f8494/download)\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names",
+  "seconds": 59.5,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 74018,
+    "cached_input_tokens": 0,
+    "output_tokens": 2898,
+    "usage_absent": 0,
+    "cost_usd": 0.0183,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T06-gpt-5.6-luna-1791502688-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

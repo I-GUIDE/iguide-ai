@@ -1,0 +1,62 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "attached",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "can't",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "I can\u2019t compute NDVI from the attached scene because it contains only a **red** band. NDVI requires both red and near-infrared (NIR) reflectance:\n\n\\[\nNDVI=\\frac{NIR-Red}{NIR+Red}\n\\]\n\nPlease attach the corresponding **NIR band** or a multiband scene containing both red and NIR bands, and I can calculate the mean NDVI.",
+  "seconds": 29.9,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 44940,
+    "cached_input_tokens": 0,
+    "output_tokens": 873,
+    "usage_absent": 0,
+    "cost_usd": 0.01,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-U02-gpt-5.6-luna-1791501544-1"
+}

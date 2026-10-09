@@ -1,0 +1,85 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "cannot",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "The mean NDVI **cannot be computed** from the attached scene.\n\n**Reason:** The scene `scene_red_only.tif` contains only **one band \u2014 the red band**. The NDVI formula requires two bands:\n\n**NDVI = (NIR \u2212 Red) / (NIR + Red)**\n\nSince the near-infrared (NIR) band is absent, the NDVI index is mathematically undefined for this scene.\n\n### What the scene actually contains\n\n| Property | Value |\n|---|---|\n| Bands | **1** (description: `red`) |\n| Size | 60 \u00d7 60 pixels (3,600 valid pixels) |\n| CRS | EPSG:32616 (UTM zone 16N) |\n| Data type | uint16 |\n| Red band min / max | 400 / 899 |\n| **Red band mean** | **650.79** |\n| Red band median | 654.0 |\n| Red band std | 144.60 |\n\n### What you'd need to complete the request\n\nTo compute the mean NDVI, I need the **NIR band** for the same scene (same extent, same pixel grid). If you can attach the NIR band (or a multi-band scene containing both red and NIR), I can immediately compute:\n\n1. Per-pixel NDVI = (NIR \u2212 Red) / (NIR + Red)\n2. The **mean NDVI** across all valid pixels\n\nThe red band alone only tells us about reflectance in the red portion of the spectrum \u2014 it cannot be converted into a vegetation index without the NIR counterpart.\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names",
+  "seconds": 99.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 92711,
+    "cached_input_tokens": 60672,
+    "output_tokens": 2318,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U02-deepseek-v4-flash-1791502382-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

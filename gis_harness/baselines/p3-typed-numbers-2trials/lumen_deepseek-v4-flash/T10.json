@@ -1,0 +1,82 @@
+{
+  "task": "T10",
+  "title": "Interpolation: IDW + ordinary kriging (Meuse)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "meuse.csv holds the Meuse river soil samples (x, y in metres, Dutch RD New, EPSG:28992; zinc in ppm). Estimate zinc at x=179500, y=331500 two ways: (a) inverse distance weighting with power 2 using all samples, and (b) ordinary kriging of log(zinc) with a spherical variogram (nugget 0.05, partial sill 0.59, range 897 m) using all samples, back-transformed with exp().",
+  "files": [
+    "meuse.csv"
+  ],
+  "expected": {
+    "idw_zinc": 397.44105463237537,
+    "ok_zinc": 309.53149003514136
+  },
+  "expected_why": {
+    "ok_zinc": "OK system solved in numpy, Sph(0.05, 0.59, 897), exp() back"
+  },
+  "score": {
+    "task": "T10",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "idw_zinc",
+        "kind": "number",
+        "expected": 397.44105463237537,
+        "matched": true,
+        "found": "397.4 ppm"
+      },
+      {
+        "name": "ok_zinc",
+        "kind": "number",
+        "expected": 309.53149003514136,
+        "matched": true,
+        "found": "312.6 ppm"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "Meuse",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the 155 Meuse river soil samples, here are the two estimates for zinc at **x = 179500, y = 331500** (EPSG:28992):\n\n### (a) Inverse Distance Weighting (power 2)\n**397.4 ppm**\n\nAll 155 samples were weighted by 1/d\u00b2. The nearest sample is only ~69 m away, which dominates the estimate.\n\n### (b) Ordinary Kriging of log(zinc) with spherical variogram\n- **log-zinc estimate:** 5.6872\n- **kriging variance:** 0.1158 (kriging SD \u2248 0.340)\n- **Back-transformed with exp():** **295.1 ppm**\n\nThe kriging system used the specified spherical variogram (nugget 0.05, partial sill 0.59 \u2192 sill 0.64, range 897 m) on all 155 samples, with the Lagrange multiplier enforcing unbiasedness (weights sum to 1.0).\n\n### Comparison\n| Method | Estimate (ppm) |\n|--------|---------------|\n| IDW (power 2) | **397.4** |\n| OK of log(zinc), exp() back-transform | **295.1** |\n\nThe two estimates differ notably. IDW is pulled up by the nearest sample (~69 m away, high zinc), while kriging smooths more toward the local mean of log-zinc given the variogram's nugget and range. The kriging estimate is the more statistically principled one here since it accounts for the spatial correlation structure and gives a variance (0.116) alongside the point estimate.\n\n**Note:** The back-transform is the plain `exp()` as requested. If you wanted the lognormal (unbiased) back-transform, it would be `exp(zhat + krig_var/2)` = exp(5.6872 + 0.0579) \u2248 **312.6 ppm** \u2014 worth mentioning since the simple exp() underestimates the mean by the factor exp(\u03c3\u00b2/2).",
+  "seconds": 113.3,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 91409,
+    "cached_input_tokens": 59136,
+    "output_tokens": 3049,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T10-deepseek-v4-flash-1791499518-0"
+}
