@@ -7466,15 +7466,37 @@ and so honestly unrecorded, plus English words pint knows as units ("20 are", "9
 fail on the first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
 (the networkx pin); `tests/` 157 passed.
 
-**Not re-measured live.** A full re-run of the fixed stage would take Lumen past the program's 50M
-cap, so the fixed stage has the tests (9 of 13 new cases fail on the first version) and the
-replay, not a second harness run.
+**Confirmation run of the fixed stage** (the user approved it, 2026-10-09). This ran on stage 45's
+tip, which carries these fixes: deepseek-v4-flash, gate on, 1 trial, the 16 tasks other than T06
+(`p5-fixed-gate`). The same 16 tasks in each run:
+
+| deepseek-v4-flash, 16 tasks | stage 43 | stage 44 first version | stage 45 on that | **fixed** |
+|---|---|---|---|---|
+| correct | 9/12 | 10/12 | 12/12 | 11/12 |
+| correct answers with a banner | 3 | 9 | 8 | **5** |
+| strict | 4/16 | 1/16 | 2/16 | 5/16 |
+| unproductive steps | 6 | 9 | 6 | 6 |
+
+The five banners on correct answers, read one by one:
+- **Three are the gate's `coverage` finding** on raster work it could not reach (T07, T08, T11).
+  Stage 43 showed the same three, as COULD NOT VERIFY. They are accurate: nothing checked those
+  numbers.
+- **One cut a remembered figure** (T01). The answer added "the official Census figure of
+  approximately 997.5 sq mi (≈ 2,583.5 km²)", which nothing in the turn recorded, and it was cut
+  with a note. That is what the cut is for.
+- **One cut a correct sum** (T10). "Total sill 0.64" is the nugget 0.05 plus the partial sill
+  0.59. The figure shows two significant digits, so the derivation rule does not try it, and the
+  producer check answered NONE despite the reworded prompt. This is the residual: a short derived
+  figure can still be cut. The answer stayed correct, because the scored values were untouched.
+
+**Spend:** this run used 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
 
 **Not fixed here.**
 - The gate's `all_nan` check fails a join whose OpenStreetMap attribute columns are sparse
   (`old_operator`, `wikidata`), which is a sandbox heuristic.
 - English words read as units.
 - An exploratory measurement inside the run the answer used.
+- A derived figure shown to fewer than three significant digits can still be cut (T10's "0.64").
 
 **Spend:** `p4-gate` 5.41M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen
 (with stage 45's run).
