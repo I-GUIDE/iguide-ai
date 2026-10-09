@@ -2166,11 +2166,11 @@ def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypa
                                    analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
     assert state["actions"].count("analyze") == 1, state["actions"]
     assert not state.get("grounding_retries")
-    # Not swallowed: the caveat still reaches the user, with the finding that caused it. Since
-    # stage 43 a unit that does not parse is a real unknown (units parse with a unit library),
-    # so it says COULD NOT VERIFY rather than stage 37's quieter note.
-    assert "could be checked" in state["final_answer"]
-    assert "km/hr^^" in state["final_answer"]
+    # Not swallowed: the finding that caused it is in the turn's verdict. Since stage 46 a
+    # "not checked" finding is reported there and no longer printed into the answer.
+    assert state["verdict"]["status"] == "unverified"
+    assert any("km/hr^^" in f["message"] for f in state["verdict"]["findings"])
+    assert "km/hr^^" not in state["final_answer"]
 
 
 def test_a_gate_fail_still_re_runs_and_the_peer_is_told_what_failed(monkeypatch):

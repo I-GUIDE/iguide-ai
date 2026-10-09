@@ -59,6 +59,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
 | 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
+| 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7608,3 +7609,111 @@ difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
   (stage 43) and in the answer.
 - Selection among sources is still the model's, now informed. No code picks one source over
   another.
+
+## Stage 46 — A banner only when a check found something {#stage-46}
+
+*2026-10-09. Branch `claude/banner-policy`, stacked on stage 45. DEVLOG M8.84. Follows the
+review of the eight-flaws program against the harness archive and the live browser sweep.*
+
+**Why.**
+
+- **The banner rarely meant the answer was wrong.** Across 437 scored turns in the harness
+  archive (every phase, both models, plus the live sweep of 2026-10-09):
+  - a banner landed on 98 correct answers and 9 wrong ones, so it marked a wrong answer 8% of
+    the time;
+  - it caught 9 of the 39 wrong answers.
+- **By kind, in the stack's own runs** (`p4-gate`, `p5-gate`, `p5-fixed-gate`, 50 turns with a
+  recorded verdict):
+
+  | check | kind | on correct | on wrong |
+  |---|---|---|---|
+  | gate | unverifiable (coverage, nothing applicable) | 22 | 0 |
+  | number scan | unverifiable (figure in no record) | 3 | 0 |
+  | number scan | note (statements cut) | 22 | 1 |
+  | gate | problem | 3 | 0 |
+
+  Two of the three gate problems were `all_nan` on T02L, where OpenStreetMap's optional tags
+  (`old_operator`, `wikidata`) were empty on a join that had matched every school.
+- **Most cuts removed correct text.** Of the 49 statements the number scan cut in those runs,
+  19 begin in the middle of a number: pieces of sentences split at a decimal point. The sentence start
+  was the last `.` of any kind, so "1,609.344 m … 41.8827° N" became "344 meters) … 8827° N",
+  which resolved to nothing and was cut. In `p5-gate` T02 that removed the headline, "**20
+  schools** are within 1 mile of the site at 41.8827° N, 87.6233° W", leaving the heading "How
+  many schools are within 1 mile of the site?" over nothing. The rest:
+  - unit conversions of grounded figures ("≈ 3.43 minutes (0.0571 hours, ~206 seconds)");
+  - a short sum ("total sill 0.64", the nugget 0.05 plus the partial sill 0.59);
+  - an answer restating its own bounding box, whose numbers sat inside a JSON list and were
+    never recorded.
+
+  Only one cut in `p5-fixed-gate` was the kind the cut exists for: T01's recalled "997.5 sq mi
+  (≈ 2,583.5 km²)".
+
+**What changed.**
+
+1. **`verdict.render` prints only what changes how to read the answer** (`verdict.shown`): a
+   problem, or a peer that failed (headed "This answer may be incomplete"). A cut gets one plain
+   italic line with the full count, because the reader is owed knowing text was removed. Every
+   "not checked" finding and every note stays in `verdict.findings` and `verdict.status`, which
+   the client and the trace receive; it is no longer printed.
+2. **A sentence ends at a terminator followed by whitespace, or a line break**
+   (`facts._SENTENCE_END_RE`), not at any `.`.
+3. **A figure that restates a grounded figure in another unit resolves**
+   (`facts._resolve_conversions`). The operand is the figure as shown, so its rounding widens the
+   tolerance: 3.43 min is 0.05717 h ± 0.00015 h. A recalled "997.5 sq mi" against a grounded
+   2,584.62 km² is 997.93 sq mi, 0.43 away, and stays unresolved.
+4. **A sum or difference shown to two significant digits resolves when both operands are stated
+   in its own sentence** (`_DERIVED_LOCAL_MIN_SIGNIFICANT`). Three or more digits may combine any
+   two grounded figures, as before; ratios and products stay excluded.
+5. **Numbers inside a JSON list are recorded**, labelled with the list's key
+   (`facts._walk_strings`): `"region_bbox": [-87.65221, 41.855, …]`.
+6. **The gate's `all_nan` fails a join only when nothing matched** (`_join_matched_rows`):
+   `index_right` or `index_left` present and entirely null. A join that matched rows with an
+   all-null attribute column passes, with the columns named. A merge with `_left`/`_right`
+   suffixes and no index column still fails as before.
+7. **Two offline tools.** `gis_harness/replay_number_scan.py` re-runs the scan over recorded
+   answers with no model calls. `gis_harness/banner_calibration.py` counts each check's findings on
+   correct and wrong answers, and the banners each policy would print.
+
+**Measured, offline.**
+
+Replay over answers the scan never touched (the 23cfd02 runs and the live sweep, 1,226 stated
+figures):
+
+| | before | after |
+|---|---|---|
+| figures in a sentence that starts inside a number | 335 | 0 |
+| unresolved figures (cut or listed as not checked) | 60 | 55 |
+
+The unresolved figures that remain are mostly the classes the scan is for or deliberately does
+not try: a ratio ("2.5× the next zone"), a count or a combinatoric ("all 28 pairs"), aftershock
+times no tool result held (live T12), and figures whose operands were themselves unrecorded.
+
+Calibration over the stack's 50 recorded verdicts (`p4-gate`, `p5-gate`, `p5-fixed-gate`):
+
+| answers carrying a banner | correct (47) | wrong (3) |
+|---|---|---|
+| every finding printed (stage 44) | 33 | 1 |
+| problems and failed peers (stage 46) | 3 | 0 |
+
+Two of the remaining three are the `all_nan` finding item 6 removes at the source; the recorded
+verdicts predate it, so the replay cannot show that. The one wrong answer that had a banner keeps
+a quiet "statement left out" line and loses the banner.
+
+**What this gives up.** A wrong answer is no more likely to be caught than before; it is now
+marked less often (0 of 3 in these runs, against 1 of 3). The 30 wrong answers in the archive
+that carried no banner include method errors the verdict cannot see: kriging with the nugget on
+the diagonal (T10 live), the hot-spot method (T09), substituted data (U01). Nothing in the verdict checks a method. That
+is the next step, not this one: recompute a headline number from the artifact the run wrote, and
+re-run standard operations (kriging, IDW, Moran's I and Gi*, slope, shortest path) with a
+reference library from the turn's own inputs, and print a problem only on disagreement.
+
+Suites: `rag_pipeline/tests` 3882 passed, 19 skipped, 1 failed (the networkx pin, failing on
+stage 45 too); `tests/` 158 passed. Changed tests assert the finding in the verdict payload where
+they used to assert the printed caveat.
+
+**Not done.**
+- The map UI does not show the verdict payload yet, so "not checked" is visible only in the
+  trace and the API response.
+- No live run of this stage. It changes no tool and no route; the replay and calibration above
+  are offline over recorded turns.
+

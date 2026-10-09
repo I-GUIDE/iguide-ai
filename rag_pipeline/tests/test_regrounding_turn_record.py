@@ -432,9 +432,12 @@ def test_a_unit_that_does_not_parse_is_not_quietly_passed():
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["invariant_gate"] == "cannot_determine"
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert [f.kind for f in findings] == [V.UNVERIFIABLE] and "km/hr^^" in findings[0].message
+    # Stage 46: reported in the verdict, not printed into the answer.
     note = g._apply_grounding_caveat("The rate is 12.", audit)
-    assert "could be checked" in note and "km/hr^^" in note
-    assert "hallucination" not in note.lower()
+    assert note == "The rate is 12." and "hallucination" not in note.lower()
 
 
 def test_a_gate_unknown_does_not_disable_reconciling_a_number_another_tool_returned():
@@ -485,7 +488,8 @@ def test_any_other_gate_unknown_still_says_could_not_verify():
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is True
-    assert "could be checked" in g._apply_grounding_caveat("x", audit)
+    from agent_runtime import verdict as V
+    assert V.status(V.from_gate(audit)) == "unverified"
 
 
 def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():
@@ -504,6 +508,9 @@ def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is False and audit["severity"] == "low"
-    note = g._apply_grounding_caveat("18 schools.", audit)
-    assert note.count("ℹ️") == 1 and "COULD NOT VERIFY" not in note
-    assert "distance_m" in note
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert V.PROBLEM not in {f.kind for f in findings}
+    assert any("distance_m" in f.message for f in findings)
+    # Stage 46: a note is kept in the verdict and not printed.
+    assert g._apply_grounding_caveat("18 schools.", audit) == "18 schools."

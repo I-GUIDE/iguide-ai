@@ -19,9 +19,24 @@ Every check now contributes `Finding`s, and `render` maps all of them to one ban
 * an **unverifiable** item says what was not checked and why. It is never called a detection;
 * a **note** is information, not a warning;
 * an answer whose checks all ran and passed gets no banner at all.
+
+**What reaches the answer text (stage 46).** Only what changes how the reader should treat the
+answer: a problem, or a peer that failed (the answer is incomplete). A statement the number scan
+cut gets one quiet line, because the reader is owed knowing that text was removed. Everything
+else, every "not checked" and every note, stays in the verdict the client and the trace receive
+(`findings`, `status`) and no longer prints as a banner.
+
+The measurement behind it. Across 437 scored turns in the harness archive (every phase, both
+models, plus the live browser sweep), a banner landed on 98 correct answers and 9 wrong ones, so
+it marked a wrong answer 8% of the time, and it caught 9 of the 39 wrong answers. By kind, in the
+stack's own runs (p4-gate, p5-gate, p5-fixed-gate): the gate's "could not check" (coverage,
+nothing applicable) was on 22 correct answers and 0 wrong; the number scan's unresolved figures
+on 3 and 0. A banner that says nothing about correctness most of the time teaches the reader to
+skip it, and then the rare real problem is skipped too.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -53,30 +68,55 @@ def status(findings: List[Finding]) -> str:
     return "verified"
 
 
+def shown(f: Finding) -> bool:
+    """Whether a finding is printed as the banner: a problem, or a failed peer (an incomplete
+    answer). Unverifiable items and notes stay in the verdict payload only."""
+    return f.kind == PROBLEM or f.check == "peer"
+
+
+def _quiet(f: Finding) -> bool:
+    """The number scan's cut: one plain line, not a banner. Text was removed and the reader is
+    owed knowing that, but it is not a warning about what remains."""
+    return f.check == "number_scan" and f.kind == NOTE
+
+
 def render(answer: str, findings: List[Finding]) -> str:
-    """The answer with at most one banner, listing every finding once, problems first."""
-    if not findings:
-        return answer
+    """The answer with at most one banner, listing problems and peer failures once, problems
+    first, then the quiet line for any cut. Nothing else is printed (see the module docstring)."""
     seen, items = set(), []
-    for f in sorted(findings, key=lambda f: _ORDER.get(f.kind, 3)):
-        key = (f.kind, f.message)
+    for f in sorted(findings or [], key=lambda f: _ORDER.get(f.kind, 3)):
+        key = (f.check, f.kind, f.message)
         if key in seen:
             continue
         seen.add(key)
         items.append(f)
-    st = status(items)
-    head = {"problem": "⚠️ **Check this answer.** A check found a problem:",
-            "unverified": ("ℹ️ **Not everything here could be checked.** Unchecked is not the "
-                           "same as wrong:"),
-            "verified": "ℹ️ **Note:**"}[st]
-    lines = [head]
-    for f in items[:MAX_LINES]:
-        tag = {PROBLEM: "Problem", UNVERIFIABLE: "Not checked", NOTE: "Note"}.get(f.kind, "Note")
-        lines.append(f"- {tag}: {f.message}")
-    if len(items) > MAX_LINES:
-        lines.append(f"- …and {len(items) - MAX_LINES} more")
+    loud = [f for f in items if shown(f)]
+    quiet = [f for f in items if _quiet(f)]
+    if not loud and not quiet:
+        return answer
+    lines: List[str] = []
+    if loud:
+        if any(f.kind == PROBLEM for f in loud):
+            lines.append("⚠️ **Check this answer.** A check found a problem:")
+        else:
+            lines.append("ℹ️ **This answer may be incomplete.**")
+        for f in loud[:MAX_LINES]:
+            tag = "Problem" if f.kind == PROBLEM else "Incomplete"
+            lines.append(f"- {tag}: {f.message}")
+        if len(loud) > MAX_LINES:
+            lines.append(f"- …and {len(loud) - MAX_LINES} more")
+    for f in quiet:
+        lines.append(("\n" if loud else "") + f"_{_cut_sentence(f)}_")
     body = (answer or "").rstrip()
     return f"{body}\n\n---\n\n" + "\n".join(lines) if body else "\n".join(lines)
+
+
+def _cut_sentence(f: Finding) -> str:
+    m = re.match(r"\s*(\d+)", f.message or "")      # the producer writes the full count first;
+    n = int(m.group(1)) if m else (len(f.evidence) or 1)   # evidence is capped at six
+    return ("One statement with a figure no tool here can produce was left out."
+            if n == 1 else
+            f"{n} statements with figures no tool here can produce were left out.")
 
 
 # --------------------------------------------------------------------------- producers

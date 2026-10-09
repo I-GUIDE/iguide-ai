@@ -25,6 +25,7 @@ business (agent_runtime/verdict.py), not this module's.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import re
@@ -38,6 +39,7 @@ _NUM_RE = re.compile(r"(?<![\w.\-/])(-|−)?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?![
 # The unit is on the same line: "382254.14\nC2,C3 ..." is a number, then the next row.
 _UNIT_AFTER_RE = re.compile(
     r"[ \t-]?((?:square |sq\.? ?|cubic )?[A-Za-z°µ%][A-Za-z0-9°²³µ%/^.\-]*(?:\s?(?:per|/)\s?[A-Za-z0-9,]+)?)")
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)|\n")
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _LINK_TARGET_RE = re.compile(r"\]\([^)]*\)|https?://\S+|\bfile_[0-9a-f]{6,}\b|`[^`]*`")
 _LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s", re.M)
@@ -152,7 +154,7 @@ def _numbers_in(text: str) -> Iterable[Tuple[float, Optional[str], str]]:
         yield value, unit, context
 
 
-def _walk_strings(node: Any, out: List[str], depth: int = 0) -> None:
+def _walk_strings(node: Any, out: List[str], depth: int = 0, key: str = "") -> None:
     if depth > 12:
         return
     if isinstance(node, dict):
@@ -160,10 +162,16 @@ def _walk_strings(node: Any, out: List[str], depth: int = 0) -> None:
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 out.append(f"{k}: {v}")
             else:
-                _walk_strings(v, out, depth + 1)
+                _walk_strings(v, out, depth + 1, str(k))
     elif isinstance(node, (list, tuple)):
+        # A number inside a list is a recorded number too: `"region_bbox": [-87.65221, 41.855,
+        # -87.59659, 41.9091]`. These were dropped, so an answer restating its own bounding box
+        # resolved to nothing (deployed-23cfd02-gate U01, stage 46). It carries the list's key.
         for v in node:
-            _walk_strings(v, out, depth + 1)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out.append(f"{key}: {v}")
+            else:
+                _walk_strings(v, out, depth + 1, key)
     elif isinstance(node, str):
         s = node.strip()
         if s.startswith("{") or s.startswith("["):
@@ -237,6 +245,11 @@ def quantities(answer: str) -> List[Quantity]:
             for i in range(m.start(), m.end()):
                 mask[i] = " "
     masked = "".join(mask)
+    # Sentence ends: a terminator FOLLOWED BY WHITESPACE, or a line break. Any "." used to end a
+    # sentence, so a decimal point did too: "1,609.344 m … 41.8827° N" split into "344 meters)
+    # … 8827° N", whose figures resolve to nothing, and the scan cut the fragment. In p5-gate T02
+    # that removed the headline "**20 schools** are within 1 mile" (stage 46).
+    ends = [b.start() for b in _SENTENCE_END_RE.finditer(masked)]
     out: List[Quantity] = []
     for m in _NUM_RE.finditer(masked):
         whole, frac = m.group(2) or "", m.group(3) or ""
@@ -260,11 +273,12 @@ def quantities(answer: str) -> List[Quantity]:
             candidate = um.group(1).rstrip(".,;:")
             if parse_unit(candidate).kind == "unit":
                 unit = candidate
-        s0 = max(masked.rfind(".", 0, m.start()), masked.rfind("\n", 0, m.start())) + 1
+        i = bisect.bisect_left(ends, m.start())
+        s0 = ends[i - 1] + 1 if i > 0 else 0
         identifier = glued or bool(
             _IDENTIFIER_BEFORE_RE.search(masked[max(0, m.start() - 12):m.start()]))
-        e1 = min([i for i in (masked.find(". ", m.end()), masked.find("\n", m.end())) if i >= 0]
-                 or [len(masked)])
+        j = bisect.bisect_left(ends, m.end())
+        e1 = ends[j] if j < len(ends) else len(masked)
         # The clause: inside parentheses, the ';'-separated segment; otherwise the sentence.
         c0 = max(masked.rfind("(", s0, m.start()), masked.rfind(";", s0, m.start()))
         c1_candidates = [i for i in (masked.find(";", m.end(), e1), masked.find(")", m.end(), e1))
@@ -334,14 +348,28 @@ def _significant(q: Quantity) -> int:
     return len(digits)
 
 
-def _derived(q: Quantity, grounded: List[Fact]) -> Optional[Tuple[str, Fact, Fact]]:
+# A figure shown to two significant digits may still be a sum or difference, but only of two
+# figures stated in ITS OWN sentence: "nugget 0.05, partial sill 0.59 (total sill = 0.64)",
+# "189 m to 246 m (relief ~57 m)". Measured over the p5-fixed-gate run, the three-digit floor
+# alone cut T10's correct "total sill 0.64" (stage 46).
+_DERIVED_LOCAL_MIN_SIGNIFICANT = 2
+
+
+def _derived(q: Quantity, grounded: List[Fact],
+             local: Sequence[Fact] = ()) -> Optional[Tuple[str, Fact, Fact]]:
     """One sum or difference of two figures the answer itself grounded: "C1+C3 beats C2+C3 by
-    36,626" is 418,880 − 382,254. Only the answer's own grounded figures are operands, and only
-    a figure shown to three or more significant digits is tried, so a coincidence is unlikely."""
-    if _significant(q) < _DERIVED_MIN_SIGNIFICANT:
+    36,626" is 418,880 − 382,254. Only the answer's own grounded figures are operands. A figure
+    shown to three or more significant digits may combine any two of them, so a coincidence is
+    unlikely; one shown to two may combine only figures stated in its own sentence (*local*)."""
+    sig = _significant(q)
+    if sig >= _DERIVED_MIN_SIGNIFICANT:
+        pool = grounded
+    elif sig >= _DERIVED_LOCAL_MIN_SIGNIFICANT:
+        pool = list(local)
+    else:
         return None
-    for i, a in enumerate(grounded):
-        for b in grounded[i + 1:]:
+    for i, a in enumerate(pool):
+        for b in pool[i + 1:]:
             for (sym, op) in _OPS:
                 for x, y in ((a, b), (b, a)):
                     v = op(x.value, y.value)
@@ -364,16 +392,52 @@ def resolve(answer: str, facts: FactSet) -> List[Resolution]:
         if r.resolved and is_claim(r.quantity) and r.fact not in grounded:
             grounded.append(r.fact)
     grounded = grounded[:24]
+    by_sentence: Dict[str, List[Fact]] = {}
+    for r in out:
+        if r.resolved and is_claim(r.quantity) and r.quantity.sentence:
+            bucket = by_sentence.setdefault(r.quantity.sentence, [])
+            if r.fact not in bucket:
+                bucket.append(r.fact)
     for r in out:
         if r.resolved or not is_claim(r.quantity) or len(grounded) < 2:
             continue
-        d = _derived(r.quantity, grounded)
+        d = _derived(r.quantity, grounded, by_sentence.get(r.quantity.sentence, ()))
         if d is not None:
             sym, x, y = d
             r.fact = Fact(id=f"{x.id}{sym}{y.id}", value=r.quantity.value, source="derived",
                           label=f"{x.id} {sym} {y.id}")
             r.parts = [x, y]
+    _resolve_conversions(out)
     return out
+
+
+def _resolve_conversions(out: List[Resolution]) -> None:
+    """A figure that restates another stated, grounded figure in a different unit resolves to
+    it: "≈ 3.43 minutes (0.0571 hours, ~206 seconds)". The operand is the figure AS SHOWN, so its
+    own rounding widens the tolerance: 3.43 min is 0.05717 h ± 0.00015 h, and an answer that
+    writes 0.0571 is within it. Measured on p4-gate U04, both conversions were cut (stage 46).
+    A recalled figure stays unresolved: "997.5 sq mi" against a grounded 2,584.62 km² is
+    997.93 sq mi, 0.43 away."""
+    anchors = [r for r in out if r.resolved and r.quantity.unit and is_claim(r.quantity)]
+    if not anchors:
+        return
+    for r in out:
+        q = r.quantity
+        if r.resolved or not q.unit or not is_claim(q):
+            continue
+        for a in anchors:
+            if a is r or a.quantity.unit == q.unit:
+                continue
+            converted = convert(a.quantity.value, a.quantity.unit, q.unit)
+            if converted is None or not math.isfinite(converted):
+                continue
+            src = a.quantity
+            rel = (0.5 * 10 ** (-src.decimals)) / max(abs(src.value), 1e-12)
+            if abs(q.value - converted) <= _tolerance(q, converted) + abs(converted) * rel:
+                r.fact = Fact(id=f"{a.fact.id}→{q.unit}", value=q.value, source="converted",
+                              label=f"{a.fact.id} ({src.text}) in {q.unit}")
+                r.parts = [a.fact]
+                break
 
 
 def is_claim(q: Quantity) -> bool:

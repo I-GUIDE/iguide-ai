@@ -83,7 +83,7 @@ def test_an_object_dtype_all_null_column_is_caught():
     unmatched join. Without join evidence the same shape is an ordinary dataset with an empty
     optional column, and a correct run over one has to be able to reach ``pass``; the dtype
     detection this test is about is identical either way."""
-    frame = pd.DataFrame({"a": [None, None], "b": [1, 2], "index_right": [0, 1]})
+    frame = pd.DataFrame({"a": [None, None], "b": [1, 2], "index_right": [None, None]})
     out = check_not_all_nan("joined", frame)
     assert out["status"] == FAIL and "a" in out["columns"]
 
@@ -91,10 +91,21 @@ def test_an_object_dtype_all_null_column_is_caught():
 def test_an_all_null_column_in_a_JOIN_result_is_a_hard_failure():
     """With join evidence there is no ambiguity: nothing matched, so any count or ratio computed
     from the result is wrong. This is the case the check exists for, and it must stay a fail."""
-    frame = pd.DataFrame({"a": [1, 2], "index_right": [0, 1], "joined": [None, None]})
+    frame = pd.DataFrame({"a": [1, 2], "index_right": [None, None], "joined": [None, None]})
     out = check_not_all_nan("joined", frame)
     assert out["status"] == FAIL
     assert "nothing matched" in out["message"]
+
+
+def test_a_join_that_matched_with_sparse_source_columns_passes():
+    """Stage 46. An sjoin of OpenStreetMap schools to a buffer matched every school, but OSM's
+    optional tags (`old_operator`, `wikidata`) were empty on all of them. The join worked; the
+    nulls are the source's. Failing it put "Check this answer" on correct T02L answers."""
+    frame = pd.DataFrame({"name": ["A", "B"], "old_operator": [None, None],
+                          "wikidata": [None, None], "index_right": [0, 0]})
+    out = check_not_all_nan("schools_in_buffer", frame)
+    assert out["status"] == PASS
+    assert "old_operator" in out["columns"] and "not a failed join" in out["message"]
 
 
 def test_merge_suffixes_also_count_as_join_evidence():
@@ -105,7 +116,8 @@ def test_merge_suffixes_also_count_as_join_evidence():
 
 
 def test_a_numeric_all_nan_column_is_caught():
-    frame = pd.DataFrame({"a": [float("nan")] * 3, "b": [1, 2, 3], "index_left": [0, 1, 2]})
+    frame = pd.DataFrame({"a": [float("nan")] * 3, "b": [1, 2, 3],
+                          "index_left": [float("nan")] * 3})
     assert check_not_all_nan("df", frame)["status"] == FAIL
 
 

@@ -166,6 +166,17 @@ def _looks_like_join_result(frame: Any) -> bool:
         str(c).endswith(("_left", "_right")) for c in columns)
 
 
+def _join_matched_rows(frame: Any) -> bool:
+    """Whether a join result carries an index from the other side with any non-null value: the
+    join matched at least one row. False when the frame has no such column, or every value in it
+    is null (a left join that matched nothing)."""
+    try:
+        cols = [c for c in frame.columns if str(c) in ("index_right", "index_left")]
+        return any(not bool(frame[c].isna().all()) for c in cols)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
     """An entirely-null column is a failed join or a failed parse wearing a result's shape.
 
@@ -213,6 +224,16 @@ def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
         except Exception:
             continue
     if bad:
+        matched = _join_matched_rows(frame)
+        if _looks_like_join_result(frame) and matched:
+            # The join matched rows, so an all-null column is the data's own sparsity, not a
+            # failed join: OpenStreetMap's optional tags (`old_operator`, `wikidata`) are empty
+            # for most features. Failing it put "Check this answer" on correct T02L answers in
+            # p4-gate and p5-gate (stage 46). A join that matched NOTHING still fails below.
+            return _finding("all_nan", PASS, name,
+                            f"joined rows matched, though {len(bad)} column(s) are entirely null "
+                            f"({', '.join(bad)}) — sparse attributes in the source, not a failed "
+                            f"join", columns=bad)
         if _looks_like_join_result(frame):
             return _finding("all_nan", FAIL, name,
                             f"column(s) entirely null: {', '.join(bad)} — this frame is a join "
@@ -1111,7 +1132,7 @@ def _inlined_helpers() -> str:
     """This module's own check functions, indented for injection into the sandbox."""
     parts: List[str] = []
     for obj in (_finding, _crs_of, _is_projected, _crs_unit, _crs_unit_factor, _unit_matches,
-                check_projected_crs, check_not_all_nan, _looks_like_join_result,
+                check_projected_crs, check_not_all_nan, _looks_like_join_result, _join_matched_rows,
                 check_join_cardinality, check_finite, _declared_number, check_declared_values,
                 declared_entries, capture_environment, check_contract_arg, _check_one_arg,
                 _geometry_column, _looks_like_frame, _has_geometry, install_contract_guards,

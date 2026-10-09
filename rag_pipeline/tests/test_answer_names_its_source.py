@@ -144,8 +144,14 @@ def test_the_sources_line_sits_with_the_answer_not_after_the_verdict(monkeypatch
                            code_fn=lambda q, ev, st: _code_result_from_the_portal(),
                            synthesize_fn=lambda *a, **k: LIST)
     final = out["final_answer"]
-    assert "**Sources:**" in final and "\n\n---\n\n" in final, final
-    assert final.index("**Sources:**") < final.index("\n\n---\n\n")
+    assert "**Sources:**" in final, final
+    # Stage 46: this turn's only finding is "not checked", which is no longer printed, so there
+    # may be no banner. When one is printed, it follows the Sources line.
+    if "\n\n---\n\n" in final:
+        assert final.index("**Sources:**") < final.index("\n\n---\n\n")
+    from agent_runtime import verdict as V
+    banner = V.render(final, [V.Finding("gate", V.PROBLEM, "a wrong number")])
+    assert banner.index("**Sources:**") < banner.index("\n\n---\n\n")
 
 
 def test_one_source_however_many_calls_and_never_from_a_repeat_note():
