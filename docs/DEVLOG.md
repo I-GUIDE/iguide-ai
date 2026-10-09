@@ -5310,3 +5310,24 @@ rather than from the previous one.
 **Not fixed** Method errors among the 30 unmarked wrong answers need reference recomputation. The map
   UI does not show the verdict payload yet.
 
+
+## 2026-10-09 · M8.86 · Measured numbers reach the gate without being declared (architecture stage 48)
+
+**Change** The sandbox's metric-op recorder keeps what `area`, `length` and `distance` returned
+  and the CRS's linear unit. `agent_runtime/measured_outputs.py` types every figure a run prints
+  with a unit pint parses, links a printed length or area to the measurement it equals, and
+  fails two things: a figure measured in a geographic CRS, and a feet CRS read as metres. Typed
+  values travel as `verification.outputs`, at most 16. The count checks stay with declarations.
+  New tool: `gis_harness/typed_coverage.py`.
+
+**Why** The unit and CRS checks ran only on `IGUIDE_OUTPUTS`. The harness never asked for it
+  (`AGENT_EXTRACTION` off, 0 of 499 gate reports declared); with the request, as on the VM,
+  deepseek declared in 48 of 117.
+
+**Measured** Correct archived answers, typed from print: deepseek 1,162 of 4,198 figures (732 of
+  1,218 lengths and areas; 19 were typed before, all by tools); luna 110 of 1,061 (0 before). Re-executing 853 calls: 34 figures
+  inherit a CRS, and neither new check fired. Live `undeclared-b24495a4` against `p5-fixed-gate`:
+  typed answer figures 0/298 → 88/334, correct 10/12 (T10 kriging) vs 11/12, 3.37M Lumen tokens.
+
+**Not fixed** Raster pixel-count areas, `pyproj.Transformer` arithmetic and shapely scalars carry
+  no CRS; Web Mercator's scale error is not a unit error.
