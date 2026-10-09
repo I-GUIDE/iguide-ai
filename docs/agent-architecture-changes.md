@@ -6884,6 +6884,22 @@ Design choices and why:
   `"verification": {}` on every code run. Their banner counts therefore include no gate
   banners. `--start-server` now sets `AGENT_INVARIANT_GATE=1`, and each record lists the gate's
   verdict on every code run (`gate`). Stage 42 records a gate-on run as the before for stage 43.
+- **The staging tools: on since 2026-10-09, OFF in every run before that.** `AGENT_EXTRACTION=1`
+  does more than turn the gate on. It binds the code peer's `stage_url`, `stage_element` and
+  `list_staged_inputs`, and the method-library tools `kb_method_search` and
+  `get_method_contract`. The harness set `AGENT_INVARIANT_GATE` alone, so every
+  `gis_harness.run` run up to and including `p5-fixed-gate` and `deployed-23cfd02-gate` had a
+  code peer with no `stage_url`. Every code-peer toolset those servers logged had 62–68 tools,
+  none of them staging (the baseline's own log holds no toolset line). A no-input task that
+  needs public data was measured on a toolset production does not have. No score in this entry
+  or in stages 42–45 was taken on the deployed toolset. The one exception is
+  `stack-live-cases`, a separate driver that set `AGENT_EXTRACTION=1` by hand; its code peer
+  bound `stage_url`.
+  - `--start-server` now defaults `AGENT_EXTRACTION` to `1`, overridable like the gate.
+  - Before launching, it builds the staging tools under the server's environment and refuses to
+    start if `stage_url` is missing while the flag is on.
+  - After the run it writes every code-peer toolset the server logged to `toolsets.json`, and
+    exits 2 if one lacks `stage_url`.
 
 - **Scorer fix, 2026-10-09: a magnitude written with its letter.** "the **M7.1** Ridgecrest
   mainshock" was never read, because a number glued to a letter was skipped. T12 was then scored
