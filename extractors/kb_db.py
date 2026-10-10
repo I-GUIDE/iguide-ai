@@ -524,6 +524,125 @@ _BLOCK_TSQUERY = _OR_TSQUERY
 _SPEC_CHARS = 6000
 
 
+# --------------------------------------------------------------------------- stored-doc shape
+#
+# One builder per row kind, shared by the ranked search and the by-id readers below. They used to
+# be inlined in `search_kb`, which was fine while search was the only reader. It is not any more:
+# `get_kb_block` fetches the doc a search result names, and a fetched doc that is shaped
+# differently from the searched one is the drift this module's docstrings keep recording.
+
+_BLOCK_COLS = """b.doc_id, b.element_id, b.title, b.markdown, b.code, b.tools, b.ord, b.imports,
+                 e.title AS element_title, e.element_type"""
+
+
+def _block_hit(row, score: float = 0.0) -> Dict[str, Any]:
+    (doc_id, element_id, title, markdown, code, tools, ord_, imports, el_title, el_type) = row
+    contents = f"{markdown}\n\n{code}".strip() if markdown else (code or "")
+    return {
+        "_id": doc_id, "_index": "pg:block", "_score": float(score),
+        "_source": {
+            "doc_id": doc_id, "title": title or el_title or doc_id,
+            "contents": contents, "resource-type": "NotebookBlock",
+            "extracted": {"kind": "notebook_block", "parent_doc_id": element_id,
+                          "parent_title": el_title, "parent_type": el_type, "order": ord_,
+                          "block": {"resolved_tools": tools or [], "code": code,
+                                    "markdown_context": markdown or "",
+                                    "imports": imports or []}},
+        }}
+
+
+_UNIT_COLS = """u.element_id, u.symbol, u.qualified_name, u.library_module, u.slice_sha,
+                u.signature, u.doc_summary, u.unit_kind, u.verdict, u.requirements,
+                u.invariants, u.params, u.returns, u.callability, e.title"""
+
+
+def unit_doc_id(element_id: str, symbol: str, slice_sha: str) -> str:
+    """The id a unit is handed out under. Minted here, not stored, so it is parsed here too."""
+    return f"{element_id}::unit::{symbol}::{slice_sha}"
+
+
+def _unit_hit(row, score: float = 0.0) -> Dict[str, Any]:
+    (element_id, symbol, qualified, module, sha, signature, summary, unit_kind,
+     verdict, requirements, invariants, params, returns, callability, el_title) = row
+    doc_id = unit_doc_id(element_id, symbol, sha)
+    return {
+        "_id": doc_id, "_index": "pg:unit", "_score": float(score),
+        "_source": {
+            "doc_id": doc_id,
+            "title": symbol, "contents": f"{signature}\n{summary}".strip(),
+            "resource-type": "MethodUnit",
+            "extracted": {"kind": "method_unit", "parent_doc_id": element_id,
+                          "parent_title": el_title,
+                          "unit": {
+                              "library_symbol": symbol, "qualified_name": qualified,
+                              "signature": signature, "doc_summary": summary,
+                              "unit_kind": unit_kind, "params": params or [],
+                              "returns": returns, "invariants": invariants or [],
+                              "requirements": requirements or {},
+                              # From the COLUMN, always. The registry never persisted
+                              # callability for the units it ships — "it is in the
+                              # library, therefore callable" — so all 840 callable units
+                              # carry `{}` here while all 149 refused ones carry a full
+                              # dict. A consumer reading the JSON saw the negative fact
+                              # and never the positive one.
+                              "callability": {**(callability or {}), "verdict": verdict},
+                              "slice_sha": sha,
+                              # Pinned to the v_<sha> module, same as everywhere else:
+                              # an evidence view that names a method without saying how
+                              # to import it makes the agent guess the one field a
+                              # sandboxed run cannot recover from.
+                              "import_line": (f"from {module} import {symbol}"
+                                              if module and symbol else None),
+                          }},
+        }}
+
+
+_SPEC_COLS = """p.element_id, e.title, p.summary, p.steps, p.tools_referenced,
+                p.datasets_referenced, p.doi,
+                -- The implementation, joined on. A spec that describes a method without
+                -- saying which element runs it leaves the agent to rediscover the pairing by
+                -- search on every turn, which is what this edge exists to stop.
+                (SELECT jsonb_agg(jsonb_build_object(
+                          'element_id', sl.target_element, 'title', te.title,
+                          'confidence', sl.confidence, 'evidence', sl.evidence))
+                   FROM spec_link sl JOIN element te ON te.id = sl.target_element
+                  WHERE sl.spec_element = p.element_id) AS implemented_by"""
+
+
+def _spec_hit(row, score: float = 0.0) -> Dict[str, Any]:
+    (element_id, title, summary, steps, tools, datasets, doi, implemented_by) = row
+    # The steps ARE the payload and they are already the distilled form, so they get a
+    # larger budget than a raw cell excerpt. Numbered, because the agent has to be able
+    # to say which step it is following.
+    body = [summary.strip()] if summary else []
+    # In the CONTENTS, not only in a field beside it. A fact the model has to go looking
+    # for is a fact it does not use — measured three times in the previous pass, most
+    # plainly when `error`, `import_line_candidates` and `disambiguate_with` were all on
+    # a row and an agent still reported having none of them.
+    for impl in (implemented_by or []):
+        body.append(
+            f"IMPLEMENTED BY element {impl['element_id']} "
+            f"({impl.get('title') or '?'}) — evidence: {impl.get('evidence')}, "
+            f"confidence: {impl.get('confidence')}. Its callable units are in the "
+            f"method library; search them with kb_method_search.")
+    body += [f"{i}. {st}" for i, st in enumerate(steps or [], start=1)]
+    contents = "\n".join(body)
+    return {
+        "_id": f"{element_id}::methodspec", "_index": "pg:publication",
+        "_score": float(score),
+        "_source": {
+            "doc_id": f"{element_id}::methodspec", "title": title or element_id,
+            "contents": contents[:_SPEC_CHARS],
+            "resource-type": "PublicationMethodSpec",
+            "extracted": {"parent_doc_id": element_id, "parent_title": title,
+                          "parent_type": "publication", "doi": doi,
+                          "spec": {"step_count": len(steps or []),
+                                   "implemented_by": implemented_by or [],
+                                   "tools_referenced": tools or [],
+                                   "datasets_referenced": datasets or []}},
+        }}
+
+
 def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
     """Blocks and units, ranked together, shaped as OpenSearch hits.
 
@@ -543,8 +662,7 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
     hits: List[Dict[str, Any]] = []
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT b.doc_id, b.element_id, b.title, b.markdown, b.code, b.tools, b.ord,
-                   e.title AS element_title, e.element_type,
+            SELECT """ + _BLOCK_COLS + """,
                    ts_rank('{0.1,0.2,0.4,1.0}'::float4[], b.search, q) AS score
               FROM block b JOIN element e ON e.id = b.element_id,
                    LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
@@ -552,23 +670,11 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
              ORDER BY score DESC, b.doc_id
              LIMIT %s
         """, (expanded, size))
-        for (doc_id, element_id, title, markdown, code, tools, ord_, el_title,
-             el_type, score) in cur.fetchall():
-            contents = f"{markdown}\n\n{code}".strip() if markdown else (code or "")
-            hits.append({
-                "_id": doc_id, "_index": "pg:block", "_score": float(score),
-                "_source": {
-                    "doc_id": doc_id, "title": title or el_title or doc_id,
-                    "contents": contents, "resource-type": "NotebookBlock",
-                    "extracted": {"parent_doc_id": element_id, "parent_title": el_title,
-                                  "parent_type": el_type, "order": ord_,
-                                  "block": {"resolved_tools": tools or [], "code": code}},
-                }})
+        for row in cur.fetchall():
+            hits.append(_block_hit(row[:-1], row[-1]))
 
         cur.execute("""
-            SELECT u.element_id, u.symbol, u.qualified_name, u.library_module, u.slice_sha,
-                   u.signature, u.doc_summary, u.unit_kind, u.verdict, u.requirements,
-                   u.invariants, u.params, u.returns, u.callability, e.title,
+            SELECT """ + _UNIT_COLS + """,
                    ts_rank('{0.125,0.25,0.5,1.0}'::float4[], u.search, q) AS score
               FROM unit u JOIN element e ON e.id = u.element_id,
                    LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
@@ -576,40 +682,8 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
              ORDER BY score DESC, u.symbol
              LIMIT %s
         """, (expanded, size))
-        for (element_id, symbol, qualified, module, sha, signature, summary, unit_kind,
-             verdict, requirements, invariants, params, returns, callability, el_title,
-             score) in cur.fetchall():
-            hits.append({
-                "_id": f"{element_id}::unit::{symbol}::{sha}", "_index": "pg:unit",
-                "_score": float(score),
-                "_source": {
-                    "doc_id": f"{element_id}::unit::{symbol}::{sha}",
-                    "title": symbol, "contents": f"{signature}\n{summary}".strip(),
-                    "resource-type": "MethodUnit",
-                    "extracted": {"parent_doc_id": element_id, "parent_title": el_title,
-                                  "unit": {
-                                      "library_symbol": symbol, "qualified_name": qualified,
-                                      "signature": signature, "doc_summary": summary,
-                                      "unit_kind": unit_kind, "params": params or [],
-                                      "returns": returns, "invariants": invariants or [],
-                                      "requirements": requirements or {},
-                                      # From the COLUMN, always. The registry never persisted
-                                      # callability for the units it ships — "it is in the
-                                      # library, therefore callable" — so all 840 callable units
-                                      # carry `{}` here while all 149 refused ones carry a full
-                                      # dict. A consumer reading the JSON saw the negative fact
-                                      # and never the positive one.
-                                      "callability": {**(callability or {}),
-                                                      "verdict": verdict},
-                                      "slice_sha": sha,
-                                      # Pinned to the v_<sha> module, same as everywhere else:
-                                      # an evidence view that names a method without saying how
-                                      # to import it makes the agent guess the one field a
-                                      # sandboxed run cannot recover from.
-                                      "import_line": (f"from {module} import {symbol}"
-                                                      if module and symbol else None),
-                                  }},
-                }})
+        for row in cur.fetchall():
+            hits.append(_unit_hit(row[:-1], row[-1]))
         # --- publications: the method as the literature states it ------------------------
         #
         # A third question, not a variant of the other two. A cell says how someone did it, a
@@ -618,55 +692,16 @@ def search_kb(conn, query: str, *, size: int = 8) -> List[Dict[str, Any]]:
         # catchment bands and decay weights are what turn `e2sfca(..., distances, weights)`
         # from a signature into a runnable call.
         cur.execute("""
-            SELECT p.element_id, e.title, p.summary, p.steps, p.tools_referenced,
-                   p.datasets_referenced, p.doi,
-                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], p.search, q) AS score,
-                   -- The implementation, joined on. A spec that describes a method without
-                   -- saying which element runs it leaves the agent to rediscover the pairing by
-                   -- search on every turn, which is what this edge exists to stop.
-                   (SELECT jsonb_agg(jsonb_build_object(
-                             'element_id', sl.target_element, 'title', te.title,
-                             'confidence', sl.confidence, 'evidence', sl.evidence))
-                      FROM spec_link sl JOIN element te ON te.id = sl.target_element
-                     WHERE sl.spec_element = p.element_id) AS implemented_by
+            SELECT """ + _SPEC_COLS + """,
+                   ts_rank('{0.1,0.2,0.4,1.0}'::float4[], p.search, q) AS score
               FROM publication p JOIN element e ON e.id = p.element_id,
                    LATERAL (SELECT """ + _OR_TSQUERY.strip() + """ AS q) t
              WHERE p.search @@ q AND jsonb_array_length(p.steps) > 0
              ORDER BY score DESC, p.element_id
              LIMIT %s
         """, (expanded, size))
-        for (element_id, title, summary, steps, tools, datasets, doi, score,
-             implemented_by) in cur.fetchall():
-            # The steps ARE the payload and they are already the distilled form, so they get a
-            # larger budget than a raw cell excerpt. Numbered, because the agent has to be able
-            # to say which step it is following.
-            body = [summary.strip()] if summary else []
-            # In the CONTENTS, not only in a field beside it. A fact the model has to go looking
-            # for is a fact it does not use — measured three times in the previous pass, most
-            # plainly when `error`, `import_line_candidates` and `disambiguate_with` were all on
-            # a row and an agent still reported having none of them.
-            for impl in (implemented_by or []):
-                body.append(
-                    f"IMPLEMENTED BY element {impl['element_id']} "
-                    f"({impl.get('title') or '?'}) — evidence: {impl.get('evidence')}, "
-                    f"confidence: {impl.get('confidence')}. Its callable units are in the "
-                    f"method library; search them with kb_method_search.")
-            body += [f"{i}. {st}" for i, st in enumerate(steps or [], start=1)]
-            contents = "\n".join(body)
-            hits.append({
-                "_id": f"{element_id}::methodspec", "_index": "pg:publication",
-                "_score": float(score),
-                "_source": {
-                    "doc_id": f"{element_id}::methodspec", "title": title or element_id,
-                    "contents": contents[:_SPEC_CHARS],
-                    "resource-type": "PublicationMethodSpec",
-                    "extracted": {"parent_doc_id": element_id, "parent_title": title,
-                                  "parent_type": "publication", "doi": doi,
-                                  "spec": {"step_count": len(steps or []),
-                                           "implemented_by": implemented_by or [],
-                                           "tools_referenced": tools or [],
-                                           "datasets_referenced": datasets or []}},
-                }})
+        for row in cur.fetchall():
+            hits.append(_spec_hit(row[:-1], row[-1]))
 
     # Cells and units answer DIFFERENT questions — "how did someone do this" and "what can I
     # call" — and ranking them on one text-similarity axis lets cells win, because a cell indexes
@@ -753,7 +788,119 @@ def parent_elements(conn, element_ids: List[str]) -> Dict[str, Dict[str, Any]]:
                        "source_url": r[3], "doi": r[4]} for r in cur.fetchall()}
 
 
+# --------------------------------------------------------------------------- reads by id
+#
+# `search_kb` hands out three kinds of id, and only one of them is a stored key:
+#
+#   {element}::block::{n}               block.doc_id, stored
+#   {element}::unit::{symbol}::{sha}    minted from (element_id, symbol, slice_sha)
+#   {element}::methodspec               minted from publication.element_id
+#
+# So a reader that looks the id up in one table finds the blocks and nothing else — which is what
+# `get_kb_block` did against the cluster on the VM: 6 of 6 block ids, 0 of 6 unit ids, 0 of 5 spec
+# ids, because the cluster has never held the other two. These readers parse the minted ids back
+# into the keys they were minted from.
+
+
+def get_doc(conn, doc_id: str) -> Optional[Dict[str, Any]]:
+    """The stored doc for one id ``search_kb`` returned, in the same hit shape, or None."""
+    doc_id = str(doc_id or "").strip()
+    if not doc_id:
+        return None
+    with conn.cursor() as cur:
+        if "::unit::" in doc_id:
+            element_id, rest = doc_id.split("::unit::", 1)
+            symbol, _, sha = rest.rpartition("::")
+            # (element, symbol, sha) is not the whole key — the source file is too — but the
+            # same slice in two files is the same code, so either row describes it. The current
+            # version first, so a re-ingest that kept an old row does not shadow the new one.
+            cur.execute("SELECT " + _UNIT_COLS + """
+                           FROM unit u JOIN element e ON e.id = u.element_id
+                          WHERE u.element_id = %s AND u.symbol = %s AND u.slice_sha = %s
+                          ORDER BY u.is_current DESC, u.source_rel_path
+                          LIMIT 1""", (element_id, symbol, sha))
+            row = cur.fetchone()
+            return _unit_hit(row) if row else None
+        if doc_id.endswith("::methodspec"):
+            cur.execute("SELECT " + _SPEC_COLS + """
+                           FROM publication p JOIN element e ON e.id = p.element_id
+                          WHERE p.element_id = %s""", (doc_id[:-len("::methodspec")],))
+            row = cur.fetchone()
+            return _spec_hit(row) if row else None
+        cur.execute("SELECT " + _BLOCK_COLS + """
+                       FROM block b JOIN element e ON e.id = b.element_id
+                      WHERE b.doc_id = %s""", (doc_id,))
+        row = cur.fetchone()
+        return _block_hit(row) if row else None
+
+
+def blocks_for_element(conn, element_id: str) -> List[tuple]:
+    """``[(doc_id, source)]`` for an element's blocks in notebook order — what a bare element id
+    resolves to, the same pairs ``kb_store.local_blocks_for_parent`` returns."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT " + _BLOCK_COLS + """
+                       FROM block b JOIN element e ON e.id = b.element_id
+                      WHERE b.element_id = %s
+                      ORDER BY b.ord NULLS LAST, b.doc_id""", (str(element_id),))
+        return [(h["_id"], h["_source"]) for h in (_block_hit(r) for r in cur.fetchall())]
+
+
+def docs_for_elements(conn, element_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """``{element_id: [stored source, ...]}`` — everything extraction recorded for each element.
+
+    Blocks, current units, the dataset's primary file and the publication's spec, each shaped as
+    the stored doc the cluster or the local store would hold (``extracted.kind`` set), so
+    ``agent_kb.kb_for_elements`` summarizes all three backends with one function.
+    """
+    ids = sorted({str(e) for e in element_ids if e})
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not ids:
+        return out
+    with conn.cursor() as cur:
+        cur.execute("SELECT " + _BLOCK_COLS + """
+                       FROM block b JOIN element e ON e.id = b.element_id
+                      WHERE b.element_id = ANY(%s)
+                      ORDER BY b.element_id, b.ord NULLS LAST, b.doc_id""", (ids,))
+        for row in cur.fetchall():
+            out.setdefault(row[1], []).append(_block_hit(row)["_source"])
+
+        # One row per unit DOC ID: the same slice in two files is two rows but one id, one unit.
+        cur.execute("SELECT DISTINCT ON (u.element_id, u.symbol, u.slice_sha) " + _UNIT_COLS + """
+                       FROM unit u JOIN element e ON e.id = u.element_id
+                      WHERE u.element_id = ANY(%s) AND u.is_current
+                      ORDER BY u.element_id, u.symbol, u.slice_sha, u.source_rel_path""", (ids,))
+        for row in cur.fetchall():
+            out.setdefault(row[0], []).append(_unit_hit(row)["_source"])
+
+        # One file per dataset: the outcome's primary file when it names one. `extracted` is the
+        # handler's whole measurement, stored as-is by the backfill, so it already carries the
+        # keys the summary reads (format, crs, schema, variables, dims ...).
+        cur.execute("""
+            SELECT DISTINCT ON (f.element_id) f.element_id, f.file, f.extracted
+              FROM dataset_file f LEFT JOIN dataset_outcome o ON o.element_id = f.element_id
+             WHERE f.element_id = ANY(%s)
+             ORDER BY f.element_id, (f.file = o.primary_file) DESC NULLS LAST, f.file""", (ids,))
+        for element_id, _file, extracted in cur.fetchall():
+            out.setdefault(element_id, []).append({
+                "doc_id": element_id,
+                "extracted": {**(extracted or {}), "kind": "dataset",
+                              "parent_doc_id": element_id}})
+
+        cur.execute("""SELECT element_id, status, steps, datasets_referenced, tools_referenced
+                         FROM publication WHERE element_id = ANY(%s)""", (ids,))
+        for element_id, status, steps, datasets, tools in cur.fetchall():
+            out.setdefault(element_id, []).append({
+                "doc_id": element_id,
+                "extracted": {"kind": "publication", "parent_doc_id": element_id,
+                              "status": status, "steps": steps or [],
+                              "datasets_referenced": datasets or [],
+                              "tools_referenced": tools or [],
+                              "is_method_spec": bool(steps)}})
+    return out
+
+
 __all__ = ["DEFAULT_DSN", "SCHEMA_VERSION", "SCHEMA_SQL", "TS_WEIGHTS", "dsn", "enabled",
            "connect", "ensure_schema", "expand_identifiers", "table_counts",
            "search_units", "get_unit_contract", "slice_source", "search_kb",
-           "parent_elements"]
+           "parent_elements", "unit_doc_id", "get_doc", "blocks_for_element",
+           "docs_for_elements"]

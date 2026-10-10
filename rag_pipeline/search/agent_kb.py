@@ -312,6 +312,42 @@ def _warn_local_backend_once() -> None:
         pass
 
 
+def _kb_db(client=None):
+    """The Postgres record when it is THE store for this call, else None.
+
+    One rule for all three readers — search, fetch-by-id and the join by element — because they
+    hand ids to each other. Search checked this and the other two did not, so on the VM a search
+    answered from Postgres and the fetch of its own results went to the cluster, which holds the
+    blocks but has never held a unit or a method spec: 6 of 6 block ids found, 0 of 6 unit ids,
+    0 of 5 spec ids. An injected client wins, as it does for search, so a test or a caller that
+    names a cluster gets that cluster.
+    """
+    if client is not None:
+        return None
+    try:
+        from extractors import kb_db
+    except Exception:
+        return None
+    return kb_db if kb_db.enabled() else None
+
+
+# What a Postgres failure says, in every reader. NO fallback to the cluster or the local store,
+# deliberately, and the same in all three:
+#
+#   * the unit and spec ids this record mints exist nowhere else, so a fallback answers "not
+#     found" for exactly the ids it was asked about — a confident negative that is really an
+#     outage;
+#   * a fallback SEARCH would switch corpus mid-conversation (the cluster has blocks only), and
+#     "fewer results" reads as coverage, not configuration — the failure the backend `note`
+#     above exists to stop.
+#
+# So a database error is reported as a database error: search and fetch carry this note, and the
+# join (whose return shape has no place for one) logs it and contributes nothing.
+def _db_failed(exc: Exception) -> str:
+    return (f"agent KB database failed (AGENT_KB_DB is set, so it is the store; not falling "
+            f"back to another): {type(exc).__name__}: {exc}")
+
+
 def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embed: bool = True,
                     resolve_parents: bool = True) -> Dict[str, Any]:
     """Search the agent KB; return normalized, parent-linked evidence.
@@ -333,23 +369,23 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         # `count: 0`, which reads as "the corpus does not cover this" rather than "nothing was
         # ever written here" — the most expensive kind of silence in this system, and the reason
         # an A/B of the KB measured nothing until this existed.
-        if client is None:
+        kb_db = _kb_db(client)
+        if kb_db is not None:
+            base["backend"] = "postgres"
             try:
-                from extractors import kb_db
-            except Exception:
-                kb_db = None
-            if kb_db is not None and kb_db.enabled():
                 with kb_db.connect() as conn:
                     hits = kb_db.search_kb(conn, query, size=size or 8)
                     docs = normalize_hits(hits, [], size or 8)
                     elements = (kb_db.parent_elements(
                         conn, [d["parent_doc_id"] for d in docs]) if resolve_parents else {})
-                for d in docs:
-                    d["element"] = elements.get(d["parent_doc_id"])
-                return {"source": "agent_kb", "backend": "postgres", "count": len(docs),
-                        "documents": docs,
-                        "citation_ids": [d["parent_doc_id"] for d in docs],
-                        "block_ids": [d["doc_id"] for d in docs], "elements": elements}
+            except Exception as exc:
+                return {**base, "note": _db_failed(exc)}
+            for d in docs:
+                d["element"] = elements.get(d["parent_doc_id"])
+            return {"source": "agent_kb", "backend": "postgres", "count": len(docs),
+                    "documents": docs,
+                    "citation_ids": [d["parent_doc_id"] for d in docs],
+                    "block_ids": [d["doc_id"] for d in docs], "elements": elements}
 
         use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
         base["backend"] = "opensearch" if use_opensearch else "local"
@@ -451,6 +487,32 @@ def _element_block_bundle(element_id: str, blocks: List) -> Dict[str, Any]:
     }
 
 
+def _get_kb_block_db(kb_db, doc_id: str) -> Dict[str, Any]:
+    """``get_kb_block`` against the Postgres record. Same return shapes as the other backends."""
+    try:
+        with kb_db.connect() as conn:
+            hit = kb_db.get_doc(conn, doc_id)
+            if hit is not None:
+                return {"doc_id": doc_id, "found": True, "index": hit.get("_index"),
+                        "backend": "postgres", "source": _reference_only(hit.get("_source"))}
+            # bare element_id -> bundle all its blocks
+            blocks = kb_db.blocks_for_element(conn, doc_id)
+            if blocks:
+                return {**_element_block_bundle(doc_id, blocks), "backend": "postgres"}
+            known = kb_db.parent_elements(conn, [doc_id])
+    except Exception as exc:
+        return {"doc_id": doc_id, "found": False, "backend": "postgres",
+                "note": _db_failed(exc)}
+    out: Dict[str, Any] = {"doc_id": doc_id, "found": False, "backend": "postgres"}
+    if doc_id in known:
+        # A dataset or publication element is in the record but has no cells to bundle. Saying
+        # so keeps "not found" from reading as "not in the corpus".
+        out["note"] = ("this element is in the record but has no notebook blocks; fetch its "
+                       "method spec as '<element>::methodspec' or its units by the ids "
+                       "agent_kb_search returns")
+    return out
+
+
 def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
     """Fetch the FULL stored agent-KB doc by id (incl. extracted.block.code).
 
@@ -458,7 +520,14 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
     ``element_id`` — in the latter case the element's blocks are concatenated into one
     whole-notebook source (the consumer often only knows the cited element_id). The
     search/evidence view truncates contents; this returns the complete code/method body
-    for verbatim reuse. Local by default; never raises."""
+    for verbatim reuse. Local by default; never raises.
+
+    Postgres first when ``AGENT_KB_DB`` is set and no client is injected — the precedence
+    ``agent_kb_search`` uses, so every id a search returns can be fetched: blocks, units
+    (``{element}::unit::{symbol}::{sha}``) and method specs (``{element}::methodspec``)."""
+    kb_db = _kb_db(client)
+    if kb_db is not None:
+        return _get_kb_block_db(kb_db, doc_id)
     try:
         from extractors import kb_store
         from extractors.indices import all_agent_indices
@@ -590,8 +659,9 @@ def _summarize_for_element(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
 def kb_for_elements(element_ids, *, client=None) -> Dict[str, Dict[str, Any]]:
     """``{element_id: extracted summary}`` for the elements that have any, keyed BY ID.
 
-    Works on either backend, because the caller should not have to know which one is configured:
-    the local file store is scanned, the cluster is queried with one terms lookup per index.
+    Works on any backend, because the caller should not have to know which one is configured:
+    the Postgres record when ``AGENT_KB_DB`` is set (the precedence search uses), else the local
+    file store is scanned or the cluster is queried with one terms lookup per index.
     An element with nothing extracted is simply absent from the result — never a stub, so a caller
     can test membership.
     """
@@ -603,7 +673,20 @@ def kb_for_elements(element_ids, *, client=None) -> Dict[str, Dict[str, Any]]:
 
     from extractors import kb_store
 
-    if client is None and kb_store.kb_backend() != "opensearch":
+    kb_db = _kb_db(client)
+    if kb_db is not None:
+        # The record, by the precedence search uses. A failure costs the enrichment, never the
+        # turn — and is logged, not silent, because this return shape has no field for a note.
+        try:
+            with kb_db.connect() as conn:
+                grouped = {e: srcs for e, srcs in
+                           kb_db.docs_for_elements(conn, sorted(wanted_set)).items()
+                           if e in wanted_set}
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("kb_for_elements: %s", _db_failed(exc))
+            return {}
+    elif client is None and kb_store.kb_backend() != "opensearch":
         for element in wanted_set:
             for _doc_id, source in kb_store.local_blocks_for_parent(element, _kb_indices()):
                 grouped.setdefault(element, []).append(source)
