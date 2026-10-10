@@ -13,6 +13,10 @@ Behaviour comes from `prototype`, which is ahead of the deployment: the VM still
 (2026-09-22). Wherever a change below landed after that, the text gives its date, and it is
 not live until the next deploy.
 
+**Re-checked on 2026-10-10** for the agent's knowledge-base record (section 6) and the method
+library. The VM then ran `prototype` at `23cfd02`, which includes the extraction merge (PR #83,
+2026-10-08), and both were switched on there on 2026-10-08 at 18:33Z.
+
 ---
 
 ## At a glance
@@ -25,6 +29,8 @@ not live until the next deploy.
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
 | Operational records | host journal; `/var/log/iguide-agent/incidents/` | container logs; one evidence bundle per watchdog incident | host access only | journal capped at 3 GB; newest 60 bundles |
+| Agent KB record | Postgres, compose service `agent-db`, volume `agent_db_data` | what extraction produced: elements, notebook blocks, method units, publication specs, dataset files | none: a shared corpus the agent only reads | nothing; nothing writes it either |
+| Method library | a host directory bind-mounted at the same path (`AGENT_METHOD_LIBRARY_DIR`) | the importable `iguide_methods` package the sandbox mounts read-only | none | nothing |
 
 Two of these grow without bound by design; see [Nothing reclaims](#nothing-reclaims). Under
 `AGENT_MODE=local` the first two are never written at all — see [Local mode](#local-mode).
@@ -487,6 +493,88 @@ within 30 seconds, and both have stacks.
 
 ---
 
+## 6. The agent's knowledge-base record — Postgres
+
+The extraction work (merged 2026-10-08, PR #83; its history is DEVLOG M8.1–M8.71) added a store
+the agent owns, instead of the `iguide_agent_*` indices it had been writing into on the website's
+OpenSearch cluster. Why it exists is DEVLOG M8.32–M8.34: the indices belong to the website, so
+re-indexing the agent's own knowledge base needed write access to production website
+infrastructure, and nothing durable held what extraction had found.
+
+**Where.** Compose service `agent-db` (container `iguide-agent-db`, image `pgvector/pgvector:pg17`)
+behind the compose profile `extraction`, published on `127.0.0.1:5544` only. Its data is the
+named volume `agent_db_data`, under the same Docker data root as the file store
+(`/media/volume/i-guide-agent-volume/docker/volumes/…_agent_db_data/_data`), so it survives a
+container recreate and an image rebuild. Schema: `extractors/kb_db.py` (`SCHEMA_SQL`).
+
+**What it holds.** Counted on the VM on 2026-10-10. The database is 28 MB, and the volume 83 MB.
+
+| table | rows |
+| --- | ---: |
+| `element` (188 publication, 174 notebook, 145 dataset, 36 code) | 543 |
+| `block` (notebook cells) | 3,830 |
+| `unit` (method units, each with its library slice) | 989 |
+| `publication` (63 with extracted steps) | 203 |
+| `dataset_outcome` | 130 |
+| `dataset_file` | 43 |
+| `spec_link` | 7 |
+| `ingest_run` | **0** |
+
+**Who writes it: nothing, at present.** The rows are a static copy. `scripts/backfill_kb_db.py`
+loaded them on a development machine from the built method library and the JSON exports, with no
+re-extraction and no LLM calls (DEVLOG M8.32). On 2026-10-08 a `pg_dump` of that copy was
+restored into the VM's `agent-db`. The newest `element.updated_at` is 2026-08-29, and `ingest_run`
+is empty, so no ingest has written to it since. Starting the ingestion service would not change
+that. `metadata-extraction-server` writes through the OpenSearch emitter (to the local store, or to
+the `iguide_agent_*` indices under `AGENT_KB_BACKEND=opensearch`) and to the library files.
+The Postgres emitter that M8.32 planned was never built. That service is not running anyway; see
+[system-components.md](system-components.md).
+
+**What reads it.** All of these readers are gated by `AGENT_KB_DB=1` (`kb_db.enabled()`), which is
+set on the VM:
+
+- `agent_kb_search` (`rag_pipeline/search/agent_kb.py`). It checks Postgres **first**, before
+  `AGENT_KB_BACKEND`, whenever the flag is on and no client is injected. On the VM it reports
+  `backend: postgres` and returns `PublicationMethodSpec`, `NotebookBlock` and `MethodUnit` hits
+  (three queries, 2026-10-10). The VM also sets `AGENT_KB_BACKEND=opensearch`, but search
+  ignores it unless the flag is turned off.
+- `kb_method_search` and `get_method_contract`, through `agent_runtime/method_library.py`. If the
+  database cannot be reached, they fall back to the library's `_registry.json` and report which
+  store answered (`backend_name()`).
+
+Two readers do **not** follow the flag. `get_kb_block` and `kb_for_elements` choose between the
+local store and OpenSearch from `AGENT_KB_BACKEND` alone. So on the VM, search hits come from
+Postgres, but the full documents behind them come from the `iguide_agent_*` indices on the prod
+cluster. The notebook blocks match, because the same 3,830 were indexed there. The other types do
+not. On 2026-10-10 `get_kb_block` found 6 of 6 `NotebookBlock` ids from Postgres results, 0 of 6
+`MethodUnit` ids and 0 of 5 `PublicationMethodSpec` ids.
+
+**Backup and rollback.** No dump exists on the VM (checked 2026-10-10). The copy it was restored
+from is on a development machine. To take one, run `docker exec iguide-agent-db pg_dump -U
+"$AGENT_DB_USER" -d "$AGENT_DB_NAME" -Fc` and write the output off the container. The rows can be
+rebuilt without any LLM calls: run `scripts/backfill_kb_db.py` against the same method library
+and exports. To turn the record off, remove `AGENT_KB_DB` and recreate agent-api with
+`--no-deps`. Search then falls back to the `AGENT_KB_BACKEND` path, and the method tools fall back
+to the registry. Then run `docker compose --profile extraction stop agent-db`. Never stop the
+database while the flag is still set. The method tools would fall back to the registry, but
+`agent_kb_search` does not fall back on a connection error. It returns no hits and an
+`agent_kb_search error:` note, and the agent can read that as a corpus with nothing on the topic.
+
+The database credentials are `AGENT_DB_USER`, `AGENT_DB_NAME`, `AGENT_DB_PASSWORD` and
+`AGENT_KB_DSN`, all in `.env`. Every service that loads `.env` through `env_file` receives them.
+
+### The method library
+
+`iguide_methods/` is the importable package that `kb_method_search` lists and the sandbox mounts
+read-only. It lives in the directory named by `AGENT_METHOD_LIBRARY_DIR`. Because sandboxes start
+through the host's Docker daemon, `docker-compose.extraction.yml` bind-mounts that directory at
+the **identical** path in agent-api. On the VM it holds 98 element packages and 944 `.py` files
+(2026-10-10). It was copied there from the same development machine on 2026-10-08, not rebuilt,
+because the units in Postgres point at its exact slices (840 of 840 byte-identical, DEVLOG M8.32).
+Nothing on the VM regenerates it. `scripts/build_method_library.py` is how to rebuild it.
+
+---
+
 ## Local mode
 
 `AGENT_MODE=local` ([Stage 24](agent-architecture-changes.md#stage-24), 2026-10-03) is for one
@@ -511,6 +599,7 @@ prod with nothing erroring.
 | `agent_chat_files` | 7.3 GB | no — `AGENT_FILE_RETENTION_DAYS=0` |
 | `iguide_codeexec` | 5.3 GB | yes — 72-hour TTL |
 | `chat_memory` | 5.27 MB | no |
+| `agent_db_data` | 83 MB (2026-10-10) | no, and nothing writes it, so it does not grow |
 
 About **12.6 GB on one volume**, with only the workspaces expiring. The file store's retention is
 off by configuration rather than by omission, so turning it on is one variable — but note that
@@ -555,9 +644,12 @@ before a few hundred sessions accumulate without it.
 
 ## Not used
 
-**No Postgres and no Neo4j for the agent's own state.** `POSTGRES_HOST`, `POSTGRES_DB` and
-`DATABASE_URL` are unset. An optional Postgres record, `AGENT_KB_DB`, exists only on unmerged
-branches (`backend_swap`, `claude/extraction-integration`); nothing on `prototype` reads it.
+**Conversations, traces and files are not in Postgres, and nothing of the agent's is in Neo4j.**
+The one Postgres store is the KB record in section 6, configured through `AGENT_KB_DB` and
+`AGENT_KB_DSN`. The generic `POSTGRES_HOST`, `POSTGRES_DB` and `DATABASE_URL` are unset on the VM
+(checked 2026-10-10), and no code path uses them for agent state.
+Until 2026-10-08 this section said `AGENT_KB_DB` existed only on unmerged branches. That stopped
+being true when PR #83 merged.
 `NEO4J_CONNECTION_STRING` points at the *platform's* graph and is read for related-elements; the
 agent writes nothing to it. OpenSearch's other indices belong to the
 website — `chat_memory` is the agent's own.
