@@ -778,6 +778,39 @@ process, so the work is mostly extraction; and `thread_id` is not a label — it
 sandbox workspace directory, so minting a fresh one per request silently hands every turn an
 empty `/work`.
 
+## The agent KB and extraction
+
+The extraction work merged into `prototype` on 2026-10-08 (PR #83, merge `aca61d7`). It turns
+knowledge elements into blocks, method units and publication specs the agent can search, plus an
+importable method library. [`extractors/EXTRACTOR_DESIGN.md`](extractors/EXTRACTOR_DESIGN.md) is
+its contract. DEVLOG M8.1–M8.71 holds its history, and
+[Stage 50](docs/agent-architecture-changes.md#stage-50) summarises it.
+
+**Three KB backends, and which one answers.** `agent_kb_search` checks them in this order:
+
+1. **Postgres** (`AGENT_KB_DB=1`, `extractors/kb_db.py`). The agent's own record, the `agent-db`
+   compose service. It is checked first whenever the flag is set and no client is injected.
+2. **OpenSearch** (`AGENT_KB_BACKEND=opensearch`). The `iguide_agent_*` indices exist only on the
+   **prod** cluster, which is the website's infrastructure, not the agent's.
+3. **The local JSON store**, the default. On a machine that has never run an ingest it is empty,
+   and an empty store answers `count: 0`, which reads as "the corpus does not cover this". The
+   result names its `backend`, so check that before trusting a miss.
+
+`kb_method_search` and `get_method_contract` read Postgres under the same flag and fall back to
+the library's registry. `get_kb_block` and `kb_for_elements` ignore `AGENT_KB_DB` and follow
+`AGENT_KB_BACKEND`. So with both flags set, as on the VM, a unit or spec id from a Postgres search
+cannot be fetched (measured 2026-10-10: 0 of 6 units, 0 of 5 specs, 6 of 6 notebook blocks).
+
+**What is deployed (checked on the VM, 2026-10-10).** `agent-db` is running and serves search
+from a **static** copy: 543 elements, newest row 2026-08-29, `ingest_run` empty. The extraction
+bundle (`AGENT_EXTRACTION`) is **on**. It is set by `docker-compose.extraction.yml`, which `.env`
+lists in `COMPOSE_FILE`, not by a line in `.env`, so `grep .env` reports it missing. Read
+`docker compose exec agent-api env` instead. **The ingestion service is not deployed.** The
+`metadata-extraction-server` container (`/ingest`, `/webhook`, port 5001) exited weeks ago, from
+an image older than the merge, so nothing new is extracted. Even if it ran, it would not update
+Postgres. Where each store lives and how to roll it back:
+[persistent-state.md §6](docs/persistent-state.md#6-the-agents-knowledge-base-record--postgres).
+
 ## Verifying UI and delivery changes
 
 For anything the browser renders, load the running prototype and drive the real gesture before
@@ -851,7 +884,7 @@ companion to the history below.
 
 ## Deployment
 
-Runs as four Docker Compose services behind nginx, which terminates TLS and needs
+Runs as Docker Compose services behind nginx: `agent-api`, `mcp-server` and `embedding-server`, plus `agent-db` under the `extraction` profile (running on the VM since 2026-10-08) and `metadata-extraction-server` under the `ingestion` profile (not running). nginx terminates TLS and needs
 `proxy_buffering off` with a long `proxy_read_timeout` for the SSE stream. Host-specific
 detail — addresses, the satellite-embedding service unit, dependency pins — is operational and
 deliberately not in this file; ask the maintainer.

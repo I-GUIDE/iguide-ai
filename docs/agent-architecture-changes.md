@@ -54,6 +54,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 38 | [A peer that can find what it measures, and stops when it repeats itself](#stage-38) | 2026-10-08 | `overpass_search` bound to both measuring peers with a file; an identical repeated call is answered, then ends the run; a delivered answer drops the partial banner; a feature list names its source |
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
+| 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6870,3 +6871,80 @@ mirrors in list order, that the first answer ends the search, and that all faili
 - **No memory between calls.** Every call starts again at z, even when z failed a moment ago.
 - **Not tested from the VM.** All of this was measured from one Mac on one afternoon. The VM's
   network may rank the mirrors differently.
+
+## Stage 50 — The extraction work lands, and the agent reads a record of its own {#stage-50}
+
+*Merged 2026-10-08 as PR #83 (merge commit `aca61d7`, per-step history kept). Recorded
+2026-10-10 from `prototype` at `23cfd02`. Open PRs and branches claim stages up to 49, so this
+takes 50 even though it landed before several of them. The reasons and measurements are in DEVLOG
+M8.1–M8.71. This entry points to them rather than repeating them.*
+
+The extraction branch (`claude/extraction-integration`) had been developed apart from `prototype`
+since August. It adds `extractors/`, which turns a knowledge element into notebook blocks, method
+units, publication specs and an importable method library. It also adds the agent-side tools that
+read them. This stage did not change how the supervisor decides. It changed what the agent can
+look up and run, and it added the first store the agent owns rather than borrows.
+
+### Stage S50.1 Why the agent got its own store
+
+The agent's extracted KB lived in `iguide_agent_*` indices on the website's OpenSearch cluster.
+Re-indexing it therefore needed write access to production website infrastructure. A mapping
+change meant re-crawling the corpus, with network fetches and an LLM call for each of 203
+publications, because nothing durable held what extraction had found (DEVLOG M8.32–M8.34). The
+argument was the record, not scale (~10k rows). Measured against the file registry it replaced on
+the agent's path: median latency **58.8 ms → 7.8 ms**, right element in the top 5 **88/95 →
+93/95**, all **840 of 840** library slices byte-identical, and duplicate, orphan and refused units
+rejected by constraints instead of accepted.
+
+### Stage S50.2 Why it is one switch, and why the description is behind it too
+
+The merge had to change nothing in production until someone opted in, so `AGENT_EXTRACTION` gates
+the whole bundle (DEVLOG M8.61). A tool and the text describing it are gated together. In M2.7 a
+peer whose prompt mentioned `kb_method_search`, but which did not have the tool, guessed the
+package name and wrote `from method_library import ...`, which fails. M8.62 and M8.67 extend the
+flag to the evidence views and to fetched KB documents.
+
+### Stage S50.3 Why the library is bind-mounted at an identical path
+
+Sandboxes start through the host's Docker daemon, which resolves a `-v` source on the host. The
+default library location sat on a named volume the host cannot see, so the daemon would mount an
+empty directory. The agent would still list the methods, and every import would fail (DEVLOG
+M8.63). `docker-compose.extraction.yml` mounts the directory at the same path on both sides, and
+`COMPOSE_FILE` in `.env` is what switches it on.
+
+### Stage S50.4 The merge itself
+
+Thirteen files conflicted when `prototype` (61 commits, #30–#81) was merged into the branch first
+(DEVLOG M8.70). Three of `prototype`'s guards caught extraction code as soon as the two met, and
+each was fixed, not exempted: the fork guard, the bare-credential guard and the loopback-port
+guard. In the deployed-replica image the suite gave 3,514 passed and 13 failed. Ten of those
+failures also occur on pure `prototype` in the same image. CI's contract job then failed with 29
+setup errors that neither side produced alone, and M8.71 fixed it.
+
+### Stage S50.5 What the deployment runs (checked on the VM, 2026-10-10)
+
+- **The bundle is on.** `.env` lists `docker-compose.extraction.yml` in `COMPOSE_FILE`, so
+  agent-api has `AGENT_EXTRACTION=1` and the library mount. `AGENT_EXTRACTION` itself is not a
+  line in `.env`. A check that greps `.env` reports it off, which is wrong.
+- **`agent-db` is running.** It is pgvector on pg17 under profile `extraction`, on loopback port
+  5544, up since 2026-10-08 18:32Z, with `AGENT_KB_DB=1`. `agent_kb_search` reports `backend:
+  postgres`. `AGENT_KB_BACKEND=opensearch` is also set, but search ignores it unless the DB flag
+  is turned off. The full-document fetch still follows it (S50.6) ([persistent-state.md §6](persistent-state.md#6-the-agents-knowledge-base-record--postgres)).
+- **Its rows are a static copy.** It holds 543 elements, 3,830 blocks, 989 units and 203
+  publications. `ingest_run` is empty, and the newest row dates from 2026-08-29. The rows were
+  restored from a development machine's backfill.
+- **The ingestion service is not deployed.** The `metadata-extraction-server` container exited
+  seven weeks before this check, from an image built 2026-04-27, before the merge.
+
+### Stage S50.6 What this stage does not fix
+
+- **Nothing keeps the record current.** No emitter writes to Postgres during ingest; M8.32 left
+  it unbuilt on purpose, to prove the schema first. Even a running ingestion service would update
+  only the OpenSearch indices and the library.
+- **The full-document fetch reads a different store from search.** `get_kb_block` and
+  `kb_for_elements` follow `AGENT_KB_BACKEND`, not `AGENT_KB_DB`. On the VM, `get_kb_block` found
+  6 of 6 notebook-block ids from a Postgres search, but 0 of 6 method-unit ids and 0 of 5
+  publication-spec ids.
+- **The ingestion port.** If `metadata-extraction-server` is started, port 5001 publishes on
+  every interface, because the platform form and MinIO post to it from elsewhere. That decision
+  is still open.
