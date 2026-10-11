@@ -7749,7 +7749,8 @@ the standard library.
 the VM, `fetch_public_data` off as on the VM, one trial per query and version, two turns at a time
 per server. Version 1 is the `stack-live-cases` run of the same tip (3218ecda), version 2 and 3 ran
 at 46992b90 on this branch. Archive: `gis_harness_runs_archive/{stack-live-cases, threeway-net,
-threeway-bridge, threeway-bridge-fix}`; the table's source is `threeway-net/compare3.json`.*
+threeway-bridge, threeway-bridge-fix, threeway-bridge-fix2}`; the table's source is
+`threeway-net/compare3.json`.*
 
 References, computed for this stage outside the agent: T05L the brute-force pair under each tract
 definition (Station #1 with Station Six when a tract counts by its centroid, with Station Four when
@@ -7844,7 +7845,31 @@ returned all 3,723 buildings in the county box in one call, `complete: true`, an
 qualifying area at 27,800 ha (reference 27,522); the largest patch was still being recomputed. So
 the fix is shown to deliver the data, not yet a scored answer.
 
+**Re-run on the fixed bridge, 2026-10-11** (`threeway-bridge-fix2`, at 1bc0624a, same settings, Lumen
+coins restored; 4.54M tokens). Neither answer is correct, and neither failure is the bridge's
+delivery:
+
+| query | result | LLM steps | tool calls (+ from code) | dup | wall s | Lumen 5xx | banners | Sources line |
+|---|---|---|---|---|---|---|---|---|
+| T08L | 🟨 honest "cannot provide" | 50 | 49 + 28 | 2 | 2,536 | 5 | 1 ℹ️ | TIGERweb only (no data used) |
+| T11L | ❌ 23,467 ha vs 27,522 (−14.7%); largest patch 9,970 ha vs ≈10,050, right | 33 | 27 + 10 | 1 | 481 | 0 | 1 ⚠️ (count check, 239 patches) | TIGERweb, OpenStreetMap, 3DEP |
+
+- **T11L.** Overpass was answering 504s again. The bridge's paged search retried, split and then
+  gave up with no partial result, as designed. The code then queried Overpass itself through
+  `fetch_public_data` and got all 3,705 buildings, stated, and the largest patch now matches the
+  reference. The total is wrong for a query-writing reason: the code's road query listed
+  `way[highway=primary](…);way[highway=secondary](…);out geom;` without a union, so only the second
+  statement's 173 secondary ways came back, and the answer told the user "no primary roads exist
+  in the county's OSM data". Earlier runs found 37-64 primary ways.
+- **T08L.** The memo held: 28 bridge calls, 2 repeated (first run: 70 and 33). The data-API crops
+  failed on `assets=B04,B08`. The service wants the parameter repeated (`assets=B04&assets=B08`),
+  and its 404 body says so ("B04,B08 is not valid. Should be one of …"), but `fetch` reports only
+  "answered HTTP 404" and drops the body. The code never saw the explanation and ended with an
+  honest no-value after 42 minutes, 15 of them waiting on Lumen 500s (the client has no timeout).
+
 **Not fixed here, found here:**
+- `fetch` (stage 34, shared by the tool and the bridge) drops a refusing service's error body; a
+  short excerpt of a JSON or text body would have told T08L's code its mistake.
 - The gate's count check reads a population as a row count ("declared count 2344 exceeds every
   frame"): a ⚠️ on three correct answers (T03L in both versions, network T05L), and on bridge
   T11L for a count of patches.
