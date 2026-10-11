@@ -5238,10 +5238,29 @@ rather than from the previous one.
   read, the newest of two, the bounded match, the write under a listed input's name, and the
   manifest hash. Both suites: 3918 passed, 19 skipped, 1 failed
   (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
-  **Replay PENDING**: the local Chrome replay on Lumen deepseek-v4-flash was started on both
-  builds on 2026-10-09 at 13:57 CDT (18:57 UTC). Every Lumen call returned
-  `429 insufficient_quota` ("Coin budget exhausted"), before any `execute_code` ran. No first-run
-  rate is claimed. It is to be measured on the same model once the quota resets.
+  Local Chrome replay on 2026-10-11 (`AGENT_MODE=local`, Lumen deepseek-v4-flash; the 2026-10-09
+  attempt got `429 insufficient_quota` and measured nothing). Two turns per build of the Champaign /
+  London–Paris query, then in each conversation a follow-up naming the file as the answer shows it
+  ("Using Champaign_County.geojson from your last answer, compute the county perimeter in km with
+  code."):
+
+  | build | turn | first `execute_code` opened | first run | peer model calls / input tokens |
+  |---|---|---|---|---|
+  | before `23cfd02` | Champaign / London–Paris (b2) | `"file_1012d19f9297"` | ok | 3 / 47.7K |
+  | before `23cfd02` | Champaign / London–Paris (b3) | `"file_60aac6f4ca8a"` | ok | 3 / 47.8K |
+  | this change | Champaign / London–Paris (a2) | `"file_1f0e9c66493f"` | ok | 3 / 47.9K |
+  | this change | Champaign / London–Paris (a3) | `"file_dd2ed3cf9f96"` | ok | 3 / 47.8K |
+  | before `23cfd02` | follow-up (b2) | `"Champaign_County.geojson"` | **failed** (traceback), then `list_conversation_files`, ok on attempt 2 by file_id | 4 / 68.6K |
+  | before `23cfd02` | follow-up (b3) | `"file_60aac6f4ca8a"`, after `list_conversation_files` and two `read_workspace_file` (one failed) | ok | 4 / 66.6K |
+  | this change | follow-up (a2) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+  | this change | follow-up (a3) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+
+  The original query: first run ok 2/2 on both builds, always by file_id (S30.7), so it no longer
+  reaches the filename path. The follow-up: before, 1/2 first runs failed on the filename, and the
+  two turns spent two and three extra tool calls (two extra model calls each, 34–36K more input
+  tokens); after, 2/2 first runs read the filename and succeeded in one call. Lumen spend for the 8 turns: 56 calls, all 200. The 24 instrumented peer calls used
+  391,539 input and 6,103 output tokens. The other 32 calls (router, supervisor, answer, grounding)
+  are not instrumented on this base and are not counted.
 
 **Not fixed** The claude and opencode peers do not scan. A writer that refuses an existing file
   (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input

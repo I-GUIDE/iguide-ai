@@ -5736,12 +5736,32 @@ the claude peer's 3,000-character clip budget (`_DESC_BUDGET`), and
 `test_the_longest_real_description_is_not_clipped` caught it. The wording was tightened to 2,955
 and the budget raised to 3,500, as that constant's comment asks.
 
-**Replay: PENDING.** The local Chrome replay (`AGENT_MODE=local`, Lumen deepseek-v4-flash, the
-model of #93's baseline) of "what is the area of Champaign County, Illinois, and how far is London
-from Paris?" was started on both builds on 2026-10-09 at 13:57 CDT (18:57 UTC). Every Lumen call
-returned `429 insufficient_quota` ("Coin budget exhausted"), and both turns ended before any
-`execute_code`. No first-run rate is claimed here. It is to be measured once the quota resets, on
-the same model.
+**Replay, measured 2026-10-11.** Local Chrome replay (`AGENT_MODE=local`, `AGENT_EXTRACTION=1`,
+Lumen deepseek-v4-flash, the model of #93's baseline), one new tab per turn: before `23cfd02`,
+after this branch. Each build got two turns of "what is the area of Champaign County, Illinois, and
+how far is London from Paris?". Each of those conversations then got a follow-up naming the file
+the way the answer's download list shows it: "Using Champaign_County.geojson from your last answer,
+compute the county perimeter in km with code." (A first attempt on 2026-10-09 got
+`429 insufficient_quota` from Lumen on every call and measured nothing.)
+
+| build | turn | first `execute_code` opened | first run | peer model calls / input tokens |
+|---|---|---|---|---|
+| before `23cfd02` | Champaign / London–Paris (b2) | `"file_1012d19f9297"` | ok | 3 / 47.7K |
+| before `23cfd02` | Champaign / London–Paris (b3) | `"file_60aac6f4ca8a"` | ok | 3 / 47.8K |
+| this change | Champaign / London–Paris (a2) | `"file_1f0e9c66493f"` | ok | 3 / 47.9K |
+| this change | Champaign / London–Paris (a3) | `"file_dd2ed3cf9f96"` | ok | 3 / 47.8K |
+| before `23cfd02` | follow-up (b2) | `"Champaign_County.geojson"` | **failed** (traceback), then `list_conversation_files`, ok on attempt 2 by file_id | 4 / 68.6K |
+| before `23cfd02` | follow-up (b3) | `"file_60aac6f4ca8a"`, after `list_conversation_files` and two `read_workspace_file` (one failed) | ok | 4 / 66.6K |
+| this change | follow-up (a2) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+| this change | follow-up (a3) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+
+On the original query the first run succeeded 2/2 on both builds. With S30.7 merged, the model
+opened the boundary by its file_id every time, so that query no longer reaches the filename path.
+The follow-up does reach it. Before, one first run read the filename and failed, and the other turn
+avoided the name by looking around first. They spent two and three extra tool calls, two extra
+model calls each, and 34–36K extra input tokens. After, both first runs read the filename, succeeded, and took one call. The samples
+are small (2 + 2 per build), and the follow-up wording is this sub-stage's own probe, not a
+recorded live turn.
 
 **What it does not fix.** The claude and opencode peers stage the conversation's files once, at
 the start of a run, and do not scan. A writer that refuses an existing file (`open(name, "x")`)
