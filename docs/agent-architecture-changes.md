@@ -7851,7 +7851,7 @@ delivery:
 
 | query | result | LLM steps | tool calls (+ from code) | dup | wall s | Lumen 5xx | banners | Sources line |
 |---|---|---|---|---|---|---|---|---|
-| T08L | 🟨 honest "cannot provide" | 50 | 49 + 28 | 2 | 2,536 | 5 | 1 ℹ️ | TIGERweb only (no data used) |
+| T08L | 🟨 honest "cannot provide" | 50 | 49 + 28 | 2 | 2,536 | 5 (4 in the server log) | 1 ℹ️ | TIGERweb only (no data used) |
 | T11L | ❌ 23,467 ha vs 27,522 (−14.7%); largest patch 9,970 ha vs ≈10,050, right | 33 | 27 + 10 | 1 | 481 | 0 | 1 ⚠️ (count check, 239 patches) | TIGERweb, OpenStreetMap, 3DEP |
 
 - **T11L.** Overpass was answering 504s again. The bridge's paged search retried, split and then
@@ -7865,7 +7865,8 @@ delivery:
   failed on `assets=B04,B08`. The service wants the parameter repeated (`assets=B04&assets=B08`),
   and its 404 body says so ("B04,B08 is not valid. Should be one of …"), but `fetch` reports only
   "answered HTTP 404" and drops the body. The code never saw the explanation and ended with an
-  honest no-value after 42 minutes, 15 of them waiting on Lumen 500s (the client has no timeout).
+  honest no-value after 42 minutes, 18.6 of them one wait through four Lumen 500s about six
+  minutes apart (the client has no timeout).
 
 **Not fixed here, found here:**
 - `fetch` (stage 34, shared by the tool and the bridge) drops a refusing service's error body; a
