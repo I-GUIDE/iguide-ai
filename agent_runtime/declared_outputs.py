@@ -7,10 +7,11 @@ module, in the agent process where a unit library is available, turns them into 
     {name, value, unit, canonical, dimension, counted, measured_in_crs, source}
 
 and into the findings that need units: a missing unit, a unit that does not parse, a count that
-is fractional or negative or larger than every frame in the run, and a length or area declared
-as measured in a geographic CRS. Nothing here reads a variable's or a column's NAME to decide
-what a number is. Stage 43 deleted the vocabularies and name heuristics that did
-(docs/design-review-2026-10.md, flaw 1).
+is fractional or negative or larger than the frame it counted, and a length or area declared as
+measured in a geographic CRS. Nothing here reads a variable's or a column's NAME to decide what a
+number is. Stage 43 deleted the vocabularies and name heuristics that did
+(docs/design-review-2026-10.md, flaw 1). Since stage 54 the code that computed a value says what
+it is (agent_runtime/figure_kinds.py), and the count and CRS checks apply only when it says so.
 """
 from __future__ import annotations
 

@@ -5338,3 +5338,39 @@ rather than from the previous one.
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
   so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.
+
+
+## 2026-10-12 · M8.91 · A figure's kind is read from the code that computed it (architecture stage 54)
+
+**Change** `agent_runtime/figure_kinds.py` (new): a static AST pass over a run's recorded code.
+  It gives each declared figure a kind: a count of a named frame's rows, of array elements, of
+  list items, of labelled features or of distinct values; a statistic; an area, length or
+  distance; a column's value; a ratio; or unknown. It also follows where a metric operation's
+  value goes. Three changes use it:
+  - `declared_outputs.evaluate(report, code=)` runs the count, fractional, negative and
+    `measured_in` checks only for the kind each needs. The population check compares a count of
+    F's rows with F's own size. The declaration is a hint (`declared_as`).
+  - `figure_kinds.reclassify` (in `_read_checks(work, code=)` and the bench's replay) sets aside
+    two kinds of sandbox FAIL, listed in `kind_notes`: a `projected_crs` FAIL whose degree value
+    is only compared with zero, unused, or only printed before a reprojected re-measurement; and
+    an `all_nan` FAIL on columns no line reads after a matched join.
+  - The sandbox's `all_nan` reports a matched join's empty columns with `join_matched`, instead
+    of passing them all.
+
+**Why** Step 3 of the validation plan. Stage 52 measured every count-check and declared-unit
+  banner as a false alarm: patches, pixels and residents compared with frame row counts, and an
+  NDVI mean "fractional count". Five more were degree prints and `.area > 0`, and OSM tags empty
+  after an inner join.
+
+**Measured** Validators bench, 462 replayable turns. Banner: bannered not-wrong 15 → 7, wrong 10
+  → 7. Precision 40% → 50%, earned 24% → 43%; earned recall 8% → 8%, with the same six earned
+  turns. All five false-alarm classes go from 22 findings to 0. Fixtures: earned precision 29% →
+  50% (expected.md updated). Declared outputs with a known kind: 135 of 238.
+
+**Surprised by** The auditor's severity on turns where it was not recorded follows the gate's
+  verdict. Removing a false count FAIL therefore silenced T08L fix4's audit items: medium
+  severity under a gate `cannot_determine` prints nothing. The effect is right on that correct
+  turn; the coupling is wrong.
+
+**Next** Type printed figures (stage 48's branch) with `Analysis.printed()`, then claim-level
+  verdicts (step 5).

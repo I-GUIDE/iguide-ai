@@ -155,7 +155,7 @@ _FRAME_ATTRS = {"crs", "columns", "total_bounds", "bounds", "dtypes", "empty", "
                 "has_z", "cx", "T", "axes", "attrs", "flags", "style", "active_geometry_name"}
 _METRIC_ATTRS = {"area": "area", "length": "length"}
 _METRIC_CALLS = {"distance": "distance", "hausdorff_distance": "distance",
-                 "frechet_distance": "distance", "geodesic_distance": None}
+                 "frechet_distance": "distance"}
 
 
 def _const_number(node: ast.AST) -> Optional[float]:
@@ -745,7 +745,7 @@ class Analysis:
             return _V()
         if r.typ == "geometry" and m == "distance":
             return _V(typ="number", kind=Kind("distance", via=".distance()"))
-        if m in _METRIC_CALLS and _METRIC_CALLS[m]:
+        if m in _METRIC_CALLS:
             return _V(measure=_METRIC_CALLS[m])
         if m == "read" and r.typ != "frame":
             return _V(typ="array")

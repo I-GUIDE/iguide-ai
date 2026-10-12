@@ -20,10 +20,12 @@ Two views of the checks, each scored against those labels:
   and no network. The turn's `result` event carries the supervisor's state: every peer's tool
   results (the gate's report travels inside each `execute_code` result), the evidence, the
   grounding audit with its claim ledger, the peer failures. Replayed:
-    - gate: the unit and count checks (`declared_outputs.evaluate`) on each run's recorded
-      declarations, then supersession, scoping to the runs the answer uses, and reconciliation,
-      exactly as `synthesize` does. The checks that run inside the sandbox read live objects and
-      cannot be re-run; their recorded findings are inputs;
+    - gate: the findings a figure's kind or reach decides (`figure_kinds.reclassify`, stage 54)
+      and the unit and count checks (`declared_outputs.evaluate`), both on each run's recorded
+      code and declarations, then supersession, scoping to the runs the answer uses, and
+      reconciliation, exactly as `synthesize` does. The checks that run inside the sandbox read
+      live objects and cannot be re-run; their recorded findings are inputs, re-judged only by
+      what the code says;
     - number scan: `facts.build` + `facts.resolve` on the answer without its banner. Whether a
       figure would be cut needs the producer check, an LLM call, so an unresolved figure is
       reported `unverifiable`; a cut the live turn made is carried from its verdict (the text is
