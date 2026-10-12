@@ -44,8 +44,9 @@ REL_TOL = 0.005
 CHECK = "agreement"
 # What a finding is. A `problem` prints a banner, and the plan admits a check to the banner only
 # when, measured over the scored archive, the answers it marks are wrong at least 80% of the time.
-# Until that measurement is recorded here, it is a `note` (in the verdict, not printed).
-KIND = "note"
+# Measured (stage 53, validators bench, 462 replayable turns): it fired on 2 turns, both wrong.
+# The bar is cleared, on a small sample; both turns are also caught by the reference check.
+KIND = "problem"
 
 # Words that say how a figure was produced or summarised, not what it is. A name made only of
 # these (and stop words) names no kind: two runs' `total_area` may be two different areas.

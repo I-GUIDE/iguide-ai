@@ -5358,3 +5358,30 @@ rather than from the previous one.
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
   so its typed facts are rebuilt. The 66 of 72 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.
+
+
+## 2026-10-12 · M8.90 · Two runs that disagree, and a standard method recomputed (architecture stage 53)
+
+**Change** `agent_runtime/agreement.py`: the same typed figure from two runs of one turn must
+  agree. Names must match word for word, units by dimension, and a name of only generic words
+  is never compared. The writer is told before answering, and a finding is raised when the
+  answer reports one side the runs did not settle on.
+  `agent_runtime/reference_sandbox.py`: the gate records ordinary-kriging systems and esda
+  Gi*/Moran calls, recovers the inputs (variogram, coordinates, target), and recomputes with
+  pykrige and esda. `agent_runtime/reference_checks.py` does the same for the Gi*, Moran, slope
+  (Horn) and zonal-mean tools, ties the figures to what the run printed, and raises findings.
+  The validators bench replays both (`--reexec` re-runs the code in the sandbox image). pykrige
+  is added to the sandbox image.
+
+**Why** Steps 4a and 4b of the validation plan. T09 (Gi* on row-standardised weights) and T10
+  (kriging with the nugget on the diagonal) hold 30 of the archive's wrong answers, and no check
+  saw either: each run was consistent with its own mistake.
+
+**Measured** Bench, 462 replayable turns, 72 wrong. Agreement: 2 turns, both wrong. Reference:
+  33 turns, 28 wrong (85%), recall 39%. The 5 others are T10 answers scored correct on an aside;
+  their headline is the wrong 295.1 ppm. Both are banners. The replayed banner goes from
+  precision 40% and recall 14% to 66% and 53% (earned: 24%/8% to 59%/47%).
+
+**Not fixed** `local_getis_ord` still row-standardises (the root of T09). Kriging systems that
+  are inconsistent, inverted with `inv`, or in covariance form stay silent. Hand-written Moran
+  and Gi* are not recomputed. The sandbox image is not rebuilt.

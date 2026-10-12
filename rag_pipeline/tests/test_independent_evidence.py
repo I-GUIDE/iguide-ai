@@ -281,6 +281,19 @@ def test_esda_gi_star_on_row_standardised_weights_is_found_in_agent_code(tmp_pat
     assert RC.findings("13 cells have z > 1.96.", [r], kind=V.NOTE) == []
 
 
+def test_a_count_stated_beside_the_threshold_is_held_to_the_reference():
+    """baseline T09 (luna): the tool's p-value classes gave 15 'hot spots', and the answer called
+    them "15 cells ... with Gi* z > 1.96". The run's z count was 1, the reference 13."""
+    ref = RC._gi_from_counts({"1.96": [1, 13]}, {"1.96": [0, 2]}, 2.08, 6.51, "c1",
+                             engine="esda", detail="d")
+    (f,) = RC.findings("Using binary queen weights, 15 cells are hot spots with Gi* z > 1.96.",
+                       [ref], kind=V.NOTE)
+    assert "15" in f.message and "13" in f.message
+    assert RC.findings("13 cells have z > 1.96.", [ref], kind=V.NOTE) == []
+    assert RC.findings("13 hot spots (z > 1.96) and 2 cold spots (z < -1.96).", [ref],
+                       kind=V.NOTE) == []
+
+
 def test_esda_gi_star_with_binary_weights_agrees(tmp_path, t09_lattice):
     path, _ = t09_lattice
     code = textwrap.dedent(f'''

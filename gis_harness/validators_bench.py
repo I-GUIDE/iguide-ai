@@ -524,10 +524,46 @@ def replay_rows(t: BenchTurn) -> Tuple[List[Row], Dict[str, Any]]:
     if st.get("peer_failures"):
         findings += V.from_peer_failures(G._unresolved_peer_failures(
             {**st, "analysis_results": ar, "code_result": cr}))
+    findings += _independent_evidence(t, body, results, ar, cr)
     info["sources_dropped"] = sources_dropped(t, ar, cr, resolutions)
     rows = [Row(t.id, t.run, t.task, t.label, "replay", _check_id(f.check, f.message), f.kind,
                 V.shown(f), f.message) for f in findings]
     return rows, info
+
+
+# Where the tool-side reference recomputation finds a task's input files (main sets these): the
+# harness's own dataset builders write them under DATA_ROOT, and a run's archived server files
+# are read from ARCHIVE_ROOT when the archive kept them.
+DATA_ROOT: Optional[Path] = None
+ARCHIVE_ROOT: Optional[Path] = None
+
+
+def _independent_evidence(t: BenchTurn, body: str, results: List[Dict[str, Any]], ar: Any,
+                          cr: Any) -> List[Any]:
+    """Plan step 4 (stage 53): cross-run agreement and reference recomputation, replayed.
+
+    The in-sandbox half of the reference check needs the run re-executed (`--reexec`); without
+    it only the built-in tools are recomputed."""
+    from agent_runtime import agreement as AG
+    from agent_runtime import reference_checks as RC
+    from agent_runtime import turn_log
+
+    calls = [{"call_id": c.get("id"), "args": c.get("args")}
+             for peer in (ar, cr) if isinstance(peer, dict)
+             for c in peer.get("tool_calls") or [] if isinstance(c, dict)]
+    out = AG.findings(body, AG.disagreements(AG.figures(_Log(results).facts(), calls)),
+                      kind=AG.KIND)
+    rres = [{"tool": r.get("name"), "call_id": r.get("tool_call_id"), "content": r.get("content"),
+             "ok": turn_log.parse_result(r.get("content"))["ok"]}
+            for r in results if isinstance(r, dict)]
+    resolve = None
+    if DATA_ROOT is not None:
+        from gis_harness.reference_reexec import resolver
+
+        run_dir = (ARCHIVE_ROOT / t.run) if ARCHIVE_ROOT is not None else None
+        resolve = resolver(t.task, DATA_ROOT, run_dir)
+    out += RC.findings(body, RC.for_results(rres, calls, resolve), kind=RC.KIND)
+    return out
 
 
 # --------------------------------------------------------------------------- causes
@@ -566,6 +602,18 @@ HAND_CAUSES: Tuple[Tuple[str, str, str, str], ...] = (
     ("threeway-bridge-fix4", "T08L", "DN", AUDIT_TOOL_DOC),
     ("p2-after", "T03", "outside the zones", AUDIT_DERIVED),
 )
+
+AGREE_SIDE = "agreement: two runs disagreed; the answer reports one side"
+REF_DIFFERS = "reference: the run's method differs from the reference library"
+SCORER_ASIDE = ("reference: scored correct on an aside (exp(mu + var/2)); the answer's headline "
+                "is the run's kriging")
+# Turns scored correct whose headline answer is the nugget-on-the-diagonal kriging, 295.1 ppm. The
+# scorer matched an aside, the lognormal back-transform exp(5.6872 + 0.1158/2) of 311 to 312.6
+# ppm, within its 1% of 309.53. Each answer says the exp() form, 295.1, is what it reports.
+SCORER_ASIDE_TURNS = frozenset({
+    "deployed-23cfd02-gate/lumen_deepseek-v4-flash/T10", "p2-after/lumen_deepseek-v4-flash/T10.t1",
+    "p3-after/lumen_deepseek-v4-flash/T10", "p5-gate/lumen_deepseek-v4-flash/T10",
+    "p5-fixed-gate/lumen_deepseek-v4-flash/T10"})
 
 _STOP = frozenset("""this that with from were was have has the and for are which into their there
 these those than then them they been being about after before over under each every within only
@@ -676,6 +724,10 @@ def cause(row: Row, t: BenchTurn) -> str:
         return AUDIT_OUTSIDE
     if row.check == "number_scan":
         return SCAN_CUT if row.kind == "note" else SCAN_UNRESOLVED
+    if row.check == "agreement":
+        return AGREE_SIDE
+    if row.check == "reference":
+        return SCORER_ASIDE if t.id in SCORER_ASIDE_TURNS else REF_DIFFERS
     if row.check == "peer":
         return "a peer failed"
     if row.check == "correction":
@@ -1015,6 +1067,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="with --fixtures: fail if the report differs from expected.md")
     ap.add_argument("--update-expected", action="store_true",
                     help="with --fixtures: write the report as the new expected.md")
+    ap.add_argument("--reexec", action="store_true",
+                    help="re-run each turn's kriging/esda code under the current gate (docker, "
+                         "no network) so the in-sandbox reference check is measured too")
+    ap.add_argument("--data", help="where the tasks' input files are built (default: "
+                                   "<out>/_data, a temporary folder with --fixtures)")
     ap.add_argument("--make-fixtures", nargs="+", metavar="RUN/MODEL/TASK",
                     help="write these archived turns, scrubbed, as the fixture subset")
     a = ap.parse_args(argv)
@@ -1033,6 +1090,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.exit(f"no archive at {root}")
         turns = list(iter_archive(root))
         title, out = "Validator benchmark", Path(a.out) if a.out else root / "validators_bench"
+    global DATA_ROOT, ARCHIVE_ROOT
+    if a.data:
+        DATA_ROOT = Path(a.data)
+    elif out is not None:
+        DATA_ROOT = out / "_data"
+    else:
+        import tempfile
+
+        DATA_ROOT = Path(tempfile.mkdtemp(prefix="validators_bench_data_"))
+    ARCHIVE_ROOT = None if a.fixtures else archive
+    if a.reexec:
+        from gis_harness.reference_reexec import augment_state
+
+        totals = collections.Counter()
+        for t in turns:
+            if t.state:
+                t.state, info = augment_state(t.state, t.task, DATA_ROOT)
+                totals.update(info)
+        print(f"re-executed {totals['rerun']} runs ({totals['failed']} failed); "
+              f"{totals['recorded']} wrote a reference record")
     rep = evaluate(turns)
     md = markdown(rep, title=title)
     if out is not None:

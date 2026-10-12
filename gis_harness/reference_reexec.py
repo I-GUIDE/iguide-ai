@@ -101,8 +101,10 @@ def reexec(code: str, body: Dict[str, Any], inputs: Dict[str, Path], *,
     from agent_runtime import sandbox_verify as SV
 
     script = SV.prologue_source() + "\n" + code + SV.epilogue_source()
-    digest = hashlib.sha256((image + "\0" + script + "\0" + json.dumps(
-        sorted((k, str(v)) for k, v in inputs.items()))).encode()).hexdigest()[:24]
+    h = hashlib.sha256((image + "\0" + script).encode())
+    for name, path in sorted(inputs.items()):          # by content: the data folder may move
+        h.update(name.encode() + b"\0" + hashlib.sha256(Path(path).read_bytes()).digest())
+    digest = h.hexdigest()[:24]
     cached = _cache_dir() / f"{digest}.json"
     if cached.exists():
         return json.loads(cached.read_text())
@@ -180,8 +182,7 @@ def resolver(task_id: str, data_root: Path, run_dir: Optional[Path] = None):
     """A file_id -> path function for replaying the tool-side references: the file the run's
     server stored, when the archive kept it (`server_files/`), else the task's input when the
     task has exactly one. An id that resolves to neither raises, and that reference is skipped."""
-    inputs = task_inputs(task_id, data_root)
-    single = next(iter(inputs.values())) if len(inputs) == 1 else None
+    built: Dict[str, Dict[str, Path]] = {}
 
     def resolve(file_id: str) -> Path:
         if run_dir is not None:
@@ -189,6 +190,11 @@ def resolver(task_id: str, data_root: Path, run_dir: Optional[Path] = None):
                 hits = sorted((run_dir / "server_files" / sub).glob(f"{file_id}*"))
                 if hits:
                     return hits[0]
+        # Built on first use: most turns recompute nothing, and one task's data is a download.
+        if "inputs" not in built:
+            built["inputs"] = task_inputs(task_id, data_root)
+        inputs = built["inputs"]
+        single = next(iter(inputs.values())) if len(inputs) == 1 else None
         if file_id in inputs:
             return inputs[file_id]
         if single is not None:

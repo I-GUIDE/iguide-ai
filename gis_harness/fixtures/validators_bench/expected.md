@@ -14,7 +14,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 |---|---|---|---|---|---|---|---|---|
 | recorded | 22 | 7 | 6 (3) | 12 | 33% | 86% | 17% | 43% |
 | recorded_on_replayable | 21 | 7 | 6 (3) | 11 | 35% | 86% | 18% | 43% |
-| replay | 21 | 7 | 6 (4) | 8 | 43% | 86% | 29% | 57% |
+| replay | 21 | 7 | 7 (5) | 8 | 47% | 100% | 33% | 71% |
 
 ## Checks as the live turns printed them
 
@@ -44,6 +44,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 | gate:finite_value | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
 | gate:projected_crs | problem | 2 | 2 (0) | 0 | 50% | 29% | 50% | 29% |
 | peer | unverifiable | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
+| reference | problem | 0 | 1 (0) | 0 | 100% | 14% | 100% | 14% |
 
 ## Checks replayed by this checkout, every finding
 
@@ -59,6 +60,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 | number_scan | note | 2 | 3 (0) | 0 | 60% | 43% | 60% | 43% |
 | number_scan | unverifiable | 4 | 1 (0) | 1 | 17% | 14% | 17% | 14% |
 | peer | unverifiable | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
+| reference | problem | 0 | 1 (0) | 0 | 100% | 14% | 100% | 14% |
 
 ## False alarms by cause (recorded: printed on a correct answer or a refusal)
 

@@ -34,8 +34,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 CHECK = "reference"
 # A `problem` prints a banner; the plan admits a check to it only when the answers it marks are
-# wrong at least 80% of the time over the scored archive. Until that is measured: a note.
-KIND = "note"
+# wrong at least 80% of the time over the scored archive. Measured (stage 53, validators bench
+# with --reexec, 462 replayable turns): 31 turns, 26 wrong, 84%. The other five were scored
+# correct on an aside, and their headline is the wrong kriging.
+KIND = "problem"
 THRESHOLDS = (1.645, 1.96, 2.576)
 # Size caps for recomputing a tool's result in the agent process.
 MAX_FEATURES = 20000
@@ -218,7 +220,7 @@ def _gi_from_counts(counts: Dict[str, Any], cold: Dict[str, Any], zmax_a: Any, z
         pair = cold.get(str(t))
         if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] is not None:
             figs.append(Figure(f"cells with Gi* z < -{t}", float(pair[0]), float(pair[1]), 0.0,
-                               integer=True, context=(t, -t)))
+                               integer=True, context=(-t,)))
     if isinstance(zmax_a, (int, float)) and isinstance(zmax_r, (int, float)):
         figs.append(Figure("the largest Gi* z", float(zmax_a), float(zmax_r), 1e-3))
     return Reference("Getis-Ord Gi*", call_id, engine, detail=detail, figures=figs)
@@ -578,19 +580,39 @@ def _stated(answer: str, value: float, fig: Figure) -> bool:
                if F.is_claim(q) and (not q.unit or F._digits_shown(q.text) >= 3))
 
 
+def _count_beside(answer: str, fig: Figure) -> Optional[float]:
+    """A count the answer states next to the figure's threshold that is not the reference count:
+    "15 cells are hot spots with Gi* z > 1.96" when the run printed a p-value class count and
+    called it that (baseline T09, luna). None when there is none."""
+    for s in _sentences(answer):
+        nums = _numbers(s)
+        if not any(abs(n - c) < 1e-9 for n in nums for c in fig.context):
+            continue
+        for n in nums:
+            if n.is_integer() and n >= 0 and all(abs(n - c) > 1e-9 for c in fig.context) \
+                    and abs(n - fig.reference) > 1e-9:
+                return n
+    return None
+
+
 def findings(answer: str, refs: Sequence[Reference], *, kind: str) -> List[Any]:
     """A finding for each disagreeing figure the answer reports as the run computed it, without
-    the reference value."""
+    the reference value. A count is held to its threshold's sentence: any other count stated
+    there is the run's, however the run arrived at it."""
     from agent_runtime import verdict as V
 
     out = []
     for r in refs:
         for f in r.disagreeing():
-            if not _stated(answer, f.reported, f) or _stated(answer, f.reference, f):
+            if _stated(answer, f.reference, f):
+                continue
+            shown = f.reported if _stated(answer, f.reported, f) else (
+                _count_beside(answer, f) if f.integer else None)
+            if shown is None:
                 continue
             out.append(V.Finding(
                 CHECK, kind,
-                f"{r.method}: the answer's {f.label} is {_show(f.reported, f.integer)}, but "
+                f"{r.method}: the answer's {f.label} is {_show(shown, f.integer)}, but "
                 f"recomputing it with {r.engine} from the same inputs gives "
                 f"{_show(f.reference, f.integer)} ({r.detail})",
                 evidence=[str(r.call_id)] if r.call_id else []))
