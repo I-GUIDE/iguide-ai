@@ -7939,3 +7939,25 @@ tokens.*
     check reading pixel counts as row counts, and the audit calling "Converted DN to surface
     reflectance `(DN−1000)/10000`" unsupported, because the rule came from a tool description
     and not a tool result.
+
+### Stage S49.9 The bridge records its calls' lineage
+
+*2026-10-12. For "Where every file, result and number came from" (stage 56, PR #115, branch
+`claude/lineage-graph`), which is not on this base.*
+
+- **Why:** S49.8's two faults have one cause: nothing linked a bridge call to the run that made
+  it, or the run to the files the call handed back.
+  - The Sources line could not reach the Planetary Computer from a figure computed from bridged
+    files.
+  - Nothing the auditor saw held the host note the code had applied.
+- **What:** `tool_bridge` calls `agent_runtime.lineage` when it is present, and does nothing
+  without it.
+  - `model_note()` registers each host note as a note every `execute_code` call is shown.
+  - A `BridgeServer` remembers the call it runs for. Each bridge call is dispatched inside
+    `lineage.calling(..., parent=run)`, so the fetch's own hooks (its host, the file it writes)
+    record against that call, which sits `within` the run.
+  - `_materialise` records the run reading each file a call hands back.
+- **Measured:** `test_bridge_calls_record_their_lineage_within_the_run` is skipped here and passes on
+  a scratch merge with `claude/lineage-graph`, where the fix4 fixture's offset rule is supported by
+  the Planetary Computer's catalogue note and the Sources line names the Planetary Computer once.
+

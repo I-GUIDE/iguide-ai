@@ -152,11 +152,27 @@ def dem_for_region(bbox=None, lon=None, lat=None, buffer_m=2500.0, size=512):
 '''
 
 
+def _lineage() -> Any:
+    """agent_runtime.lineage (stage 56, PR #115), or None on a tree without it: every hook
+    below is then a no-op."""
+    try:
+        from agent_runtime import lineage
+    except ImportError:
+        return None
+    return lineage
+
+
 def model_note() -> str:
     """What execute_code's description and the code peer's prompt say while the bridge is on."""
     from agent_runtime.public_data_tools import BRIDGE_HOST_NOTES, bridge_hosts
 
     hosts = bridge_hosts()
+    # Every execute_code call is shown these notes, so its lineage cites them (stage 56): a rule
+    # the code applies from one (the Sentinel-2 offset) is then supported by that note.
+    lin = _lineage()
+    if lin is not None:
+        lin.register_tool_notes("execute_code", {f"bridge:{h}": f"{h}: {BRIDGE_HOST_NOTES[h]}"
+                                                 for h in hosts if BRIDGE_HOST_NOTES.get(h)})
     listed = "; ".join(f"{h} ({BRIDGE_HOST_NOTES.get(h, '')})".replace(" ()", "")
                        for h in hosts)
     return (
@@ -383,6 +399,10 @@ class BridgeServer:
         self.max_fetches = _int_env("AGENT_CODE_BRIDGE_MAX_FETCHES", 15)
         self.max_bytes = _int_env("AGENT_CODE_BRIDGE_MAX_MB", 500) * 1024 * 1024
         self._bytes = 0
+        # The execute_code call this run is (its lineage, stage 56): every bridge call is
+        # recorded within it, and the run reads what each call hands back.
+        lin = _lineage()
+        self.run_call = lin.current_call() if lin is not None else None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -476,7 +496,14 @@ class BridgeServer:
         try:
             if body.get("error"):
                 raise Refused(body["error"])
-            result = self._dispatch(fname, args)
+            lin = _lineage()
+            if lin is not None and self.run_call:
+                # The handler's own lineage hooks (the fetch's host, the file it writes) record
+                # against this bridge call, which sits within the run.
+                with lin.calling(call_id, fname, args, parent=self.run_call):
+                    result = self._dispatch(fname, args)
+            else:
+                result = self._dispatch(fname, args)
             answer = {"ok": True, "result": result}
             record = {"ok": True, **result}
         except Refused as exc:
@@ -543,6 +570,9 @@ class BridgeServer:
             dest = self.out / "data" / f"{len(self.calls) + 1:02d}_{safe}"
             shutil.copyfile(src, dest)
             local[fid] = self.container_path(dest)
+            lin = _lineage()
+            if lin is not None and self.run_call:
+                lin.record_read(fid, via="bridge", filename=filename, call_id=self.run_call)
         out = dict(result)
         if local:
             out["local_files"] = local

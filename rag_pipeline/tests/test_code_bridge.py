@@ -370,3 +370,38 @@ def test_sentinel2_values_are_described_where_the_code_and_the_answer_read_them(
     assert "(DN - 1000) / 10000" in source_catalog._statement(pc), "the Sources line"
     other = next(s for s in source_catalog.CATALOG if s.id == "osm_overpass")
     assert "values" not in other.line() and "10000" not in source_catalog._statement(other)
+
+
+def test_bridge_calls_record_their_lineage_within_the_run(tmp_path, monkeypatch):
+    """Stage 56 (PR #115): a bridge call sits within the run that made it, its
+    handler's hooks record against it, the run reads the file it hands back, and every
+    execute_code call cites the host notes. Skipped on a tree without agent_runtime.lineage."""
+    lineage = pytest.importorskip("agent_runtime.lineage")
+    from agent_runtime.file_store import create_output_file_from_path
+
+    def stub_fetch(url, filename=None):
+        lineage.record_source(url=url)
+        src = tmp_path / "scene.tif"
+        src.write_text("pixels")
+        rec = create_output_file_from_path(str(src), filename="scene.tif")
+        return {"ok": True, "file_id": rec["file_id"], "filename": rec["filename"], "source": url}
+
+    monkeypatch.setenv("AGENT_CODE_BRIDGE", "1")
+    g = lineage.Graph()
+    url = "https://planetarycomputer.microsoft.com/api/data/v1/item/bbox/0,0,1,1.tif"
+    try:
+        with lineage.bind(g), lineage.calling("run1", "execute_code"):
+            tool_bridge.model_note()
+            assert "bridge:planetarycomputer.microsoft.com" in lineage.tool_notes("execute_code")
+            srv = _server(tmp_path, record=False, handlers={"fetch_public_data": stub_fetch})
+            _request(srv, "fetch_public_data", url=url)
+    finally:
+        lineage.register_tool_notes("execute_code", {})
+    [bridge_call] = [n["call_id"] for n in g.nodes.values()
+                     if n["type"] == "call" and n["call_id"].startswith("bridge_")]
+    assert (f"call:{bridge_call}", lineage.WITHIN, "call:run1") in g.edges
+    [fid] = [n["file_id"] for n in g.nodes.values() if n["type"] == "artifact"]
+    assert g.producer(fid) == bridge_call
+    assert ("call:run1", lineage.READ, f"artifact:{fid}") in g.edges
+    hosts = [s.get("names", [None])[0] for s in g.sources_upstream(["run1"])]
+    assert any("planetarycomputer" in str(h) or "Planetary Computer" in str(h) for h in hosts)
