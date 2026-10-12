@@ -94,6 +94,15 @@ jobs:
         # that skips here for want of something the image has is visible as a skip.
         run: python3 -m pytest rag_pipeline/tests/ -q -rfEs
 
+      - name: Validator benchmark on the fixture subset
+        # Replays every validation check over 22 recorded, hand-scored turns (no model call, no
+        # network) and compares each check's precision and recall with the committed
+        # gis_harness/fixtures/validators_bench/expected.md. A change to a check that moves them
+        # fails here until the new numbers are committed with it (`python3 -m
+        # gis_harness.validators_bench --fixtures --update-expected`), so the pull request's
+        # diff shows the delta. Architecture stage 52.
+        run: python3 -m gis_harness.validators_bench --fixtures --check
+
   deployment-contract:
     runs-on: ubuntu-latest
     steps:

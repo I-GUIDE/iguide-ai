@@ -5331,3 +5331,30 @@ rather than from the previous one.
 
 **Not fixed** Raster pixel-count areas, `pyproj.Transformer` arithmetic and shapely scalars carry
   no CRS; Web Mercator's scale error is not a unit error.
+
+## 2026-10-12 · M8.89 · Every check measured against the scored archive (architecture stage 52)
+
+**Change** `gis_harness/validators_bench.py` replays the agent's validation checks offline (no
+  model call, no network) over every scored turn in `gis_harness_runs_archive/`. Each turn
+  carries its supervisor state in its `result` event, so the replay feeds the recorded tool
+  results, gate reports and the auditor's claim ledger through this checkout's unit and count
+  checks, gate scoping, audit reconciliation, number scan, corrections and `verdict.shown`. It
+  writes `report.json` and `report.md`: per check, firings on correct, wrong and refused answers,
+  precision, recall, the same without coincidental catches, false alarms by cause, and sources
+  the Sources line drops. CI runs it on 22 committed turns and fails when the numbers move;
+  `--update-expected` commits the new ones.
+
+**Why** Step 1 of the validation plan: every later step is judged by this benchmark. The banner's
+  8% precision had been counted from answer text, with no check attributed.
+
+**Measured** The stage 46 baseline reproduces exactly: 437 turns, 39 wrong, a banner on 9 wrong
+  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong:
+  the banner as printed, precision 21%, recall 36%. This checkout replayed: precision 40%, recall
+  14% (10 of 72), and 6 of those 10 catches are related to the error (four peer failures, two
+  degree distances on U04). The count and unit checks have no earned catch. The audit's printed
+  findings are mostly claims the record holds. The Sources line drops a source on 19 turns, 14
+  of them because a code run reread files an earlier call fetched.
+
+**Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
+  so its typed facts are rebuilt. The 66 of 72 wrong answers the banner does not mark for a
+  related reason are not yet classified by what went wrong.
