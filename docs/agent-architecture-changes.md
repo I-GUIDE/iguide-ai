@@ -6175,6 +6175,37 @@ about 50 s. While bound, the tool's schema costs 475 tokens per model call.
   against the per-turn cap.
 - It is off by default. Turning it on is a deployment decision.
 
+### Stage S34.5 A refusal carries what the service said (2026-10-12)
+
+`fetch` used to report a non-200 answer as its status alone: *"planetarycomputer.microsoft.com
+answered HTTP 404"*. The body that came with it usually names the fix. In the T08L re-run of
+2026-10-11 (Stage 49's tool bridge, which goes through this same `fetch`), the code asked the
+Planetary Computer for `assets=B04,B08`. The service answers that with HTTP 404 and
+`{"detail": "B04,B08 is not valid. Should be one of ['AOT', 'B01', ..., 'B08', ...]"}`: it wants
+the parameter repeated. The code saw only the status, made 28 bridge calls trying other
+URLs, and the turn ended in "cannot provide" after 42 minutes.
+
+`_error_excerpt` now reads at most 8 KB of a refusing body and adds the message to the refusal:
+*"... answered HTTP 404; the service said: "B04,B08 is not valid. Should be one of [...]""*.
+JSON bodies give their message key (`detail`, `message`, `error.message`, `errors`, `remark`,
+FastAPI's `detail[].msg`). HTML loses its head and tags. A long preamble before the first
+"error" is skipped, because Overpass leads every error page with its licence line. Whitespace
+and control characters collapse. The excerpt is at most 200 characters. The tool bridge cuts a
+whole error at 300, and the host and status come first.
+
+The excerpt is untrusted text, like everything else this tool brings in. It comes only from a
+host on the allowlist, it is short, and it is quoted as the service's words. Had the request
+succeeded, the code would have read the whole body from the same host.
+
+Measured against the live services on 2026-10-12: the Planetary Computer's 404 comes through in
+full (236 characters with the prefix). Overpass's 400 for an unknown type reads *"Error : line
+1: parse error: Unknown type "wayy" ..."* (255). Nine new test cases in `test_public_data_tools.py`
+use the Planetary Computer's recorded body and an Overpass error page. Eight fail on
+`10029c5`. The ninth checks that an empty body still reports the bare status, as before.
+
+Not measured: whether T08L is now answered correctly. That needs a Lumen re-run on the bridge
+(PR #104) once this is under it.
+
 ---
 
 ## Stage 35 — Lumen, in dev mode only {#stage-35}

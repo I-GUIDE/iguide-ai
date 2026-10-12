@@ -26,10 +26,12 @@ open-data services, so the risk is accepted. Add a host only if you would trust 
 """
 from __future__ import annotations
 
+import html
 import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import tempfile
 import time
@@ -161,6 +163,79 @@ def _api_error(payload: Any) -> Optional[str]:
     return None
 
 
+_ERROR_READ_BYTES = 8 * 1024
+_ERROR_EXCERPT_CHARS = 200
+_MESSAGE_KEYS = ("detail", "message", "error", "errors", "description", "title", "remark")
+
+
+def _message_in(payload: Any, depth: int = 0) -> Optional[str]:
+    """The human-readable message in a JSON error body, whichever key the service put it under.
+
+    FastAPI/titiler use ``detail`` (a string, or a list of ``{"msg": ...}``), ArcGIS nests
+    ``error.message``, Socrata ``message``, Overpass's JSON output ``remark``."""
+    if depth > 3:
+        return None
+    if isinstance(payload, str):
+        return payload.strip() or None
+    if isinstance(payload, list):
+        parts = [m for m in (_message_in(x, depth + 1) for x in payload[:5]) if m]
+        return "; ".join(parts) or None
+    if isinstance(payload, dict):
+        for key in (*_MESSAGE_KEYS, "msg"):
+            if key in payload:
+                found = _message_in(payload[key], depth + 1)
+                if found:
+                    return found
+    return None
+
+
+def _error_excerpt(resp: Any, content_type: str) -> Optional[str]:
+    """What a refusing service said, cut to a short excerpt the code can act on.
+
+    The status alone hides the fix. Live (2026-10-11, T08L), the Planetary Computer answered
+    ``assets=B04,B08`` with HTTP 404 and ``{"detail": "B04,B08 is not valid. Should be one of
+    ['AOT', 'B01', ...]"}``; the code saw only "answered HTTP 404" and spent the turn guessing.
+    The excerpt is the service's own words, from a host on the allowlist, at most 200
+    characters and quoted as such: the same source the code would read in full had it answered
+    200. Nothing past the first 8 KB is read. 200 because the code bridge (Stage 49) cuts a
+    whole error at 300, and the host and status come first. A page that is not JSON skips a long
+    preamble up to its first "error": Overpass leads every error page with its licence line."""
+    raw = b""
+    try:
+        for chunk in resp.iter_content(chunk_size=_ERROR_READ_BYTES):
+            if chunk:
+                raw += chunk
+            if len(raw) >= _ERROR_READ_BYTES:
+                break
+    except Exception:  # noqa: BLE001 - the status is still worth reporting without the body
+        return None
+    text = raw[:_ERROR_READ_BYTES].decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    message: Optional[str] = None
+    if "json" in content_type or text[:1] in "{[":
+        try:
+            message = _message_in(json.loads(text))
+        except ValueError:
+            message = None          # a truncated JSON body: fall through to the raw text
+    if message is None and ("html" in content_type or "xml" in content_type
+                            or text.lstrip().startswith("<")):
+        body = re.sub(r"(?is)<(head|script|style)\b.*?</\1\s*>", " ", text)
+        message = html.unescape(re.sub(r"(?s)<[^>]*>", " ", body))
+    if message is None or text[:1] not in "{[":
+        plain = message if message is not None else text
+        at = re.search(r"(?i)\berror\b", plain)
+        # A short lead-in ("Field POP: error ...") is the context; a long one is a preamble.
+        message = plain[at.start():] if at and at.start() > 60 else plain
+    message = " ".join((message or text).split())          # also drops control characters
+    message = "".join(ch for ch in message if ch.isprintable())
+    if not message:
+        return None
+    if len(message) > _ERROR_EXCERPT_CHARS:
+        message = message[:_ERROR_EXCERPT_CHARS - 1].rstrip() + "…"
+    return message
+
+
 def _shape(payload: Any) -> Dict[str, Any]:
     """What the data is shaped like, without its contents: keys, counts and geometry types."""
     if isinstance(payload, dict):
@@ -257,7 +332,9 @@ def fetch(url: str, *, filename: Optional[str] = None, max_bytes: Optional[int] 
     tmp = tempfile.NamedTemporaryFile(prefix="public_fetch_", delete=False)
     try:
         if resp.status_code != 200:
-            raise Refused(f"{host} answered HTTP {resp.status_code}")
+            said = _error_excerpt(resp, content_type)
+            raise Refused(f"{host} answered HTTP {resp.status_code}"
+                          + (f"; the service said: \"{said}\"" if said else ""))
         declared = resp.headers.get("Content-Length")
         if declared and declared.isdigit() and int(declared) > cap:
             raise Refused(f"the file is {int(declared) / 1e6:.1f} MB, over the {cap / 1e6:.0f} MB "
