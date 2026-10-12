@@ -26,10 +26,21 @@ OFFSET_CLAIM = "Converted DN to surface reflectance `(DN−1000)/10000`"
 
 @pytest.fixture
 def offline_store(monkeypatch, tmp_path):
-    """No file store of this machine is read: an archived turn's files are not here."""
+    """No file store of this machine is read: an archived turn's files are not here. Every file
+    in the fixture turn was written by the agent, none uploaded."""
     monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
-    monkeypatch.setattr(SC, "_upload_record", lambda file_id: {})
+    monkeypatch.setattr(SC, "_upload_record", lambda file_id: {"kind": "output"})
     monkeypatch.setattr(lineage, "_file_record", lambda file_id: {})
+
+
+# The Planetary Computer is an uncatalogued host on this base, and a catalogue entry once the
+# code bridge (PR #104, which adds the entry and its `values`) is merged. Either names it.
+PC_NAMES = ("planetarycomputer.microsoft.com", "Microsoft Planetary Computer (Sentinel-2 L2A)")
+PC_NOTES = ("note:bridge:planetarycomputer.microsoft.com", "note:catalog:planetary_computer")
+
+
+def _pc_count(text):
+    return sum(str(text).count(n) for n in PC_NAMES)
 
 
 def _fix4():
@@ -50,7 +61,7 @@ def test_fix4_the_final_run_rests_on_the_planetary_computer(offline_store):
              if s == f"call:{final}" and k == lineage.READ and a.get("via") == "workspace"]
     assert reads == ["artifact:file_0f71ea94db1c"]   # written by the run before it
     names = [s["name"] for s in g.sources_upstream([final])]
-    assert "planetarycomputer.microsoft.com" in names and "US Census TIGERweb" in names
+    assert any(n in PC_NAMES for n in names) and "US Census TIGERweb" in names
 
 
 def test_fix4_sources_line_names_the_planetary_computer(offline_store):
@@ -58,36 +69,36 @@ def test_fix4_sources_line_names_the_planetary_computer(offline_store):
     st = turn["state"]
     final = {"call_id": "call_ba40cb2881ae4457929b451d"}
     line = SC.sources_line("", G._answer_sources(st, [final]))
-    assert "planetarycomputer.microsoft.com" in line
     assert "US Census TIGERweb" in line
-    # one host, however many scene URLs: the fetches are seven calls to the same service
-    assert line.count("planetarycomputer.microsoft.com") == 1
+    # once, however many scene URLs: the fetches are seven calls to the same service
+    assert _pc_count(line) == 1
     # The line before stage 56 named the used run's own sources only.
     before = SC.sources_of(G._peer_tool_pairs(st), {final["call_id"]})
-    assert not any("planetarycomputer" in s for s, _ in before)
+    assert not any(_pc_count(s) for s, _ in before)
 
 
 def test_fix4_offset_rule_is_supported_by_the_bridge_note(offline_store):
     st = _fix4()["state"]
     ctx = lineage.audit_context(lineage.for_state(st), ["call_ba40cb2881ae4457929b451d"])
     note = lineage.supporting_note(OFFSET_CLAIM, ctx)
-    assert note is not None and note["id"] == "note:bridge:planetarycomputer.microsoft.com"
-    assert note["source"] == "planetarycomputer.microsoft.com"
+    assert note is not None and note["id"] in PC_NOTES
+    assert note["source"] in PC_NAMES
     audit = {"hallucination_detected": True, "severity": "high",
              "issues": [{"claim": OFFSET_CLAIM, "reason": "no span covers this claim"}]}
     out = G._reconcile_audit_with_artifacts(audit, [], execution_context={
         "analysis_results": st["analysis_results"], "lineage": ctx})
     # The run's own gate findings stay (they are the gate's); the auditor's issue is gone.
     assert [i for i in out["issues"] if i.get("source") != "invariant_gate"] == []
-    assert out["supported_by_notes"][0]["note"] == "note:bridge:planetarycomputer.microsoft.com"
+    assert out["supported_by_notes"][0]["note"] == note["id"]
     findings = V.from_audit(out, numeric_claims_resolved=True)
-    assert [(f.kind, f.evidence) for f in findings] == [
-        (V.NOTE, ["note:bridge:planetarycomputer.microsoft.com"])]
+    assert [(f.kind, f.evidence) for f in findings] == [(V.NOTE, [note["id"]])]
     assert not any(V.shown(f) for f in findings)
 
 
-def test_fix4_without_the_note_the_claim_stays_flagged(offline_store):
-    """The note is what supports it: a replay that was not shown the note keeps the finding."""
+def test_fix4_without_the_note_the_claim_stays_flagged(offline_store, monkeypatch):
+    """The note is what supports it: a replay that was not shown the note keeps the finding.
+    (The catalogue entry is reduced to its coverage, which #104 extends with the same rule.)"""
+    monkeypatch.setattr(SC, "note_text", lambda src: f"{src.name}: covers {src.covers}")
     st = {k: v for k, v in _fix4()["state"].items() if k != "tool_notes"}
     ctx = lineage.audit_context(lineage.for_state(st), ["call_ba40cb2881ae4457929b451d"])
     assert lineage.supporting_note(OFFSET_CLAIM, ctx) is None
