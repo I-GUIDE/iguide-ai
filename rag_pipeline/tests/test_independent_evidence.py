@@ -329,15 +329,51 @@ def uploaded_lattice(monkeypatch, tmp_path, t09_lattice):
     return fid, tools, expected
 
 
-def test_the_gi_star_tool_is_recomputed_with_binary_weights(uploaded_lattice):
+def test_the_gi_star_tool_agrees_with_the_reference(uploaded_lattice):
+    """Since stage 55 the tool's default is binary Gi*, so the recomputation finds nothing."""
     fid, tools, expected = uploaded_lattice
     args = {"file_id": fid, "column": "value", "weights": "queen", "star": True}
     ref = RC.from_tool("local_getis_ord", args, tools["local_getis_ord"].invoke(args), "c1")
     by = {f.label: f for f in ref.figures}
     assert by["cells with Gi* z > 1.96"].reference == expected["hot_spots"]
+    assert not any(f.differs for f in ref.figures)
+    assert "used binary weights" in ref.detail
+    assert RC.findings("13 cells are hot spots with Gi* z > 1.96.", [ref], kind=V.NOTE) == []
+
+
+def test_a_row_standardised_gi_star_record_is_recomputed_with_binary_weights(uploaded_lattice):
+    """An archived result from before stage 55 names no transform and was row-standardised.
+    Stripping the field from an explicit "R" run reproduces one."""
+    fid, tools, expected = uploaded_lattice
+    body = json.loads(tools["local_getis_ord"].invoke(
+        {"file_id": fid, "column": "value", "weights": "queen", "transform": "R"}))
+    body.pop("transform")
+    args = {"file_id": fid, "column": "value", "weights": "queen", "star": True}
+    ref = RC.from_tool("local_getis_ord", args, json.dumps(body), "c1")
+    by = {f.label: f for f in ref.figures}
+    assert by["cells with Gi* z > 1.96"].reference == expected["hot_spots"]
+    assert by["cells with Gi* z > 1.96"].reported == 1
     assert by["cells with Gi* z > 1.96"].differs
+    assert "row-standardised" in ref.detail
     note = RC.reconcile_note([ref])
     assert "binary weights" in note
+
+
+def test_the_gi_star_counts_come_from_the_result_when_its_layer_is_gone(uploaded_lattice):
+    fid, tools, expected = uploaded_lattice
+    args = {"file_id": fid, "column": "value", "weights": "queen"}
+    body = json.loads(tools["local_getis_ord"].invoke(args))
+    body["file_id"] = "file_missing"
+    ref = RC.from_tool("local_getis_ord", args, json.dumps(body), "c1")
+    by = {f.label: f for f in ref.figures}
+    assert by["cells with Gi* z > 1.96"].reported == expected["hot_spots"] == 13
+    assert not any(f.differs for f in ref.figures)
+
+
+def test_a_requested_row_standardised_gi_star_is_not_held_to_binary(uploaded_lattice):
+    fid, tools, _ = uploaded_lattice
+    args = {"file_id": fid, "column": "value", "weights": "queen", "transform": "R"}
+    assert RC.from_tool("local_getis_ord", args, tools["local_getis_ord"].invoke(args)) is None
 
 
 def test_the_moran_tool_agrees_with_the_reference(uploaded_lattice):

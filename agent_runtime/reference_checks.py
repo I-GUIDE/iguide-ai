@@ -273,6 +273,13 @@ def _tool_gi(args: Dict[str, Any], body: Dict[str, Any], call_id: Optional[str],
     frame = _usable(_read_layer(args["file_id"], resolve), column)
     if not 3 <= len(frame) <= MAX_FEATURES:
         return None
+    # The tool says which transform it used. A result that names none predates stage 55, when
+    # the tool row-standardised every Gi*. A non-binary transform the call ASKED for is the
+    # caller's choice, not a method error, and there is no binary figure to hold it to.
+    used = str(body.get("transform") or "R").upper()
+    asked = str(args.get("transform") or "").strip().upper()
+    if asked and asked != "B":
+        return None
     cm = _weights(frame, args)
     if cm is None:
         return None
@@ -286,10 +293,16 @@ def _tool_gi(args: Dict[str, Any], body: Dict[str, Any], call_id: Optional[str],
     counts, cold = {}, {}
     hottest = [r.get("gi_z") for r in body.get("hottest") or [] if isinstance(r, dict)]
     coldest = [r.get("gi_z") for r in body.get("coldest") or [] if isinstance(r, dict)]
+    zc = body.get("z_counts") if isinstance(body.get("z_counts"), dict) else {}
     for t in THRESHOLDS:
         if z_tool is not None:
             counts[str(t)] = [int(np.sum(z_tool > t)), int(np.sum(z_ref > t))]
             cold[str(t)] = [int(np.sum(z_tool < -t)), int(np.sum(z_ref < -t))]
+            continue
+        # Since stage 55 the result counts them itself.
+        if isinstance(zc.get(f"z > {t}"), int) and isinstance(zc.get(f"z < -{t}"), int):
+            counts[str(t)] = [zc[f"z > {t}"], int(np.sum(z_ref > t))]
+            cold[str(t)] = [zc[f"z < -{t}"], int(np.sum(z_ref < -t))]
             continue
         # Without the per-area layer, the top and bottom ten still give an exact count when
         # the tenth is on the other side of the threshold.
@@ -304,8 +317,13 @@ def _tool_gi(args: Dict[str, Any], body: Dict[str, Any], call_id: Optional[str],
                                                        for v in hottest) else None))
     return _gi_from_counts(counts, cold, zmax_tool, float(np.nanmax(z_ref)), call_id,
                            engine="esda",
-                           detail="local_getis_ord row-standardises its weights; the reference "
-                                  "uses binary weights with the focal area included")
+                           detail=(("local_getis_ord used binary weights"
+                                    if used == "B" else
+                                    "local_getis_ord row-standardised its weights"
+                                    if used == "R" else
+                                    f"local_getis_ord used transform {used!r}")
+                                   + "; the reference uses binary weights with the focal area "
+                                     "included"))
 
 
 def _tool_z(body: Dict[str, Any], resolve: Resolver, n: int):

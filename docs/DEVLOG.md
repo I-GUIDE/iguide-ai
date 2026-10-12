@@ -5384,6 +5384,27 @@ rather than from the previous one.
   Both are banners. The replayed banner goes from precision 40% and recall 13% to 74% and 56%
   (earned: 24%/8% to 67%/51%).
 
-**Not fixed** `local_getis_ord` still row-standardises (the root of T09). Kriging systems that
+**Not fixed** `local_getis_ord` still row-standardises (the root of T09; fixed in M8.92). Kriging systems that
   are inconsistent, inverted with `inv`, or in covariance form stay silent. Hand-written Moran
   and Gi* are not recomputed. The sandbox image is not rebuilt.
+
+
+## 2026-10-12 · M8.92 · Gi* as Getis and Ord define it (architecture stage 55)
+
+**Change** `local_getis_ord` uses binary weights with the focal area included by default, and
+  passes the transform to `G_Local` too (esda re-applies its own default, "R"). The new
+  `transform` argument asks for row-standardised Gi*; kernels keep their own values ("O"). The
+  result names the transform and has `z_counts` (areas beyond ±1.645/1.96/2.576), and the
+  transform is part of the layer key. The reference check reads the transform: a result without
+  one is an old row-standardised record and is still flagged, a binary one agrees, and a
+  requested non-binary one is not held to binary.
+
+**Why** Stage 53's reference check found the tool was the root of T09's 16 tool-side wrong
+  answers: 1 cell with z > 1.96 where binary Gi* gives 13.
+
+**Measured** T09 lattice: 13 (was 1). Validators bench: fixtures and full-archive report.md
+  unchanged; archived turns ran the old tool and are still flagged.
+
+**Not fixed** No new T09 run. The classes still use permutation p (15 hot), now beside
+  `z_counts`. Agent-written `G_Local` without `transform="B"` is only flagged.
+

@@ -11,7 +11,7 @@ archive are exactly that:
 * **T09, Getis-Ord Gi\\*.** 16 of 25 were wrong: "1 hot spot" where the reference is 13. esda's
   `G_Local` row-standardises its weights unless told `transform="B"`, so Gi\\* "with binary
   weights" silently ran on row-standardised ones (both in agent code and in the
-  `local_getis_ord` tool, which fixes `"r"`).
+  `local_getis_ord` tool, which fixed `"r"` until stage 55 made binary its default).
 
 This module recomputes the method with a reference library, from the SAME inputs the run used,
 and records both values. It never reads a variable's name to decide what a number is. The inputs

@@ -63,6 +63,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
 | 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
 | 53 | [Two runs that disagree, and a standard method recomputed](#stage-53) | 2026-10-12 | the same figure from two runs must agree; hand-written kriging, esda Gi*/Moran and the Gi*, Moran, slope and zonal tools are recomputed with a reference library from the run's own inputs; both are banners at 100% measured precision; the replayed banner goes from 40% / 13% to 74% / 56% |
+| 55 | [Gi\* as Getis and Ord define it](#stage-55) | 2026-10-12 | `local_getis_ord` uses binary weights with the focal area included by default (it row-standardised): 13 hot spots on T09's lattice where it said 1; `transform` asks for another, `z_counts` counts the z-scores |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -8197,7 +8198,7 @@ itself after the tool, for instance.
 
 - **`local_getis_ord` still computes row-standardised Gi\*.** The check flags it on every call
   whose answer quotes its count. Fixing the tool would remove the 16 wrong T09 answers at the
-  source. That is a separate change.
+  source. That is a separate change. (Fixed: "Gi\* as Getis and Ord define it", stage 55.)
 - **A kriging system whose right-hand side is not its own matrix's variogram at any one point**
   (baseline luna T10.t1: a covariance-form matrix with a variogram right-hand side, 3,320 ppm) is
   recorded as `inconsistent` and stays silent. So is kriging done through `np.linalg.inv`, and in
@@ -8210,3 +8211,59 @@ itself after the tool, for instance.
   methods have a reference library. The other wrong answers (live data, routing, siting) need
   steps 4c to 4g.
 - **The sandbox image is not rebuilt.** Until it is, the kriging reference is numpy's.
+
+
+## Stage 55 — Gi\* as Getis and Ord define it {#stage-55}
+
+*2026-10-12. Branch `claude/gi-star-binary-weights`, stacked on "Two runs that disagree, and a
+standard method recomputed" (stage 53), whose reference check found it. DEVLOG M8.92. Stage 54 is
+"A figure's kind is read from the code that computed it", on its own branch. No model call, no
+deploy.*
+
+**Why.** `local_getis_ord` built its weights row-standardised (`_weights_for(..., "r", ...)`) and
+called `esda.G_Local` without a transform, whose default is also `"R"`. Gi\* as Getis and Ord
+define it, and as users and the T09 task ask for it, uses binary weights with the focal area
+included. Row-standardising divides each area's neighbourhood sum by its neighbour count, which
+pulls the z-scores of well-connected areas toward zero. On T09's 10x10 lattice
+(`gis_harness.datasets.lattice_autocorrelation`) the tool gave 1 cell with z > 1.96 (max z
+2.0804); binary Gi\* gives 13 (max 6.51). Every one of the archive's 16 tool-side T09 wrong
+answers quotes that 1. Stage 53's reference check flags these answers. This stage stops the tool
+producing them.
+
+**What changed** (`agent_runtime/analysis_spatial_stats_tools.py`, `local_getis_ord`):
+
+1. **Binary by default.** A new `transform` argument defaults to `"B"`. It goes to `_weights_for`
+   and, explicitly, to `G_Local` as well, because `G_Local` re-applies its own transform to
+   whatever `W` it is given. `"R"` (and libpysal's V, D and O) are available when asked for.
+   Kernel weights default to `"O"`: their values are the distance decay, and binary would flatten
+   it.
+2. **The result says which.** `transform` and `transform_meaning` are in the result, and the
+   interpretation names the weights ("by Gi\* with binary queen weights"). The transform is part
+   of the layer key, so a binary map and a row-standardised one of the same column are two layers.
+3. **`z_counts`.** The hot and cold classes come from permutation p-values (15 hot on T09). "How
+   many cells have z > 1.96" is the other reading, and the one T09 asks. Until now it could only
+   be counted from the ten hottest rows, which is wrong once more than ten pass. The result now
+   counts areas beyond ±1.645, ±1.96 and ±2.576, and the interpretation states the 1.96 count.
+4. **The reference check reads the transform** (`agent_runtime/reference_checks.py`, `_tool_gi`).
+   A result that names no transform predates this stage and was row-standardised. It is
+   recomputed and flagged as before, and the detail says "row-standardised its weights". A
+   binary result agrees with the reference and raises nothing. A non-binary transform that the
+   call asked for is not held to binary. When the tool's layer cannot be read, its counts come
+   from `z_counts` instead of the ten hottest rows.
+
+**Measured.**
+- On T09's lattice the tool now reports `z_counts["z > 1.96"] == 13`, the harness's expected
+  value (`test_getis_ord_is_binary_gi_star_by_default`). With `transform="R"` it reproduces the
+  old 1.
+- The validators bench is unchanged: the fixture check passes, and the full archive's report.md
+  is byte-identical to the base's. Every archived T09 turn ran the old tool, so its record names
+  no transform, and the reference check still fires on all 16 (precision 100%, recall 21%,
+  tool-side). Only the finding's wording moved. The fix shows up in new runs, not in the archive.
+
+**Not fixed.**
+- **No new T09 run.** Whether the agent now answers 13 is untested. Doing that takes a harness
+  run on lumen:deepseek-v4-flash.
+- **The hot/cold classes still use permutation p-values**, not ArcGIS's z bands. The two
+  disagree on T09 (15 against 13). Both are now in the result, labelled.
+- **Agent-written Gi\*** that calls `G_Local` without `transform="B"` is still row-standardised by
+  esda. Stage 53's in-sandbox reference check flags it. Nothing prevents it.
