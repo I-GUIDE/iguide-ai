@@ -203,7 +203,7 @@ class Graph:
                              statement=host, names=[host])
 
     def fact(self, call_id: str, name: str, value: Any, unit: Optional[str] = None,
-             kind: Optional[str] = None) -> str:
+             kind: Any = None) -> str:
         nid = self.add_node(f"fact:{call_id}:{name}", "fact", name=name, value=value, unit=unit,
                             # Step 3 of the validation plan fills this from the computation.
                             kind=kind)
@@ -445,7 +445,9 @@ def record_cite(g: Graph, call: str, note_id: str, text: str,
 
 @_guard
 def record_fact(g: Graph, call: str, name: str, value: Any, unit: Optional[str] = None,
-                kind: Optional[str] = None) -> str:
+                kind: Any = None) -> str:
+    """A typed value the call reported. *kind* is step 3's `figure_kind` (stage 54): a dict
+    such as {"kind": "count", "counts": "rows", "of": "tracts", "via": "len()"}."""
     return g.fact(call, name, value, unit, kind)
 
 

@@ -209,8 +209,10 @@ class TurnLog:
                             result_seq=event["seq"], **typed)
                 # The same value as a fact node of the conversation's lineage (stage 56).
                 if call_id:
+                    # `figure_kind` is step 3's (stage 54): what the code computed it as.
                     lineage.record_fact(str(typed.get("name")), typed.get("value"),
-                                        typed.get("unit"), call_id=call_id)
+                                        typed.get("unit"), kind=typed.get("figure_kind"),
+                                        call_id=call_id)
         return event
 
     def ingest(self, peer: str, result: Any, run: Optional[str] = None) -> int:

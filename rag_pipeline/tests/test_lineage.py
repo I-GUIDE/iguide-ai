@@ -263,6 +263,18 @@ def test_the_turn_log_records_facts_as_lineage_nodes():
     fact = g.nodes["fact:r9:mean_ndvi"]
     assert (fact["value"], fact["unit"]) == (0.8021, "NDVI")
     assert fact.get("kind") is None          # step 3 of the validation plan fills it
+
+
+def test_a_fact_carries_the_kind_step_3_infers():
+    """Stage 54 (PR #112) passes `figure_kind` through turn_log.typed_outputs."""
+    g = lineage.Graph()
+    kind = {"kind": "count", "counts": "rows", "of": "tracts", "via": "len()"}
+    with lineage.bind(g), lineage.calling("r1", "execute_code"):
+        lineage.record_fact("n_tracts", 48, "count", kind=kind)
+    assert g.nodes["fact:r1:n_tracts"]["kind"] == kind
+    replayed = lineage.from_results([({"id": "r2", "name": "execute_code"}, {
+        "tool_call_id": "r2", "name": "execute_code", "content": json.dumps({"ok": True})})])
+    assert "call:r2" in replayed.nodes
     assert ("fact:r9:mean_ndvi", lineage.PRODUCED_BY, "call:r9") in g.edges
 
 
