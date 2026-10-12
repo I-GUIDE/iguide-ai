@@ -39,10 +39,14 @@ class Source:
     hosts: Tuple[str, ...] = ()
     bbox: Optional[Tuple[float, float, float, float]] = None   # lon/lat, when the extent is a box
     aliases: Tuple[str, ...] = ()   # other names an answer may use for it
+    # What the values mean, when reading them as-is gives a wrong number (a scale or offset the
+    # data does not declare). Said wherever the source is described, and on the Sources line.
+    values: str = ""
 
     def line(self) -> str:
         return (f"{self.name} ({self.kind}): covers {self.covers}; leaves out {self.excludes}; "
-                f"extent {self.extent}; licence {self.licence}")
+                f"extent {self.extent}; licence {self.licence}"
+                + (f"; values: {self.values}" if self.values else ""))
 
 
 # The United States and its territories, generously (Alaska's Aleutians cross 180°, so the box
@@ -117,7 +121,8 @@ CATALOG: Tuple[Source, ...] = (
            excludes="cloud-covered pixels unless masked; days without a satellite pass",
            extent="global land", licence="Copernicus Sentinel data terms",
            hosts=("planetarycomputer.microsoft.com", "sentinel2l2a01.blob.core.windows.net"),
-           aliases=("Planetary Computer", "Sentinel-2")),
+           aliases=("Planetary Computer", "Sentinel-2"),
+           values="reflectance = (DN - 1000) / 10000 from processing baseline 04.00"),
     Source("osrm", "OSRM public router (OpenStreetMap roads)", "routing",
            covers="driving routes and times over OpenStreetMap's road network",
            excludes="live traffic; turn restrictions OSM lacks; the demo server's speeds are a "
@@ -169,7 +174,8 @@ def _statement(src: Source) -> str:
     """A source as the answer names it: what it is, what it leaves out, and its licence. What
     it leaves out is what decides how far a count or a list from it reaches (18 schools from
     the city's file, 31 in OpenStreetMap)."""
-    return f"{src.name}, which leaves out {src.excludes} ({src.licence})"
+    return (f"{src.name}, which leaves out {src.excludes}"
+            + (f"; {src.values}" if src.values else "") + f" ({src.licence})")
 
 
 def _payload(content: Any) -> Dict[str, Any]:

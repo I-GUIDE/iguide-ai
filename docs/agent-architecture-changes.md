@@ -7892,3 +7892,28 @@ delivery:
 
 Nothing was deployed. Both switches default off; the network flag cannot turn on outside local and
 dev mode.
+
+### Stage S49.7 What a Sentinel-2 pixel means is said where it is fetched
+
+**Why.** With delivery solved, T08L still answered wrong, the same way in two versions. The
+networked run (`threeway-net`) read the right July 2024 scenes and answered NDVI 0.558. The bridge
+run on #104 with stage 34's error excerpt underneath (`threeway-bridge-fix3`, 2026-10-12, a local
+merge never pushed) got the quoted 404 ("B04,B08,SCL is not valid. Should be one of …"), switched
+to one asset per request, fetched B04, B08 and SCL for both 13 July tiles, and answered 0.549.
+The offset-corrected value from the same scenes is 0.80 (S49.5). Both computed NDVI on raw DNs:
+none of the bridge run's 17 code runs mentions an offset. Nothing told them otherwise. The STAC
+items carry `s2:processing_baseline` ('05.10' for these) but their assets declare no
+`raster:scale` or offset, and ESA's Level-2A guide is where the rule lives: from processing
+baseline 04.00 (25 January 2022) the DNs carry `BOA_ADD_OFFSET = -1000`, reflectance =
+(DN + offset) / 10000, and DN 0 stays NO_DATA. The trigger is the product's baseline, not its
+acquisition date: older scenes reprocessed since carry it too.
+
+**What changed.** A statement of fact about the data, not an instruction, in the two places the
+code and the answer read:
+- `public_data_tools.S2_L2A_VALUES`, appended to the Planetary Computer entry of
+  `BRIDGE_EXTRA_HOSTS`, so every bridge description carries it (the description grew to about
+  3,100 characters);
+- a new optional `values` field on `source_catalog.Source`, set for the Planetary Computer, and
+  rendered by `line()` (the peers' brief) and `_statement()` (the Sources line) only when set.
+A test pins the facts in all three renderings and checks that a source without `values` renders
+as before. Measured effect: S49.8, after the re-run.

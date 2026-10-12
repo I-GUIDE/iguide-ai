@@ -354,3 +354,19 @@ def test_the_same_call_in_a_later_run_is_answered_without_running_again(tmp_path
     other.prepare()
     _request(other, "echo", text="x")
     assert runs == ["x", "x"], "another conversation never shares an answer"
+
+
+def test_sentinel2_values_are_described_where_the_code_and_the_answer_read_them(monkeypatch):
+    """T08L read L2A DNs as reflectance and answered 0.549 and 0.558 where 0.80 is right: the
+    STAC items declare no offset, so the meaning of a pixel has to be said where it is fetched."""
+    from agent_runtime import source_catalog
+
+    monkeypatch.setenv("AGENT_CODE_BRIDGE", "1")
+    note = tool_bridge.model_note()
+    for fact in ("(DN - 1000) / 10000", "s2:processing_baseline", "04.00", "0 is nodata", "NDVI"):
+        assert fact in note, fact
+    pc = next(s for s in source_catalog.CATALOG if s.id == "planetary_computer")
+    assert "(DN - 1000) / 10000" in pc.line(), "the peers' brief"
+    assert "(DN - 1000) / 10000" in source_catalog._statement(pc), "the Sources line"
+    other = next(s for s in source_catalog.CATALOG if s.id == "osm_overpass")
+    assert "values" not in other.line() and "10000" not in source_catalog._statement(other)

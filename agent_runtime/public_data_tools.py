@@ -55,6 +55,17 @@ DEFAULT_HOSTS: Tuple[Tuple[str, str], ...] = (
     ("data.cityofchicago.org", "City of Chicago open data (Socrata)"),
 )
 
+#: What a Sentinel-2 L2A pixel value means. Stated because the STAC items declare no scale or
+#: offset (their assets carry no raster:scale/offset), and code that read the bands as
+#: reflectance got NDVI 0.549 and 0.558 where the offset-corrected value is 0.80 (2026-10-09/12,
+#: "Three ways to reach public data"). ESA's Level-2A guide: from baseline 04.00 the DNs carry
+#: BOA_ADD_OFFSET = -1000, reflectance = (DN + offset) / 10000, and DN 0 stays NO_DATA.
+S2_L2A_VALUES = (
+    "sentinel-2-l2a pixels are integer DNs; for products of processing baseline 04.00 or later "
+    "(the item's s2:processing_baseline; from 2022-01-25, and older scenes reprocessed since) "
+    "reflectance = (DN - 1000) / 10000 and 0 is nodata, so index math such as NDVI needs the "
+    "offset removed first")
+
 #: Added for the code bridge only (agent_runtime/tool_bridge.py): the hosts the 2026-10-09 live
 #: sweep's failed questions needed. The fetch_public_data TOOL keeps DEFAULT_HOSTS, so turning
 #: the bridge on changes nothing for it. AGENT_CODE_BRIDGE_HOSTS replaces the whole bridge list.
@@ -64,7 +75,7 @@ BRIDGE_EXTRA_HOSTS: Tuple[Tuple[str, str], ...] = (
     ("waterdata.usgs.gov", "USGS monitoring-location pages"),
     ("planetarycomputer.microsoft.com", "Planetary Computer: STAC search /api/stac/v1/search?collections=sentinel-2-l2a&bbox=..&datetime=..; "
      "data API /api/data/v1/item/bbox/{minx},{miny},{maxx},{maxy}.tif?collection=..&item=..&assets=..&asset_as_band=true&max_size=1024 "
-     "returns a GeoTIFF; without max_size a county is over the size cap"),
+     "returns a GeoTIFF; without max_size a county is over the size cap. " + S2_L2A_VALUES),
     ("sentinel2l2a01.blob.core.windows.net", "Sentinel-2 L2A assets (signed with a token from planetarycomputer.microsoft.com/api/sas/v1/token/sentinel-2-l2a; files are 50-200 MB, over the cap: prefer the data API)"),
     ("z.overpass-api.de", "OpenStreetMap Overpass mirror"),
     ("lz4.overpass-api.de", "OpenStreetMap Overpass mirror"),
