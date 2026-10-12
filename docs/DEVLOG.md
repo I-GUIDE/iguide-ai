@@ -5327,13 +5327,14 @@ rather than from the previous one.
   8% precision had been counted from answer text, with no check attributed.
 
 **Measured** The stage 46 baseline reproduces exactly: 437 turns, 39 wrong, a banner on 9 wrong
-  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong:
-  the banner as printed, precision 21%, recall 36%. This checkout replayed: precision 40%, recall
-  14% (10 of 72), and 6 of those 10 catches are related to the error (four peer failures, two
+  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong
+  and five T10 turns relabelled wrong by hand (the scorer matched an aside, not the reported 295.1
+  ppm): the banner as printed, precision 22%, recall 36%. This checkout replayed: precision 40%,
+  recall 13% (10 of 77), and 6 of those 10 catches are related to the error (four peer failures, two
   degree distances on U04). The count and unit checks have no earned catch. The audit's printed
   findings are mostly claims the record holds. The Sources line drops a source on 19 turns, 14
   of them because a code run reread files an earlier call fetched.
 
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
-  so its typed facts are rebuilt. The 66 of 72 wrong answers the banner does not mark for a
+  so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.

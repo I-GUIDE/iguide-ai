@@ -7779,7 +7779,13 @@ builds. No model call, no deploy.*
      finding's cause is a known false-alarm class (`KNOWN_FALSE_ALARMS`), which would fire on a
      correct answer just the same. Example: the count check firing on T11L's 239 patches, an
      answer that was wrong because its roads query dropped primary roads.
-3. **Causes.** Every finding gets one, by rule. Two are read by hand (`HAND_CAUSES`):
+3. **Labels corrected by hand** (`LABEL_OVERRIDES`): five T10 turns the harness scored correct are
+   wrong. Each reports 295.1 ppm, the plain `exp()` of the kriged log value 5.6872. The scorer
+   matched an aside: the lognormal back-transform `exp(5.6872 + 0.1158/2)`, 311 to 312.6 ppm,
+   which the answer says it does not report, and which falls within 1% of the expected 309.53.
+   The cross-run agreement session found them; every T10 turn in the archive was checked, and no
+   others match. The stage 46 reproduction keeps the original scores.
+4. **Causes.** Every finding gets one, by rule. Two are read by hand (`HAND_CAUSES`):
    - the L2A offset in `threeway-bridge-fix4` T08L, which came from the bridge's Planetary Computer
      note;
    - a difference of two recorded counts.
@@ -7787,9 +7793,9 @@ builds. No model call, no deploy.*
    An audited claim is "in the record" when every figure in it resolves to a recorded number, as
    the number scan resolves it, or, for a claim without figures, when three quarters of its words
    are in what the tools returned and the code ran.
-4. **The Sources line.** The bench lists the data sources a turn's record holds that its rendered
+5. **The Sources line.** The bench lists the data sources a turn's record holds that its rendered
    Sources line leaves out, with the cause.
-5. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on 22
+6. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on 22
    committed turns (`gis_harness/fixtures/validators_bench/turns.jsonl`, 1.8 MB; scrubbed of thread
    and session ids, local paths and email addresses). It compares the report with the committed
    `expected.md` and fails on any difference. A change to a check commits the new numbers with it
@@ -7815,7 +7821,8 @@ builds. No model call, no deploy.*
 - **Over the full archive** the bench runs in about 6 s. On the fixtures it takes 1.7 s, and
   their rows equal the full run's rows for the same turns.
 
-**Measured** (493 scored turns: 330 correct, 81 wrong, 82 honest refusals; 7 unscored left out).
+**Measured** (493 scored turns: 325 correct, 86 wrong, 82 honest refusals; 7 unscored left out;
+five T10 turns relabelled wrong, see item 3).
 
 The stage 46 baseline is reproduced exactly. Over the 18 runs archived by then (437 turns, 39 wrong
 by that entry's split), there was a banner on 9 wrong and 98 others: precision 8%, recall 23%. That
@@ -7824,15 +7831,15 @@ wrong.
 
 | banner | turns | wrong | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
 |---|---|---|---|---|---|---|---|---|
-| as the live turns printed it | 493 | 81 | 29 (17) | 111 | 21% | 36% | 12% | 21% |
-| the same, on the 462 replayable turns | 462 | 72 | 24 (16) | 98 | 20% | 33% | 13% | 22% |
-| this checkout, replayed | 462 | 72 | 10 (6) | 15 | 40% | 14% | 24% | 8% |
+| as the live turns printed it | 493 | 86 | 31 (19) | 109 | 22% | 36% | 14% | 22% |
+| the same, on the 462 replayable turns | 462 | 77 | 26 (18) | 96 | 21% | 34% | 15% | 23% |
+| this checkout, replayed | 462 | 77 | 10 (6) | 15 | 40% | 13% | 24% | 8% |
 
 What the replayed banner prints, per check (wrong answers, of which coincidental, in brackets):
 
 | check | kind | on correct | on wrong | on refusal | precision | recall | precision earned |
 |---|---|---|---|---|---|---|---|
-| peer failed | unverifiable | 0 | 4 (0) | 0 | 100% | 6% | 100% |
+| peer failed | unverifiable | 0 | 4 (0) | 0 | 100% | 5% | 100% |
 | gate `projected_crs` | problem | 4 | 2 (0) | 0 | 33% | 3% | 33% |
 | gate `count_population` | problem | 4 | 3 (3) | 0 | 43% | 4% | 0% |
 | gate `declared_units` | problem | 1 | 1 (1) | 0 | 50% | 1% | 0% |
@@ -7844,9 +7851,9 @@ What it keeps in the verdict payload:
 
 | check | kind | on correct | on wrong | on refusal | precision | recall |
 |---|---|---|---|---|---|---|
-| number scan | unverifiable | 102 | 27 (0) | 10 | 19% | 38% |
-| number scan | note (cut) | 25 | 12 (0) | 6 | 28% | 17% |
-| gate `coverage` | unverifiable | 47 | 7 (7) | 10 | 11% | 10% |
+| number scan | unverifiable | 99 | 30 (0) | 10 | 22% | 39% |
+| number scan | note (cut) | 23 | 14 (0) | 6 | 33% | 18% |
+| gate `coverage` | unverifiable | 47 | 7 (7) | 10 | 11% | 9% |
 
 As the live turns printed them, the audit fired on 8 correct, 4 wrong and 1 refusal. Three of the
 4 catches are coincidental:
@@ -7872,7 +7879,7 @@ False alarms of this checkout's banner, by cause (correct answers and refusals):
 As the live turns printed them, the false alarms were mostly "not checked":
 - the gate could not reach the frames: 165 findings on 58 turns;
 - it had nothing to check: 62 on 41;
-- cuts: 29;
+- cuts: 27;
 - unit words the vocabulary before "A number carries its unit and where it was measured"
   (stage 43) did not know: 15 on 7.
 
@@ -7885,20 +7892,21 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
 **What this says.**
 
 - **Stage 46 cut the false alarms; it did not make the banner a detector.** On the same 462 turns,
-  the answers that are not wrong but carry a banner fell from 98 to 15, and wrong answers with a
-  banner fell from 24 to 10. Of those 10, six are earned: four peer failures and two
+  the answers that are not wrong but carry a banner fell from 96 to 15, and wrong answers with a
+  banner fell from 26 to 10. Of those 10, six are earned: four peer failures and two
   `projected_crs` failures on U04, a distance measured in degrees. On U04 the answer then made up a
   travel time; the gate does not establish that one caused the other. A banner now means a wrong
-  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 72 wrong
-  answers, and only 6 of them for a related reason.
+  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 77 wrong
+  answers, and only 6 of them for a related reason. It marks none of the five T10 answers that
+  reported the wrong back-transform.
 - **Neither the count check nor the unit check has an earned catch.** Every one of the count
   check's seven firings, and the unit check's two, is a count of non-rows or a mean typed as a
   count.
 - **The audit's printed findings are almost all claims the record holds.** That is the
   auditor's view of the record failing (truncation, a second call, a figure in code), not the
   answer.
-- **The highest recall of any check is the number scan's "not in any record", at 38%,** and it
-  is not printed. At 19% precision it is not a banner by itself. It is the obvious input to
+- **The highest recall of any check is the number scan's "not in any record", at 39%,** and it
+  is not printed. At 22% precision it is not a banner by itself. It is the obvious input to
   claim-level verdicts (step 5).
 - **The in-sandbox checks** (`all_nan`, `projected_crs`, coverage) can be measured here but not
   re-run. A fix to them, like stage 46's `all_nan` rule, shows only in new runs.
@@ -7909,5 +7917,6 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
 - The audit's own severity is inferred on 17 turns.
 - Causes are rules over message text, with two hand labels. A new class shows up as "other" or
   under the nearest rule until someone reads it.
-- The 66 of 72 wrong answers the banner does not mark for a related reason are not classified
-  by what went wrong (method, data, arithmetic). That is step 4's input.
+- The 71 of 77 wrong answers the banner does not mark for a related reason are not classified
+  by what went wrong (method, data, arithmetic). That is step 4's input. The harness scorer's
+  matching can credit an aside (the T10 relabels); `gis_harness/score.py` is unchanged here.
