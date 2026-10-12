@@ -44,7 +44,7 @@ REL_TOL = 0.005
 CHECK = "agreement"
 # What a finding is. A `problem` prints a banner, and the plan admits a check to the banner only
 # when, measured over the scored archive, the answers it marks are wrong at least 80% of the time.
-# Measured (stage 53, validators bench, 462 replayable turns): it fired on 2 turns, both wrong.
+# Measured (stage 53, validators bench, 462 replayable turns, 77 wrong): 2 turns, both wrong.
 # The bar is cleared, on a small sample; both turns are also caught by the reference check.
 KIND = "problem"
 

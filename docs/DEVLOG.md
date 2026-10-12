@@ -5348,15 +5348,16 @@ rather than from the previous one.
   8% precision had been counted from answer text, with no check attributed.
 
 **Measured** The stage 46 baseline reproduces exactly: 437 turns, 39 wrong, a banner on 9 wrong
-  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong:
-  the banner as printed, precision 21%, recall 36%. This checkout replayed: precision 40%, recall
-  14% (10 of 72), and 6 of those 10 catches are related to the error (four peer failures, two
+  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong
+  and five T10 turns relabelled wrong by hand (the scorer matched an aside, not the reported 295.1
+  ppm): the banner as printed, precision 22%, recall 36%. This checkout replayed: precision 40%,
+  recall 13% (10 of 77), and 6 of those 10 catches are related to the error (four peer failures, two
   degree distances on U04). The count and unit checks have no earned catch. The audit's printed
   findings are mostly claims the record holds. The Sources line drops a source on 19 turns, 14
   of them because a code run reread files an earlier call fetched.
 
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
-  so its typed facts are rebuilt. The 66 of 72 wrong answers the banner does not mark for a
+  so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.
 
 
@@ -5377,10 +5378,11 @@ rather than from the previous one.
   (kriging with the nugget on the diagonal) hold 30 of the archive's wrong answers, and no check
   saw either: each run was consistent with its own mistake.
 
-**Measured** Bench, 462 replayable turns, 72 wrong. Agreement: 2 turns, both wrong. Reference:
-  33 turns, 28 wrong (85%), recall 39%. The 5 others are T10 answers scored correct on an aside;
-  their headline is the wrong 295.1 ppm. Both are banners. The replayed banner goes from
-  precision 40% and recall 14% to 66% and 53% (earned: 24%/8% to 59%/47%).
+**Measured** Bench with stage 52's relabels, 462 replayable turns, 77 wrong. Agreement: 2 turns,
+  both wrong. Reference: 33 turns, all wrong, recall 43%. Its only apparent false positives in the
+  first run were the 5 T10 turns the scorer credited for an aside, which stage 52 now relabels.
+  Both are banners. The replayed banner goes from precision 40% and recall 13% to 74% and 56%
+  (earned: 24%/8% to 67%/51%).
 
 **Not fixed** `local_getis_ord` still row-standardises (the root of T09). Kriging systems that
   are inconsistent, inverted with `inv`, or in covariance form stay silent. Hand-written Moran

@@ -35,8 +35,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 CHECK = "reference"
 # A `problem` prints a banner; the plan admits a check to it only when the answers it marks are
 # wrong at least 80% of the time over the scored archive. Measured (stage 53, validators bench
-# with --reexec, 462 replayable turns): 31 turns, 26 wrong, 84%. The other five were scored
-# correct on an aside, and their headline is the wrong kriging.
+# with --reexec, 462 replayable turns, 77 wrong): 33 turns, all wrong.
 KIND = "problem"
 THRESHOLDS = (1.645, 1.96, 2.576)
 # Size caps for recomputing a tool's result in the agent process.
