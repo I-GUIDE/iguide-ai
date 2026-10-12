@@ -51,7 +51,9 @@ class Finding:
     check: str                      # which check: gate, number_scan, audit, peer, correction, ...
     kind: str                       # problem | unverifiable | note
     message: str
-    evidence: List[str] = field(default_factory=list)   # fact ids, call ids, quoted text
+    # fact ids, call ids, lineage node ids (`note:…`, `artifact:…`, agent_runtime/lineage.py),
+    # quoted text
+    evidence: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"check": self.check, "kind": self.kind, "message": self.message,
@@ -151,8 +153,15 @@ def from_audit(audit: Optional[Dict[str, Any]], *, numeric_claims_resolved: bool
     A claim that states a number is the number scan's, which is deterministic; the audit's
     sampled verdict on it is not used. A failed audit is reported as not checked, never as
     clean.
+
+    A claim the reconciliation found stated by a note a call behind the answer was shown
+    (stage 56) is a note here, citing the lineage node: not a warning, but on the record.
     """
-    out: List[Finding] = []
+    out: List[Finding] = [
+        Finding("audit", NOTE, f"supported by a note about {s.get('source') or 'a tool'} the work "
+                               f"was shown ({s.get('note')}): \"{str(s.get('claim') or '')[:160]}\"",
+                evidence=[str(s.get("note"))])
+        for s in (audit or {}).get("supported_by_notes") or [] if isinstance(s, dict)]
     severity = str((audit or {}).get("severity") or "").lower()
     if severity == "unknown":
         out.append(Finding("audit", UNVERIFIABLE,

@@ -41,6 +41,7 @@ from agent_runtime.supervisor.evidence_subgraph import (
 from agent_runtime.streaming_trace import emit_trace_event
 from agent_runtime import facts as turn_facts
 from agent_runtime import turn_log
+from agent_runtime import lineage
 from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
 
@@ -1965,16 +1966,15 @@ def _answer_sources(state: SupervisorState,
     download share (a Socrata `/api/views/<4x4>/rows.csv` beside `/<Category>/<Name>/<4x4>`).
     """
     pairs = _peer_tool_pairs(state)
-    used = {n.get("call_id") for n in (numbers or []) if n.get("call_id")}
-    for call, res in pairs:
-        parsed = turn_log.parse_result(res.get("content"))
-        payload = _json_or_empty(res.get("content"))
-        if parsed["ok"] and (payload.get("map_layer") or payload.get("map_layers")
-                             or payload.get("on_map")):
-            used.add(res.get("tool_call_id"))
+    used = _used_calls(pairs, numbers)
+    # Stage 56: what the used results rest on, from the lineage the tools recorded. A figure a
+    # code run computed from files an earlier call fetched names that fetch's source too; before
+    # this, 14 sources across the benchmark's turns dropped off the line that way.
+    graph = lineage.for_state(state, pairs)
+    upstream = set(graph.calls_upstream(used)) if used else set()
     from urllib.parse import urlparse
 
-    sources = source_catalog.sources_of(pairs, used or None)
+    sources = source_catalog.sources_of(pairs, (used | upstream) or None)
     titles = _web_titles(pairs)
     # A dataset staged from a URL is named by the title its search found it under, beside its
     # host's catalogue entry: "Chicago Public Schools - School Locations SY2425: City of Chicago
@@ -1994,11 +1994,55 @@ def _answer_sources(state: SupervisorState,
         if statement.startswith("http"):
             host = urlparse(statement).netloc
             title = staged.get(host, "")
-            statement = f"{title} ({host})" if title else statement
+            # A host the catalogue does not know is named once, by its host: seven Planetary
+            # Computer scene URLs are one source.
+            statement = f"{title} ({host})" if title else host
         elif host in staged:
             statement = f"{staged[host]}: {statement}"
-        out.append((statement, names))
+        if all(statement != s for s, _ in out):
+            out.append((statement, names))
+    # Sources upstream that no result of this turn names: a file an earlier turn wrote, whose
+    # record carries the sources it came from.
+    if used:
+        have = {names[0] for _, names in out if names}
+        for node in graph.sources_upstream(used):
+            names = list(node.get("names") or [node.get("name")])
+            if names and names[0] not in have and node.get("statement"):
+                have.add(names[0])
+                out.append((str(node["statement"]), names))
     return out
+
+
+def _resolution_links(resolutions: List[Any]) -> List[Dict[str, Any]]:
+    """The number scan's links, ``[{call_id}]``, from resolved figures."""
+    return [{"call_id": f.call_id} for r in resolutions
+            if getattr(r, "resolved", False) and turn_facts.is_claim(r.quantity)
+            for f in (getattr(r, "parts", None) or [r.fact]) if f is not None and f.call_id]
+
+
+def _lineage_context(state: Dict[str, Any], resolutions: List[Any]) -> Dict[str, Any]:
+    """The lineage the auditor and the reconciliation read (lineage.audit_context)."""
+    try:
+        pairs = _peer_tool_pairs(state)
+        used = _used_calls(pairs, _resolution_links(resolutions))
+        return lineage.audit_context(lineage.for_state(state, pairs), used)
+    except Exception:  # noqa: BLE001 - provenance never costs the answer
+        logging.getLogger(__name__).debug("lineage context failed", exc_info=True)
+        return {}
+
+
+def _used_calls(pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]],
+                numbers: Optional[List[Dict[str, Any]]]) -> set:
+    """The calls an answer used: those a stated figure resolved to (the number scan's links),
+    and those that put a layer on the map."""
+    used = {n.get("call_id") for n in (numbers or []) if n.get("call_id")}
+    for call, res in pairs:
+        parsed = turn_log.parse_result(res.get("content"))
+        payload = _json_or_empty(res.get("content"))
+        if parsed["ok"] and (payload.get("map_layer") or payload.get("map_layers")
+                             or payload.get("on_map")):
+            used.add(res.get("tool_call_id"))
+    return used
 
 
 def _with_sources(answer: str, state: SupervisorState,
@@ -2661,7 +2705,12 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         return audit
     issues = (audit or {}).get("issues") or []
     blob = ""
+    lineage_ctx = (execution_context or {}).get("lineage") if isinstance(execution_context, dict) else None
     if execution_context is not None:
+        # The lineage's notes are not a record of what ran; rule (2) must not find a number in
+        # a note and call the computation verified.
+        if isinstance(execution_context, dict) and "lineage" in execution_context:
+            execution_context = {k: v for k, v in execution_context.items() if k != "lineage"}
         try:
             blob = json.dumps(_without_peer_prose(execution_context), default=str)
         except Exception:
@@ -2678,6 +2727,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     # "Grounded: flagged claims are supported…", and that line cannot say whether the claim was
     # really in the record or merely matched one of these rules.
     removed: List[tuple] = []
+    supported_by_notes: List[Dict[str, Any]] = []
     for it in issues:
         if isinstance(it, dict):
             claim = str(it.get("claim") or "").lower()
@@ -2693,6 +2743,16 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             rule = "4 map"                # a map claim, and a layer really did reach the map
         elif any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             rule = "3 concedes"           # the auditor's own reason concedes grounding
+        # Stage 56: a note a call behind the answer was shown states the claim (a tool's
+        # description, a catalogue entry, a service note). Live: the Sentinel-2 rule
+        # "(DN-1000)/10000" the code applied from the bridge's Planetary Computer note was
+        # flagged on a correct answer (T08L, threeway-bridge-fix4). Not a gate matter: a note
+        # says what a value means, and the gate checks what the code computed.
+        elif lineage.supporting_note(claim, lineage_ctx) is not None:
+            note = lineage.supporting_note(claim, lineage_ctx)
+            rule = f"5 note @{note['id']}"
+            supported_by_notes.append({"claim": claim[:200], "note": note["id"],
+                                       "source": note.get("source")})
         # On numeric boundaries, not as substrings. A substring match let "~450 km by road"
         # through on a coordinate holding the digits 450 (local replay, 2026-10-08).
         elif nums and blob and not gate and all(_number_in(n, blob) for n in nums):
@@ -2707,6 +2767,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         removed.append((claim[:120], rule))
     if removed:
         _LEDGER_LOG.info("audit reconciliation removed %d issue(s): %s", len(removed), removed)
+    extra = {"supported_by_notes": supported_by_notes} if supported_by_notes else {}
 
     if gate:
         # Prepended: the deterministic finding is the one the reader must see first, and it
@@ -2751,13 +2812,13 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                 "issues": gate_issues + kept,
                 "summary": (headline + " " + auditor_summary).strip(),
                 "gate_headline": headline, "gate_advisory_only": advisory_only,
-                "invariant_gate": gate_verdict}
+                "invariant_gate": gate_verdict, **extra}
 
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],
                 "summary": "Grounded: flagged claims are supported by the produced artifact(s), the "
-                           "delivered map layer(s) and the execution record."}
-    return {**(audit or {}), "issues": kept}
+                           "delivered map layer(s) and the execution record.", **extra}
+    return {**(audit or {}), "issues": kept, **extra}
 
 
 # A request that genuinely needs I-GUIDE evidence: asking for platform content (elements,
@@ -6124,6 +6185,11 @@ def build_supervisor_graph(
             # findings all came from side runs (a directory listing, a 0-row lookup, a failed
             # first attempt); the run that produced the numbers raised none.
             resolutions = turn_facts.resolve(answer, fact_set)
+            # Stage 56: where the used results came from, and the notes the calls behind them
+            # were shown (a tool's description, a catalogue entry, a service note). A rule the
+            # code applied from a note is then "supported by" that note, not unsupported.
+            exec_ctx["lineage"] = _lineage_context({**state, "analysis_results": ar,
+                                                    "code_result": cr}, resolutions)
             gate_ctx = _scope_to_used_runs(exec_ctx, resolutions, answer)
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or

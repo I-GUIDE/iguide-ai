@@ -161,6 +161,65 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     return staging, staged_info, errors, skipped
 
 
+def _record_reads(staged_info: List[Dict[str, Any]], code: str, entrypoint: Optional[str],
+                  session_id: Optional[str]) -> None:
+    """The run's reads, in its lineage (agent_runtime/lineage.py, stage 56): every staged input,
+    and every file an earlier run left in the workspace that the program names. The second is
+    what the Sources line lost: a run that reopened `ndvi_county_final.npy` from the workspace
+    was given nothing, so the Planetary Computer scenes behind it were never reached (T08L,
+    threeway-bridge-fix4)."""
+    from agent_runtime import lineage
+
+    g = lineage.active()
+    if g is None or lineage.current_call() is None:
+        return
+    staged = set()
+    for f in staged_info:
+        if f.get("file_id"):
+            staged.add(str(f["file_id"]))
+            lineage.record_read(str(f["file_id"]), via="staged", filename=f.get("filename"))
+    source = code or ""
+    if entrypoint and session_id:
+        from agent_runtime.code_execution import resolve_workspace_file
+
+        source += "\n" + entrypoint
+        try:
+            source += "\n" + resolve_workspace_file(session_id, entrypoint).read_text(
+                encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+    known = dict(g.workspace)
+    if session_id:
+        from agent_runtime.code_execution import session_workspace_listing
+        from agent_runtime.file_store import find_files
+
+        # Files an earlier process wrote: the newest output of that name in this conversation.
+        for item in session_workspace_listing(session_id, limit=500):
+            name = str(item.get("name") or "")
+            if name in known or not lineage.workspace_reads(source, {name: ""}):
+                continue
+            hits = [r for r in find_files(name=name, kind="output", limit=5)
+                    if r.get("filename") == name.rsplit("/", 1)[-1]]
+            if hits:
+                known[name] = str(hits[0]["file_id"])
+    for name, fid in lineage.workspace_reads(source, known):
+        if fid and fid not in staged:
+            lineage.record_read(fid, via="workspace", filename=name)
+
+
+def _record_outputs(payload: Dict[str, Any]) -> None:
+    """A run's written files become the workspace a later run can name (see _record_reads)."""
+    from agent_runtime import lineage
+
+    g = lineage.active()
+    if g is None or lineage.current_call() is None:
+        return
+    for art in payload.get("artifacts") or []:
+        if (isinstance(art, dict) and art.get("file_id") and art.get("filename")
+                and art.get("kind") != "source"):
+            g.workspace[str(art["filename"])] = str(art["file_id"])
+
+
 # Appended to execute_code's description only while the extraction bundle is on
 # (agent_runtime/extraction_flag.py): it describes the gate and the mounted library, and a
 # model told about a library that is not mounted guesses at it.
@@ -225,6 +284,10 @@ def make_code_execution_tools(
         explicit = [str(r).strip() for r in (input_files or []) if str(r).strip()]
         refs = list(dict.fromkeys([*default_ids, *explicit]))
         staging, staged_info, input_errors, skipped = _build_staging(refs)
+        try:
+            _record_reads(staged_info, code, entrypoint, session_id)
+        except Exception:  # noqa: BLE001 - provenance never costs the run
+            pass
 
         # `label` only names the saved source, so pass it optionally: an executor
         # implementing the older signature (or a test double) still works.
@@ -242,6 +305,10 @@ def make_code_execution_tools(
             **extra,
         )
         payload = result.to_dict()
+        try:
+            _record_outputs(payload)
+        except Exception:  # noqa: BLE001
+            pass
         if staged_info:
             payload["input_files"] = staged_info
         if input_errors:

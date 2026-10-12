@@ -61,6 +61,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 | 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
 | 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
+| 56 | [Where every file, result and number came from](#stage-56) | 2026-10-12 | a per-conversation lineage graph written by the code that acts (file store, staging, fetches, the turn log), persisted in each file's record; the Sources line names every source upstream of what the answer used; a claim a note the work was shown states is supported by that note |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7920,3 +7921,131 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
 - The 71 of 77 wrong answers the banner does not mark for a related reason are not classified
   by what went wrong (method, data, arithmetic). That is step 4's input. The harness scorer's
   matching can credit an aside (the T10 relabels); `gis_harness/score.py` is unchanged here.
+
+
+## Stage 56 — Where every file, result and number came from {#stage-56}
+
+*2026-10-12. Branch `claude/lineage-graph`, stacked on "Every check measured against the scored
+archive" (stage 52). DEVLOG M8.93. Step 2 of the five-step validation plan. Stage numbers 53 to 55
+are taken by "Two runs that disagree, and a standard method recomputed", "A figure's kind is read
+from the code that computed it" and "Gi\* as Getis and Ord define it". No model call, no deploy.*
+
+**Why.**
+
+- **The Sources line lost a source whenever a code run reread files.** The stage 52 benchmark
+  counted 14 such drops across 462 replayable turns. In `threeway-bridge-fix4` T08L (mean NDVI of
+  Champaign County, 0.802 against 0.80) the final figure came from a run that reopened
+  `ndvi_county_final.npy`. An earlier run had written that file from Sentinel-2 bands fetched from
+  the Planetary Computer, but the figure resolved only to the rereading run, so the line named
+  TIGERweb alone. The line was computed from the used result's own call, one result at a time.
+- **The audit called a fact unsupported when it came from a note rather than a result.** In the
+  same turn the rule "(DN−1000)/10000" was one of 14 ⚠️ items on a correct answer. The code had
+  applied it from the bridge's Planetary Computer note ("Three ways to reach public data", S49.7),
+  and nothing the auditor or the reconciliation saw held the note.
+- **Provenance taken from text can be planted.** The AgentDojo/STAC study (arXiv 2610.09793) found
+  that one planted line defeated a naive provenance check on 94–99% of runs, and that binding
+  provenance to the lookup that produced it closed the hole. So no edge here comes from prose: not
+  from a peer's summary, a tool result's text, or the answer.
+
+**What changed.**
+
+1. **`agent_runtime/lineage.py`: one graph per conversation**, add-only and idempotent.
+   - Nodes:
+     - `source`: a catalogue entry, an unknown host, or an upload;
+     - `artifact`: a file_id, with its content digest; a file staged by URL is `ws:<name>`;
+     - `call`: a tool call or code run;
+     - `fact`: a typed value a result reported. Its `kind` is empty, for step 3 to fill;
+     - `note`: a tool's description, a catalogue entry, or a service note.
+   - Edges: `produced_by` (artifact or fact → call), `read` (call → artifact), `from_source`
+     (call → source), `cites` (call → note), and `within` (a call the code made through the
+     bridge → its run).
+2. **Each edge is written where the action happens.**
+   - The tool-call middleware (`_make_repeat_call_middleware`) binds the acting call
+     (`lineage.calling`). It also cites the tool's description, and any notes registered for the
+     tool (`register_tool_notes`).
+   - `file_store.create_output_file*` records `produced_by`. It writes `lineage` (producer, the
+     files it read, every source upstream) and a `digest` into the file's record. A later turn,
+     or another process, that reads the file inherits its sources from the record.
+   - `execute_code` (`_record_reads`) records every staged input, and every file an earlier run
+     left in the workspace that the program names. The second is a static over-approximation: a
+     name in a comment counts. What the program opened is not observable from the agent (GDAL
+     opens files below Python), and naming a source that was only mentioned is the safer error.
+   - `public_data_tools.fetch`, `staging.stage_url`, `admin_boundary` (TIGERweb), Overpass and
+     3DEP record the service they reached. Each records before writing its file, so the file's
+     record carries the service.
+   - `TurnLog.record_result` records each typed output as a fact.
+3. **`lineage.from_results` replays a recorded turn** through the same API. It reads only fields
+   a tool wrote: call ids, `input_files`, `artifacts`, `bridge_calls`, a fetch's `source`. The
+   supervisor merges this replay with the live graph (`for_state`), so a peer that bypassed the
+   middleware is still covered. The benchmark replays the archive with it.
+4. **The Sources line** (`_answer_sources`) now names every source upstream of what the answer
+   used:
+   - the calls its figures resolved to, and the calls that put a layer on the map;
+   - with sources from earlier turns' file records;
+   - with an uncatalogued host named once, by its host. Before, every distinct URL was its own
+     item: seven Planetary Computer scene URLs would have been seven sources.
+
+   `source_catalog.by_host` matches a mirror subdomain (`lz4.overpass-api.de`) to its entry.
+5. **The audit.** `execution_context["lineage"]` gives the auditor, for each used call:
+   - the files it read and what wrote them;
+   - the sources upstream;
+   - the notes the calls behind the answer were shown, with their text.
+
+   The reconciliation gains rule 5. An issue whose claim a cited note states is removed and kept
+   as `supported_by_notes`. "States" means every figure in the claim is in the note, and the
+   claim's formula is there verbatim (modulo spacing, case and the Unicode minus), or most of its
+   words are. Sharing a topic is not enough. The notes are kept out of rule 2's blob, so a number
+   in a note never makes a computation look verified. `verdict.from_audit` reports each removal as
+   a NOTE finding whose evidence is the note's node id. It is not printed.
+6. **The bridge.** The bridge (PR #104) is not on this base. It calls the same API: it registers
+   its host notes for `execute_code`, binds each bridge call within its run, and records the run
+   reading each file a call hands back. That is a separate commit on #104, a no-op until this
+   module is present, with a test that is skipped until then.
+7. **The benchmark.**
+   - Archived turns do not hold the notes their code was shown: `bound_tool_docs` keeps 200
+     characters of each description. `gis_harness/run_notes.py` reads the bridge's host notes
+     from the commit each bridge run names in its `.origin` and writes `<run>/tool_notes.json`.
+     It evaluates the module's constant assignments, never imports it.
+   - The bench classifies each source the line omits by the lineage, and also holds the line as it
+     was before this stage to the same lineage.
+
+**Measured** (`python3 -m gis_harness.validators_bench`, 493 scored turns, 462 replayable,
+against the stage 52 report).
+
+- **Sources the answer's results rest on that the line leaves out: 11 → 0.** The 11 are the old
+  line held to the lineage, on 11 turns. Among them are `threeway-bridge-fix4` T08L and
+  `threeway-bridge-fix3` T08L (the Planetary Computer), three Census Reporter turns, OSRM, USGS
+  NLDI, and OSM on three turns. Under stage 52's own definition (every source in the record) the
+  drops fall from 23 on 19 turns to 11 on 11 turns, and its "a code run reread files" class from
+  14 to 2. Every one of the 11 left was checked against the record, and nothing the answer used
+  rests on any of them:
+  - the two remaining "reread" sources are Census API fetches that returned the key-error page
+    `missing_key.html`, which no run read;
+  - six are Nominatim geocodes whose coordinates never reached a later call;
+  - three are wrong answers whose figures came from no data run: two T08L runs whose Planetary
+    Computer fetches failed or went unused, and a T03L whose OSM run no stated figure came from.
+- **Audit findings on a fact from a tool description or note: 1 → 0** (replay). It was the
+  fix4 offset rule, now a NOTE finding citing `note:bridge:planetarycomputer.microsoft.com`. The
+  other five audit findings on that turn are not description-backed and stay. Banner precision
+  and recall do not move: replay 40% / 13% (earned 24% / 8%); recorded 22% / 36%. The turn
+  keeps its banner, for the gate's unit and count findings (step 3's subject).
+- **Fixture subset** (22 turns, CI): the old line's drops held to the lineage fall from 3 to 0;
+  the "reread" class 4 → 0. `expected.md` is updated with this commit.
+- `rag_pipeline/tests/test_lineage.py` covers:
+  - the fix4 turn replayed from the committed fixture. The final run reaches the Planetary
+    Computer, the Sources line names it once, and the offset rule is supported by the bridge note.
+    Without the note it stays flagged;
+  - live recording from a fetch through two code runs and a new turn;
+  - prose never writing an edge: a web page claiming a source adds none, and its text supports
+    no claim.
+
+**Not done.**
+- What a program actually opened is approximated by the names it contains. An audit hook in the
+  sandbox would see `open()` but not GDAL's reads.
+- A value the model carried by hand (coordinates from a geocode typed into a later call) is not
+  an edge. It is data flowing through prose, which this stage refuses to trust.
+- The graph lives in process memory, bounded at 200 conversations. Only a file's lineage
+  persists, in its record. The live graph is not yet in the trace or the client payload.
+- Fact nodes carry no kind until step 3 fills it, and the claim-level verdicts of step 5 do not
+  read the graph yet.
+

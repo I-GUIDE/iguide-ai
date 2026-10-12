@@ -202,9 +202,15 @@ class TurnLog:
             if in_step:
                 self._runs[run]["pending"].append(event)
         if parsed["ok"] and memo_of is None:
+            from agent_runtime import lineage
+
             for typed in typed_outputs(content):
                 self.append("fact", peer=peer, run=run, tool=name, call_id=call_id,
                             result_seq=event["seq"], **typed)
+                # The same value as a fact node of the conversation's lineage (stage 56).
+                if call_id:
+                    lineage.record_fact(str(typed.get("name")), typed.get("value"),
+                                        typed.get("unit"), call_id=call_id)
         return event
 
     def ingest(self, peer: str, result: Any, run: Optional[str] = None) -> int:

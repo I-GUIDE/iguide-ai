@@ -258,6 +258,11 @@ def fetch(url: str, *, filename: Optional[str] = None, max_bytes: Optional[int] 
     try:
         if resp.status_code != 200:
             raise Refused(f"{host} answered HTTP {resp.status_code}")
+        # The host this file came from, in the calling tool's lineage (stage 56), before the
+        # file is written, so the file's record carries it.
+        from agent_runtime import lineage
+
+        lineage.record_source(url=current)
         declared = resp.headers.get("Content-Length")
         if declared and declared.isdigit() and int(declared) > cap:
             raise Refused(f"the file is {int(declared) / 1e6:.1f} MB, over the {cap / 1e6:.0f} MB "

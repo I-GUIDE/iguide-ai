@@ -208,6 +208,12 @@ def _staged_result(session_id: str, target: Path, source: Any, origin: str) -> D
         "backend": getattr(source, "backend", ""),
     }
     record_input(session_id, entry)
+    # Its lineage (stage 56): where it came from, and the name a run opens it by.
+    from agent_runtime import lineage
+
+    if str(origin).startswith("http"):
+        lineage.record_source(url=str(origin))
+    lineage.record_workspace_file(target.name, f"ws:{target.name}")
     return entry
 
 

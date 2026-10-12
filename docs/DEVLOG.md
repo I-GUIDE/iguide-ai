@@ -5338,3 +5338,35 @@ rather than from the previous one.
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
   so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.
+
+
+## 2026-10-12 · M8.93 · Where every file, result and number came from (architecture stage 56)
+
+**Change** `agent_runtime/lineage.py` is a per-conversation graph of sources, files, calls, facts
+  and notes. Its edges are written by the code that acts, never taken from prose:
+  - the tool middleware binds the acting call and cites its description;
+  - the file store records each file's producer, and persists the file's lineage and digest in
+    its record;
+  - `execute_code` records its staged inputs, and the workspace files the program names;
+  - fetch, staging, TIGERweb, Overpass and 3DEP record their service;
+  - the turn log records facts.
+
+  The Sources line names every source upstream of what the answer used. The auditor sees each used
+  call's lineage, and the notes the work was shown. Reconciliation rule 5 removes a claim a cited
+  note states and records it as a NOTE finding citing the note's node.
+
+**Why** Step 2 of the validation plan. The line dropped a source whenever a code run reread files
+  fetched earlier (fix4 T08L named TIGERweb alone). The audit flagged the Sentinel-2 offset rule
+  the code took from the bridge's Planetary Computer note. And provenance read from text can be
+  planted (arXiv 2610.09793).
+
+**Measured** On the 462 replayable archived turns, sources the answer's results rest on that the
+  line leaves out fell from 11 to 0. Stage 52's own count fell from 23 to 11, and every remaining
+  source was checked: nothing the answer used rests on it. Description-backed "unsupported" audit
+  findings fell from 1 to 0. Banner precision and recall are unchanged (replay 40% / 13%,
+  recorded 22% / 36%).
+
+**Not fixed** Reads are approximated by the names the program contains. A value the model carried
+  by hand is not an edge. The graph is in memory; only file lineage persists. The bridge hook is
+  a separate commit on #104.
+
