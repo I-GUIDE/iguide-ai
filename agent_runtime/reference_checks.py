@@ -573,8 +573,9 @@ def _stated(answer: str, value: float, fig: Figure) -> bool:
     from agent_runtime import facts as F
 
     target = F.Fact(id="reference", value=value, source="reference")
+    # A claim only: "the tool returned slope 0" restates the tool, it is not the answer's figure.
     return any(F._matches(q, target) for q in F.quantities(answer or "")
-               if not q.unit or F._digits_shown(q.text) >= 3)
+               if F.is_claim(q) and (not q.unit or F._digits_shown(q.text) >= 3))
 
 
 def findings(answer: str, refs: Sequence[Reference], *, kind: str) -> List[Any]:

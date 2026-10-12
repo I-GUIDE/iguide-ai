@@ -56,6 +56,9 @@ _GENERIC = frozenset("""
     measured new old tmp temp test check res out x y z val var data first second third
     """.split())
 _STOP = frozenset("of the a an in for with by to and at on per from is as via using".split())
+# A permutation result is not one figure: a p-value floors at 1/(permutations+1) and moves with
+# the seed, so 0.001 and 0.0001 from 999 and 9,999 shuffles are both right (T09L, threeway-net).
+_PERMUTATION = frozenset("p pval pvalue psim sim zsim".split())
 _WORD_RE = re.compile(r"[A-Za-z][a-z]*|[A-Z]+(?![a-z])|\d+")
 
 
@@ -173,7 +176,8 @@ def figures(facts: Iterable[Dict[str, Any]],
         name = str(f.get("name") or "")
         if f.get("source") == "printed":
             name = _printed_label(name)
-        if kind_key(name) is None:
+        if kind_key(name) is None or _PERMUTATION & set(_tokens(name)) \
+                or "p-value" in str(f.get("unit") or "").lower():
             continue
         try:
             value = float(f.get("value"))
@@ -289,8 +293,27 @@ def _stated(answer: str, fig: Figure) -> bool:
     return any(F.is_claim(q) and F._matches(q, target) for q in F.quantities(answer or ""))
 
 
+def _support(d: Disagreement, fig: Figure) -> Set[int]:
+    """The runs that computed *fig*'s value."""
+    return {g.order for g in d.figures if differ(g, fig) is False}
+
+
+def _settled(d: Disagreement, fig: Figure) -> bool:
+    """Whether the turn's own runs settled on *fig*: more runs computed its value than any value
+    it disagrees with. A zero does not compete with non-zero values: it is how a failed attempt
+    (an empty selection, a raster read in the wrong unit) looks, and in the archive's correct
+    turns the early zeros were exactly that (T06 slope 0, T07L area 0, before the runs that
+    worked)."""
+    mine = _support(d, fig)
+    rivals = [g for g in d.figures if differ(g, fig)]
+    if fig.value != 0:
+        rivals = [g for g in rivals if g.value != 0]
+    return all(len(mine) > len(_support(d, g)) for g in rivals)
+
+
 def findings(answer: str, found: Sequence[Disagreement], *, kind: str) -> List[Any]:
-    """A finding for each disagreement the answer reports one side of."""
+    """A finding for each disagreement the answer reports one side of, when the turn's runs did
+    not settle on that side."""
     from agent_runtime import verdict as V
 
     out = []
@@ -301,7 +324,9 @@ def findings(answer: str, found: Sequence[Disagreement], *, kind: str) -> List[A
         values = {round(f.value, 9) for f in d.figures}
         if {round(f.value, 9) for f in stated} == values:
             continue                       # it reports every value; the reader has been told
-        others = [f for f in d.figures if f not in stated]
+        if any(_settled(d, f) for f in stated):
+            continue                       # the runs agree on what the answer reports
+        others = [f for f in d.figures if differ(f, stated[0])]
         out.append(V.Finding(
             CHECK, kind,
             f"two runs in this turn computed {d.label} and disagree "

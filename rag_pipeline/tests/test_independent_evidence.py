@@ -105,6 +105,29 @@ def test_measured_figures_and_disjoint_inputs_and_unit_mismatch_stay_silent():
     assert AG.disagreements(AG.figures(units)) == []
 
 
+def test_an_answer_that_sides_with_the_runs_consensus_is_not_flagged():
+    """T06/T07L in the archive: early attempts computed 0 or a broken area, later runs agreed,
+    and the answer reported what they agreed on."""
+    facts = [{"name": "watershed_area_km2", "value": v, "unit": "km**2", "call_id": f"c{i}"}
+             for i, v in enumerate([0.0666, 16.2, 16.2, 16.2])]
+    found = AG.disagreements(AG.figures(facts))
+    assert len(found) == 1                               # the writer is still told
+    assert AG.findings("The watershed is 16.2 km².", found, kind=V.PROBLEM) == []
+    assert len(AG.findings("The watershed is 0.0666 km².", found, kind=V.PROBLEM)) == 1
+    zeros = [{"name": "flooded_area", "value": v, "unit": "hectare", "call_id": f"c{i}"}
+             for i, v in enumerate([0.0, 0.0, 0.0, 654.11, 654.11])]
+    found = AG.disagreements(AG.figures(zeros))
+    assert AG.findings("654.11 ha would flood.", found, kind=V.PROBLEM) == []
+
+
+def test_permutation_p_values_are_not_compared():
+    facts = [{"name": "morans_i_p", "value": 0.001, "unit": "p-value", "call_id": "c1"},
+             {"name": "morans_i_p", "value": 0.0001, "call_id": "c2"},
+             {"name": "p_sim", "value": 0.02, "call_id": "c3"},
+             {"name": "p_sim", "value": 0.03, "call_id": "c4"}]
+    assert AG.figures(facts) == []
+
+
 def test_units_are_converted_before_comparing():
     facts = [{"name": "basin_area", "value": 16.2, "unit": "km**2", "call_id": "c1"},
              {"name": "basin_area", "value": 1620.0, "unit": "hectare", "call_id": "c2"}]
@@ -385,3 +408,29 @@ def test_overlapping_zones_are_each_averaged_over_their_own_pixels(tmp_path):
 def test_a_tool_that_failed_or_an_unknown_tool_is_not_recomputed():
     assert RC.from_tool("local_getis_ord", {}, {"ok": False, "error": "x"}) is None
     assert RC.from_tool("buffer_layer", {}, {"ok": True}) is None
+
+
+# --------------------------------------------------------------------------- the bench's re-run
+
+def test_only_code_that_can_produce_a_reference_record_is_re_run():
+    from gis_harness.reference_reexec import TRIGGER
+
+    assert TRIGGER.search("lam = np.linalg.solve(A, b)")
+    assert TRIGGER.search("from scipy.linalg import solve\nw = solve(K, k)")
+    assert TRIGGER.search("gi = G_Local(y, w, star=True)")
+    assert TRIGGER.search("mi = esda.Moran(y, w)")
+    assert not TRIGGER.search("df = pd.read_csv('a.csv')\nprint(df.zinc.mean())")
+
+
+def test_a_task_file_is_staged_under_every_name_the_run_used(tmp_path):
+    from gis_harness.reference_reexec import _stage
+
+    src = tmp_path / "meuse.csv"
+    src.write_text("x,y,zinc\n1,2,3\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    body = {"input_files": [{"file_id": "file_1e0c1a05d195", "filename": "meuse.csv",
+                             "available_as": ["file_1e0c1a05d195", "meuse.csv"]}]}
+    _stage(work, "pd.read_csv('file_1e0c1a05d195__meuse.csv')", body, {"meuse.csv": src})
+    assert {p.name for p in work.iterdir()} == {"meuse.csv", "file_1e0c1a05d195",
+                                                "file_1e0c1a05d195__meuse.csv"}
