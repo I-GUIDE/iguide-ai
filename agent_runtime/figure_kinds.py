@@ -45,7 +45,6 @@ PASS, FAIL, UNKNOWN = "pass", "fail", "cannot_determine"
 DECLARED = "IGUIDE_OUTPUTS"
 
 MEASURES = ("area", "length", "distance")
-STATS = ("mean", "median", "std", "quantile", "sum", "min", "max")
 
 
 @dataclass(frozen=True)
