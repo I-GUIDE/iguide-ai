@@ -7917,3 +7917,25 @@ code and the answer read:
   rendered by `line()` (the peers' brief) and `_statement()` (the Sources line) only when set.
 A test pins the facts in all three renderings and checks that a source without `values` renders
 as before. Measured effect: S49.8, after the re-run.
+
+### Stage S49.8 T08L with the values stated: correct
+
+*2026-10-12, `threeway-bridge-fix4`: the S49.7 tip (545fb2d6) merged locally with stage 34's error
+excerpt (#109), never pushed; settings as `threeway-bridge-fix2`; Lumen deepseek-v4-flash; 0.68M
+tokens.*
+
+- **0.802 against 0.80** (13 July 2024, tiles 16TCK and 16TDK, SCL-masked, clipped to the county).
+- **Where it learned the offset:** from the bridge's host note. Its second code run printed each
+  item's `s2:processing_baseline` (05.10/05.11), which the run without the note never read, and
+  the run that built the mosaic opens with the note's rule as a comment: "baseline >= 04.00:
+  reflectance = (DN - 1000) / 10000, 0 is nodata".
+- **Calls:** 8 bridge calls, 0 repeats, 1 failure: the comma-joined `assets=B04,B08`, whose 404
+  now quoted the service ("B04,B08 is not valid …"); the next call asked for one asset. 15 code
+  runs, 351 s, no Lumen 5xx.
+- **Not right yet:**
+  - The Sources line names TIGERweb only. The figure came from a run that read files earlier
+    bridged runs had saved, so no bridge call links to it (the cross-run provenance gap, S49.5).
+  - The ⚠️ banner lists 14 problems. They include the model declaring NDVI as a count, the count
+    check reading pixel counts as row counts, and the audit calling "Converted DN to surface
+    reflectance `(DN−1000)/10000`" unsupported, because the rule came from a tool description
+    and not a tool result.
