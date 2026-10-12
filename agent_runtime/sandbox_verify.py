@@ -30,6 +30,11 @@ import math
 from types import ModuleType
 from typing import Any, Dict, List, Optional
 
+from agent_runtime.reference_sandbox import (_fit_variogram, _gi_reference, _kriging_reference,
+                                             _length_n_vectors, _moran_reference, _uniform_rows,
+                                             _variogram_models, _w_from_snapshot,
+                                             install_reference_recorder, reference_report)
+
 PASS = "pass"
 FAIL = "fail"
 UNKNOWN = "cannot_determine"
@@ -1054,6 +1059,10 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
     counts = {PASS: 0, FAIL: 0, UNKNOWN: 0}
     for f in findings:
         counts[f["status"]] = counts.get(f["status"], 0) + 1
+    try:
+        reference = reference_report(namespace)
+    except Exception:
+        reference = []
     return {
         "schema": 2,
         "inspected": inspected,
@@ -1066,6 +1075,9 @@ def run_checks(namespace: Dict[str, Any], *, max_frames: int = 12) -> Dict[str, 
         "metric_ops": _dedup_ops(all_ops),
         "frame_sizes": frame_sizes,
         "op_tracking": tracking,
+        # Standard methods the run computed, recomputed with a reference library from the same
+        # inputs (agent_runtime/reference_sandbox.py, plan step 4b).
+        **({"reference": reference} if reference else {}),
         # The single field a reader should branch on, with precedence fail > unknown > pass.
         #
         # A single cannot_determine downgrades the whole run, even when everything else
@@ -1162,6 +1174,13 @@ try:
 except Exception:
     pass
 
+# Before the user's code, so every kriging system it solves and every esda Gi*/Moran call it
+# makes is recorded for the reference recomputation (agent_runtime/reference_sandbox.py).
+try:
+    _iguide_gate_body()['install_reference_recorder'](globals())
+except Exception:
+    pass
+
 '''
 
 
@@ -1174,7 +1193,9 @@ def _inlined_helpers() -> str:
                 declared_entries, capture_environment, check_contract_arg, _check_one_arg,
                 _geometry_column, _looks_like_frame, _has_geometry, install_contract_guards,
                 install_operation_tracker, _install_metric_op_recorder, _summarise, _dedup_ops,
-                run_checks):
+                install_reference_recorder, _variogram_models, _length_n_vectors, _fit_variogram,
+                _kriging_reference, _uniform_rows, _w_from_snapshot, _gi_reference,
+                _moran_reference, reference_report, run_checks):
         src = inspect.getsource(obj)
         parts.append("\n".join("    " + line if line.strip() else line
                                for line in src.splitlines()))

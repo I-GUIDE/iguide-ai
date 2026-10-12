@@ -22,6 +22,8 @@ MODULES = [
     "geopandas", "fiona", "rasterio", "pyproj", "mapclassify", "folium",
     # plus the spatial-statistics stack
     "libpysal", "esda", "spreg", "pygeoda",
+    # the gate's kriging reference
+    "pykrige",
 ]
 
 broken = []
