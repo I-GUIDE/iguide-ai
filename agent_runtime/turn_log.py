@@ -123,7 +123,7 @@ def typed_outputs(content: Any) -> List[Dict[str, Any]]:
             if isinstance(item, dict) and "value" in item and "name" in item:
                 found.append({k: item.get(k) for k in ("name", "value", "unit", "dimension",
                                                        "counted", "measured_in_crs", "source",
-                                                       "op") if item.get(k) is not None})
+                                                       "op", "figure_kind") if item.get(k) is not None})
     return found[:48]
 
 

@@ -365,13 +365,20 @@ def recorded_rows(t: BenchTurn) -> List[Row]:
 _AGENT_SIDE = {"declared_units", "count_population", "measured_in"}
 
 
-def replay_report(rep: Dict[str, Any]) -> Dict[str, Any]:
-    """A recorded verification report with its agent-side checks re-run by this checkout's
-    `declared_outputs.evaluate`. The sandbox-side findings stay as recorded.
+def replay_report(rep: Dict[str, Any], code: Optional[str] = None) -> Dict[str, Any]:
+    """A recorded verification report with its agent-side checks re-run by this checkout: the
+    sandbox findings a figure's kind or reach decides (`figure_kinds.reclassify`, stage 54), then
+    the unit and count checks (`declared_outputs.evaluate`), both reading the run's recorded
+    *code*. The sandbox-side findings are otherwise as recorded.
 
     The report keeps only non-pass findings, so the frame sizes a count is compared with survive
     only inside a recorded count finding; a count whose check passed live is compared with none
     here, which is the same outcome."""
+    from agent_runtime import figure_kinds
+
+    rep = figure_kinds.reclassify(rep, code)
+    rep = {**rep, "findings": [f for f in rep.get("findings") or []
+                               if not (isinstance(f, dict) and f.get("status") == "pass")]}
     outputs = rep.get("outputs")
     if not isinstance(outputs, list) or not outputs:
         return rep
@@ -396,7 +403,8 @@ def replay_report(rep: Dict[str, Any]) -> Dict[str, Any]:
             entry["crs"] = o["measured_in_crs"]
         declared.append(entry)
     extra, typed = declared_outputs.evaluate({"declared": declared, "frame_sizes": frames,
-                                              "metric_ops": rep.get("metric_ops") or []})
+                                              "metric_ops": rep.get("metric_ops") or []},
+                                             code=code)
     kept = [f for f in rep.get("findings") or []
             if not (isinstance(f, dict) and f.get("check") in _AGENT_SIDE
                     and str(f.get("target")) in declared_names)]
@@ -431,7 +439,8 @@ def _replay_peer(peer: Any) -> Any:
         except ValueError:
             payload = None
         if isinstance(payload, dict) and isinstance(payload.get("verification"), dict):
-            payload = {**payload, "verification": replay_report(payload["verification"])}
+            payload = {**payload, "verification": replay_report(payload["verification"],
+                                                                payload.get("code"))}
             r = {**r, "content": json.dumps(payload, default=str)}
         results.append(r)
     return {**peer, "tool_results": results}
