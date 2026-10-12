@@ -60,6 +60,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 | 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
+| 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7717,3 +7718,196 @@ they used to assert the printed caveat.
 - No live run of this stage. It changes no tool and no route; the replay and calibration above
   are offline over recorded turns.
 
+
+## Stage 52 — Every check measured against the scored archive {#stage-52}
+
+*2026-10-12. Branch `claude/validators-bench`, stacked on "A banner only when a check found
+something" (stage 46). DEVLOG M8.89. Step 1 of the five-step plan for validation: (1) measure every
+check offline against the scored archive; (2) a lineage graph, so every number and source is traced
+by construction; (3) quantity types inferred from the computation, not declared by the model;
+(4) independent evidence (plausibility envelopes, metamorphic checks, a second route for the
+headline number, positive controls for absence claims); (5) claim-level verdicts, with banner
+thresholds set from measured precision. Every later step is judged by the benchmark this one
+builds. No model call, no deploy.*
+
+**Why.**
+
+- The banner's 8% precision ("A banner only when a check found something") was counted from
+  answer text. Nothing said which check produced which banner. Nothing re-ran the checks of the
+  code being changed, so a fix could be judged only by a new harness run, at about 4M Lumen tokens
+  per phase.
+- That entry's calibration covered 50 turns of three runs. The archive holds 493 scored turns.
+
+**What changed.**
+
+1. **`gis_harness/validators_bench.py`.** Every scored turn in `gis_harness_runs_archive/` becomes a
+   labelled row:
+   - **correct**;
+   - **wrong**: a solvable task answered wrong, or an unsolvable one given a made-up value;
+   - **honest refusal**: refused, or a disclosed substitute.
+
+   The checks are scored in two views:
+   - **recorded**: what the live turn showed. That is its recorded verdict (from "Facts, a number
+     scan, one verdict", stage 44, on), or the items of the banner in the answer, in each of the
+     eight formats the archive holds.
+   - **replay**: the checks of this checkout, re-run on the state each turn's `result` event
+     carries. That state holds every peer's tool results with their call ids (the gate's report
+     rides inside each `execute_code` result), the evidence, the audit with its claim ledger, and
+     the peer failures. 462 of the 493 turns carry it; the live browser sweep does not.
+
+   Replayed are:
+   - the unit and count checks (`declared_outputs.evaluate`) on each run's recorded declarations;
+   - the gate's supersession and its scoping to the runs the answer uses;
+   - the audit's reconciliation and `verdict.from_audit`;
+   - the number scan;
+   - the corrections and the peer note;
+   - `verdict.shown`.
+
+   Inputs, as recorded:
+   - the checks that run inside the sandbox, which read live objects;
+   - the auditor's own verdict. The ledger's absent and contradicted rows are its issues. Its
+     severity is inferred on 17 turns, where the gate or a reconciliation overwrote it.
+
+   Whether the number scan would cut a figure needs the producer check, an LLM call. So an
+   unresolved figure is reported as unverifiable, and a cut the live turn made is carried from
+   its verdict.
+2. **Per check, and for the banner:**
+   - the turns it fired on, split by correct, wrong and refusal;
+   - precision, the share of those turns that were wrong;
+   - recall, the share of wrong turns it fired on;
+   - the same two **earned**, without coincidental catches. A catch is coincidental when the
+     finding's cause is a known false-alarm class (`KNOWN_FALSE_ALARMS`), which would fire on a
+     correct answer just the same. Example: the count check firing on T11L's 239 patches, an
+     answer that was wrong because its roads query dropped primary roads.
+3. **Causes.** Every finding gets one, by rule. Two are read by hand (`HAND_CAUSES`):
+   - the L2A offset in `threeway-bridge-fix4` T08L, which came from the bridge's Planetary Computer
+     note;
+   - a difference of two recorded counts.
+
+   An audited claim is "in the record" when every figure in it resolves to a recorded number, as
+   the number scan resolves it, or, for a claim without figures, when three quarters of its words
+   are in what the tools returned and the code ran.
+4. **The Sources line.** The bench lists the data sources a turn's record holds that its rendered
+   Sources line leaves out, with the cause.
+5. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on 22
+   committed turns (`gis_harness/fixtures/validators_bench/turns.jsonl`, 1.8 MB; scrubbed of thread
+   and session ids, local paths and email addresses). It compares the report with the committed
+   `expected.md` and fails on any difference. A change to a check commits the new numbers with it
+   (`--update-expected`), so its precision and recall delta is in the pull request's diff.
+   `--baseline REPORT.json` prints the delta against any earlier full run. Disabling the count
+   check, as a test, moved the fixture banner's recall from 86% to 71% and its earned precision
+   from 29% to 31%.
+
+**How faithful the replay is.**
+
+- **Every turn with a recorded verdict** (55 turns): the replay gives the same set of (check, kind)
+  for the gate, audit, correction and peer checks as the live turn. One exception: nine
+  `not_applicable` items that `from_gate` in this checkout no longer reports. Two fixes were needed
+  to get there:
+  - The answer's figures must resolve first to the typed facts of the turn log, as they did live.
+    The log is not archived, so the bench rebuilds it from each successful result's `outputs`.
+    Without it, `threeway-bridge` T05L resolved a figure to an earlier failed run, and that run's
+    `projected_crs` failure came into scope.
+  - Outputs that stage 48's branch types from printed numbers (`source` "printed") are left as
+    recorded. This checkout read "incidents per 1,000" as a count and failed it.
+- **The number scan** gives the same unresolved figures on 13 of 18 turns. The rest are turns
+  with a re-grounding pass, or figures that stage 46's resolver changes (unit conversions).
+- **Over the full archive** the bench runs in about 6 s. On the fixtures it takes 1.7 s, and
+  their rows equal the full run's rows for the same turns.
+
+**Measured** (493 scored turns: 330 correct, 81 wrong, 82 honest refusals; 7 unscored left out).
+
+The stage 46 baseline is reproduced exactly. Over the 18 runs archived by then (437 turns, 39 wrong
+by that entry's split), there was a banner on 9 wrong and 98 others: precision 8%, recall 23%. That
+split counted the 19 answers to unsolvable tasks with a made-up value as not wrong. Here they are
+wrong.
+
+| banner | turns | wrong | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
+|---|---|---|---|---|---|---|---|---|
+| as the live turns printed it | 493 | 81 | 29 (17) | 111 | 21% | 36% | 12% | 21% |
+| the same, on the 462 replayable turns | 462 | 72 | 24 (16) | 98 | 20% | 33% | 13% | 22% |
+| this checkout, replayed | 462 | 72 | 10 (6) | 15 | 40% | 14% | 24% | 8% |
+
+What the replayed banner prints, per check (wrong answers, of which coincidental, in brackets):
+
+| check | kind | on correct | on wrong | on refusal | precision | recall | precision earned |
+|---|---|---|---|---|---|---|---|
+| peer failed | unverifiable | 0 | 4 (0) | 0 | 100% | 6% | 100% |
+| gate `projected_crs` | problem | 4 | 2 (0) | 0 | 33% | 3% | 33% |
+| gate `count_population` | problem | 4 | 3 (3) | 0 | 43% | 4% | 0% |
+| gate `declared_units` | problem | 1 | 1 (1) | 0 | 50% | 1% | 0% |
+| gate `all_nan` | problem | 3 | 0 | 0 | 0% | 0% | 0% |
+| gate `finite_value` | problem | 1 | 0 | 0 | 0% | 0% | 0% |
+| audit | problem | 6 | 1 (1) | 1 | 12% | 1% | 0% |
+
+What it keeps in the verdict payload:
+
+| check | kind | on correct | on wrong | on refusal | precision | recall |
+|---|---|---|---|---|---|---|
+| number scan | unverifiable | 102 | 27 (0) | 10 | 19% | 38% |
+| number scan | note (cut) | 25 | 12 (0) | 6 | 28% | 17% |
+| gate `coverage` | unverifiable | 47 | 7 (7) | 10 | 11% | 10% |
+
+As the live turns printed them, the audit fired on 8 correct, 4 wrong and 1 refusal. Three of the
+4 catches are coincidental:
+- in `baseline` T09 (twice) it called z-scores contradicted that a second recorded call holds, on
+  answers wrong for their hot-spot count;
+- in `p2-after` U04.t1 it called distances unsupported that the code printed, on an answer wrong
+  for a made-up travel time.
+
+False alarms of this checkout's banner, by cause (correct answers and refusals):
+
+| cause | findings | turns |
+|---|---|---|
+| audit: the record holds the claim; the auditor marked it absent | 8 | 5 |
+| count check: a count of things that are not frame rows (people, pixels, patches) | 8 | 4 |
+| `all_nan`: an optional column empty after a join that matched | 7 | 3 |
+| `projected_crs`: an exploratory print measured in degrees, not the answer's run | 3 | 3 |
+| a mean, median or index typed as a count (a fractional "count") | 3 | 1 |
+| audit: knowledge or interpretation in no record | 3 | 1 |
+| `finite_value`: a declared NaN | 2 | 1 |
+| `projected_crs`: a degree area used only as a non-zero test (`.area > 0`) | 2 | 1 |
+| audit: arithmetic on recorded figures; the reason a refusal gives; a fact from a tool description | 1 each | 1 each |
+
+As the live turns printed them, the false alarms were mostly "not checked":
+- the gate could not reach the frames: 165 findings on 58 turns;
+- it had nothing to check: 62 on 41;
+- cuts: 29;
+- unit words the vocabulary before "A number carries its unit and where it was measured"
+  (stage 43) did not know: 15 on 7.
+
+The Sources line, replayed, leaves out a data source its record holds on 19 turns (10 correct,
+9 wrong; 23 sources):
+- 14 because a code run reread files an earlier call fetched (the figure resolves to the code
+  run, and the fetch's source drops out: `threeway-bridge-fix4` T08L loses Planetary Computer);
+- 9 whose result no stated figure came from, mostly a geocoder.
+
+**What this says.**
+
+- **Stage 46 cut the false alarms; it did not make the banner a detector.** On the same 462 turns,
+  the answers that are not wrong but carry a banner fell from 98 to 15, and wrong answers with a
+  banner fell from 24 to 10. Of those 10, six are earned: four peer failures and two
+  `projected_crs` failures on U04, a distance measured in degrees. On U04 the answer then made up a
+  travel time; the gate does not establish that one caused the other. A banner now means a wrong
+  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 72 wrong
+  answers, and only 6 of them for a related reason.
+- **Neither the count check nor the unit check has an earned catch.** Every one of the count
+  check's seven firings, and the unit check's two, is a count of non-rows or a mean typed as a
+  count.
+- **The audit's printed findings are almost all claims the record holds.** That is the
+  auditor's view of the record failing (truncation, a second call, a figure in code), not the
+  answer.
+- **The highest recall of any check is the number scan's "not in any record", at 38%,** and it
+  is not printed. At 19% precision it is not a banner by itself. It is the obvious input to
+  claim-level verdicts (step 5).
+- **The in-sandbox checks** (`all_nan`, `projected_crs`, coverage) can be measured here but not
+  re-run. A fix to them, like stage 46's `all_nan` rule, shows only in new runs.
+
+**Not done.**
+- The replay has no turn log, so typed facts are rebuilt from the recorded outputs, and turns
+  with a re-grounding pass are replayed from their final state only.
+- The audit's own severity is inferred on 17 turns.
+- Causes are rules over message text, with two hand labels. A new class shows up as "other" or
+  under the nearest rule until someone reads it.
+- The 66 of 72 wrong answers the banner does not mark for a related reason are not classified
+  by what went wrong (method, data, arithmetic). That is step 4's input.
