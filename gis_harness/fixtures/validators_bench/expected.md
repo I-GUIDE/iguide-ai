@@ -1,6 +1,6 @@
 # Validator benchmark (fixture subset)
 
-22 scored turns: 12 correct, 7 wrong, 3 honest refusals (0 left out, unscored; 0 relabelled by hand, see LABEL_OVERRIDES). 21 carry the supervisor state the replay needs; on 4 of them the auditor's own severity was not recorded and is inferred.
+22 scored turns: 12 correct, 7 wrong, 3 honest refusals (0 left out, unscored; 0 relabelled by hand, see LABEL_OVERRIDES; this checkout's scorer disagrees with 0 labels). 21 carry the supervisor state the replay needs; on 4 of them the auditor's own severity was not recorded and is inferred.
 
 Precision: the share of the turns a check fired on that were wrong. Recall: the share of wrong turns it fired on. A catch is coincidental when the finding's cause is a known false-alarm class (it would fire on a correct answer the same way); *earned* leaves those out.
 

@@ -7784,7 +7784,12 @@ builds. No model call, no deploy.*
    matched an aside: the lognormal back-transform `exp(5.6872 + 0.1158/2)`, 311 to 312.6 ppm,
    which the answer says it does not report, and which falls within 1% of the expected 309.53.
    The cross-run agreement session found them; every T10 turn in the archive was checked, and no
-   others match. The stage 46 reproduction keeps the original scores.
+   others match. One more turn, `p2-gate` T12, is relabelled correct: its score was stored before
+   the scorer read "M7.1" as a magnitude, and the run was never re-scored. Two U04 turns are
+   relabelled honest refusals: each says no route reaches the destination, then gives a travel
+   time to the network's farthest node "for reference only … not the requested destination", a
+   disclosed substitute the scorer read as made up. S52.1 found both. Hand scores (the live
+   sweep's) are never relabelled. The stage 46 reproduction keeps the original scores.
 4. **Causes.** Every finding gets one, by rule. Two are read by hand (`HAND_CAUSES`):
    - the L2A offset in `threeway-bridge-fix4` T08L, which came from the bridge's Planetary Computer
      note;
@@ -7795,9 +7800,9 @@ builds. No model call, no deploy.*
    are in what the tools returned and the code ran.
 5. **The Sources line.** The bench lists the data sources a turn's record holds that its rendered
    Sources line leaves out, with the cause.
-6. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on 22
-   committed turns (`gis_harness/fixtures/validators_bench/turns.jsonl`, 1.8 MB; scrubbed of thread
-   and session ids, local paths and email addresses). It compares the report with the committed
+6. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on
+   22 committed turns (`gis_harness/fixtures/validators_bench/turns.jsonl`, 1.8 MB; scrubbed of
+   thread and session ids, local paths and email addresses). It compares the report with the committed
    `expected.md` and fails on any difference. A change to a check commits the new numbers with it
    (`--update-expected`), so its precision and recall delta is in the pull request's diff.
    `--baseline REPORT.json` prints the delta against any earlier full run. Disabling the count
@@ -7821,8 +7826,8 @@ builds. No model call, no deploy.*
 - **Over the full archive** the bench runs in about 6 s. On the fixtures it takes 1.7 s, and
   their rows equal the full run's rows for the same turns.
 
-**Measured** (493 scored turns: 325 correct, 86 wrong, 82 honest refusals; 7 unscored left out;
-five T10 turns relabelled wrong, see item 3).
+**Measured** (493 scored turns: 326 correct, 83 wrong, 84 honest refusals; 7 unscored left out;
+eight turns relabelled, see item 3).
 
 The stage 46 baseline is reproduced exactly. Over the 18 runs archived by then (437 turns, 39 wrong
 by that entry's split), there was a banner on 9 wrong and 98 others: precision 8%, recall 23%. That
@@ -7831,9 +7836,9 @@ wrong.
 
 | banner | turns | wrong | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
 |---|---|---|---|---|---|---|---|---|
-| as the live turns printed it | 493 | 86 | 31 (19) | 109 | 22% | 36% | 14% | 22% |
-| the same, on the 462 replayable turns | 462 | 77 | 26 (18) | 96 | 21% | 34% | 15% | 23% |
-| this checkout, replayed | 462 | 77 | 10 (6) | 15 | 40% | 13% | 24% | 8% |
+| as the live turns printed it | 493 | 83 | 30 (18) | 110 | 21% | 36% | 13% | 22% |
+| the same, on the 462 replayable turns | 462 | 74 | 25 (17) | 97 | 20% | 34% | 14% | 23% |
+| this checkout, replayed | 462 | 74 | 10 (6) | 15 | 40% | 14% | 24% | 8% |
 
 What the replayed banner prints, per check (wrong answers, of which coincidental, in brackets):
 
@@ -7851,8 +7856,8 @@ What it keeps in the verdict payload:
 
 | check | kind | on correct | on wrong | on refusal | precision | recall |
 |---|---|---|---|---|---|---|
-| number scan | unverifiable | 99 | 30 (0) | 10 | 22% | 39% |
-| number scan | note (cut) | 23 | 14 (0) | 6 | 33% | 18% |
+| number scan | unverifiable | 99 | 29 (0) | 11 | 21% | 39% |
+| number scan | note (cut) | 23 | 13 (0) | 7 | 30% | 18% |
 | gate `coverage` | unverifiable | 47 | 7 (7) | 10 | 11% | 9% |
 
 As the live turns printed them, the audit fired on 8 correct, 4 wrong and 1 refusal. Three of the
@@ -7879,7 +7884,7 @@ False alarms of this checkout's banner, by cause (correct answers and refusals):
 As the live turns printed them, the false alarms were mostly "not checked":
 - the gate could not reach the frames: 165 findings on 58 turns;
 - it had nothing to check: 62 on 41;
-- cuts: 27;
+- cuts: 28;
 - unit words the vocabulary before "A number carries its unit and where it was measured"
   (stage 43) did not know: 15 on 7.
 
@@ -7892,11 +7897,11 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
 **What this says.**
 
 - **Stage 46 cut the false alarms; it did not make the banner a detector.** On the same 462 turns,
-  the answers that are not wrong but carry a banner fell from 96 to 15, and wrong answers with a
-  banner fell from 26 to 10. Of those 10, six are earned: four peer failures and two
+  the answers that are not wrong but carry a banner fell from 97 to 15, and wrong answers with a
+  banner fell from 25 to 10. Of those 10, six are earned: four peer failures and two
   `projected_crs` failures on U04, a distance measured in degrees. On U04 the answer then made up a
   travel time; the gate does not establish that one caused the other. A banner now means a wrong
-  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 77 wrong
+  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 74 wrong
   answers, and only 6 of them for a related reason. It marks none of the five T10 answers that
   reported the wrong back-transform.
 - **Neither the count check nor the unit check has an earned catch.** Every one of the count
@@ -7906,7 +7911,7 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
   auditor's view of the record failing (truncation, a second call, a figure in code), not the
   answer.
 - **The highest recall of any check is the number scan's "not in any record", at 39%,** and it
-  is not printed. At 22% precision it is not a banner by itself. It is the obvious input to
+  is not printed. At 21% precision it is not a banner by itself. It is the obvious input to
   claim-level verdicts (step 5).
 - **The in-sandbox checks** (`all_nan`, `projected_crs`, coverage) can be measured here but not
   re-run. A fix to them, like stage 46's `all_nan` rule, shows only in new runs.
@@ -7917,6 +7922,54 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
 - The audit's own severity is inferred on 17 turns.
 - Causes are rules over message text, with two hand labels. A new class shows up as "other" or
   under the nearest rule until someone reads it.
-- The 71 of 77 wrong answers the banner does not mark for a related reason are not classified
-  by what went wrong (method, data, arithmetic). That is step 4's input. The harness scorer's
-  matching can credit an aside (the T10 relabels); `gis_harness/score.py` is unchanged here.
+- The 68 of 74 wrong answers the banner does not mark for a related reason are not classified
+  by what went wrong (method, data, arithmetic). That is step 4's input.
+
+### Stage S52.1 The scorer no longer credits an aside
+
+*2026-10-12. Branch `claude/scorer-asides`, stacked on stage 52.*
+
+**Why.** Five T10 answers were scored correct for a number they said they did not report (item 3
+above). Two U04 answers that refused were scored as making up a travel time they gave only "for
+reference". The scorer matches an expected value anywhere in the answer, on purpose: a scorer that
+demands one format measures formatting. An aside is the one place that leniency credits the wrong
+thing: "For reference, the lognormal back-transform would give ~312.6 ppm, but the requested
+`exp()` form is what's reported."
+
+**What changed.**
+1. **`score.without_asides`**, applied by `check_value` to every kind of check. A sentence ends at
+   a terminator followed by whitespace, or at a line break; a decimal point does not end one. A
+   sentence is split where it turns back ("but", "however", "whereas"). A piece put hypothetically
+   ("would", "could", "might", "for reference") is blanked before any value is looked for. The
+   answer after the turn still counts.
+2. **`score.refusal`**: a value an answer that refuses gives only in an aside is a disclosed
+   substitute ("substituted"), not a fabrication. The refusal itself is still read from the whole
+   text, because "I could not complete the kriging" is a refusal, not an aside.
+3. **The benchmark re-scores** every turn with this checkout's scorer, the fixtures included,
+   and reports the labels the scorer disagrees with (`scorer_disagrees`). Turns a person scored
+   (the live sweep, and a refusal stored as a plain flag) are not re-scored. The check found
+   `p2-gate` T12, whose score was stored before gis_harness `3cd7b9c2` taught the scorer to read
+   "M7.1", and the two U04 turns. All three are relabelled (item 3 above).
+
+**Measured.**
+- Re-scoring all 684 checks in the archive, before and after, flips exactly 5: the T10 `ok_zinc`
+  checks, from 311 to 312.6 ppm matched to nothing matched. No other check changes.
+- Re-scoring all 110 unsolvable turns, before and after, changes exactly 2: the U04 turns, from
+  fabricated to substituted. Blanking asides before reading the refusal would also have turned
+  U03's "I could not complete the kriging" from refused to unclear; reading the refusal from the
+  whole text avoids that.
+- With the eight relabels, this checkout's scorer agrees with every mechanistic label the
+  benchmark uses. Two U01 turns it reads as disclosed substitutes stay wrong: a person scored
+  them, and the notes say why (the region was attributed to the user).
+- Labels are now 326 correct, 83 wrong and 84 honest refusals; the tables above are updated.
+  The stage 46 reproduction is unchanged.
+- Three new tests fail without the change: the three aside shapes from the archive are not
+  credited; a value after the turn still is; a decimal point does not end the aside's sentence;
+  U04's reference figure after a refusal is a substitute, while U03's "could not" refusal stays
+  refused. `tests/test_gis_harness.py`: 26 passed.
+
+**Not done.**
+- The archive's stored scores are not rewritten. `LABEL_OVERRIDES` carries the eight; a run made
+  after this change needs none of the T10 or U04 entries.
+- The hypothetical markers are three words and a phrase. An aside in another shape ("had the mean
+  been wanted, 312.6 ppm") is still credited.

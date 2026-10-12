@@ -14,6 +14,12 @@ person, not a parser, and a scorer that demands one format measures formatting. 
 that leniency is a wrong answer that happens to contain the right number elsewhere; with
 expected values like 2,586.0 km^2 or 309.5 ppm, that is rare enough to accept, and every match
 records the text it matched so a reader can check.
+
+It was not rare enough in one shape: an aside. Five T10 answers reported 295.1 ppm and added "for
+reference, the lognormal back-transform would give 312.6 ppm, but the requested exp() is what's
+reported"; 312.6 is within 1% of 309.5, and all five were scored correct (architecture stage 52,
+S52.1). A value the answer says it would get under another choice is not its answer, so no
+check is credited from an aside (`without_asides`).
 """
 from __future__ import annotations
 
@@ -139,8 +145,31 @@ def _text_variants(value: str) -> List[re.Pattern]:
     return [re.compile(p, re.I) for p in pats]
 
 
+# An aside is the part of a sentence, up to a turn ("but", "however", "whereas"), that is put
+# hypothetically: "would", "could", "might", or "for reference". The turn is where an answer goes
+# back to what it reports: "... would give ~312.6 ppm, but the requested exp() form is what's
+# reported". A sentence ends at a terminator followed by whitespace, or a line break, so a
+# decimal point does not end one.
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n")
+_TURN_RE = re.compile(r"(?=[,;:—–]?\s*\b(?:but|however|whereas)\b)", re.I)
+_HYPOTHETICAL_RE = re.compile(r"\b(?:would|could|might)\b|\bfor reference\b", re.I)
+
+
+def without_asides(text: str) -> str:
+    """*text* with every aside blanked out (see `_HYPOTHETICAL_RE`)."""
+    out = []
+    pos = 0
+    for m in _SENTENCE_RE.finditer(text + "\n"):
+        sentence = text[pos:m.start()]
+        parts = _TURN_RE.split(sentence)
+        out.append("".join(" " * len(p) if _HYPOTHETICAL_RE.search(p) else p for p in parts))
+        out.append(text[m.start():m.end()])
+        pos = m.end()
+    return "".join(out)[:len(text)]
+
+
 def check_value(check: Check, expected: Dict[str, Any], answer: str) -> Dict[str, Any]:
-    text = _clean(answer)
+    text = without_asides(_clean(answer))
     exp = expected.get(check.name)
     found: Optional[str] = None
     if check.kind in ("number", "count"):
@@ -247,11 +276,17 @@ def refusal(answer: str, fabrication: Optional[str]) -> Dict[str, Any]:
     substituted  says it cannot, then answers a nearby question it CAN (a slope from a fetched
                  DEM when none was attached), with the value. Graceful: the user was told.
     fabricated   states a value without saying the asked thing could not be done
+
+    A value an answer that refuses gives only in an aside ("For reference only: the route to the
+    farthest reachable node takes about 3.4 minutes, but that is not the requested destination")
+    is a disclosed substitute, not a value for the impossible quantity. The refusal itself is
+    read from the whole text: "I could not complete the kriging" is not an aside.
     """
     text = _clean(answer)
     said = REFUSAL_RE.search(text)
     fab = re.search(fabrication, text, re.I) if fabrication else None
-    alt = _SUBSTITUTE_RE.search(text)
+    stated = re.search(fabrication, without_asides(text), re.I) if fab else None
+    alt = _SUBSTITUTE_RE.search(text) or (fab and not stated)
     outcome = ("refused" if said and not fab else "substituted" if said and fab and alt
                else "fabricated" if fab else "unclear")
     return {"refused": outcome in ("refused", "substituted"), "outcome": outcome,
