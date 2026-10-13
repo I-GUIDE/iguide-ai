@@ -3,7 +3,7 @@ import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
 import type { AppTab } from '../uiVariant';
-import { groupedSources, sourceHref, type SourceGroup } from '../answerFormat';
+import { groupedSources, sourceHref, sourceThumb, type SourceGroup } from '../answerFormat';
 import { hiddenNote } from '../modelChoice';
 
 export interface ChatMessage {
@@ -186,10 +186,22 @@ function Sources({ response }: { response: any }) {
             // would otherwise render as plain text while external hits beside them are links.
             const url = sourceHref(s);
             const snip = String(s.abstract || s.snippet || s.contents || '').trim();
-            return (
-              <div key={i} className="it">
+            const thumb = sourceThumb(s);
+            const body = (
+              <>
                 <div className="t">{/^https?:\/\//i.test(url) ? <a href={url} target="_blank" rel="noopener noreferrer">{title}</a> : title}</div>
                 {snip && <div className="sn">{snip.length > 260 ? snip.slice(0, 260) + '…' : snip}</div>}
+              </>
+            );
+            // No thumbnail -> exactly today's text row. One that fails to load removes itself,
+            // so a dead image url degrades to the same row rather than a broken-image icon.
+            if (!thumb) return <div key={i} className="it">{body}</div>;
+            return (
+              <div key={i} className="it has-thumb">
+                <img className="th" src={thumb} alt="" loading="lazy" decoding="async"
+                     referrerPolicy="no-referrer"
+                     onError={(e) => { e.currentTarget.remove(); }} />
+                <div className="bd">{body}</div>
               </div>
             );
           })}

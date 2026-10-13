@@ -13,7 +13,7 @@ from rag_pipeline.search.opengeodata import get_opengeodata_results
 from rag_pipeline.search.web import results_to_hits, run_web_search
 from rag_pipeline.search.web_fetch import fetch_and_extract
 from rag_pipeline.search.keyword import get_keyword_search_results
-from rag_pipeline.search.utils import snippet_chars
+from rag_pipeline.search.utils import snippet_chars, thumbnail_of
 from rag_pipeline.search.agents import (
     explore_neo4j_related_nodes,
     get_neo4j_agent_results,
@@ -97,6 +97,10 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
             "contents": (doc.get("contents") or "")[:snippet_chars()],
             "url": _landing_url(doc),  # external landing url (OpenGeoData); "" for internal
         }
+        # One key on every arm, absent when empty (rag_pipeline.search.utils.THUMBNAIL_KEY).
+        thumb = thumbnail_of(doc)
+        if thumb:
+            item["thumbnail_image"] = thumb
         # External (OpenGeoData) descriptions are user-facing: keep the FULL abstract alongside
         # the (capped) contents so the structured results a client renders are never cut short.
         full_text = str(doc.get("contents") or "")

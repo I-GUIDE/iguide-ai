@@ -26,7 +26,7 @@ import re
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .utils import get_logger
+from .utils import get_logger, thumbnail_of
 
 log = get_logger("element_ids")
 
@@ -42,7 +42,7 @@ _CYPHER = """
 UNWIND $prefixes AS p
 MATCH (r)
 WHERE any(l IN labels(r) WHERE l IN $labels) AND r.id STARTS WITH p
-RETURN p AS prefix, r.id AS id, labels(r) AS labels
+RETURN p AS prefix, r.id AS id, labels(r) AS labels, r.thumbnail_image AS thumbnail
 """
 
 
@@ -94,8 +94,11 @@ def resolve_element_prefixes(
         prefix, full = str(row.get("prefix") or ""), str(row.get("id") or "")
         if not full.lower().startswith(prefix) or not is_full_element_id(full):
             continue
-        found.setdefault(prefix, {})[full] = {"id": full,
-                                              "element_type": element_type_from_labels(row.get("labels"))}
+        resolution = {"id": full, "element_type": element_type_from_labels(row.get("labels"))}
+        thumb = thumbnail_of({"thumbnail_image": row.get("thumbnail")})
+        if thumb:
+            resolution["thumbnail_image"] = thumb
+        found.setdefault(prefix, {})[full] = resolution
     for p in missing:
         matches = list((found.get(p) or {}).values())
         if len(matches) > 1:
@@ -119,8 +122,9 @@ def link_kb_documents(docs: List[Dict[str, Any]], elements: Dict[str, Dict[str, 
                       ) -> List[str]:
     """Give each agent-KB hit its parent element's platform id and link, in place.
 
-    Sets ``element_id`` (the full UUID) and ``url`` on each hit whose ``parent_doc_id``
-    resolves, and ``platform_id``/``url`` on the matching ``elements`` entry. ``parent_doc_id``
+    Sets ``element_id`` (the full UUID), ``url`` and, when the element has one,
+    ``thumbnail_image`` on each hit whose ``parent_doc_id`` resolves, and the same on the
+    matching ``elements`` entry (as ``platform_id``/``url``/``thumbnail_image``). ``parent_doc_id``
     and ``doc_id`` are left as the KB's own keys, because ``get_kb_block`` and
     ``kb_for_elements`` look blocks up by them. Returns the citation ids: the full id where one
     was resolved, else the KB's id unchanged.
@@ -140,11 +144,15 @@ def link_kb_documents(docs: List[Dict[str, Any]], elements: Dict[str, Dict[str, 
             d["element_id"] = hit["id"]
             if url:
                 d["url"] = url
+            if hit.get("thumbnail_image"):
+                d["thumbnail_image"] = hit["thumbnail_image"]
             if isinstance(element, dict):
                 element["platform_id"] = hit["id"]
                 element["platform_type"] = hit["element_type"]
                 if url:
                     element["url"] = url
+                if hit.get("thumbnail_image"):
+                    element["thumbnail_image"] = hit["thumbnail_image"]
             citations.append(hit["id"])
         else:
             citations.append(parent)

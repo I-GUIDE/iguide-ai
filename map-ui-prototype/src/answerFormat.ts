@@ -5,6 +5,10 @@ export interface SourceDoc {
   element_type?: string; 'resource-type'?: string; source?: string; source_system?: string;
   provider?: string; license?: string; abstract?: string; snippet?: string; contents?: string;
   bbox?: number[];
+  // The element's thumbnail url. The server sends it under this one key, and only when it is
+  // non-empty (rag_pipeline/search/utils.py THUMBNAIL_KEY); the hyphenated index spelling is
+  // accepted too, for a response from an older server.
+  thumbnail_image?: string; 'thumbnail-image'?: string;
 }
 export type SourceGroup = 'internal' | 'external' | 'web';
 
@@ -68,6 +72,13 @@ const PLATFORM_PATHS: Record<string, string> = {
   // /docs/<slug>; /documentations/<slug> is an empty page (both checked 2026-10-13).
   documentation: 'docs',
 };
+
+/** The thumbnail to show beside a source, or '' for none. Only an absolute http(s) url: a blank
+ * or relative value would render as a broken image, and the row is fine without one. */
+export function sourceThumb(src: SourceDoc): string {
+  const v = String(src.thumbnail_image || src['thumbnail-image'] || '').trim();
+  return /^https?:\/\//i.test(v) ? v : '';
+}
 
 /** The href for a source item, or '' when no honest link can be formed.
  *

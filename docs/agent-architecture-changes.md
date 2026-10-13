@@ -55,7 +55,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
-| 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id |
+| 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -7016,7 +7016,7 @@ one in place, and change nothing else about which copy they keep:
 - `evidenceDocs` in `map-ui-prototype/src/answerFormat.ts`.
 
 `collection` → `collections` joins the client's allowlist, and `documentation` → `docs` joins both
-builders (S57.4). The platform serves that path: checked
+builders (S57.5). The platform serves that path: checked
 live, `/collections/8ff3dd3c-4660-493e-b94a-bf04d293cc85` renders the Summer School 2025
 collection. The server's `_element_url` already formed it, because it pluralises any type except
 `resource`.
@@ -7049,7 +7049,56 @@ Measured on the VM the same day:
   (HTTP 400). The `id` keyword field is missing on 131 of the index's 763 documents, and
   `05269a1a…` is one of them.
 
-### Stage S57.4 Not changed here
+### Stage S57.4 Each source carries its element's thumbnail, under one key
+
+Added at the user's request the same day. The graph spells the property `thumbnail_image` on
+every label. Measured non-empty counts by label:
+
+| Label | Non-empty `thumbnail_image` |
+|---|---|
+| Notebook | 214 of 214 |
+| Publication | 203 of 206 |
+| Map | 161 of 161 |
+| Dataset | 142 of 142 |
+| Oer | 44 of 44 |
+| Code | 38 of 38 |
+| Collection | 5 of 19 |
+
+The other 14 Collections hold `""`. The search index `iguide-feb12` spells the field
+`thumbnail-image`: a string on 760 of its 763 documents, absent on 3. The index holds no
+collections at all, so the graph is their only route to a thumbnail.
+
+Before this change, a normalized document carried no thumbnail at all. `agents.py` hits carried
+one under `thumbnail-image`, including an empty string.
+
+**Change.** Every normalized document, from every arm, carries `thumbnail_image`
+(`utils.THUMBNAIL_KEY`). It is the graph's own spelling and the field `DocumentPayload` in
+`rag_pipeline/state.py` already declared. `thumbnail_of` reads either spelling, and
+`with_thumbnail` writes the one key and drops both spellings when the value is empty. An empty
+string is no thumbnail, and `""` is never emitted.
+
+The `/agent/chat` `elements` array keeps its published `thumbnail-image` key, because that is a
+response shape other clients read. It already accepted either spelling.
+
+Agent-KB hits take their parent element's thumbnail from the same batched graph query that
+resolves the full id (S57.3), so the lookup adds no extra query.
+
+Measured on the VM through this branch:
+
+| Arm | Hits | With `thumbnail_image` |
+|---|---|---|
+| Graph, two queries | 36 | 35 (1 publication has none) |
+| Agent KB | 16 | 16 |
+| Keyword | 10 | 10 |
+
+No hit used the hyphenated key. Three collections with empty thumbnails came back typed
+`collection` with no thumbnail key.
+
+The map UI's "Sources used" shows a 48 px thumbnail beside a source that has one. A source without
+one renders exactly as before. An image that fails to load removes itself, so the row degrades to
+the same text row instead of a broken-image icon.
+
+### Stage S57.5 Not changed here
 
 - **`resolve_parent_elements` (OpenSearch backend) can never match.** It queries `terms` on
   `doc_id`, and `iguide-feb12` has no `doc_id` in its mapping. The Postgres backend does not use

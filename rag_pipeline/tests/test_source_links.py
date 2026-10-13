@@ -128,6 +128,48 @@ def test_a_stored_type_property_is_not_overridden_by_the_label():
     assert [h["_source"]["element_type"] for h in hits] == ["dataset", "map"]
 
 
+# ------------------------------------------------------------------ 1c. thumbnails, one key
+
+def test_a_labelled_node_carries_its_thumbnail_under_one_key(monkeypatch):
+    """The graph spells it `thumbnail_image`, the index `thumbnail-image`; a normalized document
+    carries `thumbnail_image` whichever arm it came from."""
+    from agent_runtime.langchain_granular_tools import _normalize_hits
+    from rag_pipeline.search import agents
+
+    node = _FakeNode({"id": FULL, "title": "Flood notebook", "thumbnail_image": THUMB},
+                     labels={"Notebook"})
+    hits = n4.get_neo4j_search_results("flood", driver=_FakeDriver([{"node": node}]))
+    assert _normalize_hits(hits, source="neo4j")[0]["thumbnail_image"] == THUMB
+
+    # The dispatcher's own hit shape, used by the popularity and related-element paths.
+    hit = agents._node_to_hit({**node, "_labels": ["Notebook"]})
+    assert hit["_source"]["thumbnail_image"] == THUMB and "thumbnail-image" not in hit["_source"]
+    assert agents._hit_to_document(hit)["thumbnail_image"] == THUMB
+
+    # An index-shaped keyword hit lands under the same key.
+    keyword_hit = {"_id": PUB, "_source": {"title": "P", "resource-type": "publication",
+                                           "thumbnail-image": THUMB}}
+    assert _normalize_hits([keyword_hit], source="keyword")[0]["thumbnail_image"] == THUMB
+
+
+def test_a_collection_with_an_empty_thumbnail_carries_none():
+    """14 of the graph's 19 Collections hold "" — that is no thumbnail, never an empty src."""
+    from agent_runtime.langchain_granular_tools import _normalize_hits
+    from rag_pipeline.search import agents
+    from rag_pipeline.state import merge_retrieval
+
+    node = _FakeNode({"id": FULL, "title": "Summer School 2025", "thumbnail_image": "",
+                      "thumbnail_image_credit": ""}, labels={"Collection"})
+    hits = n4.get_neo4j_search_results("summer school", driver=_FakeDriver([{"node": node}]))
+    assert not any(k in hits[0]["_source"] for k in ("thumbnail_image", "thumbnail-image"))
+    doc = _normalize_hits(hits, source="neo4j")[0]
+    assert doc["element_type"] == "collection" and "thumbnail_image" not in doc
+    assert "thumbnail_image" not in agents._node_to_hit({**node, "_labels": ["Collection"]})["_source"]
+    state = {}
+    merge_retrieval(state, source="neo4j", hits=[{"_id": FULL, "_source": {"thumbnail-image": "  "}}])
+    assert "thumbnail_image" not in state["evidence"]["retrieved_documents"][0]["document"]
+
+
 # ------------------------------------------------------------------ 1b. dedup keeps the typed copy
 
 def test_the_typed_duplicate_wins_the_supervisor_merge():
@@ -161,13 +203,17 @@ def test_the_typed_duplicate_wins_the_retrieval_merge():
 
 # ------------------------------------------------------------------ 2. agent-KB prefixes
 
-def _graph(rows_by_prefix):
+THUMB = "https://backend.i-guide.io:443/user-uploads/thumbnails/1720206819181-spastc_scaled.jpg"
+
+
+def _graph(rows_by_prefix, thumbnail=THUMB):
     calls = []
 
     def run(cypher, params):
         calls.append(params["prefixes"])
-        return [{"prefix": p, "id": full, "labels": labels}
-                for p in params["prefixes"] for full, labels in rows_by_prefix.get(p, [])]
+        return [{"prefix": p, "id": full, "labels": row[1],
+                 "thumbnail": row[2] if len(row) > 2 else thumbnail}
+                for p in params["prefixes"] for row in rows_by_prefix.get(p, []) for full in row[:1]]
 
     run.calls = calls
     return run
@@ -210,6 +256,20 @@ def test_an_agent_kb_hit_links_to_its_parent_element_by_full_id(monkeypatch):
 
     out = _with_citation_urls({"evidence": [json.loads(json.dumps(doc))]})
     assert out["evidence"][0]["url"] == f"https://platform.i-guide.io/notebooks/{FULL}"
+
+
+def test_an_agent_kb_hit_carries_its_parent_elements_thumbnail(monkeypatch):
+    """Once the full id is resolved, the hit takes its parent element's thumbnail; a parent whose
+    thumbnail is "" (14 of 19 Collections) gets none, and is still linked."""
+    payload = _kb_search(monkeypatch, _graph({"05269a1a": [(FULL, ["Notebook"])],
+                                              "777a106d": [(PUB, ["Collection"], "")]}),
+                         parents=("05269a1a", "777a106d"))
+    with_thumb, without = payload["documents"]
+    assert with_thumb["thumbnail_image"] == THUMB
+    assert payload["elements"]["05269a1a"]["thumbnail_image"] == THUMB
+    assert without["url"] == f"https://platform.i-guide.io/collections/{PUB}"
+    assert "thumbnail_image" not in without
+    assert "thumbnail_image" not in payload["elements"]["777a106d"]
 
 
 def test_an_ambiguous_prefix_gets_no_link(monkeypatch):

@@ -5,7 +5,7 @@
  * eight sources were plain text: graph hits typed 'resource', and one element that keyword search
  * had returned typed 'publication' was listed from its untyped graph copy instead (Stage 57).
  */
-import { evidenceDocs, sourceHref } from './answerFormat';
+import { evidenceDocs, sourceHref, sourceThumb } from './answerFormat';
 
 let bad = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
@@ -32,6 +32,12 @@ const docs = evidenceDocs({ agent_result: { orchestration_result: { evidence: [
 eq('one entry per element', docs.length, 1);
 eq('the linkable copy is the one listed', sourceHref(docs[0]),
    `https://platform.i-guide.io/publications/${dup}`);
+
+const THUMB = 'https://backend.i-guide.io:443/user-uploads/thumbnails/1720206819181-spastc_scaled.jpg';
+eq('a thumbnail url is shown', sourceThumb({ thumbnail_image: THUMB }), THUMB);
+eq('the index spelling is accepted', sourceThumb({ 'thumbnail-image': THUMB }), THUMB);
+eq('an empty thumbnail is none (14 of 19 collections)', sourceThumb({ thumbnail_image: '' }), '');
+eq('a relative value is none', sourceThumb({ thumbnail_image: '/thumbs/x.png' }), '');
 
 if (bad) { console.error(`${bad} check(s) failed`); process.exit(1); }
 console.log('all source-link checks passed');

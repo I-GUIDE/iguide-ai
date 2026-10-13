@@ -49,10 +49,40 @@ def safe_score(val: Any, default: float = 1.0) -> float:
         return default
 
 
+# The one key a normalized document carries its thumbnail under. The graph spells the property
+# `thumbnail_image` on every label; the search index spells it `thumbnail-image`. Measured
+# 2026-10-13: non-empty on 807 of 824 graph elements (14 of 19 Collections hold ""), and a string
+# on 760 of the index's 763 documents (3 absent). Collections are not in the index at all, so the
+# graph is their only route to a thumbnail.
+THUMBNAIL_KEY = "thumbnail_image"
+
+
+def thumbnail_of(source: Any) -> Optional[str]:
+    """The element's thumbnail url under either spelling, or None. An empty string is None: a
+    blank value must never reach a client as an image source."""
+    if not isinstance(source, dict):
+        return None
+    for key in ("thumbnail_image", "thumbnail-image"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def with_thumbnail(target: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """Set ``target[THUMBNAIL_KEY]`` from *source*, or remove both spellings when there is none."""
+    thumb = thumbnail_of(source)
+    target.pop("thumbnail-image", None)
+    target.pop(THUMBNAIL_KEY, None)
+    if thumb:
+        target[THUMBNAIL_KEY] = thumb
+    return target
+
+
 def normalize_source_fields(source: Dict[str, Any], fallback_id: str) -> Dict[str, Any]:
     if not isinstance(source, dict):
         source = {}
-    source = dict(source)
+    source = with_thumbnail(dict(source), source)
 
     source.setdefault("doc_id", fallback_id)
     source.setdefault("title", source.get("name") or "No Title")
@@ -88,6 +118,9 @@ __all__ = [
     "getenv",
     "is_linkable_copy",
     "normalize_source_fields",
+    "thumbnail_of",
+    "with_thumbnail",
+    "THUMBNAIL_KEY",
     "safe_score",
     "default_top_k",
 ]
