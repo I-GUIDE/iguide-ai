@@ -1865,6 +1865,33 @@ whose UI is still the 2026-09-22 build (MapLibre 4.7.1).
 (`sess-60a7f5ca`, no snapshot) and the client's (`sess-c7d8b460`, snapshotted). The filter hides
 the orphan rather than explaining it, and why the two ids diverge is not yet understood.
 
+### Stage S9.12 A numbered list that read "1." on every item (2026-10-13)
+
+The map UI renders answers with its own small Markdown renderer (`renderMarkdown`,
+`map-ui-prototype/src/markdown.ts`), a port of the reference chat prototype's. It closed an
+ordered list at every blank line and at every indented line. A model usually writes a list
+"loose", with a blank line between items, or puts indented sub-bullets under an item, so every
+item became its own one-item `<ol>`, and every item read "1.". It also threw away the number the
+model wrote, so a list starting at 4 rendered from 1.
+
+Seen on a prod answer on 2026-10-13, to "What extreme research has been done using the resources
+on I-GUIDE platform". Its raw markdown is eight items separated by blank lines. The old renderer
+produced 8 lists of 1 item each; the new one produces 1 list of 8.
+
+What changed:
+- A blank line no longer closes a list when the next non-blank line continues it, either another
+  item or an indented line.
+- An indented item nests inside the open item, as one level of sub-list. An indented line that is
+  not an item continues the open item's text.
+- The first item's number becomes the list's `start`, and `1)` numbering counts as a list too.
+- Anything else still closes the list as before: a paragraph, a heading, a table, a fence.
+
+`npm run check:markdown` holds eleven cases, six of which fail on the previous renderer. No test
+runner exists here, as `check:sources` and the other `check:*` scripts already note. The
+server-side text is unchanged, so saved conversations render correctly once the new bundle is
+served.
+
+
 ---
 
 ## Stage 10 — Removing the second path {#stage-10}

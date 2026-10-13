@@ -36,8 +36,22 @@ export function renderMarkdown(src: string, resolveUrl: (u: string) => string): 
   };
 
   const lines = String(src || '').replace(/\r\n?/g, '\n').split('\n');
-  let html = ''; let i = 0; let inUl = false; let inOl = false; let para: string[] = [];
-  const closeLists = () => { if (inUl) { html += '</ul>'; inUl = false; } if (inOl) { html += '</ol>'; inOl = false; } };
+  let html = ''; let i = 0; let para: string[] = [];
+  // Lists: one top-level list, an open <li> inside it, and one nested list inside that <li>.
+  // A model writes a list three ways the old renderer broke: items separated by blank lines (a
+  // "loose" list), items followed by indented sub-bullets, and numbering that does not start at 1.
+  // Each of the first two closed the <ol> after every item, so every item became its own one-item
+  // list and read "1." (seen on a prod answer, 2026-10-13); the third was lost because the number
+  // was discarded. Now a blank line or an indented line keeps the list open, and the first
+  // item's number becomes `start`.
+  let top: '' | 'ol' | 'ul' = ''; let liOpen = false; let sub: '' | 'ol' | 'ul' = '';
+  const closeSub = () => { if (sub) { html += `</${sub}>`; sub = ''; } };
+  const closeLists = () => { closeSub(); if (liOpen) { html += '</li>'; liOpen = false; } if (top) { html += `</${top}>`; top = ''; } };
+  const listItem = (l: string) => {
+    const m = l.match(/^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+    return m ? { indent: m[1].replace(/\t/g, '    ').length, kind: (m[2] ? 'ul' : 'ol') as 'ul' | 'ol', n: m[3] ? Number(m[3]) : 1, text: m[4] } : null;
+  };
+  const openList = (kind: 'ol' | 'ul', n: number) => (kind === 'ol' && n !== 1 ? `<ol start="${n}">` : `<${kind}>`);
   const flush = () => { if (para.length) { html += '<p>' + inline(esc(para.join('\n'))).replace(/\n/g, '<br>') + '</p>'; para = []; } };
   const isSep = (l: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(l);
   const cells = (l: string) => l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
@@ -58,11 +72,34 @@ export function renderMarkdown(src: string, resolveUrl: (u: string) => string): 
     }
     const bq = line.match(/^>\s?(.*)$/);
     if (bq) { flush(); closeLists(); const q: string[] = []; while (i < lines.length) { const m = lines[i].match(/^>\s?(.*)$/); if (!m) break; q.push(m[1]); i++; } html += `<blockquote>${inline(esc(q.join('\n'))).replace(/\n/g, '<br>')}</blockquote>`; continue; }
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-    if (ul) { flush(); if (inOl) { html += '</ol>'; inOl = false; } if (!inUl) { html += '<ul>'; inUl = true; } html += `<li>${inline(esc(ul[1]))}</li>`; i++; continue; }
-    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (ol) { flush(); if (inUl) { html += '</ul>'; inUl = false; } if (!inOl) { html += '<ol>'; inOl = true; } html += `<li>${inline(esc(ol[1]))}</li>`; i++; continue; }
-    if (/^\s*$/.test(line)) { flush(); closeLists(); i++; continue; }
+    const item = listItem(line);
+    if (item && top && liOpen && item.indent >= 2) {
+      // A nested item belongs to the open <li>.
+      flush(); if (sub && sub !== item.kind) closeSub();
+      if (!sub) { html += openList(item.kind, item.n); sub = item.kind; }
+      html += `<li>${inline(esc(item.text))}</li>`; i++; continue;
+    }
+    if (item) {
+      flush(); closeSub(); if (liOpen) { html += '</li>'; liOpen = false; }
+      if (top && top !== item.kind) { html += `</${top}>`; top = ''; }
+      if (!top) { html += openList(item.kind, item.n); top = item.kind; }
+      html += `<li>${inline(esc(item.text))}`; liOpen = true; i++; continue;
+    }
+    if (/^\s*$/.test(line)) {
+      flush();
+      if (top) {
+        // Keep the list open across blank lines when it continues: another item, or an indented line.
+        let j = i + 1; while (j < lines.length && /^\s*$/.test(lines[j])) j++;
+        const next = j < lines.length ? lines[j] : '';
+        if (next && (listItem(next) || /^\s{2,}\S/.test(next))) { i = j; continue; }
+      }
+      closeLists(); i++; continue;
+    }
+    if (top && liOpen && /^\s{2,}\S/.test(line)) {
+      // An indented continuation line is more text for the open item, not a new paragraph.
+      closeSub(); html += `<br>${inline(esc(line.trim()))}`; i++; continue;
+    }
+    if (top) closeLists();
     para.push(line); i++;
   }
   flush(); closeLists();
