@@ -341,6 +341,10 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .srcs .it .t a { color: #3f6591; text-decoration: none; }
 .srcs .it .t a:hover { text-decoration: underline; }
 .srcs .it .sn { font-size: 13px; color: #6b7178; margin-top: 2px; line-height: 1.45; }
+.srcs .it.has-thumb { display: flex; gap: 10px; align-items: flex-start; }
+.srcs .it .th { flex: 0 0 auto; width: 48px; height: 48px; object-fit: cover; border-radius: 6px;
+                border: 1px solid var(--line); background: #f3f4f5; }
+.srcs .it .bd { min-width: 0; flex: 1 1 auto; }
 
 .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #cdd3da; border-top-color: var(--brand); animation: sp .8s linear infinite; display: inline-block; }
 @keyframes sp { to { transform: rotate(360deg); } }

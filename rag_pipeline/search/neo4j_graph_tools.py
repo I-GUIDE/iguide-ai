@@ -76,6 +76,27 @@ def _get_resource_labels() -> set:
     return _DEFAULT_RESOURCE_LABELS
 
 
+def element_type_from_labels(labels: Any) -> Optional[str]:
+    """The element type a graph node's LABEL names, lower-cased, or None.
+
+    The platform graph stores an element's type ONLY as its label. Measured on the VM on
+    2026-10-13: Publication 206, Notebook 214, Map 161, Dataset 142, Oer 44, Code 38,
+    Collection 19, and no node has an ``element_type`` or ``resource-type`` property. Hits built
+    from node properties alone therefore fell back to ``element_type: "resource"``, which no link
+    builder can turn into a platform page, so six of eight sources in a prod answer that day were
+    plain text.
+
+    Only knowledge-element labels count (``_get_resource_labels``): a node that is also a
+    :Contributor must not become a "contributor" element. Sorted, so a node with two element
+    labels gets the same type on every call rather than whichever a set iterates first.
+    """
+    if not labels:
+        return None
+    known = _get_resource_labels()
+    matches = sorted(str(label) for label in labels if str(label) in known)
+    return matches[0].lower() if matches else None
+
+
 def _get_internal_labels() -> set:
     env_val = os.getenv("NEO4J_INTERNAL_LABELS", "").strip()
     if env_val:

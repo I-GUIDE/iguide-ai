@@ -37,10 +37,11 @@ from .neo4j_graph_tools import (
     build_explore_related_nodes_query,
     build_tool_query,
     detect_pattern,
+    element_type_from_labels,
     run_user_author_fallback,
     _get_internal_labels,
 )
-from .utils import snippet_chars
+from .utils import snippet_chars, thumbnail_of, with_thumbnail
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ def _safe_score(val: Any, default: float = 1.0) -> float:
 def _normalize_source_fields(src: Dict[str, Any], hit_id: str) -> Dict[str, Any]:
     if not isinstance(src, dict):
         src = {}
-    src = dict(src)
+    src = with_thumbnail(dict(src), src)
     if "element_type" not in src and "resource-type" in src:
         src["element_type"] = src["resource-type"]
     src.setdefault("doc_id", hit_id)
@@ -285,32 +286,31 @@ def _source_to_hit(
     node_labels: Optional[set] = None,
     prefix: str = "",
 ) -> Dict[str, Any]:
-    labels = node_labels or set()
+    # A label, not `next(iter(labels))`: that took whichever non-internal label a set yielded
+    # first, so a node carrying any label outside the element set could be typed by it.
     resource_type = (
         source.get("resource-type")
         or source.get("element_type")
-        or (next(iter(labels)).lower() if labels else None)
+        or element_type_from_labels(node_labels)
     )
 
     base_contents = source.get("contents") or ""
     contents = f"[{prefix}] {base_contents}".strip() if prefix else base_contents or None
 
-    return {
-        "_id": doc_id,
-        "_score": score,
-        "_source": {
-            "doc_id":          doc_id,
-            "id":              source.get("id") or doc_id,
-            "contributor":     source.get("contributor"),
-            "contents":        contents,
-            "resource-type":   resource_type,
-            "title":           source.get("title"),
-            "authors":         _as_list(source.get("authors")),
-            "tags":            _as_list(source.get("tags")),
-            "thumbnail-image": _transform_thumbnail(source.get("thumbnail-image", source.get("thumbnail_image"))),
-            "click_count":     source.get("click_count", 0),
-        },
+    out = {
+        "doc_id":          doc_id,
+        "id":              source.get("id") or doc_id,
+        "contributor":     source.get("contributor"),
+        "contents":        contents,
+        "resource-type":   resource_type,
+        "title":           source.get("title"),
+        "authors":         _as_list(source.get("authors")),
+        "tags":            _as_list(source.get("tags")),
+        "click_count":     source.get("click_count", 0),
     }
+    # `thumbnail_image`, and only when there is one (utils.THUMBNAIL_KEY).
+    with_thumbnail(out, {"thumbnail_image": _transform_thumbnail(thumbnail_of(source))})
+    return {"_id": doc_id, "_score": score, "_source": out}
 
 
 def _node_to_hit(
@@ -385,6 +385,7 @@ def _hit_to_document(hit: Dict[str, Any], source_name: str = "neo4j") -> Dict[st
         "contents": (doc.get("contents") or "")[:snippet_chars()],
         "authors": _as_list(doc.get("authors")),
         "tags": _as_list(doc.get("tags")),
+        **({"thumbnail_image": thumbnail_of(doc)} if thumbnail_of(doc) else {}),
     }
 
 
@@ -917,21 +918,20 @@ def get_opensearch_agent_results(user_query: str, limit: int = 12) -> List[Dict[
         source = hit.get("_source", {}) or {}
         source.pop("contents-embedding", None)
         source.pop("pdf_chunks", None)
-        if "thumbnail-image" in source:
-            source["thumbnail-image"] = _transform_thumbnail(source["thumbnail-image"])
+        out = {
+            "contributor":     source.get("contributor"),
+            "contents":        source.get("contents"),
+            "resource-type":   source.get("resource-type"),
+            "title":           source.get("title"),
+            "authors":         _as_list(source.get("authors")),
+            "tags":            _as_list(source.get("tags")),
+            "click_count":     source.get("click_count", 0),
+        }
+        with_thumbnail(out, {"thumbnail_image": _transform_thumbnail(thumbnail_of(source))})
         hits.append({
             "_id": doc_id,
             "_score": _safe_score(hit.get("_score", 1.0)),
-            "_source": {
-                "contributor":     source.get("contributor"),
-                "contents":        source.get("contents"),
-                "resource-type":   source.get("resource-type"),
-                "title":           source.get("title"),
-                "authors":         _as_list(source.get("authors")),
-                "tags":            _as_list(source.get("tags")),
-                "thumbnail-image": source.get("thumbnail-image"),
-                "click_count":     source.get("click_count", 0),
-            },
+            "_source": out,
         })
     return hits
 

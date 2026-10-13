@@ -67,12 +67,20 @@ def _doc_field(doc: Any, *keys: str, default: str = "") -> str:
     return default
 
 
+# Element types whose platform path is not the type plus "s". `documentation` became reachable in
+# Stage 57, when graph hits started taking their type from the node label: the graph's 6
+# :Documentation nodes are slugs such as `getting-started`, served at /docs/getting-started, and
+# /documentations/getting-started is an empty page (both checked 2026-10-13).
+_PLATFORM_PATH_EXCEPTIONS = {"code": "code", "documentation": "docs"}
+
+
 def _element_url(doc: Any) -> str:
     """The link target for a document, so the synthesizer can render a clickable citation.
 
     * A document that CARRIES a url -> that url, whatever its element type.
     * Internal knowledge element (no url) -> ``{FRONTEND_DOMAIN}/{element_type-plural}/{doc_id}``
-      (plural, except ``code`` stays ``code``) — same scheme as the smart-search frontend.
+      (plural, except ``code`` stays ``code`` and ``documentation`` is ``docs``) — same scheme as
+      the smart-search frontend. ``collection`` → ``collections`` is the plain rule.
     Returns "" when no link can be formed (the synthesizer then cites the title in bold).
 
     The url check comes FIRST, and that ordering is the whole point. Only internal platform
@@ -99,7 +107,7 @@ def _element_url(doc: Any) -> str:
     if not doc_id or not etype or etype == "resource":
         # No url, and nothing to build one from — cite the title instead of guessing a path.
         return ""
-    plural = etype if etype == "code" else f"{etype}s"
+    plural = _PLATFORM_PATH_EXCEPTIONS.get(etype, f"{etype}s")
     base = os.getenv("FRONTEND_DOMAIN", "https://platform.i-guide.io").rstrip("/")
     return f"{base}/{plural}/{doc_id}"
 

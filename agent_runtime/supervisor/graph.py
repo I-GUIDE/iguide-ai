@@ -160,13 +160,23 @@ def _doc_key(doc: Any) -> str:
 
 
 def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
+    """Union by `_doc_key`, first copy kept — unless a later copy is linkable and the kept one
+    is not, in which case the later copy takes its place (``is_linkable_copy``: a graph hit typed
+    ``resource`` must not hide the same element typed ``publication`` by keyword search)."""
+    from rag_pipeline.search.utils import is_linkable_copy
+
     merged = list(existing or [])
-    seen = {_doc_key(d) for d in merged}
+    seen = {}
+    for i, d in enumerate(merged):
+        seen.setdefault(_doc_key(d), i)
     for d in new or []:
         key = _doc_key(d)
         if key in seen:
+            i = seen[key]
+            if is_linkable_copy(d) and not is_linkable_copy(merged[i]):
+                merged[i] = d
             continue
-        seen.add(key)
+        seen[key] = len(merged)
         merged.append(d)
     return merged
 
@@ -3717,7 +3727,8 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
             for d in payload.get("documents") or []:
                 if not isinstance(d, dict):
                     continue
-                parent = d.get("parent_doc_id")
+                # The platform id when agent_kb_search resolved one (Stage 57), else the KB's.
+                parent = d.get("element_id") or d.get("parent_doc_id")
                 docs.append({**d, "source": "agent_kb",
                              # Cite the ELEMENT, not the block: a block id is not something a
                              # reader can open, and the other sweep arms cite elements.

@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, TypedDict
 
-from .search.utils import normalize_source_fields, safe_score
+from .search.utils import is_linkable_copy, normalize_source_fields, safe_score
 
 
 class DocumentPayload(TypedDict, total=False):
@@ -152,13 +152,19 @@ def merge_retrieval(
     items = build_evidence_items(hits, source=source, start_rank=start_rank)
 
     if dedupe:
-        seen_ids = {entry["document"]["doc_id"] for entry in current_docs}
+        # A duplicate is dropped, unless it is linkable and the copy already held is not: then it
+        # takes that copy's place (see is_linkable_copy).
+        held = {entry["document"]["doc_id"]: ("current", i) for i, entry in enumerate(current_docs)}
         deduped: List[EvidenceEntry] = []
         for entry in items:
             doc_id = entry["document"].get("doc_id") or ""
-            if doc_id in seen_ids:
+            if doc_id in held:
+                where, i = held[doc_id]
+                kept = current_docs if where == "current" else deduped
+                if is_linkable_copy(entry["document"]) and not is_linkable_copy(kept[i]["document"]):
+                    kept[i] = entry
                 continue
-            seen_ids.add(doc_id)
+            held[doc_id] = ("new", len(deduped))
             deduped.append(entry)
         items = deduped
 

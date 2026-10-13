@@ -55,6 +55,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
+| 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -6971,3 +6972,144 @@ setup errors that neither side produced alone, and M8.71 fixed it.
 - **The ingestion port.** If `metadata-extraction-server` is started, port 5001 publishes on
   every interface, because the platform form and MinIO post to it from elsewhere. That decision
   is still open.
+
+## Stage 57 — A cited source links to its platform page {#stage-57}
+
+*2026-10-13, branch `claude/source-links` from `prototype` at `10029c5`. Open PRs claim stages
+up to 56 (#115), so this takes 57.*
+
+A prod turn on 2026-10-13 asked "What extreme research has been done using the resources on
+I-GUIDE platform". Six of its eight "Sources used" were plain text, not links. All six came from
+the graph arm with `element_type: "resource"` and `url: ""`. The two that linked came from
+semantic search, typed `publication`. Agent-KB sources never linked at all. There were two
+causes, both measured on the VM that day.
+
+### Stage S57.1 The graph holds an element's type only as a label
+
+The platform graph's knowledge-element nodes are labelled `Publication` 206, `Notebook` 214,
+`Map` 161, `Dataset` 142, `Oer` 44, `Code` 38 and `Collection` 19. No node has an
+`element_type` or `resource-type` property. `rag_pipeline/search/neo4j.py` built hits from node
+properties alone, so `_normalize_hits` fell back to `"resource"`. Neither link builder links that
+type: `_element_url` refuses it, and the map UI's `sourceHref` links only an allowlist.
+
+That keyword arm is also the last tier of `get_neo4j_agent_results`, which the `neo4j_search` tool
+calls. A question with no pattern match and no useful Text2Cypher result ends there. The tier-1
+path in `agents.py` did read labels, but as `next(iter(labels))`, so it took whichever non-internal
+label a set yielded first.
+
+**Change.** `element_type_from_labels` (`neo4j_graph_tools.py`) returns the lower-cased label that
+is one of `_get_resource_labels()`, choosing the first in sorted order when a node has two. Both
+paths use it, and only when the node has no type property. Re-run on the VM with this branch,
+Text2Cypher off: the same question's graph arm returned 11 hits typed `publication` 6, `oer` 3,
+`dataset` 1 and `notebook` 1, and all 11 linked.
+
+### Stage S57.2 A typed duplicate wins dedup
+
+Keyword search had also returned one of the six, "Spatial and Temporal Variability…"
+(`777a106d…`), typed `publication`. Dedup kept the first copy it saw, and that was the untyped
+graph copy. `is_linkable_copy` (`rag_pipeline/search/utils.py`) is true for a document that has a
+url or a type other than `resource`. Three merges now let a linkable copy replace an unlinkable
+one in place, and change nothing else about which copy they keep:
+
+- `_merge_dedup` in `supervisor/graph.py`, which builds the turn's evidence;
+- `merge_retrieval` in `rag_pipeline/state.py`;
+- `evidenceDocs` in `map-ui-prototype/src/answerFormat.ts`.
+
+`collection` → `collections` joins the client's allowlist, and `documentation` → `docs` joins both
+builders (S57.5). The platform serves that path: checked
+live, `/collections/8ff3dd3c-4660-493e-b94a-bf04d293cc85` renders the Summer School 2025
+collection. The server's `_element_url` already formed it, because it pluralises any type except
+`resource`.
+
+### Stage S57.3 Agent-KB hits name an 8-character prefix
+
+The agent KB keys every element by the first 8 characters of its platform UUID, for example
+`05269a1a` for `05269a1a-ce6e-4e87-8b43-74490a986c09`. On the VM's Postgres record, all 543
+`element.id` values are 8 characters long. No column holds the full id: `source_url` and `fields`
+are empty on every row. So a hit's `parent_doc_id` and the `citation_ids` named ids the platform
+does not know, and no link could be formed.
+
+**Change.** `rag_pipeline/search/element_ids.py` resolves the prefixes with one batched
+`UNWIND $prefixes … r.id STARTS WITH p` query to the graph per search, restricted to
+knowledge-element labels. Results are cached for an hour per process, and a failed lookup is not
+cached. `agent_kb_search` gives each resolved hit `element_id` (the full id) and `url` (the parent
+element's platform page), and cites the full id. `doc_id` and `parent_doc_id` keep the KB's own
+keys, because `get_kb_block` and `kb_for_elements` look blocks up by them. A prefix that matches
+more than one element gets no link and keeps its KB id: a guessed link to the wrong element is
+worse than none.
+
+Measured on the VM the same day:
+
+- **All 543 prefixes resolved, none ambiguous.** The batched query took about half a second for
+  the whole set. Three searches through this branch linked 24 of 24 hits. The first took 0.30 s
+  including the graph connection, and later ones took 0.04 s.
+- **The type comes from the graph, not the KB.** The KB's own type disagreed with the platform's
+  on 15 of 543 elements: the KB says `dataset`, and the platform serves them as publications.
+- **The OpenSearch index was the other candidate, and is worse.** `_id` refuses prefix queries
+  (HTTP 400). The `id` keyword field is missing on 131 of the index's 763 documents, and
+  `05269a1a…` is one of them.
+
+### Stage S57.4 Each source carries its element's thumbnail, under one key
+
+Added at the user's request the same day. The graph spells the property `thumbnail_image` on
+every label. Measured non-empty counts by label:
+
+| Label | Non-empty `thumbnail_image` |
+|---|---|
+| Notebook | 214 of 214 |
+| Publication | 203 of 206 |
+| Map | 161 of 161 |
+| Dataset | 142 of 142 |
+| Oer | 44 of 44 |
+| Code | 38 of 38 |
+| Collection | 5 of 19 |
+
+The other 14 Collections hold `""`. The search index `iguide-feb12` spells the field
+`thumbnail-image`: a string on 760 of its 763 documents, absent on 3. The index holds no
+collections at all, so the graph is their only route to a thumbnail.
+
+Before this change, a normalized document carried no thumbnail at all. `agents.py` hits carried
+one under `thumbnail-image`, including an empty string.
+
+**Change.** Every normalized document, from every arm, carries `thumbnail_image`
+(`utils.THUMBNAIL_KEY`). It is the graph's own spelling and the field `DocumentPayload` in
+`rag_pipeline/state.py` already declared. `thumbnail_of` reads either spelling, and
+`with_thumbnail` writes the one key and drops both spellings when the value is empty. An empty
+string is no thumbnail, and `""` is never emitted.
+
+The `/agent/chat` `elements` array keeps its published `thumbnail-image` key, because that is a
+response shape other clients read. It already accepted either spelling.
+
+Agent-KB hits take their parent element's thumbnail from the same batched graph query that
+resolves the full id (S57.3), so the lookup adds no extra query.
+
+Measured on the VM through this branch:
+
+| Arm | Hits | With `thumbnail_image` |
+|---|---|---|
+| Graph, two queries | 36 | 35 (1 publication has none) |
+| Agent KB | 16 | 16 |
+| Keyword | 10 | 10 |
+
+No hit used the hyphenated key. Three collections with empty thumbnails came back typed
+`collection` with no thumbnail key.
+
+The map UI's "Sources used" shows a 48 px thumbnail beside a source that has one. A source without
+one renders exactly as before. An image that fails to load removes itself, so the row degrades to
+the same text row instead of a broken-image icon.
+
+### Stage S57.5 Not changed here
+
+- **`resolve_parent_elements` (OpenSearch backend) can never match.** It queries `terms` on
+  `doc_id`, and `iguide-feb12` has no `doc_id` in its mapping. The Postgres backend does not use
+  it, and the prefix resolution above links hits on every backend, so this is not fixed here.
+- **The server still pluralises types the client does not list.** Today that covers no label
+  in the graph. The label count on 2026-10-13 also found 6 `Documentation` nodes, which are
+  slugs such as `getting-started`. Typing them by label would have sent them to
+  `/documentations/getting-started`, which is an empty page, so both builders now map
+  `documentation` to `/docs/<slug>`, which renders. They carry `name` and `content` rather than
+  `title` and `contents`, so the keyword arm never matches them anyway.
+- **The original platform UI.** The user reports that its cards showed some of these elements with
+  type "undefined". That fits the same missing type property if another client reads
+  `resource-type` from graph hits. It was not reproduced on the platform's own collection,
+  publication and search pages, which all link correctly.
