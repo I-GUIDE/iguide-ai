@@ -12,7 +12,8 @@
     "check:files": "esbuild src/files.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/filescheck.mjs && node node_modules/.cache/filescheck.mjs",
     "check:upload": "esbuild src/upload.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/uploadcheck.mjs && node node_modules/.cache/uploadcheck.mjs",
     "check:hooks": "node scripts/check-hook-deps.mjs",
-    "check:models": "esbuild src/modelChoice.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/modelcheck.mjs && node node_modules/.cache/modelcheck.mjs"
+    "check:models": "esbuild src/modelChoice.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/modelcheck.mjs && node node_modules/.cache/modelcheck.mjs",
+    "check:sources": "esbuild src/sources.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/sourcescheck.mjs && node node_modules/.cache/sourcescheck.mjs"
   },
   "dependencies": {
     "@deck.gl/aggregation-layers": "^9.4.0",

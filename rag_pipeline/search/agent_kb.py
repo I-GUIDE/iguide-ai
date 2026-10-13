@@ -293,6 +293,21 @@ def resolve_parent_elements_local(hits: List[Dict[str, Any]]) -> Dict[str, Dict[
     return elements
 
 
+def _link_to_platform(docs: List[Dict[str, Any]], elements: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Each hit's parent element as a platform id and link; the citation ids to return.
+
+    The KB keys elements by an 8-character prefix of the platform id, so without this every
+    agent-KB source was plain text and was cited by an id the platform does not know (Stage 57,
+    ``element_ids``). The hits keep their KB ids; only ``element_id``/``url`` are added.
+    """
+    try:
+        from .element_ids import link_kb_documents
+
+        return link_kb_documents(docs, elements)
+    except Exception:  # noqa: BLE001 - a link is never worth failing a search over
+        return [d["parent_doc_id"] for d in docs]
+
+
 _LOCAL_BACKEND_WARNED = False
 
 
@@ -348,7 +363,7 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
                     d["element"] = elements.get(d["parent_doc_id"])
                 return {"source": "agent_kb", "backend": "postgres", "count": len(docs),
                         "documents": docs,
-                        "citation_ids": [d["parent_doc_id"] for d in docs],
+                        "citation_ids": _link_to_platform(docs, elements),
                         "block_ids": [d["doc_id"] for d in docs], "elements": elements}
 
         use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
@@ -392,7 +407,7 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
         out = {
             "source": "agent_kb", "backend": ("opensearch" if use_opensearch else "local"),
             "count": len(docs), "documents": docs,
-            "citation_ids": [d["parent_doc_id"] for d in docs],   # cite the ORIGINAL element
+            "citation_ids": _link_to_platform(docs, elements),   # cite the ORIGINAL element
             "block_ids": [d["doc_id"] for d in docs],
             "elements": elements,
         }

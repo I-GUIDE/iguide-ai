@@ -172,6 +172,13 @@ def _records_to_hits(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         if node is not None:
             properties = dict(node)
+            if not (properties.get("element_type") or properties.get("resource-type")):
+                # The graph holds the type only as a label; see element_type_from_labels.
+                from rag_pipeline.search.neo4j_graph_tools import element_type_from_labels
+
+                label_type = element_type_from_labels(getattr(node, "labels", None))
+                if label_type:
+                    properties["element_type"] = label_type
             # The platform UUID, NOT Neo4j's internal element id. Measured on the live graph:
             # the `_id` property exists on 0 of 3205 nodes, so this fallback chain always
             # reached `element_id` and emitted "4:f84f361b-...:532" as the doc_id. Every other

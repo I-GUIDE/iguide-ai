@@ -10,13 +10,17 @@ export type SourceGroup = 'internal' | 'external' | 'web';
 
 export function evidenceDocs(response: any): SourceDoc[] {
   const out: SourceDoc[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   const add = (d: any) => {
     if (!d || typeof d !== 'object') return;
     const src = (d.document && typeof d.document === 'object') ? d.document : d;
     const id = String(src.doc_id || src.id || src.url || src.title || '');
-    if (!id || seen.has(id)) return;
-    seen.add(id); out.push(src);
+    if (!id) return;
+    const at = seen.get(id);
+    if (at === undefined) { seen.set(id, out.length); out.push(src); return; }
+    // The same element twice — typed 'resource' by the graph, 'publication' by keyword search —
+    // must not be listed as plain text because the unlinkable copy came first.
+    if (!sourceHref(out[at]) && sourceHref(src)) out[at] = src;
   };
   const orch = response?.agent_result?.orchestration_result;
   if (orch && Array.isArray(orch.evidence)) orch.evidence.forEach(add);
@@ -57,6 +61,12 @@ const PLATFORM_PATHS: Record<string, string> = {
   oer: 'oers',
   map: 'maps',
   code: 'code',          // singular on the platform, unlike the rest
+  // Checked live 2026-10-13: /collections/8ff3dd3c-4660-493e-b94a-bf04d293cc85 renders the
+  // Summer School 2025 collection. The graph has 19 Collection elements.
+  collection: 'collections',
+  // The graph's 6 :Documentation nodes are slugs (getting-started, release-notes, …) served at
+  // /docs/<slug>; /documentations/<slug> is an empty page (both checked 2026-10-13).
+  documentation: 'docs',
 };
 
 /** The href for a source item, or '' when no honest link can be formed.

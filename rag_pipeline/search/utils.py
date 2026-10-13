@@ -63,9 +63,30 @@ def normalize_source_fields(source: Dict[str, Any], fallback_id: str) -> Dict[st
     return source
 
 
+def is_linkable_copy(doc: Any) -> bool:
+    """Whether a retrieved document can be turned into a link: it carries a url, or a real
+    element type (anything but empty or the ``"resource"`` placeholder).
+
+    Used where duplicates of one element are merged. The same element can arrive twice — from
+    keyword search typed ``publication`` and from the graph typed ``resource`` — and the merge
+    kept whichever came first. On a prod turn on 2026-10-13 that was the graph copy of
+    "Spatial and Temporal Variability…" (777a106d…), so the source list showed it as plain text
+    although a linkable copy had been retrieved. The merges now let a linkable copy replace an
+    unlinkable one, and nothing else changes which copy is kept.
+    """
+    if not isinstance(doc, dict):
+        return False
+    src = doc.get("document") if isinstance(doc.get("document"), dict) else doc
+    if str(src.get("url") or "").strip():
+        return True
+    etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
+    return bool(etype) and etype != "resource"
+
+
 __all__ = [
     "get_logger",
     "getenv",
+    "is_linkable_copy",
     "normalize_source_fields",
     "safe_score",
     "default_top_k",

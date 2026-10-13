@@ -37,6 +37,7 @@ from .neo4j_graph_tools import (
     build_explore_related_nodes_query,
     build_tool_query,
     detect_pattern,
+    element_type_from_labels,
     run_user_author_fallback,
     _get_internal_labels,
 )
@@ -285,11 +286,12 @@ def _source_to_hit(
     node_labels: Optional[set] = None,
     prefix: str = "",
 ) -> Dict[str, Any]:
-    labels = node_labels or set()
+    # A label, not `next(iter(labels))`: that took whichever non-internal label a set yielded
+    # first, so a node carrying any label outside the element set could be typed by it.
     resource_type = (
         source.get("resource-type")
         or source.get("element_type")
-        or (next(iter(labels)).lower() if labels else None)
+        or element_type_from_labels(node_labels)
     )
 
     base_contents = source.get("contents") or ""
