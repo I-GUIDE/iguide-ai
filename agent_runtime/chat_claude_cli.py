@@ -69,11 +69,12 @@ def _tool_schema(tool: Any) -> Dict[str, Any]:
 # Sized above the longest real description, with headroom. `execute_code` carries the whole
 # sandbox contract — dependencies, workspace persistence, tiers, the iguide_methods package,
 # and the invariant gate's IGUIDE_OUTPUTS convention — and has now grown past two earlier
-# budgets (600, then 1400, then 2000), each time silently truncating the paragraph added last.
+# budgets (600, then 1400, then 2000, then 3000), each time silently truncating the paragraph
+# added last.
 # Everything else in the registry is 300-600 chars, so a 20-tool peer still pays only a few
 # thousand tokens of schema. `test_the_longest_real_description_is_not_clipped` is what catches
 # the next growth; raise this rather than trimming the contract.
-_DESC_BUDGET = 3000
+_DESC_BUDGET = 3500
 
 
 def _clip_description(text: str) -> str:

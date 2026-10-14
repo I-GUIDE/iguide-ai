@@ -183,11 +183,14 @@ def read_json(work: Path, name: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def collect_inputs(work: Path, staged: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+def collect_inputs(work: Path, staged: Optional[List[str]] = None,
+                   input_sources: Optional[Dict[str, Path]] = None) -> List[Dict[str, Any]]:
     """Staged input files with a sha256 each, merged with any provenance already recorded.
 
     A re-run must be able to assert it read the *same bytes*, not merely a file with the same
-    name — which is why the hash matters more than the path.
+    name — which is why the hash matters more than the path. ``input_sources`` names the inputs
+    the run wrote over, and each is hashed from its source instead: the copy in the work dir
+    holds the run's output by now.
     """
     work = Path(work)
     recorded: Dict[str, Dict[str, Any]] = {}
@@ -205,7 +208,7 @@ def collect_inputs(work: Path, staged: Optional[List[str]] = None) -> List[Dict[
 
     out: List[Dict[str, Any]] = []
     for name in sorted(set(staged or ())):
-        path = work / name
+        path = Path((input_sources or {}).get(name) or work / name)
         row: Dict[str, Any] = dict(recorded.get(name) or {})
         row["name"] = name
         if path.is_file():
@@ -226,6 +229,7 @@ def collect_inputs(work: Path, staged: Optional[List[str]] = None) -> List[Dict[
 def emit(*, code: str, work: Path, image: str, backend: str,
          dependencies: Optional[List[str]] = None, tier: Optional[str] = None,
          staged: Optional[List[str]] = None,
+         input_sources: Optional[Dict[str, Path]] = None,
          verification: Optional[Dict[str, Any]] = None,
          dest: Optional[Path] = None) -> Dict[str, Any]:
     """Write ``run.py``, ``manifest.json`` and ``inputs.jsonl`` into *dest* (default: work).
@@ -244,7 +248,7 @@ def emit(*, code: str, work: Path, image: str, backend: str,
         manifest = build_manifest(
             code=code, work=work, image=image, backend=backend,
             dependencies=dependencies, tier=tier,
-            inputs=collect_inputs(work, staged),
+            inputs=collect_inputs(work, staged, input_sources),
             verification=verification or {"verdict": checks.get("verdict")} if checks else {},
             environment=environment, declared_outputs=declared)
         target.mkdir(parents=True, exist_ok=True)

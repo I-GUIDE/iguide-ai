@@ -5401,6 +5401,57 @@ rather than from the previous one.
 **Not fixed** Raster pixel-count areas, `pyproj.Transformer` arithmetic and shapely scalars carry
   no CRS; Web Mercator's scale error is not a unit error.
 
+## 2026-10-09 · M8.87 · A conversation file the code names by filename is staged, and an input the run rewrites is kept
+
+**Change** `CodeExecutor.execute` (`agent_runtime/code_execution.py`) treats a staged name as an
+  input only while its bytes equal the source (`_rewritten_inputs`). A rewritten name is persisted
+  as an artifact and copied back to the workspace. `collect_inputs` hashes it from the source, so
+  the manifest records what the run read. Then `execute_code`
+  (`agent_runtime/langchain_exec_tools.py`) stages every file of THIS conversation and THIS owner
+  whose filename the code names as a whole name (`_conversation_files_named_in`), newest per name.
+  The lookup goes through `find_files` scoped to the session, with the owner compared exactly. It
+  skips the legacy pool, names already allocated to a listed or attached input, and names the
+  workspace holds. `_DESC_BUDGET` (claude peer) is raised from 3000 to 3500.
+
+**Why** S30.7 / M8.79 staged a file_id the code names and left the filename open:
+  `gpd.read_file('Champaign_County.geojson')` with no `input_files` still failed first runs, in the
+  local replay on `40356bd` and in PR #85's replays. The reason it was left open was a real bug.
+  A staged name was excluded from the outputs and the copy-back, so a run that wrote under an
+  input's name lost its output, and that already happened with an explicit `input_files`.
+  Reasoning is in architecture S30.8.
+
+**Measured** 15 new tests (`test_filename_named_in_code.py`). Five fail on `23cfd02`: the filename
+  read, the newest of two, the bounded match, the write under a listed input's name, and the
+  manifest hash. Both suites: 3918 passed, 19 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
+  Local Chrome replay on 2026-10-11 (`AGENT_MODE=local`, Lumen deepseek-v4-flash; the 2026-10-09
+  attempt got `429 insufficient_quota` and measured nothing). Two turns per build of the Champaign /
+  London–Paris query, then in each conversation a follow-up naming the file as the answer shows it
+  ("Using Champaign_County.geojson from your last answer, compute the county perimeter in km with
+  code."):
+
+  | build | turn | first `execute_code` opened | first run | peer model calls / input tokens |
+  |---|---|---|---|---|
+  | before `23cfd02` | Champaign / London–Paris (b2) | `"file_1012d19f9297"` | ok | 3 / 47.7K |
+  | before `23cfd02` | Champaign / London–Paris (b3) | `"file_60aac6f4ca8a"` | ok | 3 / 47.8K |
+  | this change | Champaign / London–Paris (a2) | `"file_1f0e9c66493f"` | ok | 3 / 47.9K |
+  | this change | Champaign / London–Paris (a3) | `"file_dd2ed3cf9f96"` | ok | 3 / 47.8K |
+  | before `23cfd02` | follow-up (b2) | `"Champaign_County.geojson"` | **failed** (traceback), then `list_conversation_files`, ok on attempt 2 by file_id | 4 / 68.6K |
+  | before `23cfd02` | follow-up (b3) | `"file_60aac6f4ca8a"`, after `list_conversation_files` and two `read_workspace_file` (one failed) | ok | 4 / 66.6K |
+  | this change | follow-up (a2) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+  | this change | follow-up (a3) | `"Champaign_County.geojson"` | ok | 2 / 32.6K |
+
+  The original query: first run ok 2/2 on both builds, always by file_id (S30.7), so it no longer
+  reaches the filename path. The follow-up: before, 1/2 first runs failed on the filename, and the
+  two turns spent two and three extra tool calls (two extra model calls each, 34–36K more input
+  tokens); after, 2/2 first runs read the filename and succeeded in one call. Lumen spend for the 8 turns: 56 calls, all 200. The 24 instrumented peer calls used
+  391,539 input and 6,103 output tokens. The other 32 calls (router, supervisor, answer, grounding)
+  are not instrumented on this base and are not counted.
+
+**Not fixed** The claude and opencode peers do not scan. A writer that refuses an existing file
+  (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input
+  the run deletes stays in the workspace.
+
 ## 2026-10-12 · M8.89 · Every check measured against the scored archive (architecture stage 52)
 
 **Change** `gis_harness/validators_bench.py` replays the agent's validation checks offline (no
