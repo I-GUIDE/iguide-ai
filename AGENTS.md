@@ -890,7 +890,13 @@ answer, so both are checked at the edge: `GET /agent/files/<id>/download` and th
 take a conversation id verify the owner before doing anything else. `get_or_create_memory` itself
 does not; the chat routes call `assert_owner` on the id the turn will use, which is
 `memoryId or threadId`, because a check on `memoryId` alone let a `threadId`-only turn into
-another user's conversation (S9.14). A mismatch answers
+another user's conversation (S9.14). That check covers the conversation DOCUMENT only. All the
+agent's other per-conversation state is keyed by the `threadId` the client chose: the
+checkpointer's peer threads, session memory, files and ledger, the sandbox and Claude-peer
+workspaces, staged inputs and lineage. So the chat service scopes that key to the signed-in
+caller (`agent_runtime/thread_scope.py`, S9.15). New per-conversation state must be keyed by
+the thread id the agent is handed (`state["thread_id"]`, or `child_thread_id` of it), never by
+the request's raw `threadId` or the file store's session. A mismatch answers
 **404, not 403** — a 403 confirms the id exists and turns the endpoint into an enumeration
 oracle. The one gotcha worth knowing before touching an ownership query: `owner_id` is mapped as
 analysed `text` with a `.keyword` subfield, and a `term` query against the bare field compares

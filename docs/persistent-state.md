@@ -26,7 +26,7 @@ library. The VM then ran `prototype` at `23cfd02`, which includes the extraction
 | Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | only its owner's delete (S9.13), which leaves a tombstone (S9.14) |
 | Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | deleted with their conversation (S9.13) |
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
-| Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
+| Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation and caller (S9.15) | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
 | Operational records | host journal; `/var/log/iguide-agent/incidents/` | container logs; one evidence bundle per watchdog incident | host access only | journal capped at 3 GB; newest 60 bundles |
 | Agent KB record | Postgres, compose service `agent-db`, volume `agent_db_data` | what extraction produced: elements, notebook blocks, method units, publication specs, dataset files | none: a shared corpus the agent only reads | nothing; nothing writes it either |
@@ -483,6 +483,12 @@ One directory per conversation, `agentws_<slug>_<sha256-prefix>`. The slug alone
 many-to-one — it maps every unsafe character to `_` and truncates — so `sess:42` and `sess_42`,
 both raw client input, would share a directory and its files. The digest is what keeps them apart.
 
+The key is not the client's `threadId` alone. In token mode it is `<threadId>@u-<16 hex of
+sha256(user id)>::codeexec` (`agent_runtime/thread_scope.py`, S9.15), so two users who send the
+same `threadId` get two directories. Before, a signed-in user who sent another user's
+`threadId` with their own `memoryId` ran code in the other user's workspace. Unsigned callers
+(dev, demo, the service key) keep the bare `threadId`, as before.
+
 The container is ephemeral (`--rm`, that is the sandbox); the **workspace is not**, so a follow-up
 turn can build on what the last one wrote instead of re-uploading it. `.deps/` inside holds the
 conversation's dependency cache, bind-mounted read-only into runs.
@@ -663,7 +669,9 @@ every answer publishes file ids as download links, and `outputs/` is where those
 A stored conversation is close to self-contained, because the pieces cross-reference each other:
 the record's `fileIds` and each `artifacts[].file_id` point into the file store, which never
 deletes; `layers[].sourceUrl` are those same files; `threadId` identifies the agent thread and,
-through `sha256(f"{threadId}::codeexec")`, the code workspace directory.
+through `sha256(f"{threadId}::codeexec")`, the code workspace directory. In token mode the
+`threadId` there carries the owner's scope, `@u-<16 hex of sha256(owner id)>` (S9.15), so the
+record's `ownerId` is needed to find the directory.
 
 **Available for any past session:** the question, the final answer, every file it produced, the
 layer descriptors, the tool sequence with truncated arguments, and the model that answered.

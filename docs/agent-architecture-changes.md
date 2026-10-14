@@ -2204,8 +2204,134 @@ row, in both modes. The in-flight trace is not stored, and a first turn is still
 - **Other state keyed by `threadId`.** The LangGraph checkpointer and the in-process session
   memory are both keyed by the client's `threadId`. When a turn sends its own `memoryId` with
   someone else's `threadId`, nothing checks the `threadId`. Whether that resumes the other user's
-  agent thread was not measured.
+  agent thread was not measured. Measured and closed in S9.15: it did.
 - **Files.** The S9.13 position is unchanged: deleting a conversation does not delete its files.
+
+### Stage S9.15 Another user's threadId names none of your agent state
+
+*Branch `claude/thread-owner-scope`, stacked on S9.14 (`claude/delete-tombstone`, `28294473`).*
+
+S9.14 left one row unmeasured: state the agent keeps under the client's `threadId`. The chat
+edge checks the conversation DOCUMENT, keyed by `memoryId or threadId`. A turn that sends its
+own `memoryId` passes that check whatever `threadId` it sends, and the agent keeps everything
+else between turns under the `threadId`. The map UI prints that id in every answer.
+
+**Where `threadId` is a key**, read from the code before measuring:
+- the peers' checkpointed threads, `child_thread_id(thread_id, "analysis" | "sup_search" |
+  "code")` on the process-global `DEFAULT_CHECKPOINTER`;
+- session memory, session files and the action ledger (`session_memory`);
+- the sandbox workspace on disk (`child_thread_id(thread_id, "codeexec")`), which the code peer
+  lists and runs in, and the Claude peer's CLI session directory (`"claudepeer"`);
+- staged inputs and the QGIS session (`"code_qgis"`, `"analysis_qgis"`);
+- the lineage graph, keyed by the file store's session, which the edge binds to the raw
+  `threadId`.
+
+The file store is not on the list. Its records carry `owner_id`, and every read checks it
+(Stage 30), so its session stays the raw `threadId`.
+
+**Measured first**, on `28294473`, token mode, strict, model stubbed. The stub does with the
+thread id it is handed what the graph does: a real `create_agent` graph on the real
+`DEFAULT_CHECKPOINTER` under the analysis child id, the workspace listing, the ledger read, and
+`lineage.active()`. Alice ran two turns on T with an uploaded file. Bob ran one turn on his own
+conversation, then sent `{memoryId: his own, threadId: T}`.
+
+| Bob's turn received | `AGENT_PERSISTENT_MEMORY` on | off (or a store outage) |
+| --- | --- | --- |
+| edge | **200** | **200** for a `threadId`-only turn: no document to check |
+| analysis peer's checkpointed messages | **both of Alice's questions, her file id and filename** | same |
+| session file ids in his input | **her file id** (the name was withheld: the file store refused the record) | same |
+| sandbox workspace | **her `alice_result.csv`** | same |
+| action ledger | **her rows** | same |
+| lineage graph | **her source node** | same |
+| chat history | his own | **her questions and answers** |
+
+Her file's content was not reachable: `get_file_record` refused it. Her workspace was, because
+the sandbox mounts the directory, and a workspace file has no owner record.
+
+**Two fixes considered.**
+- **Check the `threadId` at the edge too**, or require it to equal `memoryId`. This only works
+  where a document exists to check. With persistence off, or during a store outage (which falls
+  back to it), there is none, and session memory is then the turn's only history. Distinct
+  `threadId`/`memoryId` pairs, which the API docs show, would have no owner record anywhere.
+- **Scope the key to the caller.** The agent's key is the client's id plus a digest of the
+  signed-in user. Two users who send the same id get two keys, in every mode, with no registry
+  and no store read. **Chosen.**
+
+**The change.**
+- **`agent_runtime/thread_scope.py`**: `scoped(id)` returns `<id>@u-<16 hex of sha256(user
+  id)>`, and `unscoped` inverts it. A digest, not the id: platform ids are URLs, and the key ends
+  up in directory names and log lines. With nobody signed in (dev, demo, the service key) the key
+  is the client's id, unchanged. An unsigned id that already carries a scope is scoped again
+  (`@u-anon`), so a service-key caller cannot reach a user's state by spelling out its key.
+- **The chat service scopes once, where the id enters the agent.** `run_agent_chat` and
+  `stream_agent_chat_events` hand the scoped key to the graph and to session memory and files.
+  Every child id, workspace, ledger row and staged input below that inherits the scope, with no
+  change at those sites. Scoping at each consumer instead was rejected: a missed or future
+  consumer would be unscoped, silently.
+- **The client never sees the key.** The map UI adopts a `thread_id` from ANY event as the
+  conversation id (`agentClient.ts`). A scoped key reaching it would come back as the next
+  `threadId` and be scoped twice. `_for_client` translates `data.thread_id` in the graph's status
+  and completed events, which are the only events that carry one. The response, the
+  `agent_chat_started` status and the stored trace keep the client's id.
+- **A signed-in turn with no id gets one from the service.** The graph generates
+  `auto-thread-<uuid>` when given none. That id would be unscoped, and the next turn, sending it
+  back, would be scoped and find nothing of the first.
+- **Lineage** scopes its key itself (`lineage._conversation`). Its key is the file store's
+  session, and the edge binds that to the raw id. It reads the identity ContextVar, as the file
+  store's owner checks in the same tool code already do.
+- **`llm_usage` records** keep the client's conversation id as their `session`.
+
+**At deploy.** Keys change for signed-in conversations started before it. The checkpointer,
+session memory and lineage are in-process, so a restart drops them anyway. Workspaces and Claude
+peer directories are on disk: an older conversation's next code run starts in an empty
+workspace, and its old directory expires on the 72-hour sweep. Files in the file store are
+unaffected.
+
+**Measured after.** The same turns: Bob's agent ran under `T@u-<his digest>`. His peer saw only
+his own question, and the workspace, ledger, lineage, session files and history held nothing of
+Alice's, in both persistence modes. Alice's second turn still saw all of her first.
+
+- **Tests.** `rag_pipeline/tests/test_thread_scope.py` has 9 functions, 11 cases. 6 fail on
+  `28294473`:
+  - Bob's own `memoryId` with Alice's `threadId`;
+  - a `threadId`-only turn with persistence off, and during a store outage;
+  - Bob's turn leaving nothing in Alice's state;
+  - the service key spelling out a scoped key;
+  - the client never seeing the scoped key, driven through the real `graph_runtime` stream with
+    only the orchestrator graph stubbed.
+
+  5 pass on the base by design, as guards:
+  - Alice keeping her own conversation (2 cases);
+  - an unsigned caller's key being unchanged;
+  - a signed-in turn with no id keeping its state on the next turn, which guards this stage's own
+    generated id;
+  - the key's unit test.
+- **Mutations.** Each part was removed in turn, against `test_thread_scope.py`,
+  `test_conversation_delete.py` and `test_memory_ownership.py`:
+
+  | Part removed | Tests that fail |
+  | --- | ---: |
+  | the service scoping the key | 6 |
+  | lineage scoping its own key | 4 |
+  | re-scoping an unsigned scoped id | 2 |
+  | translating the key back for the client | 1 |
+  | the service generating a signed-in turn's id | 1 |
+
+  The `llm_usage` unscoping has no test: it changes a diagnostic field only.
+- **Full suites.** `rag_pipeline/tests` + `tests`, offline: 4361 passed and 1 failed, against
+  4350 passed and 1 failed on `28294473`. The one failure on both is
+  `test_the_installed_networkx_matches_the_pin`, the Mac environment against the image pin.
+
+**Not done here:**
+- **Measured with the graph stubbed, not live.** The stub calls the same helpers with the id it
+  is handed, at the call sites listed above. A consumer that reads the request's raw id some
+  other way would not be covered. None was found.
+- **`AGENT_PERSISTENT_MEMORY=0` in token mode refuses a `memoryId` turn** (404), because no
+  document exists to own. The map UI does not send one in that mode (the response carries no
+  `memoryId`), so this was not changed.
+- **Delete does not clear in-process or workspace state** for the conversation. It is now
+  reachable only by its owner, and it expires.
+- **Deployment.** Not merged, not deployed.
 
 
 ---
