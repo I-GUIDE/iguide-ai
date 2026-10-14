@@ -27,7 +27,6 @@ import time
 from functools import lru_cache, wraps
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
-import requests
 from neo4j import Driver, GraphDatabase
 from neo4j.graph import Node as _Neo4jNode
 from opensearchpy import OpenSearch
@@ -112,61 +111,47 @@ def _transform_thumbnail(value: Any) -> Any:
 # LLM client
 # ---------------------------------------------------------------------------
 
-def _openai_endpoint(path: str) -> str:
-    """Resolve an OpenAI-compatible URL, preferring the *agent's* LLM config.
+# Text2Cypher must answer well inside a search turn. The old raw call used 45 s; Lumen's
+# deepseek-v4-flash answered the real schema prompt in a few seconds (Stage 58).
+_LLM_TIMEOUT_SEC = float(os.getenv("SEARCH_AGENT_LLM_TIMEOUT_SEC", "45"))
 
-    Text2Cypher (and the other agent-search LLM call) use the same LLM as the
-    main agent: ``VLLM_PROXY`` / ``OPENAI_BASE_URL`` first, then the legacy
-    dedicated ``ANVILGPT_URL``, then the OpenAI default.
+
+def _llm_chat(messages: List[Dict[str, str]]) -> str:
+    """One completion from the PROCESS DEFAULT model, the one an unspecified agent turn uses.
+
+    This used to POST to an OpenAI-compatible URL with its own model choice (VLLM_* → OPENAI_* →
+    ANVILGPT_*) and a fixed ``max_tokens=512, temperature=0.0``. That chain never read
+    ``AGENT_LLM_PROVIDER``, so on a deployment whose agent runs on Lumen it still called OpenAI
+    with whatever OPENAI_CHAT_MODEL held. On the VM that was gpt-5.6-luna, which refuses
+    ``max_tokens`` ("Use 'max_completion_tokens' instead") and refuses ``temperature`` 0.0
+    without ``reasoning_effort='none'``. Every Text2Cypher call was a 400, and the graph search
+    silently fell back to keyword matching (Stage 58).
+
+    ``build_default_llm`` already knows which parameters each provider and model accepts. It
+    sends no ``max_tokens`` to a reasoning model, where a ceiling cuts the thinking into an empty
+    answer. So the search agents ask it rather than keeping a second, drifting copy of those rules.
     """
-    base = (
-        os.getenv("VLLM_PROXY")
-        or os.getenv("OPENAI_BASE_URL")
-        or os.getenv("ANVILGPT_URL")
-        or "https://api.openai.com/v1"
-    ).rstrip("/")
-    # If URL already ends with the full path (e.g. /api/chat/completions), return as-is
-    if base.lower().endswith("/chat/completions"):
-        return base
-    if base.lower().endswith("/v1"):
-        return f"{base}/{path.lstrip('/')}"
-    return f"{base}/v1/{path.lstrip('/')}"
+    from agent_runtime.executor_factory import build_default_llm
 
-
-def _llm_chat(
-    messages: List[Dict[str, str]],
-    max_tokens: int = 512,
-    temperature: float = 0.0,
-) -> str:
-    url = _openai_endpoint("chat/completions")
-    # Same LLM as the agent (VLLM_*/OPENAI_*); ANVILGPT_* kept as legacy fallback.
-    api_key = (
-        os.getenv("VLLM_API_KEY")
-        or os.getenv("OPENAI_KEY")
-        or os.getenv("ANVILGPT_KEY")
-        or ""
-    )
-    model = (
-        os.getenv("VLLM_MODEL")
-        or os.getenv("OPENAI_CHAT_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or os.getenv("ANVILGPT_MODEL")
-        or "gpt-4o-mini"
-    ).strip()
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    response = requests.post(url, headers=headers, json=payload, timeout=45)
-    response.raise_for_status()
-    data = response.json()
+    llm = build_default_llm()
+    kwargs: Dict[str, Any] = {}
     try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as err:
-        raise ValueError(f"Unexpected LLM response payload: {data}") from err
+        from langchain_openai.chat_models.base import BaseChatOpenAI
+
+        if isinstance(llm, BaseChatOpenAI):
+            # Forwarded to the OpenAI SDK as a per-request timeout, not into the JSON body.
+            kwargs["timeout"] = _LLM_TIMEOUT_SEC
+    except ImportError:  # pragma: no cover - build_default_llm needs it anyway
+        pass
+    reply = llm.invoke(messages, **kwargs)
+    content = getattr(reply, "content", reply)
+    if isinstance(content, list):  # content blocks: keep the text ones
+        content = "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block) for block in content
+        )
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"Empty LLM reply from the default model: {reply!r:.200}")
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -657,8 +642,6 @@ def _text2cypher(user_query: str, schema: str, limit: int) -> Tuple[str, Dict[st
             {"role": "system", "content": _CYPHER_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=512,
-        temperature=0.0,
     ).strip()
 
     start, end = content.find("{"), content.rfind("}") + 1
@@ -880,8 +863,6 @@ def _agent_generate_opensearch_body(user_query: str, schema: str, limit: int) ->
     )
     content = _llm_chat(
         [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
-        max_tokens=400,
-        temperature=0.0,
     ).strip()
     start, end = content.find("{"), content.rfind("}") + 1
     if start == -1 or end <= start:

@@ -71,6 +71,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 55 | [Gi\* as Getis and Ord define it](#stage-55) | 2026-10-12 | `local_getis_ord` uses binary weights with the focal area included by default (it row-standardised): 13 hot spots on T09's lattice where it said 1; `transform` asks for another, `z_counts` counts the z-scores |
 | 56 | [Where every file, result and number came from](#stage-56) | 2026-10-12 | a per-conversation lineage graph written by the code that acts (file store, staging, fetches, the turn log), persisted in each file's record; the Sources line names every source upstream of what the answer used; a claim a note the work was shown states is supported by that note |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
+| 58 | [Text2Cypher asks the model the agent runs on](#stage-58) | 2026-10-13 | the search agents' LLM call goes through `build_default_llm`, so it follows `AGENT_LLM_PROVIDER` and that builder's per-model parameters; on the VM it had called OpenAI gpt-5.6-luna with `max_tokens` and got a 400 every time |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -9799,3 +9800,107 @@ the same text row instead of a broken-image icon.
   type "undefined". That fits the same missing type property if another client reads
   `resource-type` from graph hits. It was not reproduced on the platform's own collection,
   publication and search pages, which all link correctly.
+
+## Stage 58 — Text2Cypher asks the model the agent runs on {#stage-58}
+
+*2026-10-13, branch `claude/text2cypher-openai-400` from `prototype` at `75df473`. No open PR or
+branch claims a stage above 57, so this takes 58. DEVLOG M8.94.*
+
+The graph search has three tiers: pattern tools, then Text2Cypher, then a keyword match. On the VM
+the middle tier had not worked since at least 2026-10-13 14:06Z. The journal for the five days
+before the 2026-10-14 deploy has 12 lines like this one:
+
+```
+WARNING search_agents: Text2Cypher failed (400 Client Error: Bad Request for url:
+https://api.openai.com/v1/chat/completions); falling back to keyword search.
+```
+
+No line in that window reads "Text2Cypher returned". Every query without a pattern match, such as
+"extreme events research", was answered by the keyword tier, and the answer did not say so.
+
+### Stage S58.1 The search agent chose its own model
+
+`_llm_chat` in `rag_pipeline/search/agents.py` POSTed to an OpenAI-compatible URL. Its model came
+from `VLLM_MODEL` → `OPENAI_CHAT_MODEL` → `OPENAI_MODEL` → `ANVILGPT_MODEL`, and every request
+carried `max_tokens` (512, or 400 for the OpenSearch agent) and `temperature: 0.0`. The function's
+docstring said it used "the same LLM as the main agent", but it never read `AGENT_LLM_PROVIDER`,
+which is how the agent's default is chosen. The VM runs the agent on Lumen
+(`AGENT_LLM_PROVIDER=lumen`, `deepseek-v4-flash`), while `OPENAI_CHAT_MODEL` still names
+`gpt-5.6-luna`. So Text2Cypher called OpenAI with that model.
+
+The request was replayed once inside `agent-api` on 2026-10-14 (UTC), with the code's URL, model
+and key resolution and a one-line prompt. The key was read in the container and never printed.
+
+| Parameters sent to `gpt-5.6-luna` | Status | Error body |
+|---|---|---|
+| `temperature: 0.0, max_tokens: 512` (as the code sent them) | 400 | `{"message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.", "type": "invalid_request_error", "param": "max_tokens", "code": "unsupported_parameter"}` |
+| `max_completion_tokens: 512` | 200 | — |
+| `temperature: 0.0, max_completion_tokens: 512` | 400 | `{"message": "Unsupported value: 'temperature' does not support 0.0 with this model. Only the default (1) value is supported.", "type": "invalid_request_error", "param": "temperature", "code": "unsupported_value"}` |
+| `temperature: 0.0, reasoning_effort: "none"` | 200 | — |
+
+The key and billing were fine. Two parameters were wrong: `max_tokens`, and `temperature` 0
+without `reasoning_effort: "none"`. Renaming the first would still have hit the second.
+
+### Stage S58.2 Fix: one builder decides what to send
+
+`_llm_chat` now asks `agent_runtime.executor_factory.build_default_llm()`, which is the model an
+agent turn uses when it names none. The OpenSearch agent goes through the same function. Two
+options were considered:
+
+- **Make the raw request valid** by sending `max_completion_tokens`, dropping `temperature` and
+  adding `reasoning_effort`. That repeats the per-model rules `executor_factory` already keeps in
+  `_TOOL_EFFORT` and `_NO_TEMPERATURE`, and the copy would drift on the next model change. It would
+  also keep the VM paying OpenAI for a step whose agent runs on Lumen.
+- **Route through the default builder** (chosen). Text2Cypher follows `AGENT_LLM_PROVIDER` the way
+  the docstring always claimed. It gets the builder's parameter rules: no token ceiling for
+  reasoning models, where a ceiling cuts the thinking into an empty answer, and for an OpenAI
+  `gpt-5.6-*` default, `temperature` 0 alongside `reasoning_effort: "none"`. That combination
+  returned 200 in the table above.
+
+The call keeps a 45 s timeout (`SEARCH_AGENT_LLM_TIMEOUT_SEC`). The timeout is passed per
+request, so the default client's own retries still apply. An empty reply raises, so the
+dispatcher logs it and falls back, as it does for any other Text2Cypher failure. The
+`VLLM_*` / `ANVILGPT_*` chain in this module is gone. `build_default_llm` resolves `VLLM_*`
+itself, and an AnvilGPT default is selected by `AGENT_LLM_PROVIDER=anvilgpt`, as for the agent.
+
+Measured inside `agent-api` on 2026-10-14. The patched module was loaded from a temp file in a
+one-off process; the running service was not changed. Each query is one that had fallen back in
+the journal:
+
+| Query | Text2Cypher | `$q` | Hits |
+|---|---|---|---|
+| extreme events research | 2.1 s | `extreme events` | 4 (code 1, publication 2, collection 1) |
+| extreme research | 1.8 s | `extreme` | 12 (notebook 3, dataset 2, code 2, publication 5) |
+| disaster resilience extreme events spatial AI | 1.7 s | `disaster` | 12 |
+| I-GUIDE Summer School Spatial AI Extreme Events Disaster Resilience | 1.7 s | `spatial` | 11 |
+
+Every call went to `lumen.ncsa.illinois.edu` and answered 200. The full dispatcher logged
+"Text2Cypher returned 4 results" instead of falling back. Hits are typed from labels, as with the
+other graph tiers (Stage 57).
+
+### Stage S58.3 Tests
+
+`rag_pipeline/tests/test_text2cypher_llm.py` intercepts the OpenAI SDK, so nothing leaves the
+machine. Every test fails on `prototype` with "search agent bypassed the default model: POST
+https://api.openai.com/v1/chat/completions model='gpt-5.6-luna' params=['max_tokens', 'model',
+'temperature']". It checks three things:
+
+- With `AGENT_LLM_PROVIDER=lumen`, Text2Cypher goes to Lumen's `deepseek-v4-flash` with no token
+  ceiling.
+- With an OpenAI `gpt-5.6-luna` default, the request has no `max_tokens`, and any `temperature` is
+  sent alongside `reasoning_effort: "none"`.
+- The dispatcher returns the Text2Cypher rows without reaching the keyword tier.
+
+### Stage S58.4 Not changed here
+
+- **The tier now spends Lumen coins.** On this deployment that is one deepseek call per graph
+  search that has no pattern match. It previously spent nothing, because every call failed before
+  generation.
+- **A per-request model pick does not reach the search.** A turn whose user picked another model
+  still runs Text2Cypher on the process default. Threading the turn's model into the search tools
+  is a larger change.
+- **The fallback is still silent to the user.** A failed Text2Cypher is logged as a WARNING, and
+  the answer does not say that the graph tier degraded to keyword matching.
+- **Generated Cypher quality.** deepseek strips the query to a single keyword (`$q='spatial'` for
+  a summer-school query), as the prompt tells it to. Whether that ranks better than the keyword
+  tier was not measured.
