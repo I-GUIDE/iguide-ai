@@ -5452,6 +5452,28 @@ rather than from the previous one.
   (`open(name, "x")`) fails if its name matches a tool's file in this conversation. A staged input
   the run deletes stays in the workspace.
 
+## 2026-10-12 · M8.88 · A refused fetch says what the service said, not just its status
+
+**What** `public_data_tools.fetch` now adds a quoted excerpt of a refusing body to its
+  `Refused` message: *"<host> answered HTTP 404; the service said: "…""*. It reads at most 8 KB,
+  takes the message key of a JSON body or the text of an HTML page, skips a long preamble before
+  the first "error", drops control characters, and keeps 200 characters. The tool
+  `fetch_public_data` and the code bridge (Stage 49) both go through `fetch`, so both get it.
+  An empty body reports the status alone, as before.
+
+**Why** In the T08L re-run (2026-10-11, bridge, Lumen deepseek-v4-flash), the code sent
+  `assets=B04,B08` to the Planetary Computer. The 404 body says what is wrong and lists the
+  valid names, but the code saw only "answered HTTP 404". The turn spent 28 bridge calls and
+  ended in "cannot provide". Reasoning is in architecture S34.5.
+
+**Measured** Live, 2026-10-12: Planetary Computer 404 → the full `detail` (236 chars with
+  prefix); Overpass 400 → *"Error : line 1: parse error: Unknown type "wayy" …"* (255 chars),
+  both under the bridge's 300-character cut. 9 new test cases; 8 fail on `10029c5` (the
+  ninth pins the empty-body message). Both suites: 3924 passed, 19 skipped, 1 failed
+  (`test_the_installed_networkx_matches_the_pin`, the Mac's networkx, failing on the base too).
+
+**Not measured** T08L end to end. It needs a Lumen re-run on #104 with this change under it.
+
 ## 2026-10-12 · M8.89 · Every check measured against the scored archive (architecture stage 52)
 
 **Change** `gis_harness/validators_bench.py` replays the agent's validation checks offline (no

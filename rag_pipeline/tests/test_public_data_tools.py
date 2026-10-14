@@ -179,6 +179,66 @@ def test_a_failing_status_is_reported():
         run({TIGER: Resp(503, b"busy")})
 
 
+# The Planetary Computer's answer to assets=B04,B08, recorded 2026-10-12 (T08L's failure).
+PC_404 = (b'{"detail":"B04,B08 is not valid. Should be one of [\\u0027AOT\\u0027, \\u0027B01\\u0027, '
+          b'\\u0027B04\\u0027, \\u0027B08\\u0027, \\u0027SCL\\u0027, \\u0027visual\\u0027]"}')
+OVERPASS_400 = (b'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html><head>'
+                b'<title>OSM3S Response</title></head>\n<body>\n<p>The data included in this '
+                b'document is from www.openstreetmap.org. The data is made available under ODbL.'
+                b'</p>\n<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: '
+                b'Unknown type &quot;wayy&quot; </p>\n</body></html>')
+
+
+def test_a_failing_status_carries_what_the_service_said():
+    """Live, the code saw only "answered HTTP 404" while the body named the fix."""
+    with pytest.raises(pdt.Refused) as exc:
+        run({TIGER: Resp(404, PC_404, {"Content-Type": "application/json; charset=utf-8"})})
+    msg = str(exc.value)
+    assert "HTTP 404" in msg
+    assert "B04,B08 is not valid. Should be one of ['AOT', 'B01', 'B04', 'B08'" in msg
+    assert outputs() == []
+
+
+@pytest.mark.parametrize("body,ctype,want", [
+    (OVERPASS_400, "text/html", 'Error : line 1: parse error: Unknown type "wayy"'),
+    (b'{"error": {"code": 400, "message": "Invalid field: POP"}}', "application/json",
+     "Invalid field: POP"),
+    (b'{"detail": [{"loc": ["query", "bbox"], "msg": "field required"}]}', "application/json",
+     "field required"),
+    (b'{"code": "query.soql.no-such-column", "message": "No such column: wardd"}', "",
+     "No such column: wardd"),
+    (b"Too many requests\r\n\x1b[31m", "text/plain", "Too many requests"),
+])
+def test_the_excerpt_is_the_message_not_the_markup(body, ctype, want):
+    with pytest.raises(pdt.Refused) as exc:
+        run({TIGER: Resp(400, body, {"Content-Type": ctype})})
+    msg = str(exc.value)
+    assert want in msg
+    assert "<" not in msg and "\x1b" not in msg and "OSM3S" not in msg
+    assert "ODbL" not in msg, "the licence preamble is skipped, the error kept"
+
+
+def test_a_short_lead_in_before_the_error_is_kept():
+    with pytest.raises(pdt.Refused) as exc:
+        run({TIGER: Resp(400, b"Field POP: error, no such field", {"Content-Type": "text/plain"})})
+    assert '"Field POP: error, no such field"' in str(exc.value)
+
+
+def test_the_excerpt_is_short_and_reads_only_the_start_of_the_body():
+    body = b'{"detail": "' + b"x" * 50_000 + b'"}'
+    resp = Resp(500, body, {"Content-Type": "application/json"})
+    with pytest.raises(pdt.Refused) as exc:
+        run({TIGER: resp})
+    said = str(exc.value).split("the service said: ", 1)[1]
+    assert len(said) <= pdt._ERROR_EXCERPT_CHARS + 2 and said.endswith('…"')
+
+
+def test_an_empty_error_body_still_reports_the_status():
+    with pytest.raises(pdt.Refused) as exc:
+        run({TIGER: Resp(502, b"")})
+    assert str(exc.value) == "tigerweb.geo.census.gov answered HTTP 502"
+
+
 def test_an_arcgis_error_with_status_200_is_reported_not_saved():
     """TIGERweb answers a bad query with HTTP 200 and an error object. Saved, it would reach
     the code as a 'data' file holding no data."""
