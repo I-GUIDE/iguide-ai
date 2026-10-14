@@ -684,6 +684,48 @@ def delete_memory(memory_id: str) -> None:
         raise
 
 
+def delete_conversation(memory_id: str) -> Dict[str, Any]:
+    """Delete one conversation for good: its recorded turns, then the conversation itself.
+
+    Caller must already own it. Returns ``{"deleted": bool, "traces": n}``; ``deleted`` is False
+    only when the conversation was already gone. Raises if either store refuses, leaving the
+    conversation in place so the same request can be retried.
+
+    TRACES FIRST, because a trace's access is its conversation's (the traces route checks the
+    parent, not the trace). With the conversation gone and its traces left behind, the parent has
+    no owner, so ``assert_owner`` lets anyone holding the id through while
+    ``AGENT_TOKEN_STRICT=0``, and the traces are the whole question and answer of every turn.
+    Deleted in the other order, a failure halfway would leave exactly that. In this order it
+    leaves an owned conversation with fewer traces, which a retry finishes.
+
+    Files are NOT deleted. A file id is printed into answers as a download link and can be used
+    by the owner's other conversations, so a conversation does not own its files.
+    """
+    client = _get_opensearch_client()
+    try:
+        # `.keyword` for the reason `list_turn_traces` gives: a memory id tokenises on its hyphens,
+        # and a term query on the analysed field would match nothing and delete nothing, silently.
+        # `conflicts="proceed"`: a turn still being recorded must not abort the whole delete.
+        result = client.delete_by_query(
+            index=TRACE_INDEX,
+            body={"query": {"term": {"memory_id.keyword": memory_id}}},
+            conflicts="proceed", refresh=True)
+    except NotFoundError:
+        result = {"deleted": 0}         # no trace index yet: nothing was ever recorded
+    if result.get("failures"):
+        raise RuntimeError(f"could not delete every trace of {memory_id}: "
+                           f"{len(result['failures'])} failed")
+    traces = int(result.get("deleted") or 0)
+    try:
+        # `refresh="wait_for"` for the snapshot's reason, in reverse: the client re-lists the
+        # moment this returns, and a delete is not visible to search until the next refresh, so
+        # without it the conversation it just deleted comes straight back in the list.
+        client.delete(index=MEMORY_INDEX, id=memory_id, refresh="wait_for")
+    except NotFoundError:
+        return {"deleted": False, "traces": traces}
+    return {"deleted": True, "traces": traces}
+
+
 def _needs_context(new_query: str) -> bool:
     lowered = new_query.strip().lower()
     if not lowered:
@@ -928,6 +970,7 @@ __all__ = [
     "configure_embedder",
     "configure_opensearch_client",
     "create_memory",
+    "delete_conversation",
     "delete_memory",
     "form_comprehensive_user_query",
     "get_memory",
