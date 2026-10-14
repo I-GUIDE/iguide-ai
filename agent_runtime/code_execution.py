@@ -175,6 +175,9 @@ _IMPORT_TO_PIP = {
     "fiona": "fiona", "rasterio": "rasterio", "seaborn": "seaborn", "statsmodels": "statsmodels",
     "pyarrow": "pyarrow", "networkx": "networkx", "folium": "folium", "mapclassify": "mapclassify",
     "requests": "requests", "bs4": "beautifulsoup4", "PIL": "pillow", "openpyxl": "openpyxl",
+    # Baked into sandbox/Dockerfile with a numpy 2.4 shim. Listed so the probe sees the baked
+    # copy and a declared `pysheds` is not reinstalled (with numba and llvmlite) on every run.
+    "pysheds": "pysheds",
 }
 
 
