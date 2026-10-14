@@ -29,10 +29,26 @@ python -m gis_harness.run --summarise gis_harness/runs/baseline-81fd7c8
 `--start-server` launches `api/server.py` from this checkout with `AGENT_MODE=local`, so the
 run writes no conversation, snapshot or trace to shared infrastructure. It also blanks
 `GOOGLE_MAPS_API_KEY` (KB spatial search geocodes through Google, a metered call no task needs),
-and sets `AGENT_INVARIANT_GATE=1`, because the deployment's `AGENT_EXTRACTION=1` turns the code
-gate on. Runs made before that flag (the stage 41 baseline, stage 42 and 43's first after-runs)
-had the gate off; their scores say nothing about the gate. The rest of the extraction bundle (the
-Postgres record, the method-library contracts) is not reproduced locally.
+and sets `AGENT_EXTRACTION=1` and `AGENT_INVARIANT_GATE=1`, as the deployment does. Either can be
+overridden from the environment (`AGENT_EXTRACTION=0 python -m gis_harness.run ...`).
+
+- `AGENT_EXTRACTION=1` binds the code peer's staging tools (`stage_url`, `stage_element`,
+  `list_staged_inputs`) and the method-library tools (`kb_method_search`, `get_method_contract`).
+  **Every run before 2026-10-09 ran without them**: `baseline-4b066f6` through `p5-fixed-gate`
+  and `deployed-23cfd02-gate`. Their code peer bound 62–68 tools, none of them `stage_url`. A
+  task with no input that needs public data was therefore measured on a toolset production
+  does not have. (`stack-live-cases` is the one exception: a separate driver that set the
+  flag by hand.)
+- Before launching, the harness builds the staging tools under the server's environment and
+  refuses to start if the flag is on and `stage_url` is missing. After the run it reads every
+  code-peer `turn_instrumentation_toolset` line in `server.log` into `toolsets.json`. It exits 2
+  if any of them lacks `stage_url` while the flag is on.
+- `AGENT_INVARIANT_GATE=1` was added earlier, in `33426a5`. Runs before it (the stage 41
+  baseline, and the first after-runs of stages 42 and 43) had the gate off, so their scores say
+  nothing about the gate.
+- The Postgres read path (`AGENT_KB_DB`) is a separate switch and stays off, so
+  `kb_method_search` reads the on-disk method library, if one is present.
+
 `--base-url` uses a server you started yourself. Start it the same way.
 
 Output: `gis_harness/runs/<label>/<provider>_<model>/<task>.json` (score, answer, tool calls,
