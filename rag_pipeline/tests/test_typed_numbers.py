@@ -135,8 +135,23 @@ def test_a_measurement_carries_the_crs_its_operation_ran_in(tmp_path, monkeypatc
 def test_a_length_declared_in_a_geographic_crs_fails():
     rep = sv.run_checks({sv.DECLARED_OUTPUTS: {"d": {"value": 0.02, "unit": "km",
                                                        "crs": "EPSG:4326"}}})
-    findings, _ = declared_outputs.evaluate(rep)
+    measured = ("d = gdf.length.sum() / 1000\n"
+                "IGUIDE_OUTPUTS = {'d': {'value': d, 'unit': 'km', 'crs': 'EPSG:4326'}}\n")
+    findings, _ = declared_outputs.evaluate(rep, code=measured)
     assert any(f["check"] == "measured_in" and f["status"] == "fail" for f in findings)
+
+
+def test_a_length_not_measured_by_a_crs_operation_is_not_held_to_its_crs():
+    """Stage 54: a geodesic distance computed on 4326 coordinates is right in 4326, and a
+    figure whose computation the code does not show has no known kind. Neither fails."""
+    rep = sv.run_checks({sv.DECLARED_OUTPUTS: {"d": {"value": 0.02, "unit": "km",
+                                                       "crs": "EPSG:4326"}}})
+    geodesic = ("d = haversine(a, b)\n"
+                "IGUIDE_OUTPUTS = {'d': {'value': d, 'unit': 'km', 'crs': 'EPSG:4326'}}\n")
+    for code in (geodesic, None):
+        findings, _ = declared_outputs.evaluate(rep, code=code)
+        assert not any(f["check"] == "measured_in" and f["status"] == "fail"
+                       for f in findings), code
 
 
 def test_typed_outputs_become_facts_in_the_turn_log(tmp_path, monkeypatch):
@@ -162,7 +177,7 @@ def test_without_the_unit_library_declarations_are_unknown_not_passed(tmp_path, 
     (tmp_path / "checks.json").write_text(json.dumps({
         "verdict": "pass", "counts": {"pass": 1}, "findings": [],
         "declared": [{"name": "r", "value": 25000, "unit": None}]}))
-    monkeypatch.setattr(declared_outputs, "evaluate", lambda r: (_ for _ in ()).throw(
+    monkeypatch.setattr(declared_outputs, "evaluate", lambda r, code=None: (_ for _ in ()).throw(
         ImportError("No module named 'pint'")))
     report = code_execution._read_checks(tmp_path)
     assert report["verdict"] == "cannot_determine"

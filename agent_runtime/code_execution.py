@@ -494,7 +494,7 @@ def _note_printed_outputs(verification: Dict[str, Any], stdout: Any, work: Path)
         return verification
 
 
-def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
+def _read_checks(work: Path, stdout: Any = None, *, code: Optional[str] = None) -> Dict[str, Any]:
     """Load the invariant gate's report, if it wrote one.
 
     Absent is not a failure: the gate may be disabled, or the run may have died before the
@@ -504,6 +504,12 @@ def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
     *stdout* is the run's printed output. Its figures and the measuring calls' recorded values
     are typed here (agent_runtime/measured_outputs.py), so the unit and CRS checks run without
     the script declaring anything.
+
+    *code* is the script that ran. What each figure IS is read from it (stage 54,
+    agent_runtime/figure_kinds.py), and a check that needs a figure's kind or its reach applies
+    only when the code says so: a degree measurement only compared with zero or only printed
+    before a reprojected one, an empty column no line reads, a declared count that counted no
+    frame's rows. What was set aside is listed in `kind_notes`.
     """
     from agent_runtime.sandbox_verify import CHECKS_FILENAME
 
@@ -525,9 +531,15 @@ def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
     # values travel on the result as `outputs`: {name, value, unit, dimension, measured_in_crs}.
     outputs: List[Dict[str, Any]] = []
     try:
+        from agent_runtime import figure_kinds
+
+        data = figure_kinds.reclassify(data, code)
+    except Exception:  # noqa: BLE001 - a refinement; the report stands without it
+        pass
+    try:
         from agent_runtime import declared_outputs
 
-        extra, outputs = declared_outputs.evaluate(data)
+        extra, outputs = declared_outputs.evaluate(data, code=code)
         data = {**data, "findings": [*(data.get("findings") or []), *extra],
                 **declared_outputs.merge_verdict(data, extra)}
     except Exception as exc:  # noqa: BLE001 - the unit check must never cost the run its report
@@ -572,6 +584,7 @@ def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
             **({"reference": [_compact_reference(r) for r in data["reference"][:8]
                               if isinstance(r, dict)]}
                if data.get("reference") else {}),
+            **({"kind_notes": data["kind_notes"][:6]} if data.get("kind_notes") else {}),
             **({"error": data["error"]} if data.get("error") else {})}
 
 
@@ -1340,7 +1353,7 @@ class CodeExecutor:
             artifacts = [*source_artifacts,
                          *_persist_artifacts(work, {"script.py", CHECKS_FILENAME, ENVIRONMENT_FILENAME,
                                                     DECLARED_FILENAME, *staged, *unchanged})]
-            verification = _note_printed_outputs(_read_checks(work, stdout), stdout, work)
+            verification = _note_printed_outputs(_read_checks(work, stdout, code=code), stdout, work)
             # The reproducible record: run.py + manifest.json (image DIGEST, in-sandbox
             # environment, input hashes, library slice_shas) + inputs.jsonl. Written into the
             # run dir before it is carried back, so it lands in the durable workspace beside the

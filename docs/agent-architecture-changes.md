@@ -65,6 +65,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
 | 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
 | 53 | [Two runs that disagree, and a standard method recomputed](#stage-53) | 2026-10-12 | the same figure from two runs must agree; hand-written kriging, esda Gi*/Moran and the Gi*, Moran, slope and zonal tools are recomputed with a reference library from the run's own inputs; both are banners at 100% measured precision; the replayed banner goes from 40% / 13% to 74% / 56% |
+| 54 | [A figure's kind is read from the code that computed it](#stage-54) | 2026-10-12 | a static pass over the recorded code says what each declared figure is (a count of which frame's rows, of pixels or of list items; a statistic; a measurement; a column's value); the count, unit and CRS checks fire only when it is known; a degree measurement only compared with zero or only printed before a reprojected one, and an empty column no line reads, are set aside; banner false alarms 15 → 7 with every earned catch kept |
 | 55 | [Gi\* as Getis and Ord define it](#stage-55) | 2026-10-12 | `local_getis_ord` uses binary weights with the focal area included by default (it row-standardised): 13 hot spots on T09's lattice where it said 1; `transform` asks for another, `z_counts` counts the z-scores |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
@@ -8563,6 +8564,7 @@ The Sources line, replayed, leaves out a data source its record holds on 19 turn
   by what went wrong (method, data, arithmetic). That is step 4's input. The harness scorer's
   matching can credit an aside (the T10 relabels); `gis_harness/score.py` is unchanged here.
 
+
 ## Stage 53 — Two runs that disagree, and a standard method recomputed {#stage-53}
 
 *2026-10-12. Branch `claude/independent-evidence`, stacked on "Measured numbers reach the gate
@@ -8726,6 +8728,152 @@ itself after the tool, for instance.
   steps 4c to 4g.
 - **The sandbox image is not rebuilt.** Until it is, the kriging reference is numpy's.
 
+
+## Stage 54 — A figure's kind is read from the code that computed it {#stage-54}
+
+*2026-10-12. Branch `claude/figure-kinds`, stacked on "Every check measured against the scored
+archive" (stage 52). DEVLOG M8.91. Step 3 of the five-step validation plan: infer what a number is
+from how it was computed. Stage 53 ("Two runs that disagree, and a standard method recomputed",
+steps 4a/4b) is on its own branch; neither changes the other's files except `_read_checks`' signature
+and the bench's replay, and both merges are small. No model call, no deploy.*
+
+**Why.**
+
+The checks decided what a number was after the fact: from the model's `IGUIDE_OUTPUTS` declaration
+(its unit word), or by comparing it with every frame in the run. Stage 52's benchmark found that
+every banner the count check and the declared-unit check raised was a false alarm, along with five
+of the `projected_crs` and `all_nan` findings. Each is a number whose kind the check guessed:
+
+| false-alarm class (stage 52) | findings / turns | what the code says |
+|---|---|---|
+| count check: a count of things that are not frame rows | 8 / 4 | `len(list(qual.geoms))` (239 patches), `int(valid.sum())` over a raster mask (1,000,557 pixels), `int(top['population'])` (2,344 residents), `tracts['population'].sum()` (116,425) |
+| a mean or median typed as a count | 3 / 1 | `float(np.nanmean(ndvi_county))` declared with the unit "NDVI (dimensionless)", which the unit library reads as a count of NDVI |
+| `projected_crs`: an exploratory print in degrees | 3 / 3 | `print(gdf.geometry.area)`, then `gdf.to_crs("EPSG:26916").geometry.area` on the next lines |
+| `projected_crs`: a degree area used only as a non-zero test | 2 / 1 | `tracts[tracts['geom_in_city'].area > 0]`: a sign test, which degrees answer as metres do |
+| `all_nan`: an optional column empty after a join that matched | 7 / 3 | `gpd.sjoin(schools, buffer, how='inner')`; `old_operator`, `wikidata`, `wikipedia` are named by no line of the code |
+
+**What changed.**
+
+1. **`agent_runtime/figure_kinds.py`**, a static pass over the recorded code (the AST, with each
+   name resolved to its nearest binding above the use). It gives each declared figure a `Kind`:
+   - **count**, saying what it counts:
+     - rows of frame F: `len(F)`, `F.shape[0]`, a sum over a mask of F's column,
+       `value_counts`, `groupby().size()`, `.count()`. The kind also records the frame those rows
+       were drawn from (`tracts` for `len(tracts[mask])`);
+     - array elements (pixels): `mask.sum()` over an array, `np.count_nonzero`;
+     - list items: `len(a_list)`;
+     - labelled features: `ndimage.label`;
+     - distinct values: `nunique`, `len(unique)`;
+   - a statistic: mean, median, std, quantile, sum, min or max;
+   - a measurement in the receiver CRS's units: area, length or distance;
+   - a value of a column: `F.loc[i, 'col']`, `row['col']`, `top.iloc[0]['population']`;
+   - a ratio: the quotient of two figures, or a count scaled by a constant;
+   - **unknown**: anything else, e.g. a helper function's result or a loop variable.
+
+   Scaling by a constant keeps the kind: `area / 1e6` is still an area. The pass also reports,
+   for a metric operation the gate's tracker recorded, where its value goes (`sinks`), the
+   columns the code could read, and whether a frame is an inner join's result. Over the 238
+   distinct declared outputs in the archive, 135 get a known kind and 103 stay unknown, mostly
+   values computed in helper functions or loops.
+2. **The model's declaration is a hint.** `declared_outputs.evaluate(report, code=...)` types each
+   output by the computation (`figure_kind` on the typed output; `declared_as: "count"` when the
+   declaration said otherwise). The checks that need a kind fire only when it is known:
+   - fractional or negative: only for what the code counted;
+   - `count_population`: only for a count of a frame's ROWS, compared with that frame's own size,
+     and only when the frame keeps its rows for the whole run. A frame filtered after the count
+     was taken is smaller when the run ends. The old rule failed a count larger than every frame
+     in the run;
+   - `measured_in` (a length or area declared in a geographic CRS): only for a figure the code
+     measured with `.area`, `.length` or `.distance`. A geodesic distance computed on 4326
+     coordinates is right in 4326;
+   - an unknown kind never fails. It is recorded on the typed output, and nothing is printed.
+3. **`figure_kinds.reclassify`** runs on the gate's report in `_read_checks` (now
+   `_read_checks(work, code=...)`) and in the bench's replay. A sandbox FAIL that does not apply
+   becomes a pass and is listed in the payload's `kind_notes`:
+   - **`projected_crs`** applies to a degree measurement that reaches the answer. It does not
+     reach when its value is only compared with zero, never used, only counted, only tested for
+     truth, or only printed by a run that measures the same quantity again on a copy of the same
+     frame reprojected to a projected CRS. `to_crs(<literal>)` is read with pyproj,
+     `estimate_utm_crs()` counts, and so does a line the tracker recorded as projected. A value
+     compared with a non-zero threshold reaches: it picks rows by a number in degrees. So does a
+     value the pass cannot follow (passed to a function, returned, stored in a column) and a line
+     the code does not hold.
+   - **`all_nan`** on a join result is set aside when the join matched and no line of the code
+     reads any of the empty columns. "Matched" means an inner join by construction (sjoin's and
+     merge's default, overlay's intersection), or, from the sandbox, a non-null index column.
+     "Optional" means named by no string constant or attribute in the code. Dict-literal keys
+     are excluded from that, since they build data and read none. An empty `index_right` still
+     fails: nothing matched. So does an empty column the code reads, which is a number computed
+     from nothing.
+4. **The sandbox's `all_nan`** (`check_not_all_nan`) now reports an empty column in a matched join
+   as a FAIL with `join_matched: true`, for the agent side to decide from the code. "A banner only
+   when a check found something" (stage 46) passed every such column, including one the code sums.
+   With no script to read (a run from a workspace file), the stage 46 pass stands.
+5. **The bench's replay** (`replay_report(rep, code)`) runs `reclassify` and the kind-aware
+   `evaluate` on each run's recorded code. The sandbox findings it used to take as fixed inputs are
+   therefore re-judged offline from the archive.
+
+**Measured** (`python3 -m gis_harness.validators_bench --baseline <stage 52 report>`; 462
+replayable turns, 77 wrong).
+
+| banner, replayed | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
+|---|---|---|---|---|---|---|
+| stage 52 | 10 (6) | 15 | 40% | 13% | 24% | 8% |
+| stage 54 | 7 (6) | 7 | 50% | 9% | 43% | 8% |
+
+| check, printed | on correct | on wrong (coincidental) | on refusal | precision | recall | precision earned | recall earned |
+|---|---|---|---|---|---|---|---|
+| gate `projected_crs` | 4 → 0 | 2 (0) → 2 (0) | 0 | 33% → 100% | 3% → 3% | 33% → 100% | 3% → 3% |
+| gate `count_population` | 4 → 0 | 3 (3) → 0 | 0 | 43% → – | 4% → – | 0% → – | 0% → – |
+| gate `declared_units` | 1 → 0 | 1 (1) → 0 | 0 | 50% → – | 1% → – | 0% → – | 0% → – |
+| gate `all_nan` | 3 → 0 | 0 | 0 | 0% → – | 0% → – | 0% → – | 0% → – |
+| gate `finite_value` | 1 → 1 | 0 | 0 | 0% → 0% | 0% | 0% | 0% |
+| audit | 6 → 5 | 1 (1) → 1 (1) | 1 → 1 | 12% → 14% | 1% → 1% | 0% → 0% | 0% → 0% |
+| peer failed | 0 | 4 (0) → 4 (0) | 0 | 100% | 5% | 100% | 5% |
+
+- **No earned catch is lost.** The six turns whose banner carries a related finding are the same
+  before and after: the two U04 degree distances and the four peer failures. U04's
+  `min(gdf.geometry.distance(dest_pt))` is printed, and nothing in the run measures a distance
+  again, so it reaches.
+- **The three wrong turns that lost their banner** (`threeway-bridge` T11L, `threeway-bridge-fix2`
+  T11L, `threeway-bridge-fix3` T08L) had only coincidental catches: patch and pixel counts, and the
+  NDVI mean, on answers wrong for other reasons.
+- **Eliminated, all five classes:** count of non-rows (8 findings on 4 turns → 0), mean typed as a
+  count (3 on 1 → 0), exploratory print (3 on 3 → 0), non-zero test (2 on 1 → 0), optional empty
+  column (7 on 3 → 0).
+- **Two side effects, both from code this stage does not change:**
+  - On `threeway-bridge-fix4` T08L, a correct answer, the auditor's items no longer print: six on
+    the full archive, three of them on the fixture subset. Its severity is not recorded, and
+    `_reconcile_audit_with_artifacts` sets it from the gate's verdict: high under a gate FAIL,
+    medium under a gate `cannot_determine`. The items printed only because the false count FAIL
+    made the severity "high". The bench files them as claims the record holds, a tool
+    description's fact, or knowledge in no record.
+  - On two T01 turns, the number scan's payload-only "not in any record" list gains "3857". That
+    figure resolved only to the gate's own remedy text ("e.g. .to_crs(3857)"), which a passed
+    finding no longer carries.
+- **Fixtures** (`gis_harness/fixtures/validators_bench/expected.md`, updated for this change):
+  - replayed banner: 6 wrong (4 earned) and 8 not wrong → 4 (4) and 4. Precision 43% → 50%,
+    recall 86% → 57%; earned precision 29% → 50%, earned recall 57% → 57%. The two wrong turns
+    it no longer marks carried only count findings;
+  - `projected_crs` precision 50% → 100%;
+  - `count_population` and `declared_units` no longer fire;
+  - the audit no longer prints on T08L fix4 (correct), as described above.
+
+  Verified on linux/amd64 `python:3.11-slim` with `constraints.txt`.
+
+**Not done.**
+
+- **Printed figures are not typed.** "Measured numbers reach the gate without being declared"
+  (stage 48, another branch) types what a run prints. `Analysis.printed()` gives each printed
+  figure's kind and label for when the two meet, and for claim-level verdicts (step 5).
+- **Name resolution is textual.** A name rebound in a loop or a function resolves to its nearest
+  binding above the use. A wrong resolution gives an unknown or too-general kind, and by
+  construction that is silent.
+- **`finite_value` is unchanged.** A declared NaN (`max_depth_below_205m`, `threeway-bridge` T07L)
+  on a correct answer still prints. Whether a declared value reaches the answer is the number
+  scan's question.
+- **The severity coupling.** A gate verdict overrides the auditor's severity. That deserves its
+  own measurement.
 
 ## Stage 55 — Gi\* as Getis and Ord define it {#stage-55}
 

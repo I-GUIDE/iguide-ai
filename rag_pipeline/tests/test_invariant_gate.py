@@ -100,12 +100,30 @@ def test_an_all_null_column_in_a_JOIN_result_is_a_hard_failure():
 def test_a_join_that_matched_with_sparse_source_columns_passes():
     """Stage 46. An sjoin of OpenStreetMap schools to a buffer matched every school, but OSM's
     optional tags (`old_operator`, `wikidata`) were empty on all of them. The join worked; the
-    nulls are the source's. Failing it put "Check this answer" on correct T02L answers."""
+    nulls are the source's. Failing it put "Check this answer" on correct T02L answers.
+
+    Stage 54: whether an empty column matters is the CODE's to say. The sandbox reports the
+    column with `join_matched`; the agent side sets it aside when no line reads it, and keeps it
+    when one does (a population summed from an empty column is a number computed from nothing).
+    With no script to read, the stage 46 pass stands."""
+    from agent_runtime import figure_kinds
+
     frame = pd.DataFrame({"name": ["A", "B"], "old_operator": [None, None],
                           "wikidata": [None, None], "index_right": [0, 0]})
     out = check_not_all_nan("schools_in_buffer", frame)
-    assert out["status"] == PASS
-    assert "old_operator" in out["columns"] and "not a failed join" in out["message"]
+    assert out["status"] == FAIL and out["join_matched"] is True
+    assert "old_operator" in out["columns"]
+
+    report = {"verdict": FAIL, "counts": {FAIL: 1}, "findings": [out]}
+    unread = ("schools_in_buffer = gpd.sjoin(schools, buffer, predicate='within')\n"
+              "print(len(schools_in_buffer))\n")
+    kept = figure_kinds.reclassify(report, unread)
+    assert kept["verdict"] == PASS and kept["kind_notes"][0]["check"] == "all_nan"
+    assert "no line of the code reads" in kept["kind_notes"][0]["why"]
+
+    read = unread + "ops = schools_in_buffer['old_operator'].value_counts()\n"
+    assert figure_kinds.reclassify(report, read)["verdict"] == FAIL
+    assert figure_kinds.reclassify(report, None)["verdict"] == PASS
 
 
 def test_merge_suffixes_also_count_as_join_evidence():
@@ -410,28 +428,34 @@ def test_a_clean_run_with_no_audit_is_left_completely_alone():
 
 # ------------------------------------------------------------------ declared units + bounds
 
-def _declared(outputs, **namespace):
+def _declared(outputs, code=None, **namespace):
     """The whole path a declaration takes since stage 43: the sandbox reports it as written,
-    and the agent side (declared_outputs.py, with a unit library) judges the unit."""
+    and the agent side (declared_outputs.py, with a unit library) judges the unit. *code* is
+    the script: since stage 54 what a value IS (a count of a frame's rows, a mean, ...) is read
+    from it, and a count is checked as a count only when the code counted."""
     from agent_runtime import declared_outputs
     from agent_runtime.sandbox_verify import DECLARED_OUTPUTS
 
+    if code is not None and DECLARED_OUTPUTS not in code:
+        # Each key declared from the variable of the same name, as a script writes it.
+        code += f"{DECLARED_OUTPUTS} = {{" + ", ".join(
+            f"{k!r}: {{'value': {k}}}" for k in outputs) + "}\n"
     rep = run_checks({DECLARED_OUTPUTS: outputs, **namespace})
-    extra, typed = declared_outputs.evaluate(rep)
+    extra, typed = declared_outputs.evaluate(rep, code=code)
     return {**rep, "findings": [*rep["findings"], *extra], "outputs": typed,
             **declared_outputs.merge_verdict(rep, extra)}
 
 
-def check_declared_units(outputs):
+def check_declared_units(outputs, code=None):
     """Stage 43: the declared-output findings, through the sandbox AND the agent-side unit
     check, since units are no longer judged inside the sandbox."""
-    return [f for f in _declared(outputs)["findings"]
+    return [f for f in _declared(outputs, code=code)["findings"]
             if f["check"] in ("declared_units", "declared_value", "finite_value", "output_bounds",
                               "measured_in")]
 
 
-def check_count_population(outputs, namespace, max_frames=12):
-    return [f for f in _declared(outputs, **namespace)["findings"]
+def check_count_population(outputs, namespace, code=None, max_frames=12):
+    return [f for f in _declared(outputs, code=code, **namespace)["findings"]
             if f["check"] == "count_population"]
 
 
@@ -908,7 +932,10 @@ def test_a_unit_nobody_can_parse_is_still_flagged():
     not a unit stays cannot_determine, and a plural word is a count, checked as one."""
     findings = check_declared_units({"x": {"value": 1, "unit": "km/hr^^"}})
     assert any(f["status"] == UNKNOWN for f in findings)
-    assert _declared({"x": {"value": 1.5, "unit": "bananas"}})["verdict"] == FAIL
+    # "bananas" is a count of bananas, and a count the code computed must be whole (stage 54:
+    # the code says whether it counted).
+    assert _declared({"x": {"value": 1.5, "unit": "bananas"}},
+                     code="x = len(basket) - 0.5\n")["verdict"] == FAIL
 
 
 # ------------------------------------------------------------- counts are checkable numbers
@@ -926,12 +953,15 @@ def test_the_words_people_actually_use_for_a_count_are_recognised(unit):
 
 
 def test_recognising_a_count_is_not_the_same_as_checking_it():
-    """A negative or fractional count is wrong whatever produced it. Recognising the unit and then
-    passing is how 'unit count' would score a pass for a value of -3."""
-    negative = check_declared_units({"n": {"value": -3, "unit": "records"}})
+    """A negative or fractional count is wrong. Recognising the unit and then passing is how
+    'unit count' would score a pass for a value of -3. Since stage 54 the CODE says whether the
+    value is a count: the checks apply to what the code counted."""
+    negative = check_declared_units({"n": {"value": -3, "unit": "records"}},
+                                    code="n = len(rows) - 10\n")
     assert any(f["check"] == "declared_units" and f["status"] == "fail" for f in negative)
 
-    fractional = check_declared_units({"n": {"value": 12.5, "unit": "count"}})
+    fractional = check_declared_units({"n": {"value": 12.5, "unit": "count"}},
+                                      code="n = len(rows) + 0.5\n")
     assert any(f["check"] == "declared_units" and f["status"] == "fail" for f in fractional)
 
     whole = check_declared_units({"n": {"value": 27824, "unit": "records"}})
@@ -951,9 +981,10 @@ def test_a_count_larger_than_every_frame_in_the_run_fails():
     question about 128,886 records with counts from a 49,789-row spatially-joined subset."""
     pd = pytest.importorskip("pandas")
     namespace = {"df": pd.DataFrame({"a": range(40000)})}
-    findings = check_count_population({"total": {"value": 128886, "unit": "records"}}, namespace)
+    findings = check_count_population({"total": {"value": 128886, "unit": "records"}}, namespace,
+                                      code="import pandas as pd\ndf = pd.read_csv('incidents.csv')\ntotal = len(df)\n")
     assert [f["status"] for f in findings] == ["fail"]
-    assert "exceeds every frame" in findings[0]["message"]
+    assert "`df` has 40000 rows" in findings[0]["message"]
 
 
 def test_a_plausible_count_reports_the_population_it_came_from():
@@ -962,10 +993,27 @@ def test_a_plausible_count_reports_the_population_it_came_from():
     right question."""
     pd = pytest.importorskip("pandas")
     namespace = {"df": pd.DataFrame({"a": range(128886)})}
-    findings = check_count_population({"theft": {"value": 27824, "unit": "records"}}, namespace)
+    findings = check_count_population({"theft": {"value": 27824, "unit": "records"}}, namespace,
+                                      code=("import pandas as pd\ndf = pd.read_csv('incidents.csv')\n"
+                                            "theft = int((df['a'] < 27824).sum())\n"))
     assert findings[0]["status"] == "pass"
-    assert "df=128886" in findings[0]["message"]
+    assert "128886 rows of `df`" in findings[0]["message"]
     assert findings[0]["frames"] == {"df": 128886}
+
+
+def test_a_count_of_something_other_than_rows_is_not_compared_with_frames():
+    """Stage 54. The bench's count findings were all of this class: 239 patches from
+    `len(list(geom.geoms))`, 1,000,557 pixels from a raster mask's sum, 2,344 residents read
+    from a column. None counts a frame's rows, so none is compared with one."""
+    pd = pytest.importorskip("pandas")
+    namespace = {"county": pd.DataFrame({"a": [1]})}
+    for code, value in (("patches = list(qual.geoms)\nn = len(patches)\n", 239),
+                        ("import numpy as np\nvalid = np.isfinite(ndvi)\nn = int(valid.sum())\n",
+                         1000557),
+                        ("top = county.iloc[0]\nn = int(top['population'])\n", 2344),
+                        ("n = None\n", 2344)):
+        assert check_count_population({"n": {"value": value, "unit": "count"}}, namespace,
+                                      code=code) == [], code
 
 
 def test_a_non_count_output_is_not_population_checked():
@@ -1095,7 +1143,8 @@ def test_a_numeric_string_is_still_a_measurement():
     assert _declared({"r": {"value": "10.0", "unit": "km"}})["verdict"] == PASS
     assert _declared({"r": {"value": "10.0", "unit": "km/hr^^"}})["verdict"] == UNKNOWN
     assert _declared({"r": {"value": "10.0", "unit": None}})["verdict"] == FAIL
-    assert _declared({"n": {"value": "-3", "unit": "points"}})["verdict"] == FAIL
+    assert _declared({"n": {"value": "-3", "unit": "points"}},
+                     code="n = len(pts) - 5\n")["verdict"] == FAIL
 
 
 def test_a_number_with_an_unparseable_unit_is_still_unknown():
@@ -1128,8 +1177,10 @@ def test_the_geometry_and_zone_nouns_are_counts(unit):
 
 
 def test_a_geometry_noun_count_is_still_checked_as_a_count():
-    assert _declared({"n": {"value": 2.5, "unit": "tracts"}})["verdict"] == FAIL
-    assert _declared({"n": {"value": -1, "unit": "points"}})["verdict"] == FAIL
+    assert _declared({"n": {"value": 2.5, "unit": "tracts"}},
+                     code="n = tracts.shape[0] + 0.5\n")["verdict"] == FAIL
+    assert _declared({"n": {"value": -1, "unit": "points"}},
+                     code="n = len(points) - 2\n")["verdict"] == FAIL
 
 
 def test_the_live_run_passes_through_the_assembled_gate(tmp_path, monkeypatch):
@@ -1174,8 +1225,10 @@ def test_a_count_named_as_one_is_a_count_whatever_was_counted():
 def test_a_count_needs_a_whole_non_negative_number_whatever_it_is_called():
     """Stage 43: the output's NAME no longer decides anything. A plural unit word is a count
     and must be whole and non-negative; a real unit is a measurement."""
-    assert _declared({"x": {"value": 2.5, "unit": "schools"}})["verdict"] == FAIL
-    assert _declared({"x": {"value": -1, "unit": "schools"}})["verdict"] == FAIL
+    assert _declared({"x": {"value": 2.5, "unit": "schools"}},
+                     code="x = len(schools) + 0.5\n")["verdict"] == FAIL
+    assert _declared({"x": {"value": -1, "unit": "schools"}},
+                     code="x = len(schools) - 3\n")["verdict"] == FAIL
     assert _declared({"distance": {"value": 3, "unit": "furlongs"}})["verdict"] == PASS
     assert _declared({"num_x": {"value": 3, "unit": "km/h"}})["verdict"] == PASS
 

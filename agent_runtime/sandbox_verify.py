@@ -231,14 +231,16 @@ def check_not_all_nan(name: str, frame: Any) -> Dict[str, Any]:
     if bad:
         matched = _join_matched_rows(frame)
         if _looks_like_join_result(frame) and matched:
-            # The join matched rows, so an all-null column is the data's own sparsity, not a
-            # failed join: OpenStreetMap's optional tags (`old_operator`, `wikidata`) are empty
-            # for most features. Failing it put "Check this answer" on correct T02L answers in
-            # p4-gate and p5-gate (stage 46). A join that matched NOTHING still fails below.
-            return _finding("all_nan", PASS, name,
-                            f"joined rows matched, though {len(bad)} column(s) are entirely null "
-                            f"({', '.join(bad)}) — sparse attributes in the source, not a failed "
-                            f"join", columns=bad)
+            # The join matched rows, so an all-null column is either the data's own sparsity or
+            # a number computed from nothing, and only the CODE can tell which: OpenStreetMap's
+            # optional tags (`old_operator`, `wikidata`) are empty for most features and no line
+            # reads them; a population column empty after the join is summed. Stage 46 passed
+            # every such column; stage 54 reports it with `join_matched`, and the agent side
+            # (figure_kinds.reclassify) sets it aside when no line of the code reads it.
+            return _finding("all_nan", FAIL, name,
+                            f"column(s) entirely null in a join that matched rows: "
+                            f"{', '.join(bad)} — a number computed from them is computed from "
+                            f"nothing", columns=bad, join_matched=True)
         if _looks_like_join_result(frame):
             return _finding("all_nan", FAIL, name,
                             f"column(s) entirely null: {', '.join(bad)} — this frame is a join "
