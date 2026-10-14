@@ -89,7 +89,8 @@ CORRECT, WRONG, REFUSAL = "correct", "wrong", "refusal"
 LABELS = (CORRECT, WRONG, REFUSAL)
 
 # Turns the harness scored wrongly, read by hand. The label here replaces the score's; the stage 46
-# reproduction keeps the score as it was, because it reproduces a measurement made from it.
+# reproduction keeps the score as it was, because it reproduces a measurement made from it. Since
+# S52.1 the scorer itself no longer credits an aside, so a new run needs none of the T10 entries.
 # T10: the answer reports 295.1 ppm (exp of the kriged log, 5.6872), and the scorer matched an
 # aside, the lognormal back-transform exp(5.6872 + 0.1158/2) of 311-312.6 ppm that the answer
 # says it does NOT report, within 1% of the expected 309.53.
@@ -100,6 +101,15 @@ LABEL_OVERRIDES: Dict[str, Tuple[str, str]] = {
                 "p3-after/lumen_deepseek-v4-flash/T10",
                 "p5-gate/lumen_deepseek-v4-flash/T10",
                 "p5-fixed-gate/lumen_deepseek-v4-flash/T10")}
+# A score stored before a scorer fix and never re-summarised: the answer's "M7.1" was not read as
+# a magnitude until gis_harness 3cd7b9c2, after p2-gate ran. Found by `rescore` (scorer_disagrees).
+LABEL_OVERRIDES["p2-gate/lumen_deepseek-v4-flash/T12"] = (
+    CORRECT, "T12: stored before the scorer read M7.1 as a magnitude")
+# U04: the answer says no route reaches the destination, then gives the travel time to the
+# network's farthest node "for reference only ... not the requested destination". A disclosed
+# substitute, which the scorer read as a fabricated travel time until S52.1.
+for _tid in ("p3-after/lumen_deepseek-v4-flash/U04.t1", "p5-gate/lumen_deepseek-v4-flash/U04"):
+    LABEL_OVERRIDES[_tid] = (REFUSAL, "U04: a reference figure in an aside after a refusal")
 
 # The state keys the replay reads. Everything else in the `result` event is left behind.
 _STATE_KEYS = ("query", "evidence", "analysis_results", "code_result", "audit", "verdict",
@@ -121,6 +131,9 @@ class BenchTurn:
     query: str
     answer: str
     state: Dict[str, Any] = field(default_factory=dict)
+    rescored: Optional[str] = None  # the label by this checkout's scorer (see rescore)
+    expected: Optional[Dict[str, Any]] = None   # the task's expected values, which rescore reads
+    hand_scored: bool = False       # scored by a person (the live sweep): not re-scored
 
     @property
     def body(self) -> str:
@@ -147,6 +160,37 @@ def stage46_label(score: Dict[str, Any]) -> Optional[bool]:
         c = score.get("correct")
         return None if c is None else (not c)
     return score.get("refusal") is False
+
+
+def hand_scored(d: Dict[str, Any]) -> bool:
+    """A score a person gave: the live browser sweep's, and any refusal recorded as a plain
+    flag. These stand as given; only the harness scorer's own scores are re-scored."""
+    score = d.get("score") if isinstance(d.get("score"), dict) else {}
+    return bool(d.get("live")) or isinstance(score.get("refusal"), bool)
+
+
+def rescore(d: Dict[str, Any]) -> Optional[str]:
+    """The label by this checkout's scorer (`score.check_value`, `score.refusal`), from the
+    turn's answer and expected values; None when the task, its expected values or the outcome
+    are not known, or the turn was scored by hand."""
+    if d.get("hand_scored") or hand_scored(d):
+        return None
+    from gis_harness.score import check_value, refusal
+    from gis_harness.tasks import BY_ID
+
+    task = BY_ID.get(str(d.get("task")))
+    if task is None:
+        return None
+    answer = str(d.get("answer") or "")
+    if not task.solvable:
+        outcome = refusal(answer, task.fabrication)["outcome"]
+        return {"refused": REFUSAL, "substituted": REFUSAL, "fabricated": WRONG}.get(outcome)
+    expected = d.get("expected")
+    checks = [c for c in task.checks if isinstance(expected, dict) and c.name in expected]
+    if not checks:
+        return None
+    ok = bool(answer) and all(check_value(c, expected, answer)["matched"] for c in checks)
+    return CORRECT if ok else WRONG
 
 
 def strip_banner(answer: str) -> str:
@@ -249,7 +293,9 @@ def from_archive(path: Path, root: Path) -> Optional[BenchTurn]:
     return BenchTurn(id=tid, run=run, model=model, task=str(d.get("task") or path.stem),
                      label=LABEL_OVERRIDES.get(tid, (label(score), ""))[0],
                      stage46_wrong=stage46_label(score), query=str(d.get("query") or ""),
-                     answer=str(d.get("answer") or ""), state=compact_state(state))
+                     answer=str(d.get("answer") or ""), state=compact_state(state),
+                     rescored=rescore(d), expected=d.get("expected"),
+                     hand_scored=hand_scored(d))
 
 
 def iter_archive(root: Path) -> Iterable[BenchTurn]:
@@ -913,7 +959,12 @@ def _evaluate(turns: List[BenchTurn]) -> Dict[str, Any]:
         "turns": {"scored": len(scored), **{lab: counts[lab] for lab in LABELS},
                   "unscored": len(turns) - len(scored), "replayable": len(replayable),
                   "audit_severity_inferred": inferred,
-                  "relabelled": sum(1 for t in scored if t.id in LABEL_OVERRIDES)},
+                  "relabelled": sum(1 for t in scored if t.id in LABEL_OVERRIDES),
+                  # The stored score is the harness scorer's at run time. A turn this checkout's
+                  # scorer reads differently from the label used here is scorer drift, or a
+                  # relabel the scorer still gets wrong.
+                  "scorer_disagrees": sorted(t.id for t in scored
+                                             if t.rescored and t.rescored != t.label)},
         "stage46_reproduction": {
             "runs": sorted(STAGE46_RUNS),
             **banner_score(stage46, stage46_banner, wrong_of=lambda t: t.stage46_wrong)},
@@ -943,7 +994,8 @@ def markdown(rep: Dict[str, Any], *, title: str) -> str:
     lines = [f"# {title}", "",
              f"{T['scored']} scored turns: {T['correct']} correct, {T['wrong']} wrong, "
              f"{T['refusal']} honest refusals ({T['unscored']} left out, unscored; "
-             f"{T.get('relabelled', 0)} relabelled by hand, see LABEL_OVERRIDES). "
+             f"{T.get('relabelled', 0)} relabelled by hand, see LABEL_OVERRIDES; this checkout's "
+             f"scorer disagrees with {len(T.get('scorer_disagrees', []))} labels). "
              f"{T['replayable']} carry the supervisor state the replay needs; on "
              f"{T['audit_severity_inferred']} of them the auditor's own severity was not recorded "
              f"and is inferred.", "",
@@ -1050,7 +1102,16 @@ def scrub(obj: Any) -> Any:
 
 
 def load_fixtures(path: Path) -> List[BenchTurn]:
-    return [BenchTurn(**json.loads(line)) for line in path.read_text().splitlines() if line]
+    """The committed turns, re-scored by this checkout's scorer, so CI sees a scorer change too."""
+    turns = []
+    for line in path.read_text().splitlines():
+        if not line:
+            continue
+        t = BenchTurn(**json.loads(line))
+        t.rescored = rescore({"task": t.task, "expected": t.expected, "answer": t.answer,
+                              "hand_scored": t.hand_scored})
+        turns.append(t)
+    return turns
 
 
 def make_fixtures(root: Path, ids: List[str], out: Path) -> None:

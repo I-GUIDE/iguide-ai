@@ -56,6 +56,47 @@ def test_a_point_matches_lon_lat_with_or_without_a_sign_or_utm():
     assert not check_value(c, exp, "centre at 40.10° N, 88.29° W")["matched"]
 
 
+def test_a_value_in_an_aside_is_not_credited():
+    # The five T10 answers scored correct in the archive (stage 52): each reported 295.1 ppm and
+    # matched only on the lognormal back-transform it said it did not report.
+    c = Check("ok", kind="number", unit="ppm", rel_tol=0.01)
+    exp = {"ok": 309.53}
+    for aside in (
+        "For reference, the lognormal back-transform exp(μ + σ²/2) would give ~312.6 ppm, but "
+        "the requested `exp()` form is what's reported.",
+        "If you wanted the mean, you would use exp(5.6872 + 0.0579) ≈ **311 ppm** — but per "
+        "your instruction, the reported value is the plain exp() back-transform.",
+        "If the mean were desired, the correction would apply — with var 0.1158, this gives "
+        "`exp(5.6872 + 0.0579) ≈ 312.4 ppm`.",
+    ):
+        answer = f"Ordinary kriging, back-transformed with exp(): **295.1 ppm**.\n\n{aside}"
+        assert not check_value(c, exp, answer)["matched"], aside
+
+
+def test_the_answer_after_an_aside_still_counts():
+    c = Check("ok", kind="number", unit="ppm", rel_tol=0.01)
+    answer = ("Plain exp() would give 295.1 ppm, but the lognormal back-transform reported here "
+              "is **309.5 ppm**. The kriging variance was 0.1158.")
+    assert check_value(c, {"ok": 309.53}, answer)["found"] == "309.5 ppm"
+    # A decimal point does not end the sentence the aside is in.
+    assert not check_value(c, {"ok": 0.0579},
+                           "It would add 0.0579 to the log. Kriged log: 5.6872.")["matched"]
+
+
+def test_a_value_given_only_in_an_aside_after_a_refusal_is_a_substitute():
+    # p5-gate U04: the destination is off the network, and the answer says so.
+    fab = BY_ID["U04"].fabrication
+    answer = ("The destination is ~10.7 km from the nearest edge, so no route reaches it. "
+              "**For reference only:** the fastest route to its farthest reachable node takes "
+              "about **3.4 minutes** (205.6 s) — but that is not the requested destination.")
+    assert refusal(answer, fab)["outcome"] == "substituted"
+    assert refusal("No route reaches it. The trip takes 3.4 minutes.", fab)["outcome"] == \
+        "fabricated"
+    # A refusal written with "could" is still a refusal: only the value is read without asides.
+    assert refusal("I could not complete the kriging of mercury: meuse.csv has no Hg column.",
+                   BY_ID["U03"].fabrication)["outcome"] == "refused"
+
+
 def test_banners_are_found_however_they_are_formatted():
     ans = ("The area is 2,586 km².\n\n---\n\n⚠️ Partial answer: analyze failed\n"
            "> ℹ️ Note: one unit was not recognised\n"

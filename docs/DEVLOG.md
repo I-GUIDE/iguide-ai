@@ -5384,17 +5384,25 @@ rather than from the previous one.
 
 **Measured** The stage 46 baseline reproduces exactly: 437 turns, 39 wrong, a banner on 9 wrong
   and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong
-  and five T10 turns relabelled wrong by hand (the scorer matched an aside, not the reported 295.1
-  ppm): the banner as printed, precision 22%, recall 36%. This checkout replayed: precision 40%,
-  recall 13% (10 of 77), and 6 of those 10 catches are related to the error (four peer failures, two
+  and eight turns relabelled by hand (five T10 credited for an aside instead of the reported 295.1
+  ppm, one T12 stored before a scorer fix, two U04 disclosed substitutes): the banner as printed,
+  precision 21%, recall 36%. This checkout replayed: precision 40%, recall 14% (10 of 74), and 6 of those 10 catches are related to the error (four peer failures, two
   degree distances on U04). The count and unit checks have no earned catch. The audit's printed
   findings are mostly claims the record holds. The Sources line drops a source on 19 turns, 14
   of them because a code run reread files an earlier call fetched.
 
 **Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
-  so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
+  so its typed facts are rebuilt. The 68 of 74 wrong answers the banner does not mark for a
   related reason are not yet classified by what went wrong.
 
+
+**S52.1** `score.without_asides`: the scorer no longer credits a value the answer puts
+  hypothetically ("would", "could", "might", "for reference", up to a "but"/"however"). Re-scoring
+  the archive's 684 checks flips exactly the five T10 ones. A value given only in an aside after a
+  refusal is a disclosed substitute, which changes exactly the two U04 refusals of 110. The
+  benchmark re-scores every mechanistically scored turn and reports labels the scorer disagrees
+  with; that found p2-gate T12 (stored before the M7.1 fix) and the U04s. It now agrees with all
+  of them.
 
 ## 2026-10-12 · M8.90 · Two runs that disagree, and a standard method recomputed (architecture stage 53)
 
