@@ -392,10 +392,12 @@ def test_both_cross_validation_scores_use_the_same_fold_count(tmp_path, monkeypa
     monkeypatch.setattr(W, "kfold_indices",
                         lambda n_, splits, seed=0: seen.append(splits) or real_kfold(n_, splits, seed))
     # Three spatial blocks come back where five were asked for — what happens whenever the
-    # zones sit at fewer distinct locations than the requested block count.
+    # zones sit at fewer distinct locations than the requested block count. Made that way, by
+    # collapsing the groups to three: dropping two of five folds instead left their zones with
+    # no out-of-fold prediction, and an rmse of NaN that this test never read.
     real_group = W.group_kfold_indices
     monkeypatch.setattr(W, "group_kfold_indices",
-                        lambda groups, splits: real_group(groups, splits)[:3])
+                        lambda groups, splits: real_group(np.asarray(groups) % 3, splits))
 
     out = W.fit({"vectors_csv": str(csv), "polygons_path": str(poly), "label_column": "truth",
                  "zone_id_field": "zid", "blocks": 5, "out_geojson": str(tmp_path / "out.geojson")})

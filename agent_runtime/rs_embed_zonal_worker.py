@@ -586,6 +586,9 @@ def fit(req: dict) -> dict:
     # polygons.
     zones = gdf[[gdf.geometry.name]].assign(
         zone_id=ids, _label=pd.to_numeric(gdf[label], errors="coerce"))
+    # An infinite label is no more a measurement than a word is, and dropna keeps it: one inf
+    # among 30 labels made every score NaN, so the reply was not JSON, and it still said ok.
+    zones["_label"] = zones["_label"].replace([np.inf, -np.inf], np.nan)
     support = [c for c in ("pixels", "area_km2") if c in df.columns]
     join, warning = _join_report(list(df["zone_id"]), ids, read_as_missing)
     m = zones.merge(df[["zone_id"] + support + feat], on="zone_id", how="inner")
@@ -611,6 +614,25 @@ def fit(req: dict) -> dict:
 
     X = m[feat].to_numpy(dtype=np.float64)
     y = m["_label"].to_numpy(dtype=np.float64)
+    if np.unique(y).size == 1:
+        # One value everywhere leaves nothing to predict, and the fit said otherwise. 5.0 in
+        # every zone came back ok with rmse 0 and r2 NaN, the stand-in _r2 gives for 0/0, which
+        # json.dumps writes as a bare NaN: not JSON, and no verdict caught it, because NaN
+        # compares false. 0.1 in every zone was worse: its mean rounds, the spread is not quite
+        # 0, and the fit claimed r2 0.55 and 33% skill over the baseline. So the values
+        # themselves are compared, not their spread.
+        varying = [c for c in gdf.columns
+                   if c not in (label, id_field, gdf.geometry.name)
+                   and pd.api.types.is_numeric_dtype(gdf[c]) and gdf[c].nunique() > 1]
+        return {"ok": False,
+                "error": f"label_column {label!r} has the same value, {float(y[0]):.6g}, in "
+                         f"all {n} zones that have both a vector and a label, so there is "
+                         "nothing to predict",
+                "hint": "A fit needs a label that varies from zone to zone. A column holding "
+                        "one value for the whole layer, such as its state or its year, cannot "
+                        "be one.",
+                "numeric_columns_that_vary": varying[:40],
+                "join": join, **({"warning": warning} if warning else {})}
     cent = m.to_crs("EPSG:5070").geometry.centroid
     XY = np.c_[cent.x.to_numpy(), cent.y.to_numpy()]
     blocks = int(max(2, min(int(req.get("blocks") or 5), n // 4)))
@@ -636,6 +658,17 @@ def fit(req: dict) -> dict:
         return 1.0 - float(np.sum((y - p) ** 2)) / ss_tot if ss_tot > 0 else float("nan")
     rmse = float(np.sqrt(np.mean((y - oof) ** 2)))
     base_rmse = float(np.sqrt(ss_tot / n))
+    if not np.isfinite([_r2(oof), _r2(naive), rmse, base_rmse]).all():
+        # A label that varies can still be unscorable in double precision: values around
+        # 1e-200 square to 0, so the spread reads as none and r2 is NaN, and values near 1e308
+        # square to inf. Either way the reply would carry NaN, which is not JSON.
+        return {"ok": False,
+                "error": f"label_column {label!r} runs from {float(y.min()):.6g} to "
+                         f"{float(y.max()):.6g}, and its spread cannot be scored in double "
+                         "precision: squared, it underflows to 0 or overflows",
+                "hint": "Rescale the label, for example into the units it is usually reported "
+                        "in, and fit again.",
+                "join": join, **({"warning": warning} if warning else {})}
 
     m["observed"] = np.round(y, 4)
     m["predicted"] = np.round(oof, 4)
