@@ -172,6 +172,7 @@ def overpass_search(
     place: Optional[str] = None,
     bbox: Any = None,
     limit: int = _MAX_FEATURES,
+    max_limit: int = 500,
 ) -> Dict[str, Any]:
     """Query live OSM features of ``feature`` type inside ``place`` (geocoded) or ``bbox``.
 
@@ -191,7 +192,9 @@ def overpass_search(
 
     minlon, minlat, maxlon, maxlat = region
     bbox_str = f"{minlat},{minlon},{maxlat},{maxlon}"          # Overpass order: S,W,N,E
-    limit = max(1, min(int(limit or _MAX_FEATURES), 500))
+    # 500 is this tool's cap, not Overpass's: a model reading 500 features is already a lot of
+    # context. The code bridge, whose features go to a file, raises it (agent_runtime/tool_bridge).
+    limit = max(1, min(int(limit or _MAX_FEATURES), int(max_limit or 500)))
 
     if osm_filter:
         selectors = f"node[{osm_filter}]({bbox_str});\n      way[{osm_filter}]({bbox_str});"

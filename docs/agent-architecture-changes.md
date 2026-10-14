@@ -61,6 +61,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 | 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
 | 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
+| 49 | [Three ways to reach public data](#stage-49) | 2026-10-09 | sandbox code gets public data through a tool bridge (two mounted directories, the agent's fetch policy per call, every call in the turn record) or, for measurement only, a network; on the sweep's 12 failed questions: offline 4 correct, network 8, bridge 8, and only the bridge names the data its code fetched |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
@@ -7696,6 +7697,8 @@ difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
 - Selection among sources is still the model's, now informed. No code picks one source over
   another.
 
+---
+
 ## Stage 46 — A banner only when a check found something {#stage-46}
 
 *2026-10-09. Branch `claude/banner-policy`, stacked on stage 45. DEVLOG M8.84. Follows the
@@ -7928,6 +7931,355 @@ where a figure was measured.
 - The count checks stay with declarations.
 - One live trial, deepseek only. The claim across models rests on luna's archived runs, re-executed,
   and on the tests, which use no model.
+
+## Stage 49 — Three ways to reach public data {#stage-49}
+
+*2026-10-09. Branch `claude/code-peer-3way`, stacked on stage 45 (`claude/source-catalog`,
+3218ecda). Measured locally (`AGENT_MODE=local`), never deployed. Both new switches default off.*
+
+**Why.** The 2026-10-09 live browser sweep left nine questions that need public data the code
+sandbox cannot reach, because it runs `--network none`. The code peer scraped Census PL files for
+133 steps (T03L), answered from an OSM list capped at 500 features (T11L), recalled a figure
+(T06L), had no route to Sentinel-2 (T08L), and ran past an hour (T05L, T09L). Stage 34's
+`fetch_public_data` brings a file in one tool call at a time, before the code runs; code that
+discovers mid-run that it needs a page, a tile or a second year cannot ask.
+
+Two fixes were proposed. The first gives the sandbox a network. It fixes data access, and it puts
+the **lethal trifecta** in one container: private data (the user's uploads and the conversation's
+workspace are mounted in it), untrusted content (the code is written by a model that read web
+pages, knowledge-base blocks and uploads, any of which can carry instructions), and a way out.
+The second keeps `--network none` and gives the code the agent's own capabilities as functions,
+answered by the agent over a channel that is not a network interface. This stage builds both,
+behind flags, and measures them against today's sandbox on the same questions.
+
+### Stage S49.1 Version 2: a network in the run phase, for measurement only
+
+`AGENT_CODE_EXEC_NETWORK` (`agent_runtime/code_execution.exec_network`) changes the run
+container's `--network` and nothing else: the install phase, mounts, limits and image are
+unchanged, and a test compares the two argument lists element by element. `1` means Docker's
+default `bridge`; any other value names a Docker network (the measurement used a dedicated one, so
+its traffic could be captured apart from pip's). The flag is **refused** unless `AGENT_MODE` is
+set, explicitly, to `local` or `dev`: with `AGENT_MODE` unset, which defaults to dev, the run stays
+offline and a warning says why. While it is on, `execute_code`'s description and the code peer's
+prompt carry one paragraph saying the run phase has network, because every prompt here says the
+opposite and a model told so never tries.
+
+### Stage S49.2 Version 3: the tool bridge
+
+`agent_runtime/tool_bridge.py`, on with `AGENT_CODE_BRIDGE=1`. Code calls
+
+```python
+from iguide_bridge import fetch_public_data, overpass_search, admin_boundary, dem_for_region
+```
+
+and each call is answered by the agent while the code waits.
+
+- **The channel is two directories.** For the length of each run the executor mounts
+  `<run>_bridge/in` at `/bridge/in` read-write and `<run>_bridge/out` at `/bridge/out`
+  **read-only**. The client (standard library only, written into `out`) writes a JSON request
+  into `in` by write-then-rename and polls `out/resp/<id>.json`. A host thread, started with
+  `contextvars.copy_context()` so it records into the right turn, answers. The run container
+  keeps `--network none`: no interface, no DNS, no route. A unix socket was the other candidate;
+  Docker Desktop cannot bind-mount one from macOS into a container, and two directories work the
+  same on the Mac and on the VM. Measured round trip in the real sandbox image on the Mac:
+  0.28 s for a call whose handler returns at once.
+- **What the host enforces, per call.** Four functions, JSON arguments under 64 KB, and only the
+  arguments each handler declares. `fetch_public_data` goes through stage 34's `fetch`: HTTPS GET,
+  an allowlist, every resolved address `is_global`, redirects re-checked per hop, 50 MB per file,
+  no proxy, `.netrc` or cookies, ArcGIS errors-as-200 refused. The bridge's allowlist is
+  `bridge_hosts()`, stage 34's defaults plus the hosts the failed questions needed: USGS NLDI and
+  Water Data, the Planetary Computer STAC and data APIs and the Sentinel-2 storage account, three
+  more Overpass mirrors, the OSRM router, and Census Reporter (ACS without a key: `api.census.gov`
+  now refuses keyless requests). The `fetch_public_data` *tool* keeps its own list. URLs over
+  2,048 characters are refused. Per run: 30 calls, 15 fetches, 500 MB.
+- **`overpass_search` pages past the cap.** The agent-side tool answers at most 500 features,
+  because a model reads them; the bridge writes them to a file and asks for 5,000 per query. A box
+  that comes back full is split in four and asked again (Overpass has no offset); a box whose query
+  fails on every mirror is retried once, then split; features are kept once by OSM type and id.
+  The result says `complete: false`, with a warning, when a cap stopped it, and a box that keeps
+  failing ends the call with no partial result. (The first version paged at 500; S49.5 says why
+  that changed.)
+- **An identical call is answered once per conversation.** Code re-run after a fix asks for the
+  same URL again; the answer is reused for 30 minutes and marked `repeat_of_earlier_call`.
+- **Every call is a tool call of the turn.** Each is recorded in the turn's event log (stage 42)
+  as a call and a result, with its arguments, so the fact set, the verifier and the progress rule
+  see it, and streamed as a `tool_call`/`tool_result` pair marked `via: code_bridge`. The run's
+  own result lists them under `bridge_calls`, and `source_catalog.source_of` names their sources
+  when an answer's figure links to the run, so the Sources line names TIGERweb or OSRM rather
+  than "your code". The catalogue gained entries for the Planetary Computer, OSRM and Census
+  Reporter.
+- **Files come back through `out`.** Any `file_id` a result names is copied into `out/data` and
+  the result gains `path` (and `local_files`), which is what the code opens.
+- **Credentials never enter the container.** The capabilities run in the agent process; the
+  container sees results only.
+
+### Stage S49.3 Threat model
+
+The question is which legs of the trifecta each version leaves in one place.
+
+- **Version 2 (network) has all three.** Measured on the Mac from a container on the same default
+  bridge the sandbox would use: TCP connects succeeded to the agent's own API (both run ports),
+  the embedding and MCP servers on the host, another local agent server, and the production
+  OpenSearch cluster at 149.165.155.195:9200. Stage 34 found the same class on the VM read-only
+  (the metadata service, rs-embed, MCP REST, SSH). DNS resolves any name, so a name alone is a
+  channel out. Nothing in the run records what it fetched: in this measurement the only record of
+  version 2's traffic is a packet capture the deployment does not have. **It is not a deployment
+  option**, which is why the flag refuses every mode but local and dev.
+- **Version 3 (bridge) removes the network leg and keeps a narrow, logged channel.**
+  - *DNS and internal addresses:* the container resolves nothing; the host resolves only
+    allowlisted names and refuses any whose addresses are not global (private, loopback,
+    link-local, the 169.254.169.254 metadata address), per redirect hop; IP literals are refused.
+  - *Query-string leakage:* this is the residual channel. Code that read an upload can put it in
+    a query string to an allowed host. The bound: the hosts are public-sector or open-data
+    services whose logs an attacker does not read; URLs are capped at 2,048 characters; fetches
+    per run are capped; every URL is in the turn's record. A host whose logs or content anyone
+    can read (a paste site, an arbitrary storage account) must never be added: the Sentinel-2
+    entry names one storage account, not `.blob.core.windows.net`.
+  - *The channel itself:* the container can write only into `in`. Requests are opened
+    `O_NOFOLLOW|O_NONBLOCK` and must be regular files under 64 KB, so a planted symlink or FIFO is
+    refused, never read; ids must be 32 hex characters, so a request cannot name a response path;
+    answers are written by `mkstemp` + `os.replace` into `out`, which the container cannot write.
+  - *Resource use:* call, fetch, byte and Overpass tile caps per run; the run's own timeout still
+    bounds the whole.
+- **Residual risks.** The allowlisted hosts' DNS is trusted (resolve-then-connect, stage 34's
+  accepted window). Overpass and the Planetary Computer data API take expressive queries, so a
+  query can carry data in its text even under the length cap. A capability that returns content
+  (a fetched page) brings untrusted text back into the run, as any upload does; the bridge does not
+  make that content trusted. And the install phase still has network with uploads already staged
+  (stage 34's open item), for all three versions.
+
+### Stage S49.4 Tests
+
+`rag_pipeline/tests/test_code_bridge.py`, offline (21 tests): the flag's refusals by mode and
+value; the network flag changes exactly one argv element and not the install phase; the mounts
+(`in` rw, `out` ro, run still `--network none`); the model hears only what is on; end to end
+through the local backend with a stub handler (code reads the returned file; the call is in
+`bridge_calls`); a refused host raises in the code and is recorded; the stage-34 gate applies
+(non-allowlisted host, http, IP literal, over-long URL); unknown functions and arguments; the call
+cap; a symlinked and a FIFO request are never read; a malformed id writes nothing; calls land in
+the turn log as tool calls; the Sources line names bridged data; Overpass paging finds every
+feature once, says when it stopped short, asks for more than 500, retries then splits a failing
+box, and returns nothing partial when it gives up; an identical call in a later run of the same
+conversation is not run again, and another conversation never shares it; the client needs only
+the standard library.
+
+### Stage S49.5 Measured: the three versions on the sweep's failed questions
+
+*2026-10-09, local mode, Lumen deepseek-v4-flash only, invariant gate on, `AGENT_EXTRACTION=1` as on
+the VM, `fetch_public_data` off as on the VM, one trial per query and version, two turns at a time
+per server. Version 1 is the `stack-live-cases` run of the same tip (3218ecda), version 2 and 3 ran
+at 46992b90 on this branch. Archive: `gis_harness_runs_archive/{stack-live-cases, threeway-net,
+threeway-bridge, threeway-bridge-fix, threeway-bridge-fix2}`; the table's source is
+`threeway-net/compare3.json`.*
+
+References, computed for this stage outside the agent: T05L the brute-force pair under each tract
+definition (Station #1 with Station Six when a tract counts by its centroid, with Station Four when
+it counts by intersection); T06L 0.449° at 100 m, 0.631° at 30 m, basin 550 mi² (1,424.5 km²,
+USGS); T07L 632 ha at 5-10 m (the agents' 14 m tile gives 652-656, accepted); T08L 0.80 (three
+July scenes, SCL 4-5, the L2A +1000 offset removed; 0.55 with it left in); T09L Moran's I 0.5969,
+ACS 2020-2024, 48 tracts; T11L 27,522 ha with 4,159 OSM buildings and 30 m slope, largest patch
+about 10,000 ha. T03L's 14.83 reference used 2020 PL population; the task asks for ACS B01003, and
+11.95 is that rate.
+
+| | offline (v1) | network (v2) | bridge (v3) |
+|---|---|---|---|
+| correct / honest refusal / wrong (of 12) | 4 / 4 / 4 | **8 / 0 / 4** | **8 / 1 / 3** |
+| wall time, all 12 | 8,626 s | 4,284 s | 5,126 s (3,027 s without T08L's 2,099 s thrash) |
+| LLM steps | 306 | 279 | 265 |
+| tool calls (+ calls from code) | 276 | 177 | 188 + 98 |
+| duplicate calls | 28 | 4 | 53 (33 of them T08L bridge fetches) |
+| Lumen 5xx events | 7 (T09L) | 0 | 5 (T08L) |
+| banners on correct answers | 2/4 | 6/8 | 5/8 |
+| Sources line names data the code fetched | n/a | **0/6** | **5/6** |
+| Lumen tokens | 13.7M | 8.5M | 10.5M |
+
+Per query (✅ correct, 🟨 honest refusal on a solvable task, ❌ wrong):
+
+| query | version | result | LLM steps | tool calls (+ from code) | dup | wall s | Lumen 5xx | banners (correct only) | Sources names code's data | egress (v2) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| T03L | offline | 🟨 refusal gave up: Census API needs a key; ~15 identical stage_url calls | 54 | 60 | 12 | 708 | 0 | – | n/a (no code fetch) |  |
+| T03L | net | ✅ 110.02, 11.95/1,000 (28 / ACS pop 2,344), 239 restaurants | 27 | 17 | 0 | 458 | 0 | 1 | no (Census Reporter) | api.census.gov ×4, api.censusreporter.org ×4 |
+| T03L | bridge | ✅ same: 110.02, 11.95, 239 | 21 | 14 + 2 | 0 | 407 | 0 | 1 | no (Census Reporter; read back from a file in a later run) |  |
+| T04L | offline | ❌ 10.7 min (own road graph) vs OSRM 15.3 | 24 | 21 | 0 | 520 | 0 | – | n/a (no code fetch) |  |
+| T04L | net | ✅ OSRM 16.0 min / 11.08 km | 17 | 7 | 0 | 221 | 0 | 0 | no (OSRM) | router.project-osrm.org ×2 |
+| T04L | bridge | ✅ OSRM 16.0 min / 11.08 km | 10 | 5 + 1 | 0 | 104 | 0 | 0 | yes |  |
+| T05L | offline | 🟨 refusal listed 7 stations, no population, no pair | 31 | 32 | 5 | 657 | 0 | – | n/a (no code fetch) |  |
+| T05L | net | ✅ Station Four + #1 (tracts intersecting the city: matches) | 44 | 36 | 3 | 568 | 0 | 1 | no (Census Reporter) | api.census.gov ×4, api.censusreporter.org ×7 |
+| T05L | bridge | ✅ Station Six + #1 (tract centroid in city: matches; 1.98 km/person vs 1.96) | 23 | 16 + 21 | 16 | 423 | 0 | 1 | yes |  |
+| T06L | offline | ✅ 0.473° @106 m; 550 mi² from the USGS site page | 22 | 17 | 0 | 204 | 0 | 0 | n/a (no code fetch) |  |
+| T06L | net | ✅ 0.473°; 550 mi² from NWIS site service (quoted) | 19 | 10 | 0 | 218 | 0 | 0 | no (USGS water) | waterservices.usgs.gov ×3 |
+| T06L | bridge | ✅ 0.47°; NLDI basin traced, 1,447 km² (+1.6%), mapped | 14 | 9 + 1 | 0 | 126 | 0 | 1 | yes |  |
+| T07L | offline | ✅ 652 ha | 16 | 10 | 0 | 179 | 0 | 1 | n/a (no code fetch) |  |
+| T07L | net | ✅ 656 ha | 19 | 8 | 0 | 217 | 0 | 1 | – | none |
+| T07L | bridge | ✅ 654 ha | 24 | 13 + 0 | 0 | 287 | 0 | 1 | – |  |
+| T08L | offline | 🟨 refusal no imagery route | 38 | 41 | 5 | 847 | 0 | – | n/a (no code fetch) |  |
+| T08L | net | ❌ 0.558: right scenes, L2A +1000 offset ignored (ref 0.80) | 26 | 21 | 0 | 887 | 0 | – | no (Planetary Computer) | planetarycomputer.microsoft.com ×18, sentinel2l2a01.blob.core.windows.net ×142 |
+| T08L | bridge | 🟨 refusal 70 bridge calls, crops 404 (wrong endpoint in my hint), honest no-value | 51 | 46 + 70 | 35 | 2099 | 5 | – | n/a (no value) |  |
+| T09L | offline | 🟨 refusal no income data; 72 min | 41 | 43 | 5 | 4326 | 7 | – | n/a (no code fetch) |  |
+| T09L | net | ✅ I = 0.597, p = 0.0001 | 25 | 19 | 0 | 406 | 0 | 1 | no (Census Reporter) | api.censusreporter.org ×3, api.census.gov ×1 |
+| T09L | bridge | ✅ I = 0.5969, p = 0.0001 | 21 | 17 + 1 | 0 | 270 | 0 | 1 | yes |  |
+| T10L | offline | ✅ RMSE 4.21 / 4.44 m (plausible, self-check not re-run) | 18 | 13 | 0 | 268 | 0 | 1 | n/a (no code fetch) |  |
+| T10L | net | ✅ 4.97 / 4.73 m (plausible) | 29 | 19 | 0 | 327 | 0 | 1 | – | none |
+| T10L | bridge | ✅ 4.66 / 4.37 m (plausible) | 34 | 30 + 0 | 0 | 367 | 0 | 0 | – |  |
+| T11L | offline | ❌ 500-building cap, caveated | 21 | 19 | 1 | 415 | 0 | – | n/a (no code fetch) |  |
+| T11L | net | ❌ agent-side search, 500 cap, disclosed; 29,400 ha, patch 14,500 | 17 | 15 | 0 | 294 | 0 | – | – | none |
+| T11L | bridge | ❌ paged search failed on Overpass 504s; fell back to 500, NOT disclosed; 28,880 ha | 27 | 22 + 2 | 2 | 684 | 0 | – | yes |  |
+| T10 | offline | ❌ kriging 295.1 vs 309.53 (IDW 397.44 right) | 14 | 4 | 0 | 162 | 0 | – | n/a (no code fetch) |  |
+| T10 | net | ❌ kriging 295.1 vs 309.53 (IDW 397.44 right) | 15 | 5 | 0 | 172 | 0 | – | – | none |
+| T10 | bridge | ❌ kriging 295.1 vs 309.53 (IDW 397.44 right) | 14 | 4 + 0 | 0 | 133 | 0 | – | – |  |
+| U01 | offline | ❌ answered 1.36° from a fetched DEM | 10 | 4 | 0 | 108 | 0 | – | n/a (no code fetch) |  |
+| U01 | net | ❌ answered 1.36° from a fetched DEM | 17 | 6 | 1 | 174 | 0 | – | – | none |
+| U01 | bridge | ❌ answered 1.36° from a fetched DEM | 8 | 2 + 0 | 0 | 74 | 0 | – | – |  |
+| U03 | offline | ✅ refused (then kriged 4 other metals unasked) | 17 | 12 | 0 | 233 | 0 | 0 | n/a (no code fetch) |  |
+| U03 | net | ✅ refused | 24 | 14 | 0 | 342 | 0 | 1 | – | none |
+| U03 | bridge | ✅ refused | 18 | 10 + 0 | 0 | 153 | 0 | 0 | – |  |
+
+Version 2's egress, from a packet capture on its own Docker network (TCP SYN, TLS server name, HTTP
+Host): every connection carried a server name, all to public data services; none to an internal
+address. That is what this model chose to do on these questions, not a bound: S49.3's probe shows
+what the same container could reach.
+
+**What the network fixed:** T03L, T04L, T05L, T09L (Census Reporter for population and income,
+OSRM for routing), at about half the offline wall time, with no duplicate fetches and no Lumen 5xx.
+**What the bridge fixed:** the same four, and T06L's basin traced from NLDI rather than quoted. Its
+Sources line names the code's data; version 2's never does, because the code's fetches leave no
+record. **What neither fixed:** T10 (a kriging error), U01 (answers from a DEM it fetched instead
+of saying none was attached), T11L. Version 2 used the agent-side Overpass search, capped at 500,
+and said so; version 3's paged search failed on Overpass 504s and the code fell back to the capped
+list without saying so. T08L: version 2 read the right scenes and computed NDVI without removing
+the L2A offset (0.56 against 0.80), a wrong number delivered fluently; version 3 thrashed on a
+data-API path my hint got wrong and ended with an honest no-value.
+
+**The bridge's first run found three defects in the bridge, fixed in a second commit:**
+1. Paging at 500 needed about 16 Overpass queries for Piatt County's buildings and failed on
+   mirror 504s. 500 is `overpass_search`'s own cap, not Overpass's: the bridge now asks for 5,000
+   per query (`max_limit`), retries a failed box once, then splits it.
+2. 33 of T08L's 70 bridge calls repeated an earlier one exactly, across runs. Answers are now
+   memoised per conversation for 30 minutes.
+3. The Planetary Computer hint said `/item/crop/`; the route is `/item/bbox/` with `max_size`.
+   The re-run's agent found that itself by fetching the API's `openapi.json` through the bridge.
+
+The re-run of T08L and T11L (`threeway-bridge-fix`) was cut off by **Lumen 429 "Coin budget
+exhausted"** about 705 s into both turns, before either answered. By then T11L's paged search had
+returned all 3,723 buildings in the county box in one call, `complete: true`, and its code put the
+qualifying area at 27,800 ha (reference 27,522); the largest patch was still being recomputed. So
+the fix is shown to deliver the data, not yet a scored answer.
+
+**Re-run on the fixed bridge, 2026-10-11** (`threeway-bridge-fix2`, at 1bc0624a, same settings, Lumen
+coins restored; 4.54M tokens). Neither answer is correct, and neither failure is the bridge's
+delivery:
+
+| query | result | LLM steps | tool calls (+ from code) | dup | wall s | Lumen 5xx | banners | Sources line |
+|---|---|---|---|---|---|---|---|---|
+| T08L | 🟨 honest "cannot provide" | 50 | 49 + 28 | 2 | 2,536 | 5 (4 in the server log) | 1 ℹ️ | TIGERweb only (no data used) |
+| T11L | ❌ 23,467 ha vs 27,522 (−14.7%); largest patch 9,970 ha vs ≈10,050, right | 33 | 27 + 10 | 1 | 481 | 0 | 1 ⚠️ (count check, 239 patches) | TIGERweb, OpenStreetMap, 3DEP |
+
+- **T11L.** Overpass was answering 504s again. The bridge's paged search retried, split and then
+  gave up with no partial result, as designed. The code then queried Overpass itself through
+  `fetch_public_data` and got all 3,705 buildings, stated, and the largest patch now matches the
+  reference. The total is wrong for a query-writing reason: the code's road query listed
+  `way[highway=primary](…);way[highway=secondary](…);out geom;` without a union, so only the second
+  statement's 173 secondary ways came back, and the answer told the user "no primary roads exist
+  in the county's OSM data". Earlier runs found 37-64 primary ways.
+- **T08L.** The memo held: 28 bridge calls, 2 repeated (first run: 70 and 33). The data-API crops
+  failed on `assets=B04,B08`. The service wants the parameter repeated (`assets=B04&assets=B08`),
+  and its 404 body says so ("B04,B08 is not valid. Should be one of …"), but `fetch` reports only
+  "answered HTTP 404" and drops the body. The code never saw the explanation and ended with an
+  honest no-value after 42 minutes, 18.6 of them one wait through four Lumen 500s about six
+  minutes apart (the client has no timeout).
+
+**Not fixed here, found here:**
+- `fetch` (stage 34, shared by the tool and the bridge) drops a refusing service's error body; a
+  short excerpt of a JSON or text body would have told T08L's code its mistake.
+- The gate's count check reads a population as a row count ("declared count 2344 exceeds every
+  frame"): a ⚠️ on three correct answers (T03L in both versions, network T05L), and on bridge
+  T11L for a count of patches.
+- Provenance follows one run: a figure computed in a later run from a file an earlier bridged run
+  saved names no source (bridge T03L).
+- The Census API refuses keyless requests; Census Reporter answered keyless, but only with a
+  project User-Agent (python-requests' default is refused), which the fetch gate already sends.
+
+### Stage S49.6 Safety cost, side by side
+
+- **Offline:** none added. Data reaches code only through agent tools.
+- **Network:** all three legs of the trifecta in one container; reach measured to the agent's own
+  API, the host's model services and the production OpenSearch cluster; no record of what was
+  fetched, so no Sources line for it and no verifier view of it. Measurement only.
+- **Bridge:** no network leg; the agent's policy per call (allowlist, public addresses only, size,
+  count and length caps); every call in the turn's record. Residual: query strings to allowlisted
+  hosts as a narrow, logged exfiltration channel; trusted DNS for those hosts; fetched content is
+  still untrusted text inside the run; the install phase's network (all versions).
+
+Nothing was deployed. Both switches default off; the network flag cannot turn on outside local and
+dev mode.
+
+### Stage S49.7 What a Sentinel-2 pixel means is said where it is fetched
+
+**Why.** With delivery solved, T08L still answered wrong, the same way in two versions. The
+networked run (`threeway-net`) read the right July 2024 scenes and answered NDVI 0.558. The bridge
+run on #104 with stage 34's error excerpt underneath (`threeway-bridge-fix3`, 2026-10-12, a local
+merge never pushed) got the quoted 404 ("B04,B08,SCL is not valid. Should be one of …"), switched
+to one asset per request, fetched B04, B08 and SCL for both 13 July tiles, and answered 0.549.
+The offset-corrected value from the same scenes is 0.80 (S49.5). Both computed NDVI on raw DNs:
+none of the bridge run's 17 code runs mentions an offset. Nothing told them otherwise. The STAC
+items carry `s2:processing_baseline` ('05.10' for these) but their assets declare no
+`raster:scale` or offset, and ESA's Level-2A guide is where the rule lives: from processing
+baseline 04.00 (25 January 2022) the DNs carry `BOA_ADD_OFFSET = -1000`, reflectance =
+(DN + offset) / 10000, and DN 0 stays NO_DATA. The trigger is the product's baseline, not its
+acquisition date: older scenes reprocessed since carry it too.
+
+**What changed.** A statement of fact about the data, not an instruction, in the two places the
+code and the answer read:
+- `public_data_tools.S2_L2A_VALUES`, appended to the Planetary Computer entry of
+  `BRIDGE_EXTRA_HOSTS`, so every bridge description carries it (the description grew to about
+  3,100 characters);
+- a new optional `values` field on `source_catalog.Source`, set for the Planetary Computer, and
+  rendered by `line()` (the peers' brief) and `_statement()` (the Sources line) only when set.
+A test pins the facts in all three renderings and checks that a source without `values` renders
+as before. Measured effect: S49.8, after the re-run.
+
+### Stage S49.8 T08L with the values stated: correct
+
+*2026-10-12, `threeway-bridge-fix4`: the S49.7 tip (545fb2d6) merged locally with stage 34's error
+excerpt (#109), never pushed; settings as `threeway-bridge-fix2`; Lumen deepseek-v4-flash; 0.68M
+tokens.*
+
+- **0.802 against 0.80** (13 July 2024, tiles 16TCK and 16TDK, SCL-masked, clipped to the county).
+- **Where it learned the offset:** from the bridge's host note. Its second code run printed each
+  item's `s2:processing_baseline` (05.10/05.11), which the run without the note never read, and
+  the run that built the mosaic opens with the note's rule as a comment: "baseline >= 04.00:
+  reflectance = (DN - 1000) / 10000, 0 is nodata".
+- **Calls:** 8 bridge calls, 0 repeats, 1 failure: the comma-joined `assets=B04,B08`, whose 404
+  now quoted the service ("B04,B08 is not valid …"); the next call asked for one asset. 15 code
+  runs, 351 s, no Lumen 5xx.
+- **Not right yet:**
+  - The Sources line names TIGERweb only. The figure came from a run that read files earlier
+    bridged runs had saved, so no bridge call links to it (the cross-run provenance gap, S49.5).
+  - The ⚠️ banner lists 14 problems. They include the model declaring NDVI as a count, the count
+    check reading pixel counts as row counts, and the audit calling "Converted DN to surface
+    reflectance `(DN−1000)/10000`" unsupported, because the rule came from a tool description
+    and not a tool result.
+
+### Stage S49.9 The bridge records its calls' lineage
+
+*2026-10-12. For "Where every file, result and number came from" (stage 56, PR #115, branch
+`claude/lineage-graph`), which is not on this base.*
+
+- **Why:** S49.8's two faults have one cause: nothing linked a bridge call to the run that made
+  it, or the run to the files the call handed back.
+  - The Sources line could not reach the Planetary Computer from a figure computed from bridged
+    files.
+  - Nothing the auditor saw held the host note the code had applied.
+- **What:** `tool_bridge` calls `agent_runtime.lineage` when it is present, and does nothing
+  without it.
+  - `model_note()` registers each host note as a note every `execute_code` call is shown.
+  - A `BridgeServer` remembers the call it runs for. Each bridge call is dispatched inside
+    `lineage.calling(..., parent=run)`, so the fetch's own hooks (its host, the file it writes)
+    record against that call, which sits `within` the run.
+  - `_materialise` records the run reading each file a call hands back.
+- **Measured:** `test_bridge_calls_record_their_lineage_within_the_run` is skipped here and passes on
+  a scratch merge with `claude/lineage-graph`, where the fix4 fixture's offset rule is supported by
+  the Planetary Computer's catalogue note and the Sources line names the Planetary Computer once.
 
 ## Stage 50 — The extraction work lands, and the agent reads a record of its own {#stage-50}
 

@@ -39,10 +39,14 @@ class Source:
     hosts: Tuple[str, ...] = ()
     bbox: Optional[Tuple[float, float, float, float]] = None   # lon/lat, when the extent is a box
     aliases: Tuple[str, ...] = ()   # other names an answer may use for it
+    # What the values mean, when reading them as-is gives a wrong number (a scale or offset the
+    # data does not declare). Said wherever the source is described, and on the Sources line.
+    values: str = ""
 
     def line(self) -> str:
         return (f"{self.name} ({self.kind}): covers {self.covers}; leaves out {self.excludes}; "
-                f"extent {self.extent}; licence {self.licence}")
+                f"extent {self.extent}; licence {self.licence}"
+                + (f"; values: {self.values}" if self.values else ""))
 
 
 # The United States and its territories, generously (Alaska's Aleutians cross 180°, so the box
@@ -65,7 +69,8 @@ CATALOG: Tuple[Source, ...] = (
                     "attributes are uneven",
            extent="global", licence="ODbL (© OpenStreetMap contributors)",
            tools=("overpass_search",), hosts=("overpass-api.de", "overpass.kumi.systems",
-                                              "overpass.private.coffee", "maps.mail.ru"),
+                                              "overpass.private.coffee", "maps.mail.ru",
+                                              "z.overpass-api.de", "lz4.overpass-api.de"),
            aliases=("OpenStreetMap", "OSM", "Overpass")),
     Source("osm_nominatim", "OpenStreetMap Nominatim", "geocoding",
            covers="coordinates for place names and addresses",
@@ -106,8 +111,30 @@ CATALOG: Tuple[Source, ...] = (
            excludes="anything a given product does not cover",
            extent="per product", licence="US public domain",
            hosts=("earthquake.usgs.gov", "www.usgs.gov", "waterservices.usgs.gov",
-                  "tnmaccess.nationalmap.gov"),
+                  "tnmaccess.nationalmap.gov", "api.water.usgs.gov", "api.waterdata.usgs.gov",
+                  "waterdata.usgs.gov"),
            aliases=("USGS",)),
+    # Reached only through the code bridge's fetch (public_data_tools.BRIDGE_EXTRA_HOSTS).
+    Source("planetary_computer", "Microsoft Planetary Computer (Sentinel-2 L2A)", "imagery",
+           covers="Sentinel-2 surface reflectance scenes, 10-60 m, from 2015, with a STAC "
+                  "catalogue and a cropping data API",
+           excludes="cloud-covered pixels unless masked; days without a satellite pass",
+           extent="global land", licence="Copernicus Sentinel data terms",
+           hosts=("planetarycomputer.microsoft.com", "sentinel2l2a01.blob.core.windows.net"),
+           aliases=("Planetary Computer", "Sentinel-2"),
+           values="reflectance = (DN - 1000) / 10000 from processing baseline 04.00"),
+    Source("osrm", "OSRM public router (OpenStreetMap roads)", "routing",
+           covers="driving routes and times over OpenStreetMap's road network",
+           excludes="live traffic; turn restrictions OSM lacks; the demo server's speeds are a "
+                    "profile, not measurements",
+           extent="global", licence="ODbL (© OpenStreetMap contributors)",
+           hosts=("router.project-osrm.org",), aliases=("OSRM",)),
+    Source("census_reporter", "Census Reporter (US Census ACS tables)", "tabular",
+           covers="American Community Survey estimates and margins by geography, from the "
+                  "Census Bureau's releases",
+           excludes="anything the ACS does not tabulate; small-area estimates carry wide margins",
+           extent="United States", licence="US public domain (data); Census Reporter terms",
+           hosts=("api.censusreporter.org",), bbox=_US, aliases=("Census Reporter", "ACS")),
     Source("iguide_kb", "I-GUIDE platform knowledge base", "literature",
            covers="datasets, notebooks, publications and educational resources indexed by the "
                   "I-GUIDE platform",
@@ -147,7 +174,8 @@ def _statement(src: Source) -> str:
     """A source as the answer names it: what it is, what it leaves out, and its licence. What
     it leaves out is what decides how far a count or a list from it reaches (18 schools from
     the city's file, 31 in OpenStreetMap)."""
-    return f"{src.name}, which leaves out {src.excludes} ({src.licence})"
+    return (f"{src.name}, which leaves out {src.excludes}"
+            + (f"; {src.values}" if src.values else "") + f" ({src.licence})")
 
 
 def _payload(content: Any) -> Dict[str, Any]:
@@ -255,6 +283,14 @@ def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]
         name = _upload_name(fid, staged.get(fid))
         if name:
             out.append((f"{name} (your upload)", [name]))
+    # Data the code fetched itself through the tool bridge (agent_runtime/tool_bridge.py): the
+    # run's figures came from those calls, so a figure linked to the run names their sources.
+    for bc in payload.get("bridge_calls") or []:
+        if isinstance(bc, dict) and bc.get("ok") and bc.get("name"):
+            res = bc.get("result") if isinstance(bc.get("result"), dict) else {}
+            for item in source_of(str(bc["name"]), bc.get("args"), res):
+                if item not in out:
+                    out.append(item)
     return out
 
 
