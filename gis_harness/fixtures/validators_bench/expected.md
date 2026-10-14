@@ -14,7 +14,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 |---|---|---|---|---|---|---|---|---|
 | recorded | 22 | 7 | 6 (3) | 12 | 33% | 86% | 17% | 43% |
 | recorded_on_replayable | 21 | 7 | 6 (3) | 11 | 35% | 86% | 18% | 43% |
-| replay | 21 | 7 | 7 (5) | 8 | 47% | 100% | 33% | 71% |
+| replay | 21 | 7 | 5 (5) | 4 | 56% | 71% | 56% | 71% |
 
 ## Checks as the live turns printed them
 
@@ -37,12 +37,9 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 
 | check | kind | on correct | on wrong (coincidental) | on refusal | precision | recall | precision earned | recall earned |
 |---|---|---|---|---|---|---|---|---|
-| audit | problem | 3 | 0 (0) | 1 | 0% | 0% | 0% | 0% |
-| gate:all_nan | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
-| gate:count_population | problem | 2 | 2 (2) | 0 | 50% | 29% | 0% | 0% |
-| gate:declared_units | problem | 1 | 1 (1) | 0 | 50% | 14% | 0% | 0% |
+| audit | problem | 2 | 0 (0) | 1 | 0% | 0% | 0% | 0% |
 | gate:finite_value | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
-| gate:projected_crs | problem | 2 | 2 (0) | 0 | 50% | 29% | 50% | 29% |
+| gate:projected_crs | problem | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
 | peer | unverifiable | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
 | reference | problem | 0 | 1 (0) | 0 | 100% | 14% | 100% | 14% |
 
@@ -51,13 +48,10 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 | check | kind | on correct | on wrong (coincidental) | on refusal | precision | recall | precision earned | recall earned |
 |---|---|---|---|---|---|---|---|---|
 | audit | note | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
-| audit | problem | 3 | 0 (0) | 1 | 0% | 0% | 0% | 0% |
-| gate:all_nan | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
-| gate:count_population | problem | 2 | 2 (2) | 0 | 50% | 29% | 0% | 0% |
+| audit | problem | 2 | 0 (0) | 1 | 0% | 0% | 0% | 0% |
 | gate:coverage | unverifiable | 4 | 2 (2) | 1 | 29% | 29% | 0% | 0% |
-| gate:declared_units | problem | 1 | 1 (1) | 0 | 50% | 14% | 0% | 0% |
 | gate:finite_value | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
-| gate:projected_crs | problem | 2 | 2 (0) | 0 | 50% | 29% | 50% | 29% |
+| gate:projected_crs | problem | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
 | number_scan | note | 2 | 3 (0) | 0 | 60% | 43% | 60% | 43% |
 | number_scan | unverifiable | 4 | 1 (0) | 1 | 17% | 14% | 17% | 14% |
 | peer | unverifiable | 0 | 2 (0) | 0 | 100% | 29% | 100% | 29% |
@@ -88,16 +82,10 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 
 | cause | known class | findings | turns |
 |---|---|---|---|
-| count check: a count of things that are not frame rows (people, pixels, patches) | yes | 4 | 2 |
-| audit: the record holds the claim; the auditor marked it absent | yes | 3 | 2 |
-| a mean, median or index typed as a count (fractional 'count') | yes | 3 | 1 |
-| audit: knowledge or interpretation in no record |  | 3 | 1 |
-| all_nan: an optional column empty after a join that matched | yes | 2 | 1 |
 | gate finite_value |  | 2 | 1 |
-| projected_crs: a degree area used only as a non-zero test | yes | 2 | 1 |
 | audit: arithmetic on recorded figures called unsupported | yes | 1 | 1 |
 | audit: the reason a refusal gives called unsupported | yes | 1 | 1 |
-| projected_crs: an exploratory print measured in degrees, not the answer's run | yes | 1 | 1 |
+| audit: the record holds the claim; the auditor marked it absent | yes | 1 | 1 |
 
 ## The Sources line (replay)
 
@@ -107,7 +95,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 |---|---|
 | Sources line: a source whose result no stated figure came from | 1 |
 
-Held to the lineage the tools recorded (stage 56): the line leaves out 0 source(s) the answer's results rest on; the line as it was before stage 56 left out 3 on 3 turns.
+Held to the lineage the tools recorded (stage 56): the line leaves out 0 source(s) the answer's results rest on; the line as it was before stage 56 left out 2 on 2 turns.
 
 | by the lineage | sources |
 |---|---|
