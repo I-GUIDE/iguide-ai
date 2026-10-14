@@ -542,12 +542,15 @@ set on the VM:
   database cannot be reached, they fall back to the library's `_registry.json` and report which
   store answered (`backend_name()`).
 
-Two readers do **not** follow the flag. `get_kb_block` and `kb_for_elements` choose between the
-local store and OpenSearch from `AGENT_KB_BACKEND` alone. So on the VM, search hits come from
-Postgres, but the full documents behind them come from the `iguide_agent_*` indices on the prod
-cluster. The notebook blocks match, because the same 3,830 were indexed there. The other types do
-not. On 2026-10-10 `get_kb_block` found 6 of 6 `NotebookBlock` ids from Postgres results, 0 of 6
-`MethodUnit` ids and 0 of 5 `PublicationMethodSpec` ids.
+- `get_kb_block` and `kb_for_elements` (same file), by the same precedence as search
+  ([Stage 51](agent-architecture-changes.md#stage-51)). `get_kb_block` resolves all three id
+  kinds that search returns: a block (`<el>::block::<n>`), a unit (`<el>::unit::<symbol>::<sha>`)
+  and a method spec (`<el>::methodspec`). It also bundles a bare element id's blocks.
+  `kb_for_elements` reads blocks, current units, the dataset's primary file and the publication's
+  spec. **Not deployed yet.** The VM still runs the earlier code, where these two follow
+  `AGENT_KB_BACKEND` alone. There, on 2026-10-10, `get_kb_block` found 6 of 6 `NotebookBlock` ids
+  from Postgres results, 0 of 6 `MethodUnit` ids and 0 of 5 `PublicationMethodSpec` ids. The
+  blocks matched only because the cluster holds the same 3,830.
 
 **Backup and rollback.** No dump exists on the VM (checked 2026-10-10). The copy it was restored
 from is on a development machine. To take one, run `docker exec iguide-agent-db pg_dump -U
@@ -556,9 +559,14 @@ rebuilt without any LLM calls: run `scripts/backfill_kb_db.py` against the same 
 and exports. To turn the record off, remove `AGENT_KB_DB` and recreate agent-api with
 `--no-deps`. Search then falls back to the `AGENT_KB_BACKEND` path, and the method tools fall back
 to the registry. Then run `docker compose --profile extraction stop agent-db`. Never stop the
-database while the flag is still set. The method tools would fall back to the registry, but
-`agent_kb_search` does not fall back on a connection error. It returns no hits and an
-`agent_kb_search error:` note, and the agent can read that as a corpus with nothing on the topic.
+database while the flag is still set. The method tools would fall back to the registry, which
+holds the same units. The three KB readers do not fall back on a database error, on purpose
+(Stage 51): unit and spec ids exist only in the record, so a fallback would answer "not found"
+for exactly those ids. Search returns no hits and `get_kb_block` returns `found: false`. Both
+carry `backend: postgres` and a note starting `agent KB database failed`. `kb_for_elements`
+returns nothing and logs the same text. The VM's current code labels the search note
+`agent_kb_search error:` instead. Either way, the agent can read it as a corpus with nothing on
+the topic.
 
 The database credentials are `AGENT_DB_USER`, `AGENT_DB_NAME`, `AGENT_DB_PASSWORD` and
 `AGENT_KB_DSN`, all in `.env`. Every service that loads `.env` through `env_file` receives them.

@@ -64,6 +64,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
 | 49 | [Three ways to reach public data](#stage-49) | 2026-10-09 | sandbox code gets public data through a tool bridge (two mounted directories, the agent's fetch policy per call, every call in the turn record) or, for measurement only, a network; on the sweep's 12 failed questions: offline 4 correct, network 8, bridge 8, and only the bridge names the data its code fetched |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
+| 51 | [The fetch reads the store the search read](#stage-51) | 2026-10-10 | `get_kb_block` and `kb_for_elements` read Postgres under `AGENT_KB_DB`, as search does; unit and method-spec ids resolve; a failed database is reported, never a fallback |
 | 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
 | 53 | [Two runs that disagree, and a standard method recomputed](#stage-53) | 2026-10-12 | the same figure from two runs must agree; hand-written kriging, esda Gi*/Moran and the Gi*, Moran, slope and zonal tools are recomputed with a reference library from the run's own inputs; both are banners at 100% measured precision; the replayed banner goes from 40% / 13% to 74% / 56% |
 | 54 | [A figure's kind is read from the code that computed it](#stage-54) | 2026-10-12 | a static pass over the recorded code says what each declared figure is (a count of which frame's rows, of pixels or of list items; a statistic; a measurement; a column's value); the count, unit and CRS checks fire only when it is known; a degree measurement only compared with zero or only printed before a reprojected one, and an empty column no line reads, are set aside; banner false alarms 15 → 7 with every earned catch kept |
@@ -8769,10 +8770,85 @@ setup errors that neither side produced alone, and M8.71 fixed it.
 - **The full-document fetch reads a different store from search.** `get_kb_block` and
   `kb_for_elements` follow `AGENT_KB_BACKEND`, not `AGENT_KB_DB`. On the VM, `get_kb_block` found
   6 of 6 notebook-block ids from a Postgres search, but 0 of 6 method-unit ids and 0 of 5
-  publication-spec ids.
+  publication-spec ids. Fixed in [Stage 51](#stage-51), not deployed.
 - **The ingestion port.** If `metadata-extraction-server` is started, port 5001 publishes on
   every interface, because the platform form and MinIO post to it from elsewhere. That decision
   is still open.
+
+## Stage 51 — The fetch reads the store the search read {#stage-51}
+
+*Recorded 2026-10-10 on `claude/kb-fetch-follows-db`, from `prototype` at `10029c5`. Open PRs
+claim stages up to 49 and #107 took 50. Not deployed.*
+
+S50.6 left one mismatch. `agent_kb_search` reads the Postgres record first when `AGENT_KB_DB=1`.
+`get_kb_block` and `kb_for_elements` chose their store from `AGENT_KB_BACKEND` alone. The VM sets
+both flags, so search answered from Postgres and the fetch of its own results went to the prod
+cluster. Measured inside agent-api on 2026-10-10: 6 of 6 `NotebookBlock` ids found, 0 of 6
+`MethodUnit` ids, 0 of 5 `PublicationMethodSpec` ids. The blocks matched only because the cluster
+holds the same 3,830. The other two id kinds are not stored anywhere. The record mints them:
+`<el>::unit::<symbol>::<sha>` from a unit's key, `<el>::methodspec` from a publication's.
+
+### Stage S51.1 One precedence for all three readers
+
+`_kb_db(client)` in `rag_pipeline/search/agent_kb.py` returns the record when the flag is set
+and no client is injected. Search, `get_kb_block` (a block, unit or spec id, or a bare element id
+that bundles its blocks) and `kb_for_elements` all use it. An injected client still wins, as it
+did for search. With the flag off nothing changes.
+
+The new reads are in `extractors/kb_db.py`: `get_doc` parses a minted id back into the key it
+came from, `blocks_for_element` returns cells in notebook order, and `docs_for_elements` returns
+blocks, current units, a dataset's primary file and a publication's spec. These are shaped as the
+stored docs the other backends hold, so `_summarize_for_element` handles all three backends.
+The row-to-doc builders that `search_kb` had inline (`_block_hit`, `_unit_hit`, `_spec_hit`) are
+now shared, so a fetched doc is built by the same function as the searched one. Against a seeded
+`postgres:16`, `search_kb` returned the same hits as before for three queries. The only change is
+the keys it gained (`extracted.kind`, and a block's `markdown_context` and `imports`, which the
+join reads). Every id it returned came back from `get_doc` unchanged.
+
+`_reference_only` and the M8.67 gating apply to the new path unchanged. With `AGENT_EXTRACTION`
+off, a unit fetched from Postgres loses its import line, sha and callability, as a cluster doc
+does.
+
+### Stage S51.2 A database failure is not a fallback
+
+When the flag is set and the database fails, none of the three readers falls back to the cluster
+or the local store. Search returns no hits, and `get_kb_block` returns `found: false`. Both carry
+`backend: postgres` and a note that starts `agent KB database failed`. `kb_for_elements` returns
+`{}` and logs the same text, because its return shape has nowhere to put a note. Search behaved
+this way already. Its note used to be the generic `agent_kb_search error:` and did not name
+the backend.
+
+Why not fall back:
+
+- The unit and spec ids exist only in the record. A fallback would answer "not found" for exactly
+  the ids it was asked about. That is a confident negative, and the real cause is an outage.
+- A fallback search would switch corpus in the middle of a conversation, since the cluster holds
+  blocks only. Fewer results would then look like a coverage gap, not a configuration problem.
+  The local-backend `note` exists to stop that misreading.
+
+`kb_method_search` and `get_method_contract` do fall back, to `_registry.json`, and that stays
+correct. The registry holds the same units: the record's `slice_source` is what the library is
+projected from. The KB readers have no second copy of the same rows to fall back to.
+
+A bare element id that is in the record but has no blocks (a dataset or a publication) returns
+`found: false` with a note that names the spec id to fetch instead. Without it, "not found" reads
+as "not in the corpus".
+
+### Stage S51.3 Tests
+
+`rag_pipeline/tests/test_agent_kb_fetch_follows_db.py`. The offline half runs the real `kb_db`
+readers against an in-memory connection that answers their SQL. It covers the three id kinds, a
+wrong sha, the bare-element bundle, the join, extraction-off gating, a dead database across all
+three readers, flag-off fallback to the cluster and to the local store, and an injected client.
+11 of its 15 tests fail on `prototype`. The integration half fetches every id `search_kb` returns
+and compares the result (`-m integration` with `AGENT_KB_DB=1`).
+
+### Stage S51.4 What this stage does not fix
+
+- **Search returns superseded unit versions.** `search_kb` does not filter on `is_current`, so
+  a re-ingest that kept an old slice can rank the old version. The join reads current units only.
+  `get_doc` returns whatever version the id names, because the sha is part of the id.
+- **Nothing keeps the record current** (S50.6). That is unchanged.
 
 ## Stage 52 — Every check measured against the scored archive {#stage-52}
 
