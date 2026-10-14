@@ -26,7 +26,7 @@ import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
 import { layerVerdicts, type ReplayMeta } from './replay';
 import {
-  deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
+  deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, rerenderMessages, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
 } from './sessionStore';
 
@@ -441,7 +441,7 @@ export default function App() {
     // As at upload time: each upload counts as drawn, so a later turn that lists it does not
     // bring back a second copy of it through the artifact fallback.
     for (const id of rec.fileIds || []) layerSourceFiles.current.add(id);
-    setMessages(rec.messages || []);
+    setMessages(rerenderMessages(rec.messages || [], resolveUrl));
     setLayers([]);
     autoRevealed.current = false;
     // Geometry was never stored — re-fetch each layer from the file store, which keeps its
@@ -778,7 +778,8 @@ export default function App() {
         fitView(authoritative);
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
-      patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
+      patch({ html, markdown: res.error ? undefined : res.answer || undefined,
+              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
       // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
       // rather than being awaited here. The await put the fallback's layers before `finally` ended
       // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
