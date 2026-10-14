@@ -20,6 +20,7 @@
 import type { FeatureCollection } from 'geojson';
 import type { LayerArtifact } from './contracts';
 import type { ChatMessage } from './components/ChatPanel';
+import { renderMarkdown } from './markdown';
 
 const DB_NAME = 'iguide-map-ui';
 const DB_VERSION = 1;
@@ -110,6 +111,39 @@ export function toStoredLayer(a: LayerArtifact): StoredLayer {
     if (data && JSON.stringify(data).length <= INLINE_KEEP_BYTES) keep = data;
   } catch { /* unserialisable — treat as too big */ }
   return { ...rest, data: keep };
+}
+
+/** The markdown an answer was rendered from, or undefined when the message does not carry it.
+ *  `markdown` is stored from S9.12.1 on. Before that the only copy is the terminal result the
+ *  message kept as `response`, whose `answer` is the text the live turn rendered. */
+export function answerMarkdown(m: ChatMessage): string | undefined {
+  if (typeof m.markdown === 'string' && m.markdown) return m.markdown;
+  const r = m.response;
+  const a = r && typeof r === 'object' ? (r.answer || r.final_answer) : undefined;
+  return typeof a === 'string' && a ? a : undefined;
+}
+
+/**
+ * Re-render each saved answer from its markdown, so a renderer fix reaches conversations saved
+ * before it. The saved `html` is what the renderer of the day produced: S9.12 fixed numbered
+ * lists that came out as one-item lists, and a conversation saved before it still read "1." on
+ * every item when reopened from History, beside a new answer numbered 1 to 8.
+ *
+ * Only a finished answer that was rendered (`html` set). A streaming message, an error (no
+ * html, a `⚠` text) and an answer with no stored markdown keep exactly what was saved.
+ */
+export function rerenderMessages(messages: ChatMessage[],
+                                 resolveUrl: (u: string) => string): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.role !== 'agent' || m.streaming || !m.html) return m;
+    const md = answerMarkdown(m);
+    if (!md) return m;
+    try {
+      return { ...m, html: renderMarkdown(md, resolveUrl) };
+    } catch {
+      return m;                 // a renderer failure must not lose the saved answer
+    }
+  });
 }
 
 /** First user message, trimmed — the same thing a person would call the conversation. */

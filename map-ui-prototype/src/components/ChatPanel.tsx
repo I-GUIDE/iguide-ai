@@ -10,6 +10,9 @@ export interface ChatMessage {
   role: 'user' | 'agent';
   text?: string;
   html?: string;
+  /** The answer's markdown, kept beside its `html` so a reopened conversation is rendered by
+   *  today's renderer rather than the one it was saved under (see rerenderMessages). */
+  markdown?: string;
   trace?: TraceLine[];
   artifacts?: FileRecord[];
   layers?: { id: string; label: string; source: string }[];

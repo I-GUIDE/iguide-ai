@@ -1969,8 +1969,34 @@ What changed:
 
 `npm run check:markdown` holds eleven cases, six of which fail on the previous renderer. No test
 runner exists here, as `check:sources` and the other `check:*` scripts already note. The
-server-side text is unchanged, so saved conversations render correctly once the new bundle is
-served.
+server-side text is unchanged. Saved conversations did NOT pick the fix up, though: the UI stored
+each answer's rendered html and reopened that. S9.12.1 re-renders on restore.
+
+### Stage S9.12.1 A reopened conversation is rendered by today's renderer (2026-10-14)
+
+After S9.12 was deployed, a new answer on agent.i-guide.io numbered its list 1 to 8, while a
+conversation saved before it, reopened from History, still read "1." on every item. Each answer
+was stored as its rendered `html`, in IndexedDB and in the server-side conversation record, and
+`restoreSession` (`map-ui-prototype/src/App.tsx`) put those messages back as saved. No renderer
+fix could reach an old chat.
+
+The markdown was there all along. Every finished answer kept its terminal result as `response`,
+and `response.answer` is the text the live turn rendered (the final `answer` SSE event and the
+`result` event carry the same `payload["answer"]`). The server keeps the client's record whole,
+so the server copy has it too.
+
+What changed:
+- A finished answer now also stores its markdown, as `markdown`, beside `html`.
+- `rerenderMessages` (`sessionStore.ts`) runs on restore. An agent message that was rendered
+  (`html` set, not streaming) is rendered again from `markdown`, or from `response.answer` for a
+  record saved before this change. A message with no markdown anywhere keeps its saved html, as
+  do an error turn (no html, the error as text) and a turn saved mid-stream.
+- Nothing is written back. The stored record keeps its old html, so each open re-renders it.
+
+`npm run check:restore` holds ten cases; four fail on the previous tree, where restore was the
+identity. Checked in Chrome against a local dev API: a record in the pre-S9.12 shape (eight
+one-item lists in `html`, the loose list in `response.answer`) reopened as one list of eight,
+and the same record without `response` reopened unchanged.
 
 
 ---
