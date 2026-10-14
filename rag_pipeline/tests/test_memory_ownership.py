@@ -172,6 +172,58 @@ def test_no_identity_means_nothing_to_enforce(store):
     mm.assert_owner(mid)                                    # dev / demo / service: no raise
 
 
+def test_a_first_turn_may_name_an_id_with_nothing_behind_it(store):
+    """`allow_missing` is for the chat edge's `threadId`-only turn, which is how every first turn
+    starts. Without it a missing id reads as unowned, and strict mode refuses every first turn."""
+    as_user("alice", lambda: mm.assert_owner("sess-new", allow_missing=True))   # no raise
+    with pytest.raises(mm.MemoryAccessDenied):
+        as_user("alice", lambda: mm.assert_owner("sess-new"))                   # strict default
+
+
+def test_allow_missing_is_not_allow_someone_elses(store):
+    mid = as_user("alice", lambda: mm.create_memory("mine"))
+    with pytest.raises(mm.MemoryAccessDenied):
+        as_user("bob", lambda: mm.assert_owner(mid, allow_missing=True))
+
+
+# --- a deleted conversation (S9.14) ----------------------------------------------
+# Deleting overwrites the conversation document with a tombstone, `{"deletedAt": ...}`: no owner,
+# no content. The id is then refused to everyone, so nothing can write a conversation back there.
+
+def tombstone(store, mid):
+    store.docs[mid] = {"deletedAt": "2026-10-13T00:00:00+00:00"}
+    store.visible.add(mid)
+
+
+def test_a_tombstone_is_refused_even_to_its_owner_and_even_when_creating(store, monkeypatch):
+    """The owner's own stale tab is the caller most likely to bring it back."""
+    monkeypatch.setenv("AGENT_TOKEN_STRICT", "0")           # where an ownerless id was let through
+    tombstone(store, "gone")
+    for kwargs in ({}, {"allow_missing": True}, {"allow_unowned": True}):
+        with pytest.raises(mm.MemoryAccessDenied):
+            as_user("alice", lambda: mm.assert_owner("gone", **kwargs))
+
+
+def test_no_write_brings_a_tombstone_back(store):
+    """The edge is skipped by callers with no identity and passed by a turn that began before the
+    delete, so each writer refuses on its own."""
+    tombstone(store, "gone")
+    with pytest.raises(mm.MemoryAccessDenied):
+        mm.get_or_create_memory("gone")
+    with pytest.raises(mm.MemoryAccessDenied):
+        as_user("alice", lambda: mm.update_memory("gone", "q", "m", "a", []))
+    with pytest.raises(mm.MemoryAccessDenied):
+        mm.save_session_snapshot("gone", {"title": "back", "messages": []})
+    assert store.docs["gone"] == {"deletedAt": "2026-10-13T00:00:00+00:00"}
+
+
+def test_to_a_reader_a_tombstone_is_not_there(store):
+    tombstone(store, "gone")
+    assert mm.get_memory("gone") is None
+    assert mm.get_session_snapshot("gone") is None
+    assert mm.is_deleted("gone") and not mm.is_deleted("never-existed")
+
+
 # --- writes never move a conversation between users ------------------------------
 
 def test_a_write_does_not_reassign_an_owned_conversation(store):

@@ -49,12 +49,18 @@ class FakeStore(FakeOpenSearch):
         self.traces: dict[str, dict] = {}
         self.pending_delete: set[str] = set()
         self.trace_failures: list = []
+        # An OVERWRITE is near-real-time too: until a refresh, search still returns the version
+        # that was there before. The base fake hides an unrefreshed write instead, which for an
+        # overwrite is the wrong way round: the tombstone that replaces a conversation would
+        # vanish from the list at once whether or not the delete asked for a refresh (S9.14).
+        self.stale: dict[str, dict] = {}
 
     def settle(self):
         for doc_id in self.pending_delete:
             self.docs.pop(doc_id, None)
             self.visible.discard(doc_id)
         self.pending_delete.clear()
+        self.stale.clear()
         super().settle()
 
     def index(self, *, index, id, body, refresh=None, **_kw):
@@ -62,6 +68,10 @@ class FakeStore(FakeOpenSearch):
             self.traces[id] = dict(body)
             return
         self.pending_delete.discard(id)
+        if refresh:
+            self.stale.pop(id, None)
+        elif id in self.visible and id in self.docs:
+            self.stale.setdefault(id, dict(self.docs[id]))
         super().index(index=index, id=id, body=body, refresh=refresh)
 
     def get(self, *, index, id):
@@ -72,7 +82,12 @@ class FakeStore(FakeOpenSearch):
 
     def search(self, *, index, body):
         if index != mm.TRACE_INDEX:
-            return super().search(index=index, body=body)
+            docs, visible = self.docs, self.visible
+            self.docs, self.visible = {**docs, **self.stale}, visible | set(self.stale)
+            try:
+                return super().search(index=index, body=body)
+            finally:
+                self.docs, self.visible = docs, visible
         want = body["query"]["term"]["memory_id.keyword"]
         hits = [{"_id": k, "_source": dict(v)} for k, v in self.traces.items()
                 if v.get("memory_id") == want]
@@ -154,7 +169,8 @@ def test_the_owner_deletes_their_conversation(store):
     assert res.status_code == 200
     assert res.get_json() == {"deleted": True, "memoryId": mid, "traces": 2}
     store.settle()
-    assert mid not in store.docs
+    # What is left is the tombstone (S9.14): a timestamp, with no owner and no content.
+    assert set(store.docs[mid]) == {mm.TOMBSTONE_FIELD}
     assert traces_of(store, mid) == []
 
 
@@ -280,3 +296,159 @@ def test_local_mode_answers_as_the_other_routes_do(store, monkeypatch):
     assert res.status_code == 404
     assert res.get_json()["reason"] == "persistent_memory_disabled"
     assert store.docs == before
+
+
+# --- a deleted conversation stays deleted (S9.14) ----------------------------------
+# S9.13 left two ways back, both read from the code: another tab's next turn, and a turn already
+# in flight. Measured against this fake before the fix, a `threadId`-only turn re-created the
+# conversation in strict mode, and under AGENT_TOKEN_STRICT=0 so did a `memoryId` turn and the
+# end-of-turn PUT. The conversation document is now overwritten with a tombstone, and every path
+# that writes to a conversation id refuses one.
+
+def _stub_agent(monkeypatch, during=None):
+    """The agent, minus the model: records the history it was handed, and can run `during` mid-turn."""
+    from agent_runtime import agent_chat_service as acs
+    seen = []
+
+    def run(user_input, *, chat_history=None, thread_id=None, **_kw):
+        seen.append([m.get("content") for m in chat_history or []])
+        return {"final_answer": "ok", "thread_id": thread_id, "available_skills": [],
+                "route_trace": {}}
+
+    def stream(user_input, *, chat_history=None, thread_id=None, trace_recorder=None, **_kw):
+        seen.append([m.get("content") for m in chat_history or []])
+        if trace_recorder:
+            trace_recorder({"event": "status", "data": {}})
+        yield {"event": "status", "data": {"stage": "working"}}
+        if during:
+            during()
+        yield {"event": "completed", "data": {"answer": "ok", "thread_id": thread_id}}
+
+    monkeypatch.setattr(acs, "run_agent_query", run)
+    monkeypatch.setattr(acs, "stream_agent_query_events", stream)
+    monkeypatch.setattr(acs, "_llm_for_request", lambda *a, **k: None)
+    return seen
+
+
+def chat(user, **body):
+    return client_as(user).post("/agent/chat", json={"userQuery": "what did I ask?", **body})
+
+
+def deleted(owner=ALICE):
+    mid = conversation(owner)
+    assert client_as(owner).delete(f"/agent/conversations/{mid}").status_code == 200
+    return mid
+
+
+def assert_still_deleted(store, mid):
+    assert set(store.docs[mid]) == {mm.TOMBSTONE_FIELD}, store.docs[mid]
+    assert traces_of(store, mid) == []
+    assert client_as(ALICE).get("/agent/conversations").get_json()["conversations"] == []
+
+
+def test_a_stale_tabs_first_turn_cannot_bring_it_back_but_a_new_one_starts(store, monkeypatch):
+    """A tab whose first turn had not been answered names its conversation by `threadId` alone,
+    as every first turn does. Before, that re-created the deleted conversation in strict mode."""
+    seen = _stub_agent(monkeypatch)
+    mid = deleted()
+    res = chat(ALICE, threadId=mid)
+    assert res.status_code == 404 and res.get_json()["reason"] == "not_your_conversation"
+    assert seen == [], "the turn must be refused before the agent runs"
+    assert_still_deleted(store, mid)
+    # ...and the guard costs a first turn nothing: an id with nothing behind it is still created.
+    assert chat(ALICE, threadId="sess-a-new-one").status_code == 200
+    assert store.docs["sess-a-new-one"]["owner_id"] == ALICE
+
+
+@pytest.mark.parametrize("strict", ["1", "0"])
+def test_a_stale_tabs_next_turn_cannot_bring_it_back(store, monkeypatch, strict):
+    """Under AGENT_TOKEN_STRICT=0 an ownerless id was let through, and the turn's
+    get_or_create_memory re-created the conversation under the caller."""
+    monkeypatch.setenv("AGENT_TOKEN_STRICT", strict)
+    _stub_agent(monkeypatch)
+    mid = deleted()
+    res = chat(ALICE, memoryId=mid, threadId="sess-stale")
+    assert res.status_code == 404
+    assert_still_deleted(store, mid)
+
+
+def test_the_streamed_turn_is_refused_too(store, monkeypatch):
+    seen = _stub_agent(monkeypatch)
+    mid = deleted()
+    res = client_as(ALICE).post("/agent/chat/stream",
+                                json={"userQuery": "and now?", "threadId": mid})
+    body = res.get_data(as_text=True)
+    assert "not_your_conversation" in body and seen == []
+    assert_still_deleted(store, mid)
+
+
+@pytest.mark.parametrize("strict", ["1", "0"])
+def test_the_end_of_turn_save_cannot_bring_it_back(store, strict, monkeypatch):
+    """A turn in flight on another tab ends with a PUT. Under AGENT_TOKEN_STRICT=0 it was let
+    through and save_session_snapshot's NotFound branch indexed the conversation again."""
+    monkeypatch.setenv("AGENT_TOKEN_STRICT", strict)
+    mid = deleted()
+    res = client_as(ALICE).put(f"/agent/conversations/{mid}",
+                               json={"title": "back", "messages": [], "layers": []})
+    assert res.status_code == 404
+    assert_still_deleted(store, mid)
+
+
+def test_a_caller_with_no_identity_cannot_bring_it_back(store, monkeypatch):
+    """The service key skips assert_owner (no identity, nothing to check), so the store itself
+    must refuse: before, its PUT re-created the conversation, unowned."""
+    monkeypatch.setenv("AGENT_CHAT_API_KEY", KEY)
+    mid = deleted()
+    res = client_as(None).put(f"/agent/conversations/{mid}", headers={"X-API-Key": KEY},
+                              json={"title": "back", "messages": [], "layers": []})
+    assert res.status_code == 404
+    assert_still_deleted(store, mid)
+
+
+def test_a_turn_running_when_it_was_deleted_leaves_nothing_behind(store, monkeypatch):
+    """The turn started before the delete, so no edge check can stop it. At its end it wrote a
+    trace, an orphan whose parent has no owner; its answer must not land in the tombstone."""
+    from agent_runtime import agent_chat_service as acs
+    from rag_pipeline.tests.test_memory_ownership import as_user
+    mid = conversation(ALICE)
+    _stub_agent(monkeypatch, during=lambda: client_as(ALICE).delete(f"/agent/conversations/{mid}"))
+    events = as_user(ALICE, lambda: list(acs.stream_agent_chat_events(
+        user_input="still running", thread_id="sess-other-tab", memory_id=mid)))
+    assert not any(e["event"] == "trace_saved" for e in events), events
+    # The answer still reaches the tab, and its in-process session memory; not the store.
+    saved = [e["data"] for e in events if e["event"] == "memory_saved"]
+    assert all(d.get("scope") == "session" for d in saved), saved
+    assert_still_deleted(store, mid)
+
+
+def test_a_turn_naming_someone_elses_conversation_as_its_thread_is_refused(store, monkeypatch):
+    """Not a delete case, found measuring one. The edge checked `memoryId`; the service keys
+    memory on `memoryId or threadId`. Bob sending Alice's id as `threadId` alone had her history
+    handed to his agent and his turn appended to her conversation, in strict mode."""
+    from rag_pipeline.tests.test_memory_ownership import as_user
+    seen = _stub_agent(monkeypatch)
+    mid = conversation(ALICE)
+    as_user(ALICE, lambda: mm.update_memory(mid, "alice's private question", "m1", "her answer", []))
+    res = chat(BOB, threadId=mid)
+    assert res.status_code == 404 and res.get_json()["reason"] == "not_your_conversation"
+    assert seen == []
+    assert [t["userQuery"] for t in store.docs[mid]["chat_history"]] == ["alice's private question"]
+
+
+def test_a_store_outage_does_not_fail_a_first_turn(store, monkeypatch):
+    """A guard against this stage's own edge read, so it passes on the base by design. Before it,
+    a first turn's store read happened in the service, which fell back to in-process memory on
+    failure. The edge check must not turn an outage into failed first turns, nor let the service
+    make the read it could not."""
+    seen = _stub_agent(monkeypatch)
+    reads = []
+
+    def down(**kw):
+        reads.append(kw.get("id"))
+        raise ConnectionError("cluster unreachable")
+
+    monkeypatch.setattr(store, "get", down)
+    res = chat(ALICE, threadId="sess-during-outage")
+    assert res.status_code == 200 and len(seen) == 1
+    assert reads == ["sess-during-outage"], "only the edge's read; the service must not retry it"
+    assert "sess-during-outage" not in store.docs

@@ -17,8 +17,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
-from rag_pipeline.memory_module import (MemoryAccessDenied, PersistentMemoryDisabled,
-                                        SnapshotTooLarge,
+from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
+                                        PersistentMemoryDisabled, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
                                         delete_conversation, get_session_snapshot, get_turn_trace,
                                         list_memories, list_turn_traces, save_session_snapshot)
@@ -353,6 +353,35 @@ def _persistent_memory_allowed() -> bool:
     within a conversation). Unset honours the request, exactly as before.
     """
     return (os.getenv(PERSISTENT_MEMORY_ENV) or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _assert_chat_memory_owner(normalized: dict) -> None:
+    """Refuse a turn on a conversation that is not the caller's, or that was deleted.
+
+    The service keys the turn's memory on ``memory_id or thread_id``, so the edge checks THAT,
+    not ``memory_id`` alone. Checking only ``memory_id`` let a turn that named another user's
+    conversation as its ``threadId`` read that conversation's history into its own context and
+    append its turn to it, in strict mode too (measured in S9.14). A ``threadId``-only turn is
+    also how every first turn starts, so there a missing document passes: the turn creates it.
+    """
+    if normalized.get("memory_id"):
+        assert_memory_owner(normalized["memory_id"])
+    elif normalized.get("thread_id") and normalized.get("use_persistent_memory"):
+        try:
+            assert_memory_owner(normalized["thread_id"], allow_missing=True)
+        except MemoryAccessDenied:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # The store could not be read. Before this check existed, such a first turn read the
+            # store only inside the service, failed there, and fell back to in-process memory;
+            # refusing it now would turn a store outage into failed first turns. So the turn runs
+            # with that fallback on purpose: persistence off, which also means the service never
+            # makes the read this check could not, so a store that recovers mid-turn cannot let it
+            # through unchecked.
+            logger.warning("Chat ownership check for thread %s could not read the store (%s); "
+                           "running the turn without persistent memory",
+                           normalized["thread_id"], exc)
+            normalized["use_persistent_memory"] = False
 
 
 def _normalize_agent_chat_request(data: dict) -> dict:
@@ -1185,6 +1214,10 @@ def agent_conversation(memory_id):
                 return jsonify({"error": "Body must be a conversation object."}), 400
             try:
                 return jsonify(save_session_snapshot(memory_id, body))
+            except ConversationDeleted:
+                # A caller with no identity skipped assert_owner; the store refused instead.
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
             except SnapshotTooLarge as exc:
                 # A real ceiling rather than a silent truncation: a conversation that came back
                 # missing half its layers would look like data loss with no explanation.
@@ -2272,16 +2305,15 @@ def agent_chat():
             # Checked INSIDE the identity binding: assert_owner reads the caller from the same
             # ContextVar everything else does, so before this line it would see nobody and wave
             # every conversation through.
-            if normalized.get("memory_id"):
-                try:
-                    assert_memory_owner(normalized["memory_id"])
-                except MemoryAccessDenied:
-                    # 404 for the same reason the download endpoint uses it: a 403 confirms the
-                    # conversation exists, and a memory_id is the only thing guarding it.
-                    logger.info("Chat refused: memory %s is not this caller's",
-                                normalized["memory_id"])
-                    return jsonify({"error": "No conversation found for that id.",
-                                    "reason": "not_your_conversation"}), 404
+            try:
+                _assert_chat_memory_owner(normalized)
+            except MemoryAccessDenied:
+                # 404 for the same reason the download endpoint uses it: a 403 confirms the
+                # conversation exists, and a memory_id is the only thing guarding it.
+                logger.info("Chat refused: memory %s is not this caller's",
+                            normalized.get("memory_id") or normalized.get("thread_id"))
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
             raw = run_agent_chat(
                 user_input=user_query,
                 thread_id=normalized.get("thread_id"),
@@ -2810,17 +2842,16 @@ def agent_chat_stream():
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
             try:
-                if normalized.get("memory_id"):
-                    try:
-                        assert_memory_owner(normalized["memory_id"])
-                    except MemoryAccessDenied:
-                        logger.info("Stream refused: memory %s is not this caller's",
-                                    normalized["memory_id"])
-                        # Headers are long gone by now, so the refusal travels as an SSE frame
-                        # rather than a status code. Same wording as the JSON path.
-                        yield _sse_event("error", {"error": "No conversation found for that id.",
-                                                   "reason": "not_your_conversation"})
-                        return
+                try:
+                    _assert_chat_memory_owner(normalized)
+                except MemoryAccessDenied:
+                    logger.info("Stream refused: memory %s is not this caller's",
+                                normalized.get("memory_id") or normalized.get("thread_id"))
+                    # Headers are long gone by now, so the refusal travels as an SSE frame
+                    # rather than a status code. Same wording as the JSON path.
+                    yield _sse_event("error", {"error": "No conversation found for that id.",
+                                               "reason": "not_your_conversation"})
+                    return
                 for item in stream_agent_chat_events(
                     user_input=user_query,
                     thread_id=normalized.get("thread_id"),
