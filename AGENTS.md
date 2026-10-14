@@ -924,6 +924,14 @@ companion to the history below.
 
 ## Deployment
 
+**The VM runs the `snapshot` branch, not `prototype`.** `prototype` is where PRs land, and
+many sessions move it in parallel. `snapshot` is the stable branch the deployment checks out, so
+what is live is always one named commit someone chose and tested. PRs still target `prototype`;
+nothing is committed to `snapshot` directly. To deploy, test a `prototype` commit, fast-forward
+`snapshot` to it (`git push origin <sha>:snapshot`, which refuses anything but a fast-forward;
+never force it), then `git pull --ff-only` on the VM and rebuild. Set up 2026-10-13 at the
+user's request, at `345e6e5`, the commit the VM was already running.
+
 Runs as Docker Compose services behind nginx: `agent-api`, `mcp-server` and `embedding-server`, plus `agent-db` under the `extraction` profile (running on the VM since 2026-10-08) and `metadata-extraction-server` under the `ingestion` profile (not running). nginx terminates TLS and needs
 `proxy_buffering off` with a long `proxy_read_timeout` for the SSE stream. Host-specific
 detail — addresses, the satellite-embedding service unit, dependency pins — is operational and
