@@ -1972,6 +1972,112 @@ runner exists here, as `check:sources` and the other `check:*` scripts already n
 server-side text is unchanged, so saved conversations render correctly once the new bundle is
 served.
 
+### Stage S9.13 Deleting a conversation deletes it
+
+*Branch `claude/delete-conversation`, on prototype `75df473`.*
+
+A user on agent.i-guide.io (token mode) reported on 2026-10-13 that deleting a chat did nothing.
+Read from the code, it never could have. Three things combined:
+
+- **The API had no delete.** `/agent/conversations/<memory_id>` answered GET and PUT only.
+- **History in token mode is the server's list.** S9.6 made it so, and the client keeps an
+  IndexedDB copy only as a cache.
+- **The × removed only that cache, and by the wrong key.** `deleteSession(row.id)` deleted the
+  IndexedDB record whose key is the row id. In token mode the row id is the server's
+  `memoryId`, while the cache is keyed by the client's session id (`sess-…`) and carries the
+  `memoryId` as a field. So in token mode the × removed nothing at all. The next refresh listed
+  the conversation again from the server, which still held it.
+
+**`DELETE /agent/conversations/<memory_id>`** (`api/server.py`, `memory_module.delete_conversation`).
+It deletes the conversation's `chat_memory` document, which holds both the agent's memory and
+the client's snapshot, and every `chat_traces` document of that conversation. It answers like the
+GET route:
+- 404 for another user's id or an unknown one, never 403 (S9.3).
+- 404 `persistent_memory_disabled` in local mode.
+- the identity errors `_identity_error_response` already maps.
+
+It is stricter than GET in two ways, each because a delete cannot be undone:
+
+- **Nobody identified, no delete.** Dev, demo and a service-key caller have no user, so GET and
+  PUT let them through, and a delete would remove any conversation whose id they held. Every
+  answer prints its conversation's id. These callers get 403 `identity_required`.
+- **Unowned is never deletable.** `assert_owner(..., allow_unowned=False)` holds even while
+  `AGENT_TOKEN_STRICT=0`. The migration window keeps legacy conversations *readable* by id. It was
+  never meant to let anyone destroy one.
+
+**Traces go with it, and go first.** The traces route checks ownership on the conversation, not
+on the trace (S9.6), so a trace's access is its parent's. Once the parent is gone, `owner_of`
+returns None, and under `AGENT_TOKEN_STRICT=0` the route lets anyone holding the id read every
+turn's question and answer. A test reproduces exactly that against the fake store. Whether the VM
+runs non-strict was not checked; strict is the default. Deleting traces first means a failure
+halfway leaves an owned conversation with fewer traces, which a retry finishes, rather than
+unowned traces. The cost is diagnostic: a deleted conversation's turns are gone from the corpus
+the harness and failure reproduction draw on. A user's request to delete what they asked
+outranks that.
+
+The trace delete is a `delete_by_query` on `memory_id.keyword`. A memory id is a UUID and
+tokenises on its hyphens, so the bare field would match nothing and delete nothing, with no
+error. The conversation delete waits for a refresh (`refresh="wait_for"`), because the client
+re-lists the moment it returns. Without the wait, the deleted conversation is still in the search
+index and comes straight back, the save-then-list bug of S9.7 in reverse.
+
+**Files are not deleted.** A file id is printed into answers as a download link and can be used
+by the owner's other conversations, so no conversation owns its files. Reclaiming a deleted
+conversation's files would need a reference count across conversations and answers, which
+nothing keeps. `AGENT_FILE_RETENTION_DAYS` remains the only mechanism, and it is off.
+
+The server logs each deletion as `memory_id`, `owner` and trace count, with no content.
+
+**The client** (`App.tsx`, `agentClient.deleteConversation`, `sessionStore.deleteLocalCopies`):
+- **Confirm first.** The × now asks before deleting: "Delete from your account?" in token mode,
+  "…from this browser?" in dev and demo.
+- **Server first.** In token mode it calls the server first. Only on success does it remove the
+  local copies, found by `memoryId` and not by key, and re-list.
+- **Failures are shown.** A failure leaves the row and says why on it. A 404 counts as done: the
+  row came from this user's own list, so it means the conversation was already deleted elsewhere.
+- **The open conversation resets.** Deleting the open conversation starts a fresh one. Otherwise
+  its next turn would continue a deleted `memoryId`, and the end-of-turn save would recreate it.
+  For the same reason, the × is disabled on the open conversation while a turn is running.
+- **Dev and demo stay local.** They keep the local-only delete.
+
+`isOpenConversation` matches either id, and that also fixes the History highlight. The highlight
+compared the row with the session id, which in token mode never matched.
+
+**Measured.**
+- **Server tests.** `rag_pipeline/tests/test_conversation_delete.py` has 15 tests over the fake
+  store, which models analysed `owner_id` and `memory_id` and near-real-time deletes. All 15 fail
+  on prototype `75df473`.
+- **Mutations.** Each guard was removed in turn, and each removal fails at least one test:
+  - no refresh: 1 test fails;
+  - bare `memory_id`: 3 fail;
+  - no trace delete: 4 fail;
+  - default `allow_unowned`: 1 fails.
+- **Client check.** `npm run check:conversations` has 15 checks. Against prototype's source it
+  does not build, because neither export exists.
+- **Browser.** Local mode cannot exercise token mode, so the browser check used a replica:
+  - **What ran.** `api/server.py` ran in `AGENT_MODE=token` and verified a locally signed test
+    JWT. The store was replaced in process by the test fake, with no `.env` read and no cluster
+    reachable. The Vite dev page was proxied to it.
+  - **Token mode in Chrome.** Each check ran in its own tab:
+    - Cancel sends nothing.
+    - Delete sends one `DELETE` (200), then one list, and the row is gone after a reload.
+    - A forced server failure (500) leaves the row with the message under it.
+    - Deleting the open conversation resets the chat.
+    - A cache copy keyed `sess-…` with that `memoryId` is removed, and an unrelated record is kept.
+  - **Dev mode.** The same gesture sends no request and removes only the local record.
+  - **Not covered.** The real platform cookie and the prod cluster were not exercised.
+
+**Not done here.** Two cases remain, both read from the code:
+- **Other tabs.** Another tab still showing the deleted conversation keeps it until it next
+  re-lists. If that tab sends a turn, the chat path's `get_or_create_memory` re-creates the
+  document under the same owner. That path has no ownership check. The turn's PUT then passes,
+  because the caller owns the new document.
+- **A turn already in flight.** A turn in flight from another tab or device ends differently. Its
+  `update_memory` fails on the missing document (logged, not raised). Its end-of-turn PUT is then
+  refused 404 under the default `AGENT_TOKEN_STRICT=1`, but re-creates the conversation under
+  `AGENT_TOKEN_STRICT=0`.
+
+Closing either needs a server-side tombstone. Neither was observed.
 
 ---
 

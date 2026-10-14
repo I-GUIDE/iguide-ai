@@ -23,8 +23,8 @@ library. The VM then ran `prototype` at `23cfd02`, which includes the extraction
 
 | Store | Where | Holds | Owner check | Reclaimed by |
 | --- | --- | --- | --- | --- |
-| Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | nothing |
-| Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | nothing |
+| Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | only its owner's delete (S9.13) |
+| Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | deleted with their conversation (S9.13) |
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
@@ -116,6 +116,22 @@ document can have either without the other**, and that asymmetry is load-bearing
   record (`exists` on `session_snapshot_json` or `session_snapshot`). Listed therefore means
   *restorable*.
 - `GET /agent/conversations/<id>` serves the snapshot, and 404s without one.
+
+### Who deletes a conversation
+
+Only its owner, through `DELETE /agent/conversations/<id>` (S9.13), which the map UI's History ×
+calls in token mode. It removes the whole document, so both halves go: the agent's memory and the
+client's record. It also removes every `chat_traces` document of the conversation, first (see
+1b). Nothing else deletes from this index. No retention applies, and no age-based sweep runs.
+
+- **Refused callers.** The route is refused (403 `identity_required`) to a caller with no
+  identity: dev, demo or the service key.
+- **Unowned documents.** It never deletes an unowned document, even while
+  `AGENT_TOKEN_STRICT=0`.
+- **Other ids.** Another user's id and an unknown id both answer 404.
+- **Logging.** Each deletion is logged as id, owner and trace count.
+- **Files.** It does not touch the files the conversation used (section 2). A file id is a
+  download link that answers and other conversations may still hold.
 
 The snapshot is **stored, not rebuilt**. `sessionStore.ts` was written server-shaped on purpose,
 and reconstructing the client's view here would duplicate its layer-descriptor rules in a second
@@ -331,6 +347,13 @@ choosing which turn to open should not mean downloading all of them. `?traceId=<
 turn with its full event list. Ownership is asserted on the *conversation*, so a trace can never
 be reachable by an id its conversation would refuse.
 
+### Deleted with their conversation
+
+Deleting a conversation (section 1) first runs a `delete_by_query` on `memory_id.keyword` here.
+It runs first because a trace inherits its conversation's access. With the conversation gone,
+`owner_of` finds no owner, and under `AGENT_TOKEN_STRICT=0` the route above would serve the
+traces to anyone holding the id. Otherwise nothing deletes a trace.
+
 ---
 
 ## 1c. Which tier, and the two switches
@@ -458,8 +481,11 @@ each time is pure waste. ~24 workspaces, 5.3 GB.
 **Database `iguide-map-ui`, object store `sessions`**, keyed by the client's own session id (not
 the `memoryId`), each record stamped with `ownerId`.
 
-In dev and demo this is the only copy. **In token mode it is a cache**: the server owns history so
-conversations follow the account to another browser. IndexedDB is per-*origin*, not per-user, and
+In dev and demo this is the only copy, and History's × deletes from it alone. **In token mode it
+is a cache**: the server owns history so conversations follow the account to another browser.
+There, the × deletes on the server first, and only then removes this browser's copies. It finds
+them by their `memoryId` field, because the store is keyed by the client's session id. A failed
+server delete leaves both copies and shows why. IndexedDB is per-*origin*, not per-user, and
 signing out of the platform does not touch it — hence `visibleTo(record, viewer)`: an owned record
 is its owner's alone, an unowned one is shared. Another person's records are hidden, never
 deleted; it is their data and this is their browser too.
@@ -606,7 +632,7 @@ prod with nothing erroring.
 | --- | ---: | --- |
 | `agent_chat_files` | 7.3 GB | no — `AGENT_FILE_RETENTION_DAYS=0` |
 | `iguide_codeexec` | 5.3 GB | yes — 72-hour TTL |
-| `chat_memory` | 5.27 MB | no |
+| `chat_memory` | 5.27 MB | only when its owner deletes a conversation |
 | `agent_db_data` | 83 MB (2026-10-10) | no, and nothing writes it, so it does not grow |
 
 About **12.6 GB on one volume**, with only the workspaces expiring. The file store's retention is
