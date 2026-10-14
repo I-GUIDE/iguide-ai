@@ -152,6 +152,14 @@ them against the harness's labels: correct, wrong, or an honest refusal. It repo
 precision as a "this answer is wrong" signal, its recall over wrong answers, and false alarms by
 cause. Architecture stage 52 has the measurements and what the replay can and cannot re-run.
 
+The replay rebuilds each turn's lineage (`agent_runtime/lineage.py`, stage 56) from its recorded
+results. A bridge run's code was also shown the bridge's host notes, which the archive does not
+hold; recover them once from the commit each run names in its `.origin`:
+
+```bash
+python3 -m gis_harness.run_notes        # writes <run>/tool_notes.json for AGENT_CODE_BRIDGE=1 runs
+```
+
 ## Data and licences
 
 - Synthetic datasets are generated at run time from fixed seeds.

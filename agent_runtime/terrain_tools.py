@@ -151,6 +151,10 @@ def _fetch_dem(bbox: List[float], size: int) -> Any:
             return {"error": f"USGS 3DEP returned an error: {json.loads(body)}"[:300]}
         except Exception:  # noqa: BLE001
             pass
+    # The service, in the calling tool's lineage (stage 56), before the DEM file is written.
+    from agent_runtime import lineage
+
+    lineage.record_source(source_id="usgs_3dep", url=_3DEP_URL)
     return body
 
 

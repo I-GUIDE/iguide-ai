@@ -108,6 +108,10 @@ def _query(layer: str, where: str, out_fields: str = "*", *,
                         "boundary file instead of inventing coordinates."}
     if resp.status_code >= 400:
         return {"error": f"TIGERweb returned HTTP {resp.status_code}", "detail": resp.text[:300]}
+    # The service, in the calling tool's lineage (stage 56), before the boundary file is written.
+    from agent_runtime import lineage
+
+    lineage.record_source(source_id="census_tigerweb", url=url)
     try:
         data = resp.json()
     except ValueError:

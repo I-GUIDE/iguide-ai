@@ -1779,10 +1779,20 @@ def _make_repeat_call_middleware() -> Any:
     from langchain.agents.middleware import wrap_tool_call
     from langchain_core.messages import ToolMessage
 
-    from agent_runtime import turn_log
+    from agent_runtime import lineage, turn_log
 
     @wrap_tool_call
     def answer_repeats(request: Any, handler: Any) -> Any:
+        # The call acts for its own lineage (agent_runtime/lineage.py, stage 56): a file it
+        # writes, a service it reaches and a file it reads are recorded against this call id by
+        # the code that does them, and the call cites the description it was chosen from.
+        call = request.tool_call or {}
+        tool = getattr(request, "tool", None)
+        with lineage.calling(call.get("id"), call.get("name"), call.get("args"),
+                             description=getattr(tool, "description", None)):
+            return _answer_repeats(request, handler)
+
+    def _answer_repeats(request: Any, handler: Any) -> Any:
         log = turn_log.active()
         if log is None:
             return handler(request)

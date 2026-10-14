@@ -167,6 +167,15 @@ def _element_to_feature(el: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _record_source(endpoint: str) -> None:
+    """The mirror that answered, in the calling tool's lineage (agent_runtime/lineage.py)."""
+    try:
+        from agent_runtime import lineage
+    except Exception:  # noqa: BLE001 - this module also runs outside the agent
+        return
+    lineage.record_source(source_id="osm_overpass", url=endpoint)
+
+
 def overpass_search(
     feature: str,
     place: Optional[str] = None,
@@ -212,6 +221,7 @@ def overpass_search(
             resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT + 5)
             resp.raise_for_status()
             data = resp.json()
+            _record_source(endpoint)
             break
         except Exception as exc:  # noqa: BLE001 - try the next mirror
             last_error = str(exc)

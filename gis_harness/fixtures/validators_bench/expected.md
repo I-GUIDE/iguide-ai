@@ -50,6 +50,7 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 
 | check | kind | on correct | on wrong (coincidental) | on refusal | precision | recall | precision earned | recall earned |
 |---|---|---|---|---|---|---|---|---|
+| audit | note | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
 | audit | problem | 3 | 0 (0) | 1 | 0% | 0% | 0% | 0% |
 | gate:all_nan | problem | 1 | 0 (0) | 0 | 0% | 0% | 0% | 0% |
 | gate:count_population | problem | 2 | 2 (2) | 0 | 50% | 29% | 0% | 0% |
@@ -97,13 +98,17 @@ Over the 13 turns of the runs archived by then, 1 wrong: a banner on 1 wrong and
 | audit: arithmetic on recorded figures called unsupported | yes | 1 | 1 |
 | audit: the reason a refusal gives called unsupported | yes | 1 | 1 |
 | projected_crs: an exploratory print measured in degrees, not the answer's run | yes | 1 | 1 |
-| audit: a fact from a tool description called unsupported | yes | 1 | 1 |
 
 ## The Sources line (replay)
 
-4 turns render a Sources line that leaves out a data source their record holds (2 correct, 2 wrong, 0 refusals; 5 sources in all). Not a banner: the reader is not warned, the provenance is just missing.
+1 turns render a Sources line that leaves out a data source their record holds (0 correct, 1 wrong, 0 refusals; 1 sources in all). Not a banner: the reader is not warned, the provenance is just missing.
 
 | cause | sources |
 |---|---|
-| Sources line: a code run reread files an earlier call fetched | 4 |
 | Sources line: a source whose result no stated figure came from | 1 |
+
+Held to the lineage the tools recorded (stage 56): the line leaves out 0 source(s) the answer's results rest on; the line as it was before stage 56 left out 3 on 3 turns.
+
+| by the lineage | sources |
+|---|---|
+| Sources line: not named; nothing the answer used rests on it (lineage) | 1 |

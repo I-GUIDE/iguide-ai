@@ -150,6 +150,33 @@ CATALOG: Tuple[Source, ...] = (
 
 _BY_TOOL: Dict[str, Source] = {t: s for s in CATALOG for t in s.tools}
 _BY_HOST: Dict[str, Source] = {h: s for s in CATALOG for h in s.hosts}
+_BY_ID: Dict[str, Source] = {s.id: s for s in CATALOG}
+
+
+def by_id(source_id: str) -> Optional[Source]:
+    return _BY_ID.get(str(source_id or ""))
+
+
+def by_host(host: str) -> Optional[Source]:
+    """The entry for *host*, or for the catalogued host it is a subdomain of (an Overpass
+    mirror such as ``lz4.overpass-api.de``)."""
+    host = str(host or "").lower().split(":")[0]
+    if host in _BY_HOST:
+        return _BY_HOST[host]
+    for known, src in _BY_HOST.items():
+        if host.endswith("." + known):
+            return src
+    return None
+
+
+def statement(src: Source) -> str:
+    """How the Sources line names *src* (see `_statement`)."""
+    return _statement(src)
+
+
+def note_text(src: Source) -> str:
+    """The catalogue entry the peers were shown for *src* (`describe`), as a lineage note."""
+    return src.line()
 
 
 def describe(kinds: Optional[Iterable[str]] = None) -> str:
@@ -265,7 +292,7 @@ def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]
             if k in ("url", "source", "origin") and isinstance(v, str) and v.startswith("http")]
     for url in urls:
         host = urlparse(url).netloc
-        hs = _BY_HOST.get(host)
+        hs = by_host(host)
         if hs is not None:
             out.append((_statement(hs), [hs.name, *hs.aliases, host]))
         else:

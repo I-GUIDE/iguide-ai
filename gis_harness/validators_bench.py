@@ -113,7 +113,7 @@ for _tid in ("p3-after/lumen_deepseek-v4-flash/U04.t1", "p5-gate/lumen_deepseek-
 
 # The state keys the replay reads. Everything else in the `result` event is left behind.
 _STATE_KEYS = ("query", "evidence", "analysis_results", "code_result", "audit", "verdict",
-               "peer_failures", "actions", "bound_tool_docs")
+               "peer_failures", "actions", "bound_tool_docs", "tool_notes")
 _PEER_KEYS = ("tool_calls", "tool_results", "summary", "answer", "on_map", "executed", "file_id",
               "artifacts")
 
@@ -289,6 +289,15 @@ def from_archive(path: Path, root: Path) -> Optional[BenchTurn]:
     run, model = rel[0], rel[1] if len(rel) > 2 else ""
     ev = path.with_name(path.name[: -len(".json")] + ".events.jsonl")
     state = (_result_event(ev) or _trace_state(ev)) if ev.exists() else {}
+    # The notes the run's code was shown (gis_harness/run_notes.py), which the archived state
+    # does not hold; the lineage replay cites them (stage 56).
+    notes = path.parent.parent / "tool_notes.json"
+    if state and notes.exists():
+        try:
+            state["tool_notes"] = {k: v for k, v in json.loads(notes.read_text()).items()
+                                   if not k.startswith("_")}
+        except (OSError, ValueError):
+            pass
     tid = "/".join(rel)[: -len(".json")]
     return BenchTurn(id=tid, run=run, model=model, task=str(d.get("task") or path.stem),
                      label=LABEL_OVERRIDES.get(tid, (label(score), ""))[0],
@@ -572,7 +581,9 @@ def replay_rows(t: BenchTurn) -> Tuple[List[Row], Dict[str, Any]]:
                                 query=t.query or st.get("query") or "", evidence=evidence)
     resolutions = turn_facts.resolve(body, fact_set)
     artifacts = G._collect_image_artifacts(ar, cr)
-    exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}
+    exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
+                "lineage": G._lineage_context({**st, "analysis_results": ar, "code_result": cr},
+                                              resolutions)}
     gate_ctx = G._scope_to_used_runs(exec_ctx, resolutions, body)
     audit_in, info["severity_inferred"] = _llm_audit(st.get("audit") or {})
     audit = G._reconcile_audit_with_artifacts(audit_in, artifacts, execution_context=gate_ctx,
@@ -657,10 +668,14 @@ AUDIT_TOOL_DOC = "audit: a fact from a tool description called unsupported"
 AUDIT_DERIVED = "audit: arithmetic on recorded figures called unsupported"
 AUDIT_REFUSAL = "audit: the reason a refusal gives called unsupported"
 AUDIT_OUTSIDE = "audit: knowledge or interpretation in no record"
+AUDIT_NOTE_SUPPORTED = "audit: a claim a note the work was shown states (stage 56; not a warning)"
 SCAN_CUT = "number scan: statements cut"
 SCAN_UNRESOLVED = "number scan: a figure resolved to no record"
 SOURCES_REREAD = "Sources line: a code run reread files an earlier call fetched"
 SOURCES_UNLINKED = "Sources line: a source whose result no stated figure came from"
+# By the lineage (agent_runtime/lineage.py, stage 56), which the two heuristics above predate:
+LINEAGE_DROP = "Sources line: the answer's results rest on it (lineage), the line leaves it out"
+LINEAGE_UNUSED = "Sources line: not named; nothing the answer used rests on it (lineage)"
 
 KNOWN_FALSE_ALARMS = frozenset({COUNT_NOT_ROWS, MEAN_AS_COUNT, UNIT_VOCAB, GATE_BLIND,
                                 GATE_NOTHING, CRS_PRINT, CRS_NONZERO, ALL_NAN_OPTIONAL,
@@ -769,6 +784,8 @@ def cause(row: Row, t: BenchTurn) -> str:
         return ALL_NAN_OPTIONAL
     if row.check.startswith("gate:"):
         return f"gate {row.check[5:]}"
+    if row.check == "audit" and row.kind == "note":
+        return AUDIT_NOTE_SUPPORTED
     if row.check == "audit":
         claim = _claim_of(msg)
         task = t.task.split(".")[0]
@@ -811,16 +828,22 @@ def sources_dropped(t: BenchTurn, ar: Any, cr: Any, resolutions: List[Any]) -> L
     The line names what the answer USED: a result a stated figure resolved to, or one that
     produced a layer. A figure computed by a code run that reread files an earlier call fetched
     resolves to that code run, and the fetch's source drops out."""
-    from agent_runtime import facts as turn_facts
+    from agent_runtime import lineage
     from agent_runtime import source_catalog as SC
     from agent_runtime.supervisor import graph as G
 
     st = {"analysis_results": ar, "code_result": cr}
     pairs = G._peer_tool_pairs(st)
-    links = [{"call_id": f.call_id} for r in resolutions
-             if r.resolved and turn_facts.is_claim(r.quantity)
-             for f in (r.parts or [r.fact]) if f is not None and f.call_id]
+    links = G._resolution_links(resolutions)
     used = {names[0] for _s, names in G._answer_sources(st, links)}
+    # What the answer's results rest on, by the lineage the tools recorded (stage 56), and what
+    # the line would have named before it (the used results' own sources only).
+    used_calls = G._used_calls(pairs, links)
+    graph = lineage.for_state(st, pairs)
+    every_ = {names[0] for _s, names in SC.sources_of(pairs, None)}
+    upstream = ({(n.get("names") or [n.get("name")])[0]
+                 for n in graph.sources_upstream(used_calls)} if used_calls else every_)
+    before = {names[0] for _s, names in SC.sources_of(pairs, used_calls or None)}
     out = []
     by_name: Dict[str, List[str]] = collections.defaultdict(list)
     for call, res in pairs:
@@ -835,7 +858,13 @@ def sources_dropped(t: BenchTurn, ar: Any, cr: Any, resolutions: List[Any]) -> L
     for name in sorted(every - used):
         fetched = any(tool in _FETCH_TOOLS for tool in by_name.get(name, []))
         out.append({"source": name,
-                    "cause": SOURCES_REREAD if fetched and used_code else SOURCES_UNLINKED})
+                    "cause": SOURCES_REREAD if fetched and used_code else SOURCES_UNLINKED,
+                    "lineage": LINEAGE_DROP if name in upstream else LINEAGE_UNUSED})
+    # The line before stage 56, held to the lineage: sources a used result rests on that it left
+    # out. Recorded beside the rows above so one run of this checkout gives before and after.
+    for name in sorted((every & upstream) - before):
+        out.append({"source": name, "cause": "before stage 56", "lineage": LINEAGE_DROP,
+                    "before": True})
     return out
 
 
@@ -898,14 +927,15 @@ def banner_score(turns: List[BenchTurn], bannered: set, *, wrong_of=None,
 def evaluate(turns: List[BenchTurn]) -> Dict[str, Any]:
     """The report. The file store is not consulted: the archive does not carry it, and a
     replay must not depend on what this machine happens to hold."""
-    from agent_runtime import source_catalog
+    from agent_runtime import lineage, source_catalog
 
-    saved = source_catalog._upload_record
+    saved = source_catalog._upload_record, lineage._file_record
     source_catalog._upload_record = lambda file_id: {}
+    lineage._file_record = lambda file_id: {}
     try:
         return _evaluate(turns)
     finally:
-        source_catalog._upload_record = saved
+        source_catalog._upload_record, lineage._file_record = saved
 
 
 def _evaluate(turns: List[BenchTurn]) -> Dict[str, Any]:
@@ -947,12 +977,19 @@ def _evaluate(turns: List[BenchTurn]) -> Dict[str, Any]:
                  "known_false_alarm": k in KNOWN_FALSE_ALARMS} for k, v in c.most_common()]
 
     def sources_summary() -> Dict[str, Any]:
-        turns_ = {d["turn"]: d["label"] for d in dropped}
-        by_cause = collections.Counter(d["cause"] for d in dropped)
+        now = [d for d in dropped if not d.get("before")]
+        turns_ = {d["turn"]: d["label"] for d in now}
+        by_cause = collections.Counter(d["cause"] for d in now)
+        by_lineage = collections.Counter(d["lineage"] for d in now)
         by_label = collections.Counter(turns_.values())
+        before = [d for d in dropped if d.get("before")]
         return {"turns": len(turns_), **{lab: by_label[lab] for lab in LABELS},
-                "dropped": len(dropped), "by_cause": dict(by_cause.most_common()),
-                "examples": dropped[:40]}
+                "dropped": len(now), "by_cause": dict(by_cause.most_common()),
+                "by_lineage": dict(by_lineage.most_common()),
+                "lineage_drops": by_lineage.get(LINEAGE_DROP, 0),
+                "lineage_drops_before": len(before),
+                "lineage_drops_before_turns": len({d["turn"] for d in before}),
+                "examples": now[:40], "examples_before": before[:40]}
 
     counts = collections.Counter(t.label for t in scored)
     return {
@@ -1049,6 +1086,14 @@ def markdown(rep: Dict[str, Any], *, title: str) -> str:
                   "| cause | sources |", "|---|---|"]
         for k, v in so["by_cause"].items():
             lines.append(f"| {k} | {v} |")
+        if "lineage_drops" in so:
+            lines += ["", "Held to the lineage the tools recorded (stage 56): the line leaves out "
+                      f"{so['lineage_drops']} source(s) the answer's results rest on; the line as "
+                      f"it was before stage 56 left out {so['lineage_drops_before']} on "
+                      f"{so['lineage_drops_before_turns']} turns.", "",
+                      "| by the lineage | sources |", "|---|---|"]
+            for k, v in so["by_lineage"].items():
+                lines.append(f"| {k} | {v} |")
     return "\n".join(lines) + "\n"
 
 

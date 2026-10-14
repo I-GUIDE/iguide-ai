@@ -547,6 +547,28 @@ def resolve_file_ref(ref: str, *, suffix: Optional[str] = None
     return resolve_file_id(str(first["file_id"])), first, matches[1:]
 
 
+def _with_lineage(record: Dict[str, Any], target: Path) -> Dict[str, Any]:
+    """The record, with the lineage of the call writing it (agent_runtime/lineage.py, stage 56):
+    the producing call, the files it read and every source upstream of it, plus a digest of the
+    bytes. Persisted here so a later turn, or another process, that reads this file inherits
+    where it came from. Outside a tool call nothing is recorded."""
+    try:
+        from agent_runtime import lineage
+
+        if lineage.current_call() is None:
+            return record
+        stat = target.stat()
+        digest = "sha1-" + _content_digest(str(target.resolve()), stat.st_size, stat.st_mtime_ns)
+        found = lineage.record_artifact(record["file_id"], filename=record.get("filename"),
+                                        digest=digest)
+        if found:
+            record["lineage"] = found
+            record["digest"] = digest
+    except Exception:  # noqa: BLE001 - provenance never costs the write
+        pass
+    return record
+
+
 def _write_record(record: Dict[str, Any]) -> Dict[str, Any]:
     _metadata_path(record["file_id"]).write_text(json.dumps(record, ensure_ascii=True, indent=2), encoding="utf-8")
     return record
@@ -665,7 +687,7 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
-    return _with_public_url(_write_record(record))
+    return _with_public_url(_write_record(_with_lineage(record, target)))
 
 
 def create_output_file_from_path(
@@ -709,7 +731,7 @@ def create_output_file_from_path(
     # file_content_key when this file becomes the input to the next step.
     if content_key:
         record["content_key"] = str(content_key)
-    return _with_public_url(_write_record(record))
+    return _with_public_url(_write_record(_with_lineage(record, target)))
 
 
 # ---------------------------------------------------------------------------
