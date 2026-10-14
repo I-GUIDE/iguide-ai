@@ -1,0 +1,106 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 6,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`:\n\n**Fastest travel time from the start intersection (41.87408\u00b0 N, 87.65075\u00b0 W) to the end intersection (41.89222\u00b0 N, 87.62683\u00b0 W):** approximately **3.43 minutes**\n\n**Number of intersections reachable within 2 minutes (counting the start):** **15 intersections**\n\n### How this was computed\n\n1. **Graph construction** \u2014 Each LineString in the file represents an edge between two intersections (its endpoints). The network was reprojected to UTM zone 16N (EPSG:26916) so edge lengths reflect true ground distances in meters.\n\n2. **Edge travel time** \u2014 For each edge, travel time = `length_km / speed_kph \u00d7 60` minutes. The network contains 36 unique intersections and 65 edges.\n\n3. **Shortest path** \u2014 Dijkstra's algorithm was run from the start node. The given coordinates match the actual edge endpoints to within ~0.4 m, so the nearest-node matching correctly identified the start and destination intersections.\n\n4. **Fastest path** \u2014 The minimum travel time from start to end is **3.4286 minutes**.\n\n5. **2-minute reachability** \u2014 Counting the start intersection itself (0.00 min), **15 intersections** can be reached within 2 minutes. This includes the start plus 14 others, with the farthest reachable node at 1.714 minutes.\n\nThe network forms a regular 6\u00d76 grid of intersections. The start is at the southwest corner and the destination at the northeast corner, so the fastest route traverses the grid diagonally.",
+  "seconds": 119.5,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 222134,
+    "cached_input_tokens": 209152,
+    "output_tokens": 5606,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791494824-1"
+}

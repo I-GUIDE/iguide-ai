@@ -1,0 +1,52 @@
+{
+  "lumen:deepseek-v4-flash": {
+    "tasks": 16,
+    "correct": "11/12",
+    "refused_gracefully": "3/4",
+    "of_which_substituted": 0,
+    "strict": "5/16",
+    "zero_unproductive": "11/16",
+    "unproductive_steps": 6,
+    "duplicate_calls": 1,
+    "failed_calls": 5,
+    "banners_on_correct": 5,
+    "banners_total": 7,
+    "source_named": "16/16",
+    "errors": 0,
+    "seconds_total": 1852.6,
+    "llm_calls": 174,
+    "input_tokens": 3125403,
+    "output_tokens": 71813,
+    "cost_usd": null,
+    "gate_runs": {
+      "verdicts": {
+        "cannot_determine": 32,
+        "pass": 21,
+        "none": 1
+      },
+      "checks": {
+        "not_applicable": 24,
+        "coverage": 8
+      }
+    },
+    "gate_nonpass_on_correct": 24,
+    "per_task": {
+      "T01": "OK  [banners=1] 89.1s",
+      "T02": "OK  [] 90.9s",
+      "T03": "OK  [] 115.0s",
+      "T02L": "OK  [unprod=2] 159.7s",
+      "T05": "OK  [] 124.7s",
+      "T04": "OK  [unprod=1] 184.8s",
+      "T07": "OK  [banners=1] 81.3s",
+      "T08": "OK  [banners=1] 87.4s",
+      "T09": "BAD miss=hot_spots [unprod=1] 191.3s",
+      "T10": "OK  [banners=1] 203.6s",
+      "T11": "OK  [unprod=1 banners=1] 87.8s",
+      "T12": "OK  [] 65.3s",
+      "U01": "REFUSED [banners=1] 78.4s",
+      "U02": "REFUSED [banners=1] 82.3s",
+      "U03": "REFUSED [] 68.9s",
+      "U04": "FABRICATED(None) [unprod=1] 142.1s"
+    }
+  }
+}

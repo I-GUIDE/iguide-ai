@@ -42,6 +42,7 @@ from agent_runtime.langchain_geo_tools import (
 )
 from agent_runtime.map_layers import content_key
 from agent_runtime.tool_args import accept_null_defaults
+from agent_runtime.units import typed_value
 
 # Metres per unit. Degrees are deliberately absent — see _distance_meters.
 _UNITS_M: Dict[str, float] = {
@@ -692,7 +693,16 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                 extra={"operation": "buffer", "distance": float(distance), "units": str(units),
                        "distance_m": meters, "buffer_crs": mcrs, "dissolved": bool(dissolve),
                        "total_area_km2": round(total_area, 6),
-                       "input_features": int(len(gdf))},
+                       "input_features": int(len(gdf)),
+                       # Typed where the number is made (stage 43): unit, and the CRS it was
+                       # measured in, so nothing downstream has to infer either from a key name.
+                       "outputs": [
+                           typed_value("buffer_distance", meters, "m", measured_in_crs=mcrs,
+                                       op="buffer", source="buffer_layer"),
+                           typed_value("total_area", round(total_area, 6), "km^2",
+                                       measured_in_crs=mcrs, op="area", source="buffer_layer"),
+                           typed_value("input_features", int(len(gdf)), "features",
+                                       source="buffer_layer")]},
                 notes=[crs_note], key=layer_key,
             )
         except Exception as exc:  # noqa: BLE001
@@ -785,6 +795,11 @@ def make_overlay_tools(default_input_file_ids: Optional[List[str]] = None) -> Li
                 "total_area_km2": round(float(metric.geometry.area.sum() / 1_000_000.0), 6),
                 "total_length_km": round(float(metric.geometry.length.sum() / 1000.0), 6),
             }
+            stats["outputs"] = [
+                typed_value("total_area", stats["total_area_km2"], "km^2", measured_in_crs=mcrs,
+                            op="area", source="geometry_measures"),
+                typed_value("total_length", stats["total_length_km"], "km",
+                            measured_in_crs=mcrs, op="length", source="geometry_measures")]
 
             # A bounding box is expected to be axis-aligned in the coordinates it is SHOWN in,
             # so build it in lon/lat (a UTM envelope back-projected comes out visibly skewed

@@ -1,0 +1,84 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "cannot",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "I inspected the uploaded raster (`file_6756c7a872af`, `scene_red_only.tif`) and found that **the mean NDVI cannot be computed from this scene** because the file contains only a single spectral band \u2014 the red band \u2014 and NDVI requires both a near-infrared (NIR) band and a red band:\n\n```\nNDVI = (NIR \u2212 Red) / (NIR + Red)\n```\n\n**Scene metadata:**\n- **Bands:** 1 (single band)\n- **Band description:** `red`\n- **Data type:** uint16\n- **Size:** 60 \u00d7 60 pixels\n- **CRS:** EPSG:32616 (WGS 84 / UTM zone 16N)\n- **Red band range:** 400 \u2013 899 (mean \u2248 650.8)\n\n**What I can report instead** (from the red band alone):\n- Red band mean reflectance value: **650.79** (raw DN, uint16)\n- Red band min: 400, max: 899\n\n**What would be needed to compute mean NDVI:**\nA scene with both a NIR band and a red band (e.g., a 2+ band multispectral GeoTIFF, or a separate NIR file). If you can provide the NIR band (or a full multispectral scene), I can compute the NDVI and its mean immediately.\n\nI did not fabricate an NDVI value \u2014 the file genuinely lacks the NIR band required for the calculation.\n\n**Sources:** scene_red_only.tif (your upload).\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names (`module scope`)\n- Note: 1 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 82.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 98291,
+    "cached_input_tokens": 62976,
+    "output_tokens": 2484,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U02-deepseek-v4-flash-1791514361-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

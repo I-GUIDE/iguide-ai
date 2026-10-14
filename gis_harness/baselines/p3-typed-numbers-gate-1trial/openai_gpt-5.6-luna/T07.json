@@ -1,0 +1,98 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "240,000 m\u00b2"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Using the DEM\u2019s projected CRS (EPSG:32616), **2,400 cells** are at or below 5 m. Each cell covers **100 m\u00b2**, giving:\n\n**2,400 \u00d7 100 m\u00b2 = 240,000 m\u00b2 = 24 hectares**\n\n**Answer: 24 hectares.**\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names",
+  "seconds": 74.6,
+  "route": [
+    "analyze",
+    "search",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "agent_kb_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "keyword_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "semantic_search",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 11,
+    "input_tokens": 81694,
+    "cached_input_tokens": 0,
+    "output_tokens": 2524,
+    "usage_absent": 0,
+    "cost_usd": 0.0194,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T07-gpt-5.6-luna-1791502710-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

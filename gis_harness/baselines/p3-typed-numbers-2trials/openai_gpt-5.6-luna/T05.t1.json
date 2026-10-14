@@ -1,0 +1,84 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254.67 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "The two facility sites that minimise the total population-weighted straight-line distance are **C1 and C3**.\n\n- **Optimal sites:** C1 and C3  \n- **Total:** **382,254.67 person-kilometres**\n\nAll 28 possible pairs of the 8 candidate sites were evaluated using haversine distances, with each demand point weighted by its population.",
+  "seconds": 33.3,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 48331,
+    "cached_input_tokens": 0,
+    "output_tokens": 1847,
+    "usage_absent": 0,
+    "cost_usd": 0.0119,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T05-gpt-5.6-luna-1791501411-1"
+}

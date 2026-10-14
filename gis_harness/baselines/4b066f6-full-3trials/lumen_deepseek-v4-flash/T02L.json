@@ -1,0 +1,72 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 21
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://overpass.private.coffee/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 21,
+        "matched": true,
+        "found": "19"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "**OpenStreetMap has 19 schools within 1 mile of the point (41.9231 N, 87.7093 W)** \u2014 located in the Logan Square / Avondale area of Chicago.\n\nI searched OpenStreetMap for `amenity=school` features in the surrounding area (84 schools found in the broader bounding box) and computed the great-circle distance from the point to each school's location. The 19 schools within 1 mile, nearest first:\n\n| Distance | School |\n|---------|--------|\n| 349 m | Darwin Elementary School |\n| 587 m | Saint Sylvester School |\n| 865 m | Funston Elementary School |\n| 988 m | Jehovah School |\n| 1,010 m | (unnamed school on N Ridgeway Ave) |\n| 1,010 m | Our Lady of Grace School |\n| 1,068 m | Logan Square Elementary School |\n| 1,093 m | Mozart Elementary School |\n| 1,201 m | Stowe Elementary School |\n| 1,222 m | Yates Elementary School |\n| 1,314 m | Marine Leadership Academy |\n| 1,320 m | Chase Elementary School |\n| 1,321 m | Avondale-Logandale Elementary School |\n| 1,322 m | Goethe Elementary School |\n| 1,406 m | St. Hyacinth Catholic School |\n| 1,425 m | Brentano Elementary Math and Science Academy |\n| 1,508 m | McAuliffe Elementary School |\n| 1,528 m | Moos Elementary School |\n| 1,603 m | ASPIRA Business & Finance High School |\n\nA note on the source: this counts what OSM contributors have mapped as `amenity=school` \u2014 public, private and religious schools alike. It is not an official register, so a recently opened or closed school may be missing or still listed. The school layer (84 features) is available on your map as `osm_school.geojson` if you'd like to explore it.",
+  "seconds": 92.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 121203,
+    "cached_input_tokens": 80640,
+    "output_tokens": 2978,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791494242-0"
+}

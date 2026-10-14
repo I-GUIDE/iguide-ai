@@ -71,6 +71,12 @@ esda
 spreg
 pygeoda
 
+# Units (agent_runtime/units.py, stage 43): what a declared or reported unit MEANS is parsed by a
+# unit library, not looked up in a hand-kept vocabulary. Pure Python. Pinned here because
+# constraints.txt is a verbatim freeze of the deployed image, which predates it; retake the lock
+# after the next image build.
+pint==0.24.4
+
 # Data / notebooks
 pandas
 matplotlib

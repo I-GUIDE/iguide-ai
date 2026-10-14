@@ -1,0 +1,76 @@
+{
+  "task": "T10",
+  "title": "Interpolation: IDW + ordinary kriging (Meuse)",
+  "trial": 2,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "meuse.csv holds the Meuse river soil samples (x, y in metres, Dutch RD New, EPSG:28992; zinc in ppm). Estimate zinc at x=179500, y=331500 two ways: (a) inverse distance weighting with power 2 using all samples, and (b) ordinary kriging of log(zinc) with a spherical variogram (nugget 0.05, partial sill 0.59, range 897 m) using all samples, back-transformed with exp().",
+  "files": [
+    "meuse.csv"
+  ],
+  "expected": {
+    "idw_zinc": 397.44105463237537,
+    "ok_zinc": 309.53149003514136
+  },
+  "expected_why": {
+    "ok_zinc": "OK system solved in numpy, Sph(0.05, 0.59, 897), exp() back"
+  },
+  "score": {
+    "task": "T10",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "idw_zinc",
+        "kind": "number",
+        "expected": 397.44105463237537,
+        "matched": true,
+        "found": "397.441 ppm"
+      },
+      {
+        "name": "ok_zinc",
+        "kind": "number",
+        "expected": 309.53149003514136,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "meuse.csv",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Using all 155 samples from `meuse.csv`:\n\n1. **Inverse distance weighting (IDW), power = 2:** **397.441 ppm**\n2. **Ordinary kriging of log(zinc), spherical variogram:**  \n   - Log-scale estimate: **5.687166**  \n   - Back-transformed estimate using `exp()`: **295.056 ppm**\n\nThe kriging used nugget **0.05**, partial sill **0.59**, and range **897 m**.",
+  "seconds": 32.6,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 45305,
+    "cached_input_tokens": 0,
+    "output_tokens": 1307,
+    "usage_absent": 0,
+    "cost_usd": 0.0106,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T10-gpt-5.6-luna-1791496398-2"
+}

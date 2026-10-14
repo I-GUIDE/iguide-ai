@@ -1,0 +1,136 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": true,
+        "found": "13"
+      }
+    ],
+    "steps": {
+      "tool_calls": 13,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"CRS: EPSG:4326\\\\nn: 100\\\\n\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 16, in <module>\\\\n w.s0 = sum(len(v) fo"
+        },
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 15, in <module>\\\\n g = G_Local(x, w, star=True, transform=\\'B\\', "
+        }
+      ],
+      "unproductive": 2
+    },
+    "banners": [],
+    "source": "lattice.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the completed spatial analysis of `lattice.geojson`:\n\n## Results\n\n### 1. Global Moran's I (queen contiguity, row-standardised weights)\n\nUsing the canonical `esda.Moran` implementation with row-standardised queen weights:\n\n- **Moran's I = 0.2252**\n- Expected I under randomness = \u22120.0101\n- z-score = 4.40, p < 0.01 (permutation p = 0.002)\n\nThis indicates **significant positive spatial autocorrelation** \u2014 similar values cluster together on the lattice. (An independent confirmation via the `global_spatial_autocorrelation` tool also gave I = 0.2252, z = 4.58, p = 0.001.)\n\n### 2. Getis-Ord Gi* hot spots (binary queen weights, self included)\n\nUsing the canonical `esda.G_Local` implementation (`star=True`, binary queen weights, each cell in its own neighbourhood), verified against a manual computation:\n\n**Number of cells that are hot spots with z > 1.96: 13**\n\nThe hot-spot cells (cell_id) are: **25, 26, 27, 28, 35, 36, 37, 38, 39, 46, 47, 48, 49** \u2014 a contiguous block of high-value cells in the upper-central region of the lattice. The strongest hot spot is cell 38 (z = 6.51).\n\n### Important note on the tool's Gi* output\n\nThe `local_getis_ord` tool reported only **1** cell with its `gi_z > 1.96` (cell 38). That tool's `gi_z` column uses a different scaling and its significance classes are driven by **permutation p-values**, not the standard Gi* z-score. Since your question explicitly asks for the standard Gi* z-score threshold of **z > 1.96**, the correct answer is **13 cells**, confirmed by both the canonical `esda.G_Local` implementation and a from-scratch computation.\n\n### Deliverables\n- **Interactive map layer** \"Getis-Ord Gi* z-scores\" (choropleth of `gi_star_z` per cell, 100 cells) \u2014 on your map now: [file_80592ff96417](https://agent/files/file_80592ff96417/download)\n- **GeoJSON** with per-cell Gi* z-scores and an `is_hotspot` flag: [lattice_gistar_z.geojson](https://agent/files/file_80592ff96417/download)",
+  "seconds": 272.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 2,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 16,
+    "input_tokens": 423849,
+    "cached_input_tokens": 380416,
+    "output_tokens": 7541,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T09-deepseek-v4-flash-1791497284-0"
+}

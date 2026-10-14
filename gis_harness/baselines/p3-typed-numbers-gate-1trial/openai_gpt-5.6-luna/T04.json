@@ -1,0 +1,107 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.4298 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 992, in <module>\\\\n print(json.dumps({\\'features\\':len(gdf),\\'nod"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using the 65 road edges in `roads.geojson`, the requested coordinates were matched to their nearest intersections (each less than 0.5 m away). Edge travel times were calculated from geodesic length and `speed_kph`, then shortest-path travel time was computed.\n\n- **Fastest travel time:** **3.4298 minutes** \u2014 approximately **3 minutes 26 seconds**\n- **Intersections reachable within 2 minutes:** **15**, including the starting intersection\n\nThe network contains **36 intersections** in total.",
+  "seconds": 58.2,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 91293,
+    "cached_input_tokens": 0,
+    "output_tokens": 2041,
+    "usage_absent": 0,
+    "cost_usd": 0.0207,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T04-gpt-5.6-luna-1791502652-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

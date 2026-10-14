@@ -1,0 +1,108 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.225225"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": true,
+        "found": "13"
+      }
+    ],
+    "steps": {
+      "tool_calls": 7,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Using the 100-cell lattice:\n\n- **Global Moran\u2019s I:** **0.225225**\n- **Expected Moran\u2019s I under spatial randomness:** \u22120.010101\n- **Normal-approximation z-score:** 4.4007\n- **Two-sided p-value:** 1.08 \u00d7 10\u207b\u2075\n- **Weights:** queen contiguity, row-standardized\n\nFor Getis\u2013Ord **Gi\\***, using binary queen weights with each cell included in its own neighborhood (`star=True`), **13 cells** have **z > 1.96** and are classified as hot spots.",
+  "seconds": 107.7,
+  "route": [
+    "analyze",
+    "search",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "agent_kb_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "keyword_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "semantic_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 12,
+    "input_tokens": 107701,
+    "cached_input_tokens": 0,
+    "output_tokens": 3744,
+    "usage_absent": 0,
+    "cost_usd": 0.026,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T09-gpt-5.6-luna-1791502589-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

@@ -24,8 +24,11 @@ import pytest
 from agent_runtime.supervisor.graph import (_gate_failures, _gate_issues_from,
                                             _reconcile_audit_with_artifacts)
 
-PASSING = {"verdict": "pass", "inspected": ["gdf"], "counts": {"pass": 3},
-           "findings": [{"check": "projected_crs", "status": "pass", "target": "gdf",
+# The passing runs inspect a DIFFERENT frame. Since stage 42 a later run that inspects the same
+# target and does not flag it supersedes the failure (see the supersession tests below), which is
+# not what this matrix is about: it holds the walk against id() reuse.
+PASSING = {"verdict": "pass", "inspected": ["loaded"], "counts": {"pass": 3},
+           "findings": [{"check": "projected_crs", "status": "pass", "target": "loaded",
                          "message": "projected CRS EPSG:32616"}]}
 FAILING = {"verdict": "fail", "inspected": ["gdf"], "counts": {"fail": 1},
            "findings": [{"check": "projected_crs", "status": "fail", "target": "gdf",
@@ -171,7 +174,7 @@ def test_a_gate_failure_is_not_described_as_an_evidence_problem():
                    "findings": [{"check": "projected_crs", "status": "fail", "target": "gdf",
                                  "message": REMEDY}]})
     assert "retrieved evidence" not in out
-    assert "not verified" in out
+    assert "Check this answer" in out and "Problem" in out
 
 
 def test_cannot_determine_reaches_the_user_at_all():
@@ -180,15 +183,22 @@ def test_cannot_determine_reaches_the_user_at_all():
     that every cannot_determine verdict was computed, reconciled, and then silently dropped
     before it reached the answer. The plan's requirement is the opposite: reported, never
     swallowed."""
-    out = _caveat({"verdict": "cannot_determine", "counts": {"cannot_determine": 1},
-                   "findings": [{"check": "coverage", "status": "cannot_determine",
-                                 "target": "module scope",
-                                 "message": "no frame was reachable at module scope"}]})
-    assert out != ANSWER, "the caveat never reached the user"
-    assert "COULD NOT VERIFY" in out
-    assert "not the same as them being wrong" in out, (
-        "unverified must not read as wrong, or the label stops being believed")
-    assert "no frame was reachable" in out
+    report = {"verdict": "cannot_determine", "counts": {"cannot_determine": 1},
+              "findings": [{"check": "coverage", "status": "cannot_determine",
+                            "target": "module scope",
+                            "message": "no frame was reachable at module scope"}]}
+    # Stage 46: still never swallowed, but it is reported in the verdict, not printed. Across
+    # the stack's runs "could not check" sat on 22 correct answers and 0 wrong ones.
+    ctx = {"messages": [{"role": "tool", "content": _tool_result(report)}]}
+    audit = _reconcile_audit_with_artifacts(
+        {"hallucination_detected": False, "severity": "none", "issues": [], "summary": ""},
+        [{"name": "map.png"}], ctx)
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert [f.kind for f in findings] == [V.UNVERIFIABLE]
+    assert "no frame was reachable" in findings[0].message
+    assert V.status(findings) == "unverified"
+    assert _caveat(report) == ANSWER
 
 
 def test_a_passing_run_gets_no_caveat():
@@ -210,5 +220,33 @@ def test_the_issue_list_is_capped_so_the_answer_is_not_flooded():
     findings = [{"check": "projected_crs", "status": "fail", "target": f"gdf{i}",
                  "message": REMEDY} for i in range(9)]
     out = _caveat({"verdict": "fail", "counts": {"fail": 9}, "findings": findings})
-    assert out.count("- computed value") == 4
-    assert "and 5 more" in out
+    # Stage 44: one banner, at most six findings, the rest counted.
+    assert out.count("- Problem:") == 6
+    assert "and 3 more" in out
+
+
+# ------------------------------------------------------------------ supersession (stage 42)
+
+FIXED = {"verdict": "pass", "inspected": ["gdf"], "counts": {"pass": 2}, "findings": []}
+
+
+def _ctx(*reports):
+    return {"messages": [{"role": "tool", "content": _tool_result(r)} for r in reports]}
+
+
+def test_a_failure_fixed_by_a_later_run_is_superseded():
+    """The tool tells the model to fix and re-run, and stage 37 keeps every run's results. A
+    fixed run must clear the failure it fixed, or a correct turn is still marked failed."""
+    assert _gate_failures(_ctx(FAILING, FIXED)) == []
+
+
+def test_a_later_run_that_did_not_look_at_the_target_supersedes_nothing():
+    assert _gate_failures(_ctx(FAILING, PASSING))
+
+
+def test_a_failure_after_a_pass_stands():
+    assert _gate_failures(_ctx(FIXED, FAILING))
+
+
+def test_a_later_run_that_fails_the_same_target_keeps_it_failed():
+    assert len(_gate_failures(_ctx(FAILING, FAILING))) == 2

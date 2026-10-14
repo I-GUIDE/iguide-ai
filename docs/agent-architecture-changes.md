@@ -54,6 +54,12 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 38 | [A peer that can find what it measures, and stops when it repeats itself](#stage-38) | 2026-10-08 | `overpass_search` bound to both measuring peers with a file; an identical repeated call is answered, then ends the run; a delivered answer drops the partial banner; a feature list names its source |
 | 39 | [Travel figures in no tool result are cut, whether or not the audit flags them](#stage-39) | 2026-10-08 | a deterministic scan of the answer; rule (2) matches numbers on their boundaries and no longer reads the peer's summary as evidence; a lead-in loses its line when its whole list is cut |
 | 40 | [Six Overpass names, four servers, two operators](#stage-40) | 2026-10-08 | `overpass_search` tries z.overpass-api.de first and falls back as far as maps.mail.ru; in 8 probe rounds the old list answered 5, the new one 7 |
+| 41 | [Whole tasks, re-run after every change](#stage-41) | 2026-10-08 | a 17-task GIS harness with pinned data and mechanistic scores; every model call reports its tokens |
+| 42 | [One record of the turn, progress instead of counts, a plan in state](#stage-42) | 2026-10-08 | an append-only turn log every view derives from; identical calls answered from it; two steps that add nothing end a run; the task and plan ride in every peer step's system message |
+| 43 | [A number carries its unit and where it was measured](#stage-43) | 2026-10-08 | units parse with a unit library; the gate reports declarations, operations and their CRS as facts; the vocabularies and name heuristics are deleted; tools emit typed outputs |
+| 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
+| 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
+| 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
@@ -6895,6 +6901,890 @@ mirrors in list order, that the first answer ends the search, and that all faili
 - **No memory between calls.** Every call starts again at z, even when z failed a moment ago.
 - **Not tested from the VM.** All of this was measured from one Mac on one afternoon. The VM's
   network may rank the mirrors differently.
+
+## Stage 41 — Whole tasks, re-run after every change {#stage-41}
+
+*2026-10-08. Branch `claude/gis-task-harness`, built on `prototype` at `81fd7c8` and rebased onto
+`4b066f6` once #88 (stage 38) and #87 (stage 39) merged, then onto `5b5e7ef` after #89 (stage 40)
+and #92 (M8.77). 41 was the next free number on every branch and worktree. The baseline below
+was measured on `4b066f6`; #89 changes only the Overpass mirror order and #92 only how a
+conversation record is stored. DEVLOG M8.78. Phase 1 of the eight-flaws program: it changes no agent
+behaviour, and every later phase is measured against it.*
+
+**Why.** On 2026-10-08 two live turns on agent.i-guide.io got every GIS number right (2,584.6 km²
+and 340 km; 18 schools to within 4 m) and still showed the user false COULD NOT VERIFY banners, a
+lost turn record, memorised road and rail figures, a 27-call geocoding loop and a false "Partial
+answer". Each was fixed by a patch written for that turn: stages 36–39, PRs #84–#88, five in one
+day. `sandbox_verify.py` and `supervisor/graph.py` together carry 22 comments of the form "a live
+run found X", most of which added one more entry to a list. Nothing re-ran whole tasks after a
+change, so each patch could be checked only against the turn that prompted it, and a patch that
+broke a different task would surface only when a user hit it.
+
+**What.** `gis_harness/`: twelve classic GIS problems, a live-data variant and four unsolvable
+questions (README there). The data are generated from fixed seeds or pinned (USGS ComCat snapshot
+committed; Meuse by SHA-256). Each expected value is computed from the same bytes by a route
+independent of the agent: brute force (2-median over all 28 pairs, geodesic point counts), a
+closed form (a watershed exactly 120 of 200 rows by construction), or a second library (Moran's I
+and Gi* checked against esda in `tests/test_gis_harness.py`). Most datasets carry a trap with its
+wrong answer named: Web Mercator at 42 N is 1.34x long, NoData counted as flooded adds 1 ha, a
+uint16 NIR−red wraps around, the shortest street path is not the fastest.
+
+Design choices and why:
+
+- **Through the HTTP API, not in-process.** The failures this program targets live in the
+  supervisor, the audit and the banners: the layers a user sees through `/agent/chat/stream`.
+  The request sets only the model, a thread id and `agentDev` (so the stream carries tool calls
+  and usage); everything else is the server's default, the path a user takes. `claude/benchmark`'s
+  EarthVerse harness made the opposite choice (in-process `run_supervisor`) for reproducibility;
+  here the point is to see what the user would see.
+- **Mechanistic scores, no LLM judge.** Correct (every expected value within tolerance, in any unit
+  of the right dimension), productive (no repeated identical call, no failed call), clean (no
+  banner), sourced (the answer names where its data came from), refused (unsolvable: says so and
+  states no value). `strict` is all at once. GeoNatureAgent and GISAgentBench avoid a judge for
+  the same reason: a judge shares the agent's premises.
+- **Per-model, never pooled.** The 2026-10-08 failures were model-shaped (deepseek-v4-flash
+  repeating a call that gpt-5.6-luna does not), so a pooled score would hide the regressions that
+  matter.
+- **Local only.** `--start-server` runs `api/server.py` with `AGENT_MODE=local` (stage 24) and
+  blanks `GOOGLE_MAPS_API_KEY`: KB spatial search geocodes through Google, a metered call no task
+  needs.
+- **The invariant gate: on since `33426a5`, OFF in the baselines below.** The deployment turns
+  the sandbox gate on through `AGENT_EXTRACTION=1`. The harness server set neither that nor
+  `AGENT_INVARIANT_GATE` until `33426a5`, so the sample and the full baseline ran with
+  `"verification": {}` on every code run. Their banner counts therefore include no gate
+  banners. `--start-server` now sets `AGENT_INVARIANT_GATE=1`, and each record lists the gate's
+  verdict on every code run (`gate`). Stage 42 records a gate-on run as the before for stage 43.
+
+- **Scorer fix, 2026-10-09: a magnitude written with its letter.** "the **M7.1** Ridgecrest
+  mainshock" was never read, because a number glued to a letter was skipped. T12 was then scored
+  wrong although the answer was right. One capital letter before a decimal number is now read as
+  a prefix; "C1" or "Z2" is still a label, not a count.
+  - Of the 23 recorded T12 turns, 3 missed the magnitude, and all 3 had written "M7.1". Two
+    were the deployed-image comparison's own runs. The third was stage 42's gate-on run
+    (`p2-gate`, deepseek).
+  - So stage 43's gate-on table, "correct 10/13 → 10/13" for deepseek, re-scores to
+    11/13 → 10/13.
+
+**Every model call now reports its tokens.** The first sample turn streamed 2 model calls for a
+turn that made at least 4: `turn_instrumentation` is middleware on the peers' `create_agent`, so
+the supervisor's decider, synthesis and audit, which call the model directly, never reported.
+`streaming_trace.UsageCallbackHandler` is registered through LangChain's configure hook on a
+context variable that `trace_context` sets, so every runnable configured inside a traced turn, on
+any thread that copied the context, gets it without being wired. It emits `llm_usage` (detail
+tier, forwarded by `api/server.py`) with the provider's input, output, cached and reasoning
+tokens, or `usage: "absent"`, which is a different fact from zero. On the sample, deepseek's
+first call is the decider's 1,446-token request: before this it was invisible.
+`rag_pipeline/tests/test_llm_usage_events.py`: 3 of 5 fail on `81fd7c8`; the 2 that pass are guards.
+
+**Measured: the 4-task sample on `81fd7c8`** (T01 fetch + measure, T02 vector upload, T08 raster,
+U02 refusal; one trial each):
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct | 3/3 | 3/3 |
+| refused gracefully | 1/1 | 1/1 |
+| strict | 3/4 | 1/4 |
+| unproductive steps | 0 | 1 (T01: first `execute_code` could not open the boundary, the S37 symptom) |
+| banners | 0 | 0 |
+| source named | 3/4 | 1/4 |
+| wall time | 320 s | 222 s |
+| model calls / input tokens | 35 / 595k | 29 / 287k |
+| cost | Lumen coins (no $ rate) | $0.062 |
+
+The sample already shows two of the eight flaws without any live turn: an answer that does not say
+where its data came from (flaw 6), and a failed first call that a correct answer hides (flaw 3's
+"unproductive step").
+
+**The full baseline, `4b066f6`** (after #87 and #88): 17 tasks × 3 trials × 2 models, 101 of 102
+runs. The 102nd, T02L trial 2 on deepseek, has no reference: every Overpass mirror refused the
+harness's own query three times, and a task without a reference is not scored.
+`gis_harness/baselines/4b066f6-full-3trials/` keeps every run's score, answer and usage.
+
+| | deepseek-v4-flash (Lumen) | gpt-5.6-luna |
+|---|---|---|
+| correct (solvable) | 33/38 | 30/39 |
+| refused gracefully (unsolvable) | 11/12 (1 a disclosed substitution) | 7/12 |
+| **strict** | **23/50** | **7/51** |
+| runs with zero unproductive steps | 40/50 | 37/51 |
+| unproductive steps: duplicates / failed calls | 0 / 25 | 3 / 14 |
+| banners | 2 (0 on correct answers) | 1 (on a correct answer) |
+| source named | 33/50 | 18/51 |
+| wall time | 105 min | 48 min |
+| model calls / input / output tokens | 536 / 11.7M / 0.24M | 407 / 4.2M / 0.08M |
+| cost | Lumen coins | **$0.94** |
+
+Per task, three trials (C correct, x wrong, R refused, S substituted, F fabricated; u unproductive
+steps, b banner, n source not named):
+
+| task | deepseek | luna |
+|---|---|---|
+| T01 area + distance | C C C | C Cn Cn |
+| T02 schools (upload) | C C C | Cn Cn Cn |
+| T02L schools (live OSM) | C C | xu xu xu |
+| T03 join + rates | Cn Cn Cn | Cn Cn Cn |
+| T04 network | C C C | Cn Cun xu |
+| T05 2-median | Cn Cn Cun | Cn Cn Cun |
+| T06 slope + watershed | Cu Cun Cun | C C Cn |
+| T07 inundation | C C Cu | Cun Cun Cun |
+| T08 NDVI change | Cn Cn Cn | Cn Cn Cn |
+| T09 Moran's I + Gi* | xb xbn xn | xn xn xun |
+| T10 IDW + kriging | Cu x x | C x x |
+| T11 suitability | Cn Cn Cn | Cbn Cn Cn |
+| T12 aftershocks | C C Cu | Cn Cn Cn |
+| U01 no DEM | R R S | F Fn R |
+| U02 no NIR | R R R | ?u R Rn |
+| U03 no mercury | R Ru Run | R Ru Ru |
+| U04 off-network | F R Ru | Fn Fn Ru |
+
+What the baseline says, checked against the runs themselves:
+
+- **The GIS is mostly right, and the failures are not where the 10-08 patches were.** 63 of 77
+  solvable runs are correct. Banners, the 10-08 headline failure, appear on only 3 runs here.
+  Strict scores are low mainly because of unnamed sources (flaw 6) and unproductive steps
+  (flaws 3 and 4).
+- **The two systematic misses are method errors, and the answer key holds.**
+  - **T09:** 0 of 6 runs report the 13 hot spots. The expected value is esda's
+    `G_Local(transform="B", star=True).Zs > 1.96`. The two wrong answers are each another
+    method, reproduced exactly with esda:
+    - 3 runs report **1**: the z-score under row-standardised weights, although the prompt
+      asks for binary;
+    - 3 report **15**: cells with permutation p < 0.05, although the prompt asks for z > 1.96.
+  - **T10:** both models' hand-written kriging put the nugget on the matrix diagonal (γ(0) =
+    nugget) and got 295.06 ppm. PyKrige 1.7.3 gives 309.53 with `exact_values` either True or
+    False, which is the harness's value.
+- **gpt-5.6-luna on T02L, 0 of 3.** Its first `execute_code` passed a file_id as a path, the
+  same failure as live turns on 10-08 (a fix is in progress in another session). It then
+  answered "39 schools", a number no tool produced. deepseek's 19 and 20 match the reference
+  of 20.
+- **Fabrication on unsolvable tasks is model-shaped.** luna stated a slope for a DEM that was
+  never attached (U01, 2 of 3) and a travel time to a point off the network (U04, 2 of 3).
+  deepseek fabricated once (U04). Its one U01 value was a disclosed substitution: it said no DEM
+  was attached and gave the slope of a 3DEP DEM it fetched.
+- **luna names its data source on 18 of 51 runs, deepseek on 33 of 50.** That is model habit,
+  which phase 5 makes irrelevant.
+
+The harness's own scorer was corrected twice during the baseline:
+- once for a typographic apostrophe;
+- once to tell a disclosed substitution from a fabrication.
+
+`--summarise` re-scored every run from its stored events, so the table above uses the final
+scorer throughout.
+
+## Stage 42 — One record of the turn, progress instead of counts, a plan in state {#stage-42}
+
+*2026-10-08. Branch `claude/turn-event-log`, stacked on `claude/gis-task-harness` (#90), whose
+harness measures it. DEVLOG M8.80; M8.79 is #93. Phase 2 of the eight-flaws program, flaws 3, 4
+and 5. `docs/design-review-2026-10.md` gives the root causes with line references. This entry gives
+what changed, what it replaced, and what it measured.*
+
+**Why.** "What happened this turn" lived in seven places:
+- the peers' result slots;
+- the search node's `action_rows`;
+- the session ledger, written only at the end of synthesis;
+- each peer's checkpointed thread;
+- the decision list;
+- the failure lists;
+- the trace.
+
+Each consumer read a different one, and the incident catalogue (review, appendix A) counts 14
+class-C incidents where two of them disagreed.
+
+Every loop bound counted something other than progress:
+- `max_steps` 8;
+- the peer `recursion_limit` 60;
+- #88's fourth identical ask, inside the latest step only;
+- `_is_unproductive_repeat`, which caught back-to-back runs only.
+
+The plan existed only in the model's context. The context budget keeps only the latest human
+message plus the tail that fits, so on a retry the task could be trimmed away.
+
+**What changed.**
+
+1. **`agent_runtime/turn_log.py`, an append-only event log per turn.** Run ids, tool calls and
+   results, answers, needs, steps.
+   - The tool middleware every peer already has (`_make_repeat_call_middleware`) records into it.
+   - The node ingests, by tool_call_id, anything a peer reports that the middleware did not see,
+     such as a test double or a CLI peer.
+   - `_merge_peer_result` no longer merges tool records: the analyze and code slots hold the
+     log's view of that peer. `tool_failures` is recomputed from that view, so a tool that failed
+     and then succeeded is no longer reported as failing.
+   - The ledger is written from the log, once per turn, also when composition fails.
+     `run_supervisor` writes it when the graph raises.
+2. **Repeats are answered from the log for the whole turn,** across peers and runs. Each answer
+   is valid while the "world" has not moved: the world advances when a step adds something new,
+   so a listing after a write still runs again, and so does a read after an edit. A failed call
+   is retried once (an outage can recover) and then answered from the log. This supersedes #88's
+   window, which was the latest executed step of one run.
+3. **Progress, not counts.**
+   - A step is productive when one of its results is new to the turn: a success with unseen
+     content, a failure of an unseen error class (particulars stripped), a new answer, or a new
+     request for a missing capability.
+   - Two consecutive unproductive steps end a peer run. `_make_progress_middleware` returns a
+     plain message instead of calling the model again, so the run ends without an exception and
+     the turn keeps what it recorded.
+   - At the supervisor, a peer whose last run added nothing is not run again, whether a
+     decision or a queued need asks for it. This replaces #88's `RepeatedToolCallError` at the
+     fourth identical ask.
+4. **A plan in state.** The decider can return `plan` and `subgoal` alongside `next`;
+   `Decision` is a `str`, so every caller that compares it to `"done"` still works. The plan's
+   `produced` counts are measured from the log, not declared, and a subgoal whose run produced
+   nothing is marked `blocked`. The task and the plan are rendered into every peer step's
+   **system** message, which the context budget never trims.
+5. **Re-runs by a capability predicate.** `_producing_tools` asks the model, once per flagged
+   answer and with the bound tools' own descriptions, which bound tool would produce each
+   flagged claim, and checks the answer: a name that is not bound counts as none.
+   - A claim no bound tool produces is cut.
+   - A claim some tool produces earns the re-run, which the progress rule bounds.
+   - This replaces `_UNPRODUCIBLE_CAPABILITIES`, a one-entry list, as the deciding rule. The
+     list survives only for #87's travel scan, which phase 4 replaces.
+6. **Gate failures are superseded.** A failure on a target is cleared by a later run that
+   inspected the same target and did not flag it. Before this, a fixed and re-run script still
+   marked the turn failed (review §F1).
+7. **Every composition clears the re-ground flag** unless it asks for a pass. The
+   general-knowledge exit returned without clearing it, and a test reproduced the loop to
+   LangGraph's recursion limit of 10,000.
+
+**Tests.**
+- `test_turn_event_log.py` (20), `test_repeat_tool_calls.py` (15, rewritten for the log) and
+  four supersession tests in `test_gate_reaches_the_answer.py`.
+- Run against the base (stage 41) with only `turn_log.py` copied in: 19 fail. The 39 that pass
+  are guards, unchanged cases, and unit tests of the new module.
+- Changed tests, each because the behaviour changed on purpose:
+  - #88's repeat tests: memo plus progress, not a count of 4;
+  - #85's routing tests: the producer check's answer is scripted, not a list;
+  - one id-reuse matrix test: its passing runs now inspect a different frame, since a run that
+    inspects the same frame now supersedes the failure;
+  - the middleware-order test;
+  - one source-text test.
+- Suites on `e85e8ae`: `rag_pipeline/tests` 3792 passed, 18 skipped, 1 failed (the
+  machine-dependent networkx pin); `tests/` 157 passed.
+
+**Measured with the harness.** Stage 41's baseline (`4b066f6`, trials 0 and 1) against this
+branch (`5b5e7ef` + stages 41–42, 2 trials), over the 67 task trials both have
+(`python -m gis_harness.run --compare`):
+
+| | deepseek-v4-flash, base → after | gpt-5.6-luna, base → after |
+|---|---|---|
+| correct | 22/25 → 23/25 | 20/26 → 26/26 |
+| refused gracefully | 7/8 → 6/8 | 5/8 → 6/8 |
+| strict | 14/33 → 15/33 | 4/34 → 9/34 |
+| unproductive steps (duplicate + failed calls) | 19 → 26 | 15 → 6 |
+| banners | 2 → 1 | 0 → 2 |
+| input tokens | 8.17M → 6.22M | 2.85M → 2.56M |
+| wall time | 4414 s → 5135 s | 1909 s → 2006 s |
+| cost | Lumen coins | $0.63 → $0.59 |
+
+**What this does and does not show.**
+
+- **The harness does not measure this stage's mechanisms, because its tasks do not loop.**
+  Across the 68 after-run turns, the result payloads' `turn_log_summary` records 1 memoised
+  call and 0 progress stops.
+  - The 10-08 loop that motivated this stage cannot be re-created as a task: it needed an
+    analyze peer with no feature lookup, and #88 (in the base) bound `overpass_search` there.
+  - So the evidence that loops, repeats, plan loss and stale flags are bounded is the tests
+    above, each written for a class rather than a turn.
+  - The harness's evidence is that nothing regressed.
+- **The differences above are mostly trial variance,** and the base also changed by #89
+  (Overpass mirror order).
+  - luna's T02L went from 0/2 to 2/2.
+    - In both base runs, the first `execute_code` failed to open the Overpass file
+      (file_id-as-path, #93's subject), and luna then answered "39" without computing it.
+    - After: one run avoided the failure; the other hit it, retried and answered 19 (reference
+      20).
+    - Two trials cannot attribute that to this stage.
+  - deepseek's extra unproductive steps are first-attempt code failures: syntax errors, a
+    `pip install gdal` that fails, a QGIS help call failing twice. This stage does not prevent
+    those; it stops their repetition.
+  - Per-task, both models changed in both directions on T09, T10 and U04. Those are the tasks
+    whose outcome is a model's method choice.
+- **No regression found in correctness.** Correct answers did not drop for either model, and
+  input tokens fell 24% (deepseek) and 10% (luna), although the plan now rides in every peer
+  step. The harness cannot attribute the fall.
+- **Spend for this run:** $0.62 OpenAI and 6.6M Lumen tokens. Program total so far: $1.65 and
+  19.7M.
+- **The run above had the invariant gate off,** as stage 41's baseline did: the harness server
+  did not set `AGENT_INVARIANT_GATE`, and the deployment turns the gate on through
+  `AGENT_EXTRACTION`. A gate-on run of this branch (1 trial, `baselines/p2-turn-event-log-gate-1trial`)
+  is the before for stage 43.
+- **The progress rule bounds repetition, not open-ended trying.** A step is productive when one
+  of its results is new, and a script that prints something different each time is always new.
+  - Stage 43's gate-on run shows the case: deepseek spent 30 steps in one code run on T06 and
+    counted 29 of them productive, while working through pysheds' API.
+  - Counting failures as no progress would not help. Across stages 42 and 43's runs, deepseek
+    had 8 streaks of two or more failed `execute_code` calls, and all 8 ended in a success.
+  - Telling convergence from wandering needs more than novelty. That is open.
+
+## Stage 43 — A number carries its unit and where it was measured {#stage-43}
+
+*2026-10-08. Branch `claude/typed-numbers`, stacked on stage 42 (#94). DEVLOG M8.81. Phase 3 of
+the eight-flaws program, flaw 1. `docs/design-review-2026-10.md` §F1 has the root cause with line
+references.*
+
+**Why.** The invariant gate decided what a declared number was by inference:
+- **Is the word a unit?** Two hand-kept vocabularies, `_UNIT_ALIASES` (113 spellings) and
+  `_KNOWN_UNITS` (25), which disagreed on 9 tokens. Plural `kilometres` was in one and not the
+  other.
+- **Was a frame measured in degrees?** Column names (`area`, `dist`, `_m`, ...), which also matched
+  `pop_male` and `district_id`, plus a "reprojected" rescue and a twin-frame credit keyed on the
+  same names.
+- **Is a number a count?** The variable's name (`num_`, `count`, `total`).
+
+Each piece was extended after a correct answer was flagged: `km²` (DL2531), `records` (DL3795),
+`points`, `square_miles` and `schools` (2026-10-08). Stage 36's noun list broke on `schools`
+within hours. The review's catalogue counts 17 class-A incidents, 8 of them fixed by a list entry.
+
+**What changed.**
+
+1. **`agent_runtime/units.py` parses units with pint**, under three rules, none of them a vocabulary:
+   - **Grammar:** a unit token followed by a digit is an exponent (`m2`, `km2`, `mi2`),
+     underscores are spaces, a hyphen between words is a product, `per` is a division, and a
+     scale is allowed only in a rate's denominator.
+   - **A word pint does not know names what is counted** (`schools`, `records`); inside a
+     compound it is the counted factor (`person*km`).
+   - **pint's own `Printer` group** (point, pixel, pica) is read as counted things, so "points"
+     is not 1/72 inch.
+
+   Anything else is unparseable: loud, never a silent pass. A plural word is a count and must be
+   whole and non-negative; a singular one (`index`, `ratio`) is a named dimensionless measure,
+   so NDVI declared as an `index` passes.
+2. **The sandbox gate stops judging units.** It reports:
+   - the declarations as written (`declared`);
+   - every metric operation with the CRS of its receiver (`metric_ops`), projected ones included.
+     A one-time patch on geopandas' `GeoPandasBase`, installed through an import hook so that
+     runs which never import geopandas do not pay for it, records each operation with the
+     user's own line;
+   - the size of every frame (`frame_sizes`).
+
+   A geographic frame is decided by the operations: a metric operation on it is a FAIL, and
+   otherwise it is an input. Without a live tracker the gate says it cannot tell.
+3. **`agent_runtime/declared_outputs.py` judges declarations in the agent process.**
+   - **Checks:** missing unit, unparseable unit, fractional or negative counts, a count larger
+     than every frame, and a length or area declared in a geographic CRS.
+   - **Typed outputs** `{name, value, unit, dimension, counted, measured_in_crs, source}`, with
+     `measured_in_crs` from the declaration or from the projected CRS of the operations that ran.
+   - **Wiring:** `code_execution._read_checks` merges them into the verdict and puts the typed
+     values on the result as `verification.outputs`.
+   - **Without the unit library** (an image built without it), every declaration becomes an
+     explicit unknown, never a pass.
+4. **Tools that measure emit typed outputs where the number is made:** `buffer_layer`, the
+   geometry measures, `inundation_at_level` and slope (`units.typed_value`, which raises on a unit
+   that does not parse). The turn log records every typed output as a `fact` event, linked to
+   the call that produced it, for phase 4.
+5. **Deleted:** `_UNIT_ALIASES`, `_KNOWN_UNITS`, `_METRIC_COLUMN_HINTS`, `_has_metric_column`,
+   `_inferred_count`, `check_declared_units`, `check_count_population` (moved agent-side), the
+   reprojection rescue, the twin-frame credit, and the supervisor's match on the
+   "unrecognised unit" message. A structural test fails if any of them is re-added.
+   - **Kept, deliberately:** a small table for the units a CONTRACT may declare
+     (`extractors/contracts.py`, our own extractor's vocabulary), now compared with the CRS axis
+     by pyproj's conversion factor rather than by name.
+6. **New dependency:** `pint==0.24.4`, pinned in `requirements.txt`, because `constraints.txt` is
+   a verbatim freeze of the deployed image. The sandbox image does not need it. The agent image
+   needs a rebuild to get it, and until then the explicit-unknown fallback above applies.
+
+**Tests.**
+- **New:** `test_typed_numbers.py` (46).
+- **Rewritten:** `test_invariant_gate.py`. Its declared-output tests run the whole
+  sandbox-then-agent path. 20 tests changed intent and say so in their docstrings:
+  - a geographic frame alone is undecided, not FAIL;
+  - `furlongs` is a length, not unknown;
+  - a column name is no evidence;
+  - the carried-column and chained cases pass on the operations.
+
+  One test was deleted: the advisory-flag case for an unrecognised unit. That class no longer
+  exists.
+- **Adapted:** `test_regrounding_turn_record.py` and `test_supervisor_graph.py` fixtures now
+  imitate the new gate's output.
+- **Fail-first:** run against stage 42 with only `units.py` and `declared_outputs.py` copied in,
+  28 of the new and rewritten tests fail.
+- **CI's own gate step** (a 25,000-degree buffer fails, the reprojected one passes) still passes
+  locally.
+- **Suites:** `rag_pipeline/tests` 3837 passed, 18 skipped, 1 failed (the networkx pin);
+  `tests/` 157 passed.
+
+**Measured with the harness, twice.**
+
+*Gate off* (stage 42 `p2-after` → this branch `p3-after`, 2 trials, 34 task trials per model):
+
+| | deepseek-v4-flash, before → after | gpt-5.6-luna, before → after |
+|---|---|---|
+| correct | 24/26 → 23/26 | 26/26 → 26/26 |
+| strict | 15/34 → 16/34 | 9/34 → 10/34 |
+| unproductive steps | 27 → 24 | 6 → 5 |
+| banners on correct answers | 0 → 0 | 1 → 4 |
+| input tokens | 6.39M → 7.40M | 2.56M → 2.58M |
+| cost | Lumen tokens | $0.589 → $0.599 |
+
+With the gate off, no phase 3 code runs. That run checks only that nothing else moved.
+- luna's 3 extra banners are all the LLM audit's "Grounding check", not this stage. Two flag the
+  outlet coordinates the question itself gave (T06); one flags "includes private schools".
+- deepseek's T09 and T10 changed in both directions, as in stage 42. They are the method-choice
+  tasks.
+
+*Gate on* (`AGENT_INVARIANT_GATE=1`, the deployment's setting through `AGENT_EXTRACTION`;
+stage 42 `p2-gate` → `p3-gate`, 1 trial, 17 tasks per model). The harness now records the gate's
+verdict on every code run:
+
+| | deepseek-v4-flash, before → after | gpt-5.6-luna, before → after |
+|---|---|---|
+| correct | 10/13 → 10/13 | 13/13 → 13/13 |
+| strict | 3/17 → 4/17 | 3/17 → 1/17 |
+| code runs the gate judged | 59 → 75 | 20 → 23 |
+| gate verdicts: pass / cannot determine / fail | 28 / 26 / 3 → 28 / 44 / 1 | 10 / 10 / 0 → 12 / 11 / 0 |
+| non-pass verdicts in turns with a correct answer | 27 → 42 | 9 → 9 |
+| banners on correct answers | 6 → 4 | 7 → 7 |
+| unproductive steps | 6 → 21 | 2 → 5 |
+| input tokens | 3.16M → 5.39M | 1.35M → 1.38M |
+| cost | Lumen tokens | $0.312 → $0.320 |
+
+**What this does and does not show.**
+
+- **The models never exercised the new declaration checks.** In the 96 gate reports of the gate-on run, no
+  model assigned `IGUIDE_OUTPUTS`, so the unit, count and `measured_in` checks never ran.
+  - luna once *printed* `IGUIDE_OUTPUTS`, and the gate's existing message said so.
+  - What did run: the operation recorder logged metric operations in 7 of the 96 reports (5
+    deepseek, 2 luna), and measuring tools returned typed outputs twice, both on deepseek, which
+    uses `buffer_layer` and the terrain tools.
+  - This stage's effect on the reader therefore depends on phase 4, which reads typed outputs
+    and tool facts, not declarations.
+  - Whether models should be asked to declare outputs is a prompt question this program has not
+    taken up.
+- **deepseek's jump in non-pass verdicts is one task, and not this stage.**
+  - T06 (DEM watershed) went from 9 code runs to 32. 27 of the 32 ended `cannot_determine` with
+    the `coverage` finding, the same rate as before (9 of 9): raster work with no frame at
+    module scope.
+  - Without T06, deepseek's non-pass verdicts on correct answers fell, from 18 to 11.
+  - The `coverage` branch of `run_checks` is unchanged by this stage.
+  - No check errored and no `NameError` from a deleted helper appears in any of the 102 turns
+    run on this branch.
+  - The 32 runs were deepseek choosing pysheds and working through its API: 16 failures from
+    `numpy.in1d`, removed in numpy 2 and still used by the sandbox's pysheds, plus wrong
+    `Grid` constructors and dtype errors.
+  - The same task thrashed in the baseline as well, with 32 calls and 7 unproductive steps.
+- **Stage 42's progress rule did not stop T06, and this is why.**
+  - The code run counted 29 of its 30 steps as productive. Its 12 failures were interleaved
+    with successful scripts, each printing something new.
+  - By the rule's definition (a new result), exploration is progress. So the rule bounds
+    repetition, not open-ended trying; the step budget bounded this run.
+  - Making failures count as no progress would be wrong on the evidence. Across all gate-on and
+    gate-off runs of stages 42 and 43, deepseek had 8 streaks of two or more failed
+    `execute_code` calls, and all 8 ended in a success.
+  - A rule that only "a new result" counts as progress cannot tell a model converging from a
+    model wandering. That is a stated limit of stage 42, not something this stage changes.
+- **Spend for these runs:** gate off $0.60 OpenAI and 7.6M Lumen tokens; gate on (both stages,
+  one trial each) $0.63 and 8.7M. Program total: $2.88 OpenAI and 36.0M Lumen tokens.
+
+## Stage 44 — Facts, a number scan, one verdict {#stage-44}
+
+*2026-10-08. Branch `claude/one-verdict`, stacked on stage 43. DEVLOG M8.82. Phase 4 of the
+eight-flaws program, flaws 2 and 7. Review §F2 and §F7 have the root causes.*
+
+**Why.**
+
+Whether a figure in the answer was supported was decided four ways, each for one class:
+- the LLM audit's "verbatim" spans, which no code checked;
+- reconciliation rule (2), a substring match restricted to numbers of 3+ digits, so `21.5` was
+  never seen and `997.93` matched `997`;
+- stage 37's one-entry routing list (`_UNPRODUCIBLE_CAPABILITIES`);
+- stage 39's travel-figure scan.
+
+The next class shipped until someone wrote a rule. The open case was "~998 sq mi" in 3 of 4
+replays.
+
+Thirteen post-processing steps appended their own banners, none seeing the others' verdicts.
+"Could not check" was loud in the gate (COULD NOT VERIFY) and silent in the audit (a failed
+audit returned severity `unknown` and raised nothing).
+
+The gate's verdict was a union over every run in the turn. Live, 2026-10-08 21:34 UTC
+(`sess-07bc717f`, trace `…:0af26be5b3f8`, the first turn after `40356bd` was deployed): a correct
+23-school answer showed COULD NOT VERIFY, and all three findings came from side runs: an
+`os.listdir`, a lookup that matched 0 rows, and a failed first attempt. The run that produced the
+numbers raised none.
+
+**What changed.**
+
+1. **`agent_runtime/facts.py`.** The turn's fact set:
+   - the typed facts tools reported (stage 43);
+   - every number in a tool result, with the unit written beside it;
+   - the user's question, the retrieved evidence, and earlier turns' records.
+
+   `resolve` matches each figure the answer states to a recorded number:
+   - across units (pint), so `998 square miles` resolves to `2584.62 km²`;
+   - within the precision shown, so `2,585` resolves to 2,584.62 and `about 340` to 343.7,
+     since trailing zeros are rounding.
+
+   What is not a claim:
+   - identifiers (`EPSG:26916`, `GEOID 17019`: a number after an all-caps label), years, list
+     markers, code and links;
+   - small whole numbers without a unit.
+
+   A bare recorded number grounds a unit-bearing figure only when it is distinctive (≥100) or its
+   context names that dimension, so `"n": 5` is not evidence for "a 5-hour drive".
+2. **The writer is shown the typed facts,** with units and measurement CRS, in the synthesis note.
+3. **The number scan replaces the four rules.**
+   - A figure that resolves nowhere goes to the producer check (stage 42) with its sentence.
+   - If no bound tool produces it, the clause holding it is cut, whatever it is about. One
+     general note says so.
+   - If one does, the work goes back once (the existing re-grounding pass). What remains is
+     reported as not checked.
+   - Stage 37's routing list, stage 39's travel scan, `_remove_unproducible_claims` and
+     `_audit_without` are deleted.
+4. **The audit judges only what is not a number.** A claim that states a figure is the scan's;
+   the audit's sampled verdict on it is not used. A failed audit is "not checked", never clean.
+5. **`agent_runtime/verdict.py`: one finding type, one policy, one banner.**
+   - Every producer contributes `Finding`s: the gate, the audit, the number scan, artifact
+     corrections, and unresolved peer failures.
+   - `synthesize_node` renders them once, after peer failures are known: ⚠️ when something is a
+     problem, ℹ️ "Not everything here could be checked. Unchecked is not the same as wrong" when
+     something was not checked, and nothing when every check passed.
+   - At most six lines, the rest counted.
+   - `_apply_grounding_caveat`, `_peer_failure_note` and `_correct_artifact_claims` now render
+     through it. Their old banners (COULD NOT VERIFY, Grounding check, Partial answer,
+     Correction) are gone.
+   - The verdict travels on the state as `verdict: {status, findings, numbers}`, with each stated
+     figure's fact id.
+6. **The gate speaks for the code runs the answer uses:** runs a stated figure resolves to, or
+   runs that produced a file or layer.
+   - When no stated figure came from code (a qualitative answer), the runs that succeeded count.
+   - When the answer states figures that resolve nowhere, every run counts, because the gate
+     cannot tell which matter.
+   - A failed attempt that a later run superseded never counts (stage 42).
+
+**Tests.**
+- **New:** `test_number_scan_and_verdict.py` (24). Against stage 43 with only `facts.py` and
+  `verdict.py` copied in, the 7 graph-behaviour tests fail. The 17 that pass test the new modules
+  themselves.
+- **Rewritten:** the routing-figure scan tests now run the general pass with a scripted producer
+  model. The two routing-classifier parametrised tests are deleted with the classifier. Banner
+  assertions in 7 files moved to the new wording.
+- **Suites:** `rag_pipeline/tests` 3849 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
+  157 passed.
+
+**Measured with the harness, on one model.** By the user's budget decision, phases 4 and 5 ran on
+deepseek-v4-flash only, gate on, 1 trial, 17 tasks. The cross-model claim for this stage rests
+on the tests above and on gpt-5.6-luna's results up to stage 43. Stage 43's gate-on run
+(`p3-gate`) → this stage's first run (`p4-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| correct | 10/13 → 11/13 |
+| refused gracefully | 3/4 → 4/4 |
+| strict | 4/17 → 1/17 |
+| correct answers with a banner | 4 → 10 |
+| unproductive steps | 21 → 20 |
+| input tokens | 5.39M → 5.29M |
+
+`banners_total` counts banner lines, and this stage renders at most one banner per answer, so it
+falls by construction and is not reported. "Correct answers with a banner" counts answers.
+
+**The first run regressed on what this stage is for, and the records say why.** Reading all 10
+banners and replaying the number scan offline over every recorded answer (136 answers across
+`p3-gate`, `p3-after`, `p4-gate` and `p5-gate`, no model calls) found six defects. None was a
+class of claim; each was a reading error that a single list entry would have hidden.
+
+1. **A compass letter was read as a unit.** pint reads `N` as newtons and `W` as watts. The
+   question's "0.1281 W" therefore failed to ground the answer's "0.1281° W", and the sentence
+   holding the question's own coordinates was cut (T01, T02).
+   - **Fix:** a hemisphere letter after a number is read as a sign, so 117.5993°W equals a
+     recorded -117.599333 and does not equal 117.5993°E.
+   - **Also:** the question's own numbers ground a figure whatever unit the answer writes.
+2. **A recorded number was labelled by the first 60 characters of its whole output, not by the
+   words beside it.** "area hectares: 24.0" and `"watershed_area_km2": 16.2` never saw their own
+   unit names.
+   - **Fix:** the label is the 48 characters before the number, and a snake_case suffix
+     (`distance_m`) counts.
+   - **Fix:** the "small numbers coincide" guard now counts the digits a figure shows (three or
+     more ground it) instead of the magnitude (100 or more).
+3. **A unit was read across a line break.** `382254.14\nC2,C3 ...` gave the number the unit `C2`
+   (coulomb squared). A test written for the next fix found it.
+4. **Arithmetic on stated figures resolved nowhere and was cut.** Examples: "wins by 36,626
+   person-km" (418,880 − 382,254) and "all 28 pairs" (C(8,2)). The producer check answered
+   NONE although `execute_code` was bound.
+   - **Fix: one sum or difference of two figures the answer itself grounded resolves,** for a
+     figure shown to three or more significant digits.
+   - **Ratios and products were tried and dropped.** Audited over the replay, they matched mostly
+     by coincidence: "9 at p < 0.01" came out as 1.96 ÷ 0.2252, "0.3°" as 118 ÷ 470, "10 m" as
+     9975 ÷ 900. With sums and differences, every resolution in the replay is genuine or a
+     rounding of the true figure ("~2,584 km²" for 2,584.62).
+   - **Fix:** the producer prompt now says what NONE means: data no tool here can obtain. A
+     computation on values already present is produced by any tool that computes.
+5. **"Nothing in this run was geospatial" was reported as "not checked"** (T02, T03, T04).
+   `not_applicable` means the gate had nothing to apply its checks to, and the number scan still
+   holds the figures to the record. It is no longer a finding. `coverage` (geospatial work the
+   gate could not reach) still is.
+6. **One unresolved figure widened the gate's scope to every run,** so side runs spoke again.
+   Scope is now always the runs the answer's figures resolve to, including a derived figure's
+   operands, plus runs that produced a file or layer. A notes-only banner also lacked a heading.
+
+The ⚠️ heading now reads "A check found a problem". A gate failure is about the work behind the
+answer, not necessarily about something the answer states. That is T01's case: the run the answer
+used also printed an exploratory `gdf.geometry.area` in degrees, and scoping by run cannot
+separate two lines of one script.
+
+**Offline evidence for the fixes.** The share of figures in correct answers that resolve
+nowhere, on answers this stage never touched:
+
+| corpus | before the fixes | after |
+|---|---|---|
+| `p3-gate` (both models, gate on) | 37 / 325 (11.4%) | 10 / 316 (3.2%) |
+| `p3-after` (both models, 2 trials) | 97 / 824 (11.8%) | 37 / 804 (4.6%) |
+
+The claim count falls slightly because glued designations ("16N") are no longer claims. What
+remains is mostly figures the model computed in its head ("28 pairs", percentages, a 2.5× ratio)
+and so honestly unrecorded, plus English words pint knows as units ("20 are", "9 at",
+"0.53 in 2020").
+
+**Tests for the fixes:** 11 new tests (13 cases) in `test_number_scan_and_verdict.py`; 9 cases
+fail on the first version. Suites after the fixes: `rag_pipeline/tests` 3860 passed, 18 skipped, 1 failed
+(the networkx pin); `tests/` 157 passed.
+
+**Confirmation run of the fixed stage** (the user approved it, 2026-10-09). This ran on stage 45's
+tip, which carries these fixes: deepseek-v4-flash, gate on, 1 trial, the 16 tasks other than T06
+(`p5-fixed-gate`). The same 16 tasks in each run:
+
+| deepseek-v4-flash, 16 tasks | stage 43 | stage 44 first version | stage 45 on that | **fixed** |
+|---|---|---|---|---|
+| correct | 9/12 | 10/12 | 12/12 | 11/12 |
+| correct answers with a banner | 3 | 9 | 8 | **5** |
+| strict | 4/16 | 1/16 | 2/16 | 5/16 |
+| unproductive steps | 6 | 9 | 6 | 6 |
+
+The five banners on correct answers, read one by one:
+- **Three are the gate's `coverage` finding** on raster work it could not reach (T07, T08, T11).
+  Stage 43 showed the same three, as COULD NOT VERIFY. They are accurate: nothing checked those
+  numbers.
+- **One cut a remembered figure** (T01). The answer added "the official Census figure of
+  approximately 997.5 sq mi (≈ 2,583.5 km²)", which nothing in the turn recorded, and it was cut
+  with a note. That is what the cut is for.
+- **One cut a correct sum** (T10). "Total sill 0.64" is the nugget 0.05 plus the partial sill
+  0.59. The figure shows two significant digits, so the derivation rule does not try it, and the
+  producer check answered NONE despite the reworded prompt. This is the residual: a short derived
+  figure can still be cut. The answer stayed correct, because the scored values were untouched.
+
+**Spend:** this run used 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
+
+**Not fixed here.**
+- The gate's `all_nan` check fails a join whose OpenStreetMap attribute columns are sparse
+  (`old_operator`, `wikidata`), which is a sandbox heuristic.
+- English words read as units.
+- An exploratory measurement inside the run the answer used.
+- A derived figure shown to fewer than three significant digits can still be cut (T10's "0.64").
+
+**Spend:** `p4-gate` 5.41M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen
+(with stage 45's run).
+
+## Stage 45 — Every source catalogued, every answer naming its sources {#stage-45}
+
+*2026-10-08. Branch `claude/source-catalog`, stacked on stage 44. DEVLOG M8.83. Phase 5 of the
+eight-flaws program, flaw 6. Review §F6 has the root cause.*
+
+**Why.**
+
+- **Sources were chosen blind.** The model chose a source by reading tool descriptions, and
+  nothing recorded what each source includes or leaves out. Live, 2026-10-08 19:42 UTC: "18
+  schools within 1 mile" came from the Chicago Public Schools file, while OpenStreetMap has 31,
+  and the answer did not say which source it used.
+- **`source` meant four things across tools,** and naming a source was enforced in one place:
+  stage 38's `_with_feature_source`, for two tool families and only lists of three or more rows.
+- **Naming depended on the model.** Stage 41's baseline measured answers naming their source on
+  33 of 50 runs (deepseek-v4-flash) and 18 of 51 (gpt-5.6-luna). Whether a user learns where a
+  number came from was model habit.
+
+**What changed.**
+
+1. **`agent_runtime/source_catalog.py`**, one entry per source the agent reaches: TIGERweb,
+   OpenStreetMap via Overpass, Nominatim, 3DEP, the rs-embed service, the Chicago Data Portal,
+   Census and USGS data services, the platform knowledge base, and the web.
+   - Each declares `covers`, `excludes`, `extent` and `licence`, the tools that read it, and the
+     hosts it is fetched from.
+   - It is a list, as the review says: of sources, which change in months, not of words, which
+     change with every query.
+   - Two structural tests guard it: every host `fetch_public_data` may fetch from has an entry
+     (`tnmaccess.nationalmap.gov` did not), and no tool belongs to two sources.
+2. **Selection by declared coverage.**
+   - Every peer step's brief (stage 42's system-message block) lists what each source covers and
+     leaves out. That is a capability statement, not a rule: a count from a city's school file
+     and a count from OpenStreetMap answer different questions.
+   - `dem_for_region` refuses a region outside 3DEP's declared extent before fetching. The
+     all-NoData check stays behind it.
+3. **The answer names its sources from the record, always.**
+   - `_with_sources` renders a Sources line from the results the answer used: those its figures
+     resolved to (stage 44's links), those that delivered a layer, and otherwise every successful
+     data result.
+   - Each source is named with what it leaves out and its licence.
+   - A dataset staged from a URL keeps stage 38's search-title naming.
+   - Uploads are named by filename.
+   - A failed result, a repeat note, a web or knowledge-base search that only found a dataset,
+     and an agent's own output are not sources.
+   - This replaces `_with_feature_source`, `_source_entries` and `_feature_sources`.
+
+**Tests.**
+- **New:** `test_source_catalog.py` (10).
+- **Rewritten:** `test_answer_names_its_source.py` (10) for the new rule. The two tests that held
+  "an answer that already names its source, or prose without a list, gets no line" changed
+  intent: the line is now always rendered, because the prose is the model's and the line is the
+  record's.
+- **Suites:** `rag_pipeline/tests` 3858 passed, 18 skipped, 1 failed (the networkx pin); `tests/`
+  157 passed. After the fix below: 3872 passed, the same one failed, and `tests/` 157 passed.
+
+**Measured with the harness, on one model.** Run on deepseek-v4-flash only (the user's budget
+decision), gate on, 1 trial, 17 tasks. Both runs below carry stage 44's first version, so the
+difference is this stage. Stage 44 (`p4-gate`) → this stage (`p5-gate`):
+
+| deepseek-v4-flash | before → after |
+|---|---|
+| answer names a source the task's data came from | 12/17 → 17/17 |
+| answers carrying a Sources line | 0/17 → 15/17 |
+| correct | 11/13 → 13/13 |
+| refused gracefully | 4/4 → 3/4 |
+| unproductive steps | 20 → 11 |
+| input tokens | 5.29M → 4.39M |
+
+- **The source is now the record's, not the model's habit.** 15 of 17 answers carry a line
+  naming every source they used, with what it leaves out. Uploads appear as "schools.geojson
+  (your upload)", and catalogued services carry their coverage.
+  - Example: "OpenStreetMap (via Overpass), which leaves out whatever volunteers have not mapped
+    ... (ODbL)".
+  - Stage 41's baseline named a source on 33 of 50 deepseek runs and on 18 of 51 luna runs.
+- **The two answers without a line,** T11 and U02, read their uploads only through
+  `execute_code`. Its arguments reach the graph as a string, so `input_files` was never seen.
+  - Fixed after the run: string arguments are parsed, and a code run's own `input_files`
+    (with filenames) name the upload.
+  - A file the store records as the agent's own output is still never a source.
+  - 2 of the 3 new test cases fail before the fix.
+  - Both answers named their file in prose anyway, which is why the score is 17/17.
+- **The changes in correctness and steps are trial variance:** T09 and T10, the method-choice
+  tasks, both went BAD → OK. This stage changes no tool and no route.
+- **Not measured on gpt-5.6-luna,** whose baseline habit (18/51) is what this stage exists for. The
+  line is rendered from the tool record whatever the model writes, and the tests hold that. A
+  live check on a second model has not been run.
+- **Spend:** `p5-gate` 4.49M Lumen tokens, no OpenAI. Program total: $2.88 OpenAI, 45.9M Lumen.
+- **Confirmation run of the fixed tip** (`p5-fixed-gate`, 2026-10-09). This includes stage 44's
+  fixes and the code-only-upload fix. deepseek-v4-flash, gate on, 1 trial, 16 tasks (all but T06):
+  - a source the task's data came from is named on **16/16** answers (stage 43, same tasks:
+    10/16);
+  - **15/16** carry the rendered Sources line, among them T11, which read its uploads only through
+    `execute_code` and had no line before the fix;
+  - the one without a line, U01, is an unsolvable task: it refused after inspecting its upload,
+    and the file inspector takes the upload's id as `path`, an argument name the code did not
+    read. Fixed after the run: any argument value that is a file id counts as an input, whatever
+    the tool calls it, and the result's own `filename` names it. A new test fails before the fix.
+    Suites after it: `rag_pipeline/tests` 3873 passed, 18 skipped, 1 failed (the networkx pin);
+    `tests/` 157 passed;
+  - correct 11/12. Stage 44 has the verdict side of this run.
+  - Spend: 3.20M Lumen tokens. Program total: $2.88 OpenAI, 49.1M Lumen.
+
+**Not done.**
+- The source does not yet travel on the `map_layer` event itself; it travels on the typed facts
+  (stage 43) and in the answer.
+- Selection among sources is still the model's, now informed. No code picks one source over
+  another.
+
+## Stage 46 — A banner only when a check found something {#stage-46}
+
+*2026-10-09. Branch `claude/banner-policy`, stacked on stage 45. DEVLOG M8.84. Follows the
+review of the eight-flaws program against the harness archive and the live browser sweep.*
+
+**Why.**
+
+- **The banner rarely meant the answer was wrong.** Across 437 scored turns in the harness
+  archive (every phase, both models, plus the live sweep of 2026-10-09):
+  - a banner landed on 98 correct answers and 9 wrong ones, so it marked a wrong answer 8% of
+    the time;
+  - it caught 9 of the 39 wrong answers.
+- **By kind, in the stack's own runs** (`p4-gate`, `p5-gate`, `p5-fixed-gate`, 50 turns with a
+  recorded verdict):
+
+  | check | kind | on correct | on wrong |
+  |---|---|---|---|
+  | gate | unverifiable (coverage, nothing applicable) | 22 | 0 |
+  | number scan | unverifiable (figure in no record) | 3 | 0 |
+  | number scan | note (statements cut) | 22 | 1 |
+  | gate | problem | 3 | 0 |
+
+  Two of the three gate problems were `all_nan` on T02L, where OpenStreetMap's optional tags
+  (`old_operator`, `wikidata`) were empty on a join that had matched every school.
+- **Most cuts removed correct text.** Of the 49 statements the number scan cut in those runs,
+  19 begin in the middle of a number: pieces of sentences split at a decimal point. The sentence start
+  was the last `.` of any kind, so "1,609.344 m … 41.8827° N" became "344 meters) … 8827° N",
+  which resolved to nothing and was cut. In `p5-gate` T02 that removed the headline, "**20
+  schools** are within 1 mile of the site at 41.8827° N, 87.6233° W", leaving the heading "How
+  many schools are within 1 mile of the site?" over nothing. The rest:
+  - unit conversions of grounded figures ("≈ 3.43 minutes (0.0571 hours, ~206 seconds)");
+  - a short sum ("total sill 0.64", the nugget 0.05 plus the partial sill 0.59);
+  - an answer restating its own bounding box, whose numbers sat inside a JSON list and were
+    never recorded.
+
+  Only one cut in `p5-fixed-gate` was the kind the cut exists for: T01's recalled "997.5 sq mi
+  (≈ 2,583.5 km²)".
+
+**What changed.**
+
+1. **`verdict.render` prints only what changes how to read the answer** (`verdict.shown`): a
+   problem, or a peer that failed (headed "This answer may be incomplete"). A cut gets one plain
+   italic line with the full count, because the reader is owed knowing text was removed. Every
+   "not checked" finding and every note stays in `verdict.findings` and `verdict.status`, which
+   the client and the trace receive; it is no longer printed.
+2. **A sentence ends at a terminator followed by whitespace, or a line break**
+   (`facts._SENTENCE_END_RE`), not at any `.`.
+3. **A figure that restates a grounded figure in another unit resolves**
+   (`facts._resolve_conversions`). The operand is the figure as shown, so its rounding widens the
+   tolerance: 3.43 min is 0.05717 h ± 0.00015 h. A recalled "997.5 sq mi" against a grounded
+   2,584.62 km² is 997.93 sq mi, 0.43 away, and stays unresolved.
+4. **A sum or difference shown to two significant digits resolves when both operands are stated
+   in its own sentence** (`_DERIVED_LOCAL_MIN_SIGNIFICANT`). Three or more digits may combine any
+   two grounded figures, as before; ratios and products stay excluded.
+5. **Numbers inside a JSON list are recorded**, labelled with the list's key
+   (`facts._walk_strings`): `"region_bbox": [-87.65221, 41.855, …]`.
+6. **The gate's `all_nan` fails a join only when nothing matched** (`_join_matched_rows`):
+   `index_right` or `index_left` present and entirely null. A join that matched rows with an
+   all-null attribute column passes, with the columns named. A merge with `_left`/`_right`
+   suffixes and no index column still fails as before.
+7. **Two offline tools.** `gis_harness/replay_number_scan.py` re-runs the scan over recorded
+   answers with no model calls. `gis_harness/banner_calibration.py` counts each check's findings on
+   correct and wrong answers, and the banners each policy would print.
+
+**Measured, offline.**
+
+Replay over answers the scan never touched (the 23cfd02 runs and the live sweep, 1,226 stated
+figures):
+
+| | before | after |
+|---|---|---|
+| figures in a sentence that starts inside a number | 335 | 0 |
+| unresolved figures (cut or listed as not checked) | 60 | 55 |
+
+The unresolved figures that remain are mostly the classes the scan is for or deliberately does
+not try: a ratio ("2.5× the next zone"), a count or a combinatoric ("all 28 pairs"), aftershock
+times no tool result held (live T12), and figures whose operands were themselves unrecorded.
+
+Calibration over the stack's 50 recorded verdicts (`p4-gate`, `p5-gate`, `p5-fixed-gate`):
+
+| answers carrying a banner | correct (47) | wrong (3) |
+|---|---|---|
+| every finding printed (stage 44) | 33 | 1 |
+| problems and failed peers (stage 46) | 3 | 0 |
+
+Two of the remaining three are the `all_nan` finding item 6 removes at the source; the recorded
+verdicts predate it, so the replay cannot show that. The one wrong answer that had a banner keeps
+a quiet "statement left out" line and loses the banner.
+
+**What this gives up.** A wrong answer is no more likely to be caught than before; it is now
+marked less often (0 of 3 in these runs, against 1 of 3). The 30 wrong answers in the archive
+that carried no banner include method errors the verdict cannot see: kriging with the nugget on
+the diagonal (T10 live), the hot-spot method (T09), substituted data (U01). Nothing in the verdict checks a method. That
+is the next step, not this one: recompute a headline number from the artifact the run wrote, and
+re-run standard operations (kriging, IDW, Moran's I and Gi*, slope, shortest path) with a
+reference library from the turn's own inputs, and print a problem only on disagreement.
+
+Suites: `rag_pipeline/tests` 3882 passed, 19 skipped, 1 failed (the networkx pin, failing on
+stage 45 too); `tests/` 158 passed. Changed tests assert the finding in the verdict payload where
+they used to assert the printed caveat.
+
+**Not done.**
+- The map UI does not show the verdict payload yet, so "not checked" is visible only in the
+  trace and the API response.
+- No live run of this stage. It changes no tool and no route; the replay and calibration above
+  are offline over recorded turns.
 
 ## Stage 50 — The extraction work lands, and the agent reads a record of its own {#stage-50}
 

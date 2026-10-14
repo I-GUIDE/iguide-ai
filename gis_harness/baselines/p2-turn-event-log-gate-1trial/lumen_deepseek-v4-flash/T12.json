@@ -1,0 +1,101 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": false,
+        "found": null
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog (`usgs_comcat_ridgecrest_2019-07.csv`), here are the results:\n\n**Largest event's magnitude:** The largest event in the catalog is the **M7.1** mainshock of the 2019 Ridgecrest earthquake sequence, which occurred on **2019-07-06 03:19:53 UTC** at latitude 35.7695, longitude -117.5993.\n\n**Events within 7 days and 25 km:** Using a Haversine distance calculation, **673 events** occurred strictly after the mainshock (within 0 to 7 days) and within 25 km of its epicenter.\n\n**Events with magnitude \u2265 4:** Of those 673 events, **63 events** had a magnitude of 4.0 or greater. The largest aftershocks in this group included magnitudes M5.5, M5.44, M4.97, M4.9, and M4.89.\n\n**Summary:**\n- The catalog contains 1,054 events from the July 2019 Ridgecrest, CA sequence.\n- The M7.1 mainshock on July 6, 2019, was the largest event.\n- 673 aftershocks occurred within 7 days and 25 km of the mainshock's epicenter.\n- 63 of those aftershocks were magnitude 4 or greater.",
+  "seconds": 103.3,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 93691,
+    "cached_input_tokens": 58880,
+    "output_tokens": 2596,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791502231-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

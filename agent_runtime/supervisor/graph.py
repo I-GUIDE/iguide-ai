@@ -39,6 +39,10 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime import facts as turn_facts
+from agent_runtime import turn_log
+from agent_runtime import source_catalog
+from agent_runtime import verdict as turn_verdict
 
 # Words that carry no retrieval signal — stripped when judging topical coverage and when building
 # a fallback query reformulation.
@@ -132,6 +136,13 @@ class SupervisorState(TypedDict, total=False):
     reground: bool                 # synthesize -> supervisor instead of END, for that one pass
     bound_tools: List[str]         # tool names the analyze peer had bound this turn; decides
                                    # which ungrounded claims a re-run could ever produce
+    turn_log_id: str               # this turn's event log (agent_runtime.turn_log): the one
+                                   # record of what the turn did; every other view derives from it
+    plan: Dict[str, Any]           # {goal, subgoals: [{id, text, status, produced}]}: what the
+                                   # turn is for, owned by the agent, rendered to every peer step
+    turn_log_summary: Dict[str, Any]  # counts from the log, set by run_supervisor at the end
+    bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
+    verdict: Dict[str, Any]        # {status, findings, numbers}: the single verdict (stage 44)
 
 
 
@@ -992,44 +1003,63 @@ _REGROUND_DIRECTIVE = (
 )
 
 
-# --- claims no bound tool can produce ------------------------------------------------------
-#
-# The re-grounding pass assumes the peer CAN establish what the audit found missing. For some
-# claims no tool it holds ever could. Live, 2026-10-08 (thread sess-1e8e3edd-…): the synthesizer
-# added "roughly 460 km by road or ~340 km by the Eurostar rail line" to a correct 340.0 km
-# great-circle answer; the audit flagged both; analyze was re-run, ran execute_code again
-# (~28 s of a 72 s turn), and could not compute a road distance because there is no routing
-# tool. Such a claim is removed from the answer instead, and never becomes a re-run gap.
-#
-# Each entry: a label, the claim shape, the tool-name shape that WOULD produce it, and the line
-# the answer gets in its place. Kept narrow on purpose — a match removes text from the answer —
-# so "driving factors", "Google Drive" and "road network layer" are not routing claims.
-_ROUTING_CLAIM_RE = re.compile(
-    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle|foot)\b"
-    r"|\b(?:road|rail|railway|train|driving|walking|cycling)\s+(?:distance|time|route|journey|trip)s?\b"
-    r"|\b(?:drive|driving|travel|journey|transit|commute|walking|cycling)\s+times?\b"
-    r"|\btravel\s+distances?\b|\bdriving\s+directions?\b|\brail\s+line\b"
-    r"|\b(?:eurostar|amtrak|tgv)\b"
-    r"|\b\d+(?:[.,]\d+)?[\s-]*(?:h|hrs?|hours?|mins?|minutes?)[\s-]+"
-    r"(?:drive|walk|ride|flight|train\s+ride|bus\s+ride|journey|trip)\b",
-    re.I)
-_ROUTING_TOOL_RE = re.compile(r"rout|directions|isochrone|travel_time|osrm|valhalla|graphhopper",
-                              re.I)
-_UNPRODUCIBLE_CAPABILITIES = (
-    ("routing", _ROUTING_CLAIM_RE, _ROUTING_TOOL_RE,
-     re.compile(r"\b(?:rout(?:e|es|ing)|road|rail|driv(?:e|ing))\b", re.I),
-     "Road and rail travel distances and times are not included: no routing tool is "
-     "available here to compute them."),
-)
+# --- which bound tool could produce a missing claim ------------------------------------------
+# Stage 37 decided whether a re-run could establish an ungrounded claim with a list:
+# `_UNPRODUCIBLE_CAPABILITIES`, one entry (routing), a regex for the claim and a regex for the
+# tool. Any capability outside the list was assumed producible and bought a re-run, and every
+# new class needed a new entry. The question is general: given the tools this turn has bound,
+# does one of them produce this value? It is asked of the model once per flagged answer, with the
+# bound tools' own descriptions, and the answer is checked: a tool that is not bound counts as
+# none. A wrong "yes" costs one re-run, which the progress rule ends after two steps that add
+# nothing; a "no" cuts the claim instead of re-running.
+
+_PRODUCER_PROMPT = (
+    "These claims appear in a draft answer, but no tool result recorded this turn contains "
+    "them. For each claim, name the ONE tool below that would compute or retrieve that value, "
+    "or NONE when the value needs data that none of these tools can obtain (a fact about the "
+    "world, such as a road distance or a population, that no tool here retrieves). A value "
+    "that is arithmetic on figures already in the answer or the question (a difference, a "
+    "count of combinations, a unit conversion) is produced by any tool here that computes."
+    "\n\nTools:\n{tools}\n\n"
+    "Claims:\n{claims}\n\nRespond ONLY with JSON mapping each claim number to a tool name or "
+    "\"NONE\", e.g. {{\"1\": \"execute_code\", \"2\": \"NONE\"}}.")
 
 
-def _unproducible_capability(claim: str, bound_tools: Optional[List[str]]) -> Optional[str]:
-    """The capability *claim* needs when no bound tool provides it, else None."""
-    text = str(claim or "")
-    for label, claim_re, tool_re, _mention, _note in _UNPRODUCIBLE_CAPABILITIES:
-        if claim_re.search(text) and not any(tool_re.search(str(t)) for t in bound_tools or []):
-            return label
-    return None
+def _producing_tools(claims: List[str], tool_docs: Dict[str, str],
+                     llm: Optional[Any]) -> Dict[str, Optional[str]]:
+    """claim -> the bound tool that would produce it, or None. Unknown means producible: with
+    no model to ask, the re-run is allowed and the progress rule bounds it."""
+    out: Dict[str, Optional[str]] = {c: "unknown" for c in claims}
+    if not claims or not tool_docs:
+        return out
+    if llm is None:
+        # The same default the decider falls back to (default_decide_fn).
+        try:
+            from agent_runtime.executor_factory import build_default_llm
+            llm = build_default_llm()
+        except Exception:  # noqa: BLE001
+            return out
+    if not hasattr(llm, "invoke"):
+        return out
+    tools = "\n".join(f"- {name}: {doc}" for name, doc in sorted(tool_docs.items()))
+    numbered = "\n".join(f"{i}. {c[:300]}" for i, c in enumerate(claims, start=1))
+    try:
+        raw = llm.invoke(_PRODUCER_PROMPT.format(tools=tools[:12000], claims=numbered))
+        parsed = _extract_json_object(_content_to_text(raw))
+    except Exception:  # noqa: BLE001 - an unanswerable question leaves every claim producible
+        return out
+    if not isinstance(parsed, dict):
+        return out
+    for i, claim in enumerate(claims, start=1):
+        name = str(parsed.get(str(i)) or "").strip()
+        out[claim] = name if name in tool_docs else None
+    emit_trace_event(
+        "producer_check",
+        {"stage": "synthesize", "claims": len(claims),
+         "producible": sum(1 for v in out.values() if v),
+         "message": "; ".join(f"{c[:60]} -> {v or 'no tool'}" for c, v in out.items())[:600]},
+        node="synthesize")
+    return out
 
 
 # Locating a claim in the answer. The auditor quotes the answer, but the answer is markdown, so
@@ -1202,63 +1232,17 @@ def _drop_claims(text: str, claims: List[str]) -> tuple:
     return (_tidy_after_cuts(out, before=original) if dropped else original), dropped
 
 
-def _remove_unproducible_claims(answer: str, audit: Optional[Dict[str, Any]],
-                                bound_tools: Optional[List[str]]) -> tuple:
-    """Cut flagged claims no bound tool can produce out of *answer*, and out of *audit*.
-
-    Returns ``(answer, audit, dropped)``. The answer gains one line per capability whose claims
-    were cut, unless it already talks about that capability, so the user is told what is missing
-    without being shown the unsupported figures. If no auditor issue survives, the audit stops
-    flagging; a gate finding is untouched, because cutting prose changes nothing it checked.
-    """
-    issues = [i for i in ((audit or {}).get("issues") or [])]
-    candidates: Dict[str, str] = {}
-    for item in issues:
+def _flagged_auditor_claims(audit: Optional[Dict[str, Any]]) -> List[str]:
+    """The claims the LLM auditor flagged (gate findings are not claims)."""
+    out = []
+    for item in (audit or {}).get("issues") or []:
         if isinstance(item, dict) and item.get("source") == "invariant_gate":
             continue
         claim = str(item.get("claim") if isinstance(item, dict) else item or "").strip()
-        label = _unproducible_capability(claim, bound_tools)
-        if claim and label:
-            candidates[claim] = label
-    if not candidates:
-        return answer, audit, []
-    new_answer, dropped = _drop_claims(answer, list(candidates))
-    if not dropped:
-        return answer, audit, []
-    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
-        if label in {candidates[c] for c in dropped} and not mention_re.search(new_answer):
-            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
-    gone = set(dropped)
-    kept = [i for i in issues
-            if str(i.get("claim") if isinstance(i, dict) else i or "").strip() not in gone]
-    _LEDGER_LOG.info("dropped %d claim(s) no bound tool can produce: %s", len(dropped), dropped)
-    emit_trace_event(
-        "unproducible_claims_dropped",
-        {"stage": "synthesize", "claims": dropped,
-         "capabilities": sorted({candidates[c] for c in dropped}),
-         "message": f"removed {len(dropped)} claim(s) no available tool can produce: "
-                    f"{'; '.join(c[:80] for c in dropped[:3])}"},
-        node="synthesize",
-    )
-    return new_answer, _audit_without(audit, kept, dropped), dropped
+        if claim:
+            out.append(claim)
+    return out
 
-
-def _audit_without(audit: Optional[Dict[str, Any]], kept: List[Any], removed: List[str]) -> Dict:
-    """*audit* holding only the *kept* issues, after *removed* claims were cut from the answer.
-    If no auditor issue is left the audit stops flagging; a gate finding is untouched."""
-    auditor_left = [i for i in kept
-                    if not (isinstance(i, dict) and i.get("source") == "invariant_gate")]
-    new_audit = {**(audit or {}), "issues": kept,
-                 "removed_claims": [*((audit or {}).get("removed_claims") or []), *removed]}
-    if not auditor_left:
-        gate = str((audit or {}).get("invariant_gate") or "")
-        if gate:
-            new_audit["summary"] = (audit or {}).get("gate_headline") or new_audit.get("summary")
-        else:
-            new_audit.update({"hallucination_detected": False, "severity": "none",
-                              "summary": "Grounded: claims no available tool could produce were "
-                                         "removed from the answer."})
-    return new_audit
 
 
 # A number's edges in a JSON record. Not after a word character or a '.', so "450" is not found
@@ -1274,184 +1258,36 @@ def _number_in(number: str, record: str) -> bool:
         _NUM_EDGE_BEFORE + re.escape(number) + r"(?!\d)", record or "") is not None
 
 
-# --- travel figures the audit did not flag --------------------------------------------------
+# --- figures no bound tool produces (stage 44) ------------------------------------------------
 #
-# The cut above acts only on what the audit flags. Local replays, 2026-10-08, 2 of 2: the
-# answer still shipped "roughly 490 km by rail and ~450 km by road" (the flag was reconciled
-# away on a coordinate's digits) and "Driving is roughly 450–470 km" (the auditor passed it).
-# With no routing tool bound, a travel sentence carrying a distance or a time that is in no tool
-# result can only have come from the model's memory, so it is cut without asking the audit.
-#
-# The mode words are narrower than _ROUTING_CLAIM_RE's shapes allow ("Driving is …" is not a
-# "driving distance"), but they still exclude "driving factors", "Google Drive", "train the
-# model" and "as the crow flies". A bare "road" is not a mode either: "the road network layer
-# holds 3,400 km" is a measurement of a layer, not a journey.
-_TRAVEL_MODE_RE = re.compile(
-    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle)\b"
-    r"|\b(?:road|rail|railway|train|driving|walking|cycling|flight|flying)\s+"
-    r"(?:distance|time|route|journey|trip|ride)s?\b"
-    r"|(?<!google )(?<!hard )(?<!usb )(?<!shared )(?<!flash )(?<!disk )"
-    r"\bdriv(?:e|es|ing|en)\b"
-    r"(?!\s+(?:factors?|forces?|variables?|mechanisms?|causes?|process(?:es)?)\b)"
-    r"|\bflights?\b|\bflying\b|\btravel(?:l?ing|l?ed|s)?\b"
-    r"|\b(?:eurostar|amtrak|tgv)\b|\bhigh-speed\s+(?:rail|train)\b",
-    re.I)
-_QTY_NUM = r"\d[\d,]*(?:\.\d+)?"
-# A distance or a duration: "450 km", "450–470 km", "2 hours", "a 5-hour drive", "1 h 15 min".
-# Not a speed ("100 km/h") and not an area ("450 km²": no word boundary before the '²').
-_TRAVEL_QTY_RE = re.compile(
-    rf"(?<![\w.])({_QTY_NUM})(?:\s*(?:–|—|-|to)\s*({_QTY_NUM}))?[\s-]*"
-    r"(kilomet(?:er|re)s?|km|miles?|mi|met(?:er|re)s?|hours?|hrs?|hr|h|minutes?|mins?|min)"
-    r"\b(?!\s*/)",
-    re.I)
-_TIME_UNIT_RE = re.compile(r"^(?:h|hr|hrs|hours?|min|mins|minutes?)$", re.I)
-_TIME_CONTEXT_RE = re.compile(r"hour|hr|min|time|duration|eta|(?<![a-z])h(?![a-z])", re.I)
-_DIST_CONTEXT_RE = re.compile(r"km|kilomet|mile|(?<![a-z])mi(?![a-z])|dist|length|met(?:er|re)",
-                              re.I)
-_RECORD_NUM_RE = re.compile(_NUM_EDGE_BEFORE + r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)")
-_RECORD_FIELD_SEP_RE = re.compile(r"[,{}\[\];\n]|\\n")
+# Stage 37 cut flagged routing claims by a one-entry capability list; stage 39 added a scan for
+# travel figures the audit missed, keyed on travel-mode words. Both were one claim class of a
+# general question: a figure the turn did not record, that no tool bound this turn could
+# produce, can only have come from the model's memory. The number scan (agent_runtime/facts.py)
+# finds every unrecorded figure, of any kind; the producer check (stage 42) says whether a
+# bound tool could produce it; this cuts the ones none can.
 
+def _cut_unproducible_figures(answer: str, fact_set: Any, producers_fn: Callable[[List[str]], Dict[str, Optional[str]]]) -> tuple:
+    """`(answer, cut sentences, unresolved figures kept, resolutions)`."""
+    resolutions = turn_facts.resolve(answer, fact_set)
+    unresolved = [r for r in resolutions if not r.resolved and turn_facts.is_claim(r.quantity)]
+    # The producer check reads the whole sentence (context); the cut removes only the clause
+    # that holds the figure, so "(about 460 km by road; 343.6 km between centres)" keeps its
+    # second half.
+    sentences = list(dict.fromkeys(r.quantity.sentence for r in unresolved if r.quantity.sentence))
+    producers = producers_fn(sentences) if sentences else {}
+    def _placeable(r: Any) -> str:
+        clause = r.quantity.clause or r.quantity.sentence
+        # A clause too short to place safely ("~460 km" alone in parentheses) cuts its sentence.
+        return clause if _claim_pattern(clause) is not None else r.quantity.sentence
 
-def _tool_record_text(execution_context: Optional[Dict[str, Any]]) -> str:
-    """Every tool result of this turn, and the earlier turns' ledger — what a figure can come
-    from. Not a peer's summary: that is model prose, and may hold the same memorised figure."""
-    ctx = execution_context if isinstance(execution_context, dict) else {}
-    parts: List[str] = []
-    for key in ("analysis_results", "code_result"):
-        result = ctx.get(key)
-        if isinstance(result, dict):
-            parts += [str(r.get("content") or "") for r in result.get("tool_results") or []
-                      if isinstance(r, dict)]
-    parts.append(str(ctx.get("prior_actions") or ""))
-    return "\n".join(parts)
-
-
-def _quantity_recorded(number: str, unit: str, record: str) -> bool:
-    """Whether a tool result holds *number*, as a number of its own, to the answer's precision.
-
-    Rounded, so "about 464 km" is 463.8 and "340 km" is 340.0. A value under 100 also needs a
-    field or a unit of its kind beside it: "2 hours by Eurostar" is not grounded by "count": 2."""
-    n = number.replace(",", "")
-    try:
-        value = float(n)
-    except ValueError:
-        return False
-    places = len(n.split(".", 1)[1]) if "." in n else 0
-    context_re = _TIME_CONTEXT_RE if _TIME_UNIT_RE.match(unit) else _DIST_CONTEXT_RE
-    for m in _RECORD_NUM_RE.finditer(record or ""):
-        try:
-            found = float(m.group(0).replace(",", ""))
-        except ValueError:
-            continue
-        if abs(round(found, places) - value) > 1e-9:
-            continue
-        if value >= 100:
-            return True
-        seps_before = list(_RECORD_FIELD_SEP_RE.finditer(record, 0, m.start()))
-        lo = seps_before[-1].end() if seps_before else 0
-        after = _RECORD_FIELD_SEP_RE.search(record, m.end())
-        hi = after.start() if after else len(record)
-        if context_re.search(record[lo:m.start()] + " " + record[m.end():hi]):
-            return True
-    return False
-
-
-def _first_unrecorded_travel(text: str, record: str) -> Optional[tuple]:
-    """``(start, end, sentence)`` of the first travel claim in *text* whose distance or time is
-    in no tool result, or None. Fenced code is skipped."""
-    pos, fenced = 0, False
-    for line in text.split("\n"):
-        ls, pos = pos, pos + len(line) + 1
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced or not _TRAVEL_MODE_RE.search(line):
-            continue
-        body = _LINE_MARKER_RE.match(line).end()
-        bounds = [body, *[body + o for o in _sentence_ends(line[body:])], len(line)]
-        for a, b in zip(bounds, bounds[1:]):
-            sentence = line[a:b]
-            modes = list(_TRAVEL_MODE_RE.finditer(sentence))
-            if not modes:
-                continue
-            for q in _TRAVEL_QTY_RE.finditer(sentence):
-                nums = [x for x in (q.group(1), q.group(2)) if x]
-                if all(_quantity_recorded(x, q.group(3), record) for x in nums):
-                    continue
-                mode = min(modes, key=lambda m: min(abs(m.start() - q.end()),
-                                                    abs(q.start() - m.end())))
-                s, e = min(mode.start(), q.start()), max(mode.end(), q.end())
-                if "(" in sentence[s:e] or ")" in sentence[s:e]:
-                    s, e = 0, len(sentence)          # straddles a parenthesis: the sentence
-                return ls + a + s, ls + a + e, sentence.strip()
-    return None
-
-
-def _scan_unrecorded_travel(answer: str, execution_context: Optional[Dict[str, Any]],
-                            bound_tools: Optional[List[str]]) -> tuple:
-    """*answer* without its travel claims whose figures are in no tool result.
-
-    Returns ``(answer, cut)``. Does nothing when a routing tool is bound: its figures would be in
-    the record, and a figure that is not is the audit's to judge."""
-    if any(_ROUTING_TOOL_RE.search(str(t)) for t in bound_tools or []):
-        return answer, []
-    original = str(answer or "")
-    record = _tool_record_text(execution_context)
-    text, cut = original, []
-    for _ in range(16):
-        hit = _first_unrecorded_travel(text, record)
-        if not hit:
-            break
-        new = _cut_unit(text, hit[0], hit[1])
-        if new == text:
-            break
-        text = new
-        cut.append(hit[2])
-    if not cut:
-        return answer, []
-    return _tidy_after_cuts(text, before=original), cut
-
-
-def _remove_unrecorded_travel(answer: str, audit: Optional[Dict[str, Any]],
-                              bound_tools: Optional[List[str]],
-                              execution_context: Optional[Dict[str, Any]]) -> tuple:
-    """Cut unflagged memorised travel figures from *answer*; see _scan_unrecorded_travel.
-
-    Returns ``(answer, audit, cut)``. A flagged routing claim whose figures the cut removed from
-    the answer goes from the audit too: it is about text the user will not see. That is how an
-    issue the auditor paraphrased — which _drop_claims cannot place — stops leaving a caveat."""
-    new_answer, cut = _scan_unrecorded_travel(answer, execution_context, bound_tools)
-    if not cut:
-        return answer, audit, []
-    for label, _re, _tool, mention_re, note in _UNPRODUCIBLE_CAPABILITIES:
-        if label == "routing" and not mention_re.search(new_answer):
-            new_answer = f"{new_answer}\n\n{note}" if new_answer.strip() else note
-    plain = new_answer.replace(",", "")
-    kept, moot = [], []
-    for item in (audit or {}).get("issues") or []:
-        claim = str(item.get("claim") if isinstance(item, dict) else item or "")
-        # Its travel quantities only: "A26" names a road, it is not a figure the cut removed.
-        nums = [n.replace(",", "") for q in _TRAVEL_QTY_RE.finditer(claim)
-                for n in (q.group(1), q.group(2)) if n]
-        if (not (isinstance(item, dict) and item.get("source") == "invariant_gate")
-                and _unproducible_capability(claim, bound_tools) and nums
-                and not any(_number_in(n, plain) for n in nums)):
-            moot.append(claim)
-        else:
-            kept.append(item)
-    _LEDGER_LOG.info("cut %d unrecorded travel claim(s) the audit did not remove: %s",
-                     len(cut), cut)
-    emit_trace_event(
-        "unproducible_claims_dropped",
-        {"stage": "synthesize", "claims": cut, "capabilities": ["routing"],
-         "source": "answer_scan",
-         "message": f"removed {len(cut)} travel figure(s) no tool result holds: "
-                    f"{'; '.join(c[:80] for c in cut[:3])}"},
-        node="synthesize",
-    )
-    if not moot or not audit:
-        return new_answer, audit, cut
-    return new_answer, _audit_without(audit, kept, [*cut, *moot]), cut
+    clauses = list(dict.fromkeys(_placeable(r) for r in unresolved
+                                 if producers.get(r.quantity.sentence, "unknown") is None))
+    dropped: List[str] = []
+    if clauses:
+        answer, dropped = _drop_claims(answer, clauses)
+    kept = [r for r in unresolved if r.quantity.text in answer and _placeable(r) not in dropped]
+    return answer, dropped, kept, resolutions, producers
 
 
 # After a re-grounding pass the answer is about to reach a user who never saw the draft it
@@ -1490,6 +1326,47 @@ def _reground_note(state: SupervisorState) -> Optional[str]:
     if not gaps:
         return None
     return _REGROUND_DIRECTIVE.format(gaps="\n".join(f"  - {g}" for g in gaps))
+
+
+def _scope_to_used_runs(exec_ctx: Dict[str, Any], resolutions: List[Any],
+                        answer: str) -> Dict[str, Any]:
+    """The execution context, holding only the code runs the answer uses.
+
+    A run is used when a number the answer states resolves to its output, or when it produced
+    a file or layer. A side run (a directory listing, a lookup that matched nothing, a failed
+    first attempt that a later run superseded) does not speak for the answer, so its gate
+    findings do not either. A figure that resolves nowhere does not widen the scope: no run
+    vouches for it, and the number scan reports it on its own. (Stage 44's first harness run
+    widened it to every run, and an exploratory `print(gdf.geometry.area)` in degrees then spoke
+    for an answer whose area came from a later, reprojected run.)
+    """
+    used = {getattr(f, "call_id", None)
+            for r in resolutions if r.resolved for f in (getattr(r, "parts", None) or [r.fact])}
+    code_ids = {res.get("tool_call_id")
+                for slot in ("analysis_results", "code_result")
+                for res in ((exec_ctx.get(slot) or {}).get("tool_results") or []
+                            if isinstance(exec_ctx.get(slot), dict) else [])
+                if isinstance(res, dict) and res.get("name") == "execute_code"}
+    # No stated number came from any code run (a list of names, a qualitative answer): the
+    # runs that succeeded are what it rests on. A failed attempt is still not.
+    numbers_from_code = bool(used & code_ids)
+
+    def keep(res: Dict[str, Any]) -> bool:
+        if not isinstance(res, dict) or res.get("name") != "execute_code":
+            return True
+        if res.get("tool_call_id") in used:
+            return True
+        parsed = turn_log.parse_result(res.get("content"))
+        if not numbers_from_code:
+            return parsed["ok"]
+        return parsed["ok"] and bool(parsed["artifacts"])
+
+    out = dict(exec_ctx)
+    for slot in ("analysis_results", "code_result"):
+        val = exec_ctx.get(slot)
+        if isinstance(val, dict) and val.get("tool_results"):
+            out[slot] = {**val, "tool_results": [r for r in val["tool_results"] if keep(r)]}
+    return out
 
 
 def _unsupported_claims(audit: Optional[Dict[str, Any]], limit: int = 6) -> List[str]:
@@ -1638,7 +1515,7 @@ def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
     return out
 
 
-def _merge_peer_result(prior: Any, new: Any) -> Any:
+def _merge_peer_result(prior: Any, new: Any, log: Any = None, peer: Optional[str] = None) -> Any:
     """A peer's result for the TURN: its earlier runs' tool records plus this run's.
 
     The analyze and code nodes used to write their result slot outright, so a second run of a
@@ -1654,19 +1531,41 @@ def _merge_peer_result(prior: Any, new: Any) -> Any:
     the first pass's calls again. Everything else is the latest run's: its summary is what the
     peer now says, and an `error` from an earlier failed run does not outlive a later success.
     `on_map`, `executed` and `tool_failures` are facts about the turn, so they accumulate too.
+
+    Stage 42: with a turn log (*log*, *peer*), the tool records are not merged at all. They are
+    the log's view of this peer, which every run of the peer appended to as it went. Calls the
+    middleware did not see (a test double, a CLI peer) are ingested by tool_call_id first.
+    `tool_failures` is recomputed from that view, so a tool that failed in an earlier run and
+    then succeeded is no longer reported as failing.
     """
-    if not isinstance(prior, dict) or not isinstance(new, dict):
+    if not isinstance(new, dict):
         return new
+    if not isinstance(prior, dict):
+        prior = {}
     merged = {**{k: v for k, v in prior.items() if k != "error"}, **new}
-    for key, id_key in (("tool_calls", "id"), ("tool_results", "tool_call_id")):
-        if key in prior or key in new:
-            merged[key] = _merge_rows(prior.get(key) or [], new.get(key) or [], id_key)
+    if log is not None and peer:
+        run = log.last_run(peer)
+        log.ingest(peer, new, run=run)
+        log.record_answer(peer, run, new.get("summary") or new.get("answer"))
+        view = log.artifacts_view([peer])
+        for key in ("tool_calls", "tool_results"):
+            if view[key] or key in prior or key in new:
+                merged[key] = view[key]
+        failing = _repeatedly_failed_tools(view)
+        if failing:
+            merged["tool_failures"] = failing
+        else:
+            merged.pop("tool_failures", None)
+    else:
+        for key, id_key in (("tool_calls", "id"), ("tool_results", "tool_call_id")):
+            if key in prior or key in new:
+                merged[key] = _merge_rows(prior.get(key) or [], new.get(key) or [], id_key)
+        failures = {**(prior.get("tool_failures") or {}), **(new.get("tool_failures") or {})}
+        if failures:
+            merged["tool_failures"] = failures
     for flag in ("on_map", "executed"):
         if flag in prior or flag in new:
             merged[flag] = bool(prior.get(flag) or new.get(flag))
-    failures = {**(prior.get("tool_failures") or {}), **(new.get("tool_failures") or {})}
-    if failures:
-        merged["tool_failures"] = failures
     return merged
 
 
@@ -1704,6 +1603,27 @@ def _record_actions(state: SupervisorState, *contexts: Any,
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _record_turn(state: SupervisorState, ar: Any = None, cr: Any = None) -> None:
+    """Append the turn to the thread ledger, once, from the turn log.
+
+    The ledger used to be extracted from the analyze and code result slots at the end of
+    synthesis, so a turn that raised before then recorded nothing, and a slot that had been
+    overwritten recorded only its last run. The log holds every call either way. Recorded once
+    per log: synthesis and the failure paths can both reach here.
+    """
+    log = turn_log.get_log(state.get("turn_log_id"))
+    if log is not None:
+        if getattr(log, "ledger_written", False):
+            return
+        log.ledger_written = True
+        for peer, slot in (("analyze", ar), ("code", cr)):
+            log.ingest(peer, slot)
+        contexts = [log.artifacts_view(["analyze", "code"])]
+    else:
+        contexts = [ar, cr]
+    _record_actions(state, *contexts, extra_rows=state.get("action_rows"))
 
 
 def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str, Any]:
@@ -1762,12 +1682,17 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "has_answer": bool((state.get("answer") or "").strip()),
         "audit_severity": audit.get("severity"),
         "pending_needs": [n.get("capability") for n in (state.get("needs") or []) if isinstance(n, dict)],
+        # Why each need was queued. The capability name alone told the decider that something
+        # was wanted, never what (review §F5).
+        "pending_need_reasons": [str(n.get("reason") or "")[:200] for n in (state.get("needs") or [])
+                                 if isinstance(n, dict)],
         "actions_taken": actions,
         "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
         "search_attempts": state.get("search_attempts", 0),
         "search_exhausted": _search_exhausted(state),
         # What the decider may actually choose this step (see _available_actions).
         "available_actions": _available_actions(state),
+        **({"plan": state.get("plan")} if for_decision and state.get("plan") else {}),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
         # THIS turn's ledger, in the same rendering the answering model and the grounding
@@ -2027,9 +1952,7 @@ def _title_by_shared_id(url: str, titles: Dict[str, str]) -> str:
     return ""
 
 
-def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
-    """(statement, names any of which counts as the answer naming it), one per data source."""
-    pairs = _peer_tool_pairs(state)
+def _web_titles(pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> Dict[str, str]:
     titles: Dict[str, str] = {}
     for call, res in pairs:
         if res.get("name") != "web_search":
@@ -2038,78 +1961,76 @@ def _source_entries(state: SupervisorState) -> List[Tuple[str, List[str]]]:
         for hit in [*(payload.get("documents") or []), *(payload.get("results") or [])]:
             if isinstance(hit, dict) and hit.get("url") and hit.get("title"):
                 titles.setdefault(str(hit["url"]).split("?")[0].rstrip("/"), str(hit["title"]))
-    # One entry per SOURCE, not per call: a peer that retried Overpass with three boxes used
-    # one source, and the last good call is the one its list came from. Keyed "osm" for
-    # OpenStreetMap and by URL for a staged file.
-    found: Dict[str, Tuple[str, List[str]]] = {}
+    return titles
+
+
+def _answer_sources(state: SupervisorState,
+                    numbers: Optional[List[Dict[str, Any]]] = None) -> List[Tuple[str, List[str]]]:
+    """The data sources behind what the answer used (stage 45, agent_runtime/source_catalog.py).
+
+    "Used" means a stated figure resolved to the result (the number scan's links), or the result
+    put a layer on the map or produced a file. When the answer states no figure from any result
+    (a list, a qualitative answer), every successful result counts. A dataset staged from a URL is
+    named by the title its web search found it under, matched by the id the page and the
+    download share (a Socrata `/api/views/<4x4>/rows.csv` beside `/<Category>/<Name>/<4x4>`).
+    """
+    pairs = _peer_tool_pairs(state)
+    used = {n.get("call_id") for n in (numbers or []) if n.get("call_id")}
     for call, res in pairs:
-        name = res.get("name")
+        parsed = turn_log.parse_result(res.get("content"))
         payload = _json_or_empty(res.get("content"))
-        # Empty is not JSON: the repeat guard's note, a raw traceback. Neither is a source.
-        if not payload or payload.get("error"):
-            continue
-        if name == "overpass_search":
-            statement = payload.get("source_statement") or (
-                "OpenStreetMap features tagged "
-                f"{(payload.get('query') or {}).get('osm_filter') or 'as requested'}, as mapped by "
-                "OSM contributors")
-            found.pop("osm", None)          # re-insert, so the last good call is the one kept
-            found["osm"] = (str(statement), ["openstreetmap", "osm"])
-            continue
-        elif name in ("stage_url", "stage_element"):
-            url = str((call.get("args") or {}).get("url") or payload.get("origin") or "")
-            if not url:
-                continue
-            from urllib.parse import urlparse
+        if parsed["ok"] and (payload.get("map_layer") or payload.get("map_layers")
+                             or payload.get("on_map")):
+            used.add(res.get("tool_call_id"))
+    from urllib.parse import urlparse
 
-            host = urlparse(url).netloc
-            title = titles.get(url.split("?")[0].rstrip("/"), "") or _title_by_shared_id(url, titles)
-            head = title.split(" | ")[0].strip()
-            statement = f"{title} ({host})" if title else url
-            found.setdefault(url, (statement, [n.lower() for n in (host, head) if n]))
-    return list(found.values())
+    sources = source_catalog.sources_of(pairs, used or None)
+    titles = _web_titles(pairs)
+    # A dataset staged from a URL is named by the title its search found it under, beside its
+    # host's catalogue entry: "Chicago Public Schools - School Locations SY2425: City of Chicago
+    # Data Portal, which leaves out ...".
+    staged: Dict[str, str] = {}
+    for call, res in pairs:
+        if res.get("name") in ("stage_url", "stage_element", "fetch_public_data"):
+            url = str((call.get("args") or {}).get("url")
+                      or _json_or_empty(res.get("content")).get("origin") or "")
+            title = (titles.get(url.split("?")[0].rstrip("/"), "")
+                     or _title_by_shared_id(url, titles)).split(" | ")[0].strip()
+            if url and title:
+                staged[urlparse(url).netloc] = title
+    out = []
+    for statement, names in sources:
+        host = next((n for n in names if "." in n and " " not in n), "")
+        if statement.startswith("http"):
+            host = urlparse(statement).netloc
+            title = staged.get(host, "")
+            statement = f"{title} ({host})" if title else statement
+        elif host in staged:
+            statement = f"{staged[host]}: {statement}"
+        out.append((statement, names))
+    return out
 
 
-def _feature_sources(state: SupervisorState) -> List[str]:
-    """The data sources a list of features in this turn's answer could have come from."""
-    return [statement for statement, _ in _source_entries(state)]
+def _with_sources(answer: str, state: SupervisorState,
+                  numbers: Optional[List[Dict[str, Any]]] = None) -> str:
+    """*answer* with a Sources line naming every data source it used.
 
-
-def _with_feature_source(answer: str, state: SupervisorState) -> str:
-    """*answer*, plus a line naming where its list came from when it lists and names nothing."""
+    Stage 38 added a source line only to a list of three or more rows that named none of two
+    tool families' sources. The harness's first baseline found answers naming their source on
+    33 of 50 runs (deepseek-v4-flash) and 18 of 51 (gpt-5.6-luna): whether the user learns where a
+    number came from depended on the model. The line is now rendered from the record, always.
+    """
     if not isinstance(answer, str) or not answer.strip():
         return answer
-    if sum(1 for line in answer.splitlines() if _LIST_ROW.match(line)) < 3:
+    line = source_catalog.sources_line(answer, _answer_sources(state, numbers))
+    if not line:
         return answer
-    entries = _source_entries(state)
-    if not entries:
-        return answer
-    low = answer.lower()
-    if any(n in low for _, names in entries for n in names):
-        return answer
-    joined = "; ".join(statement.rstrip(" .") for statement, _ in entries)
-    plural = "these sources hold" if len(entries) > 1 else "that source holds"
-    line = f"**Source:** {joined}. The list covers only what {plural}."
-    # Beside the list, ahead of any caveat block the answer already ends with.
-    cut = answer.find("\n⚠️")
-    if cut == -1:
-        return f"{answer.rstrip()}\n\n{line}"
-    return f"{answer[:cut].rstrip()}\n\n{line}\n\n{answer[cut:].lstrip(chr(10))}"
+    return f"{answer.rstrip()}\n\n{line}"
 
 
 def _peer_failure_note(failures: List[Dict[str, Any]]) -> str:
-    """The user-visible statement that part of the turn did not run."""
-    names = []
-    for f in failures:
-        name = str(f.get("peer") or "a step")
-        if name not in names:
-            names.append(name)
-    label = {"search": "search", "analyze": "analysis", "code": "code execution",
-             "synthesize": "answer composition"}
-    pretty = [label.get(n, n) for n in names]
-    joined = pretty[0] if len(pretty) == 1 else ", ".join(pretty[:-1]) + f" and {pretty[-1]}"
-    return (f"⚠️ Partial answer: {joined} failed during this turn, so this reply is based on "
-            f"what completed before the failure. Re-running may produce a fuller answer.")
+    """The peer-failure part of the single verdict, rendered on its own (stage 44)."""
+    return turn_verdict.render("", turn_verdict.from_peer_failures(failures))
 
 def _available_actions(state: SupervisorState) -> List[str]:
     """The actions that are legal RIGHT NOW, in decider-menu order.
@@ -2145,14 +2066,20 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     """True if *nxt* re-runs the peer that JUST ran and already produced a result,
     with no pending need driving it.
 
-    Applies to ``analyze`` / ``code``: each overwrites a single result slot and
-    iterates internally (the code peer runs+debugs its own code), so re-running it
-    back-to-back with the same inputs just reproduces the same result — the
-    signature of a decision loop. ``search`` is intentionally NOT guarded: it
-    *accumulates* (dedup-merges) into evidence, so a follow-up search can add new
-    documents. A genuine multi-hop refinement interleaves a *different* peer (or a
-    request_capability need), so only consecutive same-peer repeats are blocked.
+    Applies to ``analyze`` / ``code``: each iterates internally (the code peer
+    runs+debugs its own code), so re-running it back-to-back with the same inputs just
+    reproduces the same result — the signature of a decision loop. ``search`` is
+    intentionally NOT guarded: it *accumulates* (dedup-merges) into evidence, so a
+    follow-up search can add new documents.
+
+    Stage 42 adds the rule that does not depend on adjacency: a peer whose last run this turn
+    added nothing to the turn's record is not run again. Back-to-back was the only shape the
+    old rule caught; an analyze, code, analyze, code alternation passed it until the per-peer
+    run cap. Whether a run added anything is read from the turn log, so it holds for any route
+    to the peer: a decision, a queued need, or a re-grounding pass.
     """
+    if nxt in ("analyze", "code") and _last_run_added_nothing(nxt, state):
+        return True
     actions = state.get("actions") or []
     if not actions or actions[-1] != nxt:
         return False  # not a back-to-back repeat
@@ -2161,6 +2088,105 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     if nxt == "analyze":
         return state.get("analysis_results") is not None
     return False
+
+
+def _last_run_added_nothing(peer: str, state: SupervisorState) -> bool:
+    """Whether *peer* ran this turn and its latest run appended nothing new to the turn log."""
+    log = turn_log.get_log(state.get("turn_log_id"))
+    if log is None:
+        return False
+    run = log.last_run(peer)
+    return run is not None and not log.run_was_productive(run)
+
+
+# --- the plan: what the turn is for, owned by the agent -----------------------------------
+# Before stage 42 the only record of what a turn was trying to do, and what was still missing,
+# was the model's own context. A reasoning model behind a shim loses its reasoning between steps
+# (AGENTS.md, "Which model answers"); the context budget keeps only the latest human message, so
+# on a retry the original task can be trimmed away; a queued need's reason never reached the
+# peer that was re-run for it. The plan lives in state, is rendered into every peer step's
+# SYSTEM message (never trimmed), and its progress is read from the turn log, not the model.
+
+class Decision(str):
+    """The decider's action, carrying the plan update it made. A str, so every caller that
+    compares the decision to "done" keeps working."""
+
+    plan: Optional[Dict[str, Any]] = None
+    subgoal: Optional[str] = None
+
+
+def _initial_plan(state: SupervisorState) -> Dict[str, Any]:
+    return {"goal": str(state.get("query") or "")[:600], "subgoals": [], "active": None}
+
+
+def _plan_from_decision(state: SupervisorState, decided: Any) -> Optional[Dict[str, Any]]:
+    """Merge a decider's plan update into the plan. Progress fields are kept: `produced` is
+    measured, not declared, so a model restating its plan cannot erase what was recorded."""
+    plan = dict(state.get("plan") or _initial_plan(state))
+    new = getattr(decided, "plan", None)
+    if isinstance(new, dict):
+        if str(new.get("goal") or "").strip():
+            plan["goal"] = str(new["goal"])[:600]
+        old = {str(g.get("id")): g for g in plan.get("subgoals") or [] if isinstance(g, dict)}
+        merged = []
+        for i, g in enumerate(new.get("subgoals") or []):
+            if not isinstance(g, dict):
+                continue
+            gid = str(g.get("id") or f"s{i + 1}")
+            prev = old.get(gid, {})
+            status = str(g.get("status") or prev.get("status") or "todo").lower()
+            if status not in {"todo", "doing", "done", "blocked"}:
+                status = "todo"
+            merged.append({"id": gid, "text": str(g.get("text") or prev.get("text") or "")[:300],
+                           "status": status, "produced": int(prev.get("produced") or 0)})
+        if merged:
+            plan["subgoals"] = merged[:8]
+    active = getattr(decided, "subgoal", None)
+    if active:
+        plan["active"] = str(active)
+    return plan
+
+
+def _plan_after_run(state: SupervisorState, log: Any, run: Optional[str]) -> Dict[str, Any]:
+    """Credit the active subgoal with what the run actually recorded."""
+    plan = dict(state.get("plan") or _initial_plan(state))
+    if not run:
+        return plan
+    produced = sum(1 for e in log.results() if e.get("run") == run and e.get("new")
+                   and e.get("ok"))
+    subgoals = [dict(g) for g in plan.get("subgoals") or []]
+    for g in subgoals:
+        if g.get("id") == plan.get("active"):
+            g["produced"] = int(g.get("produced") or 0) + produced
+            if produced == 0 and g.get("status") in ("todo", "doing"):
+                g["status"] = "blocked"
+            elif produced and g.get("status") == "todo":
+                g["status"] = "doing"
+    plan["subgoals"] = subgoals
+    return plan
+
+
+def _turn_brief(state: SupervisorState) -> str:
+    """The task and the plan, for the peer's system message (executor_factory)."""
+    lines = [f"Task (the user's request, verbatim): {str(state.get('query') or '')[:1500]}"]
+    plan = state.get("plan") or {}
+    if plan.get("subgoals"):
+        lines.append("Plan (kept by the supervisor; `produced` counts new results recorded "
+                     "while a subgoal was active):")
+        for g in plan["subgoals"]:
+            mark = " <- now" if g.get("id") == plan.get("active") else ""
+            lines.append(f"- [{g.get('status')}] {g.get('id')}: {g.get('text')} "
+                         f"(produced {g.get('produced', 0)}){mark}")
+    reasons = [f"{n.get('capability')}: {n.get('reason')}" for n in state.get("needs") or []
+               if isinstance(n, dict) and n.get("reason")]
+    if reasons:
+        lines.append("Requested by another step: " + "; ".join(reasons)[:600])
+    # What each data source covers and leaves out (stage 45). A count from a city's school file
+    # and a count from OpenStreetMap answer different questions; which one fits is a choice
+    # made knowing both.
+    lines.append("Data sources reachable here, and what each leaves out:\n"
+                 + source_catalog.describe())
+    return "\n".join(lines)
 
 
 # Severities at which the grounding audit appends a user-visible caveat. Only HIGH —
@@ -2193,55 +2219,15 @@ def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
 
 
 def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str:
-    """Append a clearly-marked grounding caveat to *answer* when the audit flags it.
+    """The audit's part of the single verdict, rendered (stage 44).
 
-    This is what makes the grounding audit non-cosmetic: a flagged verdict changes
-    the text the user actually sees, rather than being computed and discarded.
+    Kept as a function for callers that hold only an audit; synthesis itself renders every
+    check's findings together (synthesize_node). Before stage 44 this wrote its own banner, one of
+    five producers that never saw each other's verdicts.
     """
-    if not _audit_flagged(audit):
-        return answer
-    severity = str((audit or {}).get("severity") or "").strip().lower()
-    summary = str((audit or {}).get("summary") or "").strip()
-    gate = str((audit or {}).get("invariant_gate") or "").strip()
-
-    # A deterministic gate failure is NOT an evidence-support problem, and describing it as one
-    # understates it: a geographic-CRS buffer is a wrong number, not a claim that is merely
-    # under-cited. The two get different headlines.
-    if gate in {"fail", "cannot_determine"}:
-        # `_reconcile_audit_with_artifacts` already writes the headline for this case, so use it
-        # rather than restating it -- two headlines in a row read as a template, not a warning.
-        icon = ("⛔" if gate == "fail"
-                else "ℹ️" if (audit or {}).get("gate_advisory_only") else "⚠️")
-        note = f"{icon} {summary}" if summary else (
-            f"{icon} An invariant check {'failed' if gate == 'fail' else 'could not verify'} "
-            f"on this run, so its numeric results are not verified.")
-    else:
-        note = ("⚠️ Grounding check: parts of this answer may not be fully supported by "
-                "the retrieved evidence")
-        if severity:
-            note += f" (severity: {severity})"
-        note += f". {summary}" if summary else "."
-
-    # The specific findings, WITH their remedies. Only the summary was appended before, so the
-    # user was told a check failed and never told what failed or what to do -- and it is the
-    # gate's own message that carries "reproject to a local projected CRS (a UTM or state-plane
-    # zone in metres) before calling". Producing a remedy and then discarding it is worse than
-    # not computing one.
-    lines: List[str] = []
-    for issue in ((audit or {}).get("issues") or [])[:4]:
-        if not isinstance(issue, dict):
-            continue
-        claim = str(issue.get("claim") or "").strip()
-        reason = str(issue.get("reason") or "").strip()
-        if not reason:
-            continue
-        lines.append(f"- {claim}: {reason}" if claim else f"- {reason}")
-    extra = len([i for i in ((audit or {}).get("issues") or []) if isinstance(i, dict)]) - len(lines)
-    if lines:
-        note += "\n\n" + "\n".join(lines)
-        if extra > 0:
-            note += f"\n- …and {extra} more"
-    return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
+    findings = [*turn_verdict.from_gate(audit),
+                *turn_verdict.from_audit(audit, numeric_claims_resolved=False)]
+    return turn_verdict.render(answer, findings)
 
 
 def _correct_artifact_claims(answer: str, *contexts: Any,
@@ -2293,7 +2279,22 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
 
     if not notes:
         return answer
-    return text + "\n\n---\n\n" + "\n\n".join(f"⚠️ Correction: {n}" for n in notes)
+    return turn_verdict.render(text, [turn_verdict.Finding("correction", turn_verdict.PROBLEM,
+                                                           f"Correction: {n}") for n in notes])
+
+
+def _artifact_corrections(answer: str, *contexts: Any,
+                          prior_rows: Optional[List[Dict[str, Any]]] = None) -> tuple:
+    """`(answer without the banner, [correction notes])`: the same corrections as
+    `_correct_artifact_claims`, returned as findings for the single verdict (stage 44)."""
+    marker = "\n\n---\n\n"
+    rendered = _correct_artifact_claims(answer, *contexts, prior_rows=prior_rows)
+    if rendered == answer or marker not in rendered:
+        return rendered, []
+    body, banner = rendered.rsplit(marker, 1)
+    notes = [ln[len("- Problem: Correction: "):] for ln in banner.splitlines()
+             if ln.startswith("- Problem: Correction: ")]
+    return body, notes
 
 
 _SANDBOX_IMPORT_RE = re.compile(r"\bfrom\s+iguide_methods\b|\bimport\s+iguide_methods\b")
@@ -2379,18 +2380,18 @@ def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
     "Grounded". Now the VERDICT decides, and a fail with no surviving finding still yields an
     issue.
     """
-    found: List[Dict[str, Any]] = []
+    reports: List[Dict[str, Any]] = []
     seen: set = set()
     keep: List[Any] = []          # anchors parsed graphs so their ids cannot be recycled
 
     def walk(node: Any, depth: int = 0) -> None:
-        if depth > 12 or len(found) >= 24 or id(node) in seen:
+        if depth > 12 or len(reports) >= 24 or id(node) in seen:
             return
         seen.add(id(node))
         if isinstance(node, dict):
             report = node.get("verification")
             if isinstance(report, dict):
-                found.extend(_gate_issues_from(report))
+                reports.append(report)
             for value in node.values():
                 walk(value, depth + 1)
         elif isinstance(node, (list, tuple)):
@@ -2405,7 +2406,38 @@ def _gate_failures(execution_context: Optional[Any]) -> List[Dict[str, Any]]:
             walk(parsed, depth + 1)
 
     walk(execution_context)
-    return found
+    return _unsuperseded_gate_issues(reports)[:24]
+
+
+def _unsuperseded_gate_issues(reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Gate issues from *reports* (in turn order) that no later run has superseded.
+
+    The tool tells the model "FIX AND RE-RUN" when the gate fails, and stage 37 made the turn
+    keep every run's results. Together they meant a run that failed, was fixed and re-ran
+    correctly still marked the turn as failed: the walk collected every report, and nothing
+    said a later one replaced an earlier one (review §F1). A finding about a target is
+    superseded when a later report inspected the same target and did not flag it; a finding
+    about the run as a whole ("this run") is superseded by any later run that passed.
+    """
+    out: List[Dict[str, Any]] = []
+    for i, report in enumerate(reports):
+        later = reports[i + 1:]
+        for issue in _gate_issues_from(report):
+            target = issue.get("target")
+            superseded = False
+            for r2 in later:
+                flagged = {f.get("target") for f in (r2.get("findings") or [])
+                           if isinstance(f, dict) and f.get("status") in {"fail",
+                                                                         "cannot_determine"}}
+                if target == "this run" and r2.get("verdict") == "pass":
+                    superseded = True
+                elif target and target in (r2.get("inspected") or []) and target not in flagged:
+                    superseded = True
+                if superseded:
+                    break
+            if not superseded:
+                out.append(issue)
+    return out
 
 
 def _gate_issues_from(report: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2693,29 +2725,22 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         # from an auditor's — they call for different things; see there.
         gate_issues = [{"claim": f"computed value from `{f.get('target')}`",
                         "reason": f"invariant gate ({f.get('check')}): {f.get('message')}",
-                        "source": "invariant_gate", "status": f.get("status")}
+                        "source": "invariant_gate", "status": f.get("status"),
+                        "check": f.get("check")}
                        for f in gate]
-        # An unrecognised UNIT is the gate saying "I could not read this label", not "this
-        # number may be wrong" — everything it could read passed. Live, 2026-10-08: a correct
-        # 997.93 declared in `square_miles` produced "COULD NOT VERIFY ... hallucination is
-        # detected at high severity". That case gets a note, not an alarm.
-        # The same holds for a measurement column the gate could not trace on a WGS84 frame when no
-        # metric operation ran on a geographic frame (live 19:42 UTC: `distance_m` carried back
-        # from EPSG:26916 for output). The gate marks both `advisory`; the message test keeps an
-        # image built before the flag working.
+        # A finding the gate marks `advisory` says something was left unchecked, not that a
+        # number may be wrong; when every unknown is advisory the banner says so. Stage 43's gate
+        # no longer emits the two advisory classes stage 37 added (an unrecognised unit word, a
+        # measurement column it could not trace): units parse with a unit library, and the
+        # operations, not the columns, say where a number was measured. A unit that does not
+        # parse is a real unknown: nobody can check that number.
         def _advisory(f: Dict[str, Any]) -> bool:
-            return bool(f.get("advisory")) or (
-                f.get("check") == "declared_units"
-                and "unrecognised unit" in str(f.get("message")))
+            return bool(f.get("advisory"))
 
         advisory_only = gate_verdict == "cannot_determine" and all(_advisory(f) for f in gate)
-        unit_only = advisory_only and all(f.get("check") == "declared_units" for f in gate)
         if gate_verdict == "fail":
             headline = ("A deterministic invariant check FAILED on this run, so its numeric "
                         "results are not verified.")
-        elif unit_only:
-            headline = ("The invariant check did not recognise a declared unit, so that value's "
-                        "unit was not checked. Nothing the check could read failed.")
         elif advisory_only:
             headline = ("The invariant check left the item(s) below unchecked. Nothing it could "
                         "check failed.")
@@ -3137,7 +3162,14 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
             "tool rather than a question about the literature — computing a DEM, buffering, "
             "embedding a region — retrieval cannot help at all, however thin the evidence "
             "looks.\n\n"
-            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
+            "`plan` in Progress is this turn's plan: a goal and subgoals, each with a status and "
+            "`produced`, the number of new results the turn recorded while it was the active "
+            "subgoal. Every peer step is shown it. You can revise it with each decision; a "
+            "subgoal whose last run produced nothing is marked blocked.\n\n"
+            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\", "
+            "\"plan\": {\"goal\": \"...\", \"subgoals\": [{\"id\": \"s1\", \"text\": \"...\", "
+            "\"status\": \"todo|doing|done|blocked\"}]}, \"subgoal\": \"<id the next action works on>\"}"
+            " (`plan` and `subgoal` optional)\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
             + f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
@@ -3165,7 +3197,12 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
                      "message": nxt + (f" — {reason}" if reason else "")},
                     node="supervisor",
                 )
-                return nxt
+                decision = Decision(nxt)
+                if isinstance(parsed.get("plan"), dict):
+                    decision.plan = parsed["plan"]
+                if parsed.get("subgoal"):
+                    decision.subgoal = str(parsed["subgoal"])
+                return decision
         except Exception:
             pass
         # The decider output was unusable; fall back to the deterministic heuristic.
@@ -4808,9 +4845,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "tool_results": artifacts.get("tool_results") or [],
             # What this peer COULD have called. analysis_node lifts it into state (it never
             # reaches synthesis's serialized analysis_results), where it decides whether an
-            # ungrounded claim is one a re-run could produce; see _unproducible_capability.
+            # ungrounded claim is one a re-run could produce; see _producing_tools.
             "bound_tools": sorted({str(getattr(t, "name", "")) for t in tools
                                    if getattr(t, "name", "")}),
+            # Their own one-line descriptions, for `_producing_tools`.
+            "bound_tool_docs": {str(getattr(t, "name", "")):
+                                str(getattr(t, "description", "") or "").strip().split("\n")[0][:200]
+                                for t in tools if getattr(t, "name", "")},
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
 
@@ -5562,6 +5603,7 @@ def build_supervisor_graph(
 
     def supervisor_node(state: SupervisorState) -> Dict[str, Any]:
         step = state.get("step", 0)
+        plan_update: Optional[Dict[str, Any]] = None
         actions = state.get("actions") or []
         needs = list(state.get("needs") or [])
         # Drop peer requests that can no longer be productive, so a peer that keeps
@@ -5577,6 +5619,11 @@ def build_supervisor_graph(
             # Peer-requested re-search dies only at the hard attempt cap — a single empty
             # result must NOT permanently close search (allows a narrowed re-try).
             if cap == "search" and state.get("search_attempts", 0) >= _max_searches():
+                return True
+            # A queued need used to bypass the repeat guard entirely (review §3.6). It now
+            # meets the same progress rule as a decision: a peer whose last run added nothing
+            # is not run again because someone asked for it.
+            if cap in ("analyze", "code") and _last_run_added_nothing(cap, state):
                 return True
             return actions.count(cap) >= _max_peer_runs()
         needs = [n for n in needs if not _dead(n)]
@@ -5610,7 +5657,8 @@ def build_supervisor_graph(
                 remaining, why = needs, f"decider unavailable → {nxt}"
                 failures = [*failures, decide_failure]
             else:
-                nxt = decided
+                nxt = str(decided)
+                plan_update = _plan_from_decision(state, decided)
                 remaining, why = needs, "decision"
             _LEDGER_LOG.info(
                 "supervisor step=%s prior_actions=%d -> %s",
@@ -5663,6 +5711,14 @@ def build_supervisor_graph(
             "step": step + 1,
             "needs": remaining,
         }
+        # The turn's log and plan exist from the first step, so every peer node finds the same
+        # log through the state, whichever route the graph was entered by.
+        if not turn_log.get_log(state.get("turn_log_id")):
+            update["turn_log_id"] = turn_log.new_log().id
+        if plan_update is not None:
+            update["plan"] = plan_update
+        elif not state.get("plan"):
+            update["plan"] = _initial_plan(state)
         if len(failures) != len(state.get("peer_failures") or []):
             update["peer_failures"] = failures
         return update
@@ -5670,7 +5726,9 @@ def build_supervisor_graph(
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        raw, failure = _run_peer("search", lambda: do_search(q, state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "search", _turn_brief(state)):
+            raw, failure = _run_peer("search", lambda: do_search(q, state), state)
         if failure is not None:
             # Return the state we still have. `evidence` already in state survives because a
             # node update MERGES; returning early simply adds nothing to it. The attempt is
@@ -5781,26 +5839,36 @@ def build_supervisor_graph(
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
-        raw, failure = _run_peer(
-            "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "analyze", _turn_brief(state)) as bound_run:
+            raw, failure = _run_peer(
+                "analyze", lambda: do_analyze(q, state.get("evidence") or [], state), state)
         prior = state.get("analysis_results")
+        logged = {"turn_log_id": log.id, "plan": _plan_after_run(state, log, bound_run.run)}
         if failure is not None:
             # Degrade to an analysis_results that STATES the failure: this is the peer the
             # router sends code-shaped work to, and synthesis should answer from what the other
-            # peers found rather than read silence as "nothing to report".
-            return _with_failure({"analysis_results": _merge_peer_result(
+            # peers found rather than read silence as "nothing to report". What the run did
+            # before it failed is in the turn log, and stays in the record.
+            return _with_failure({**logged, "analysis_results": _merge_peer_result(
                 prior, {"summary": (prior or {}).get("summary", "") if isinstance(prior, dict)
                         else "", "tool_calls": [], "tool_results": [],
-                        "error": failure["error"]})},
+                        "error": failure["error"]}, log, "analyze")},
                                  state, failure)
         clean, needs = _extract_needs(raw)
+        log.record_needs("analyze", bound_run.run, needs)
         bound = clean.pop("bound_tools", None) if isinstance(clean, dict) else None
+        docs_ = clean.pop("bound_tool_docs", None) if isinstance(clean, dict) else None
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         # A second run of this peer in the same turn (a re-grounding pass, a queued need) ADDS to
         # the turn's record; see _merge_peer_result.
-        update: Dict[str, Any] = {"analysis_results": _merge_peer_result(prior, clean)}
+        update: Dict[str, Any] = {**logged,
+                                  "analysis_results": _merge_peer_result(prior, clean, log,
+                                                                         "analyze")}
         if bound:
             update["bound_tools"] = sorted({*(state.get("bound_tools") or []), *bound})
+        if docs_:
+            update["bound_tool_docs"] = {**(state.get("bound_tool_docs") or {}), **docs_}
         if unified_peer_enabled(state) and isinstance(clean, dict):
             # The state KEYS stay exactly as they were. evidence_quality.py and
             # runtime_utils.py read "analysis_results"/"evidence" by name, and a rename there
@@ -5821,19 +5889,24 @@ def build_supervisor_graph(
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        raw, failure = _run_peer(
-            "code", lambda: do_code(q, state.get("evidence") or [], state), state)
+        log = turn_log.log_for_state(state)
+        with turn_log.bind(log, "code", _turn_brief(state)) as bound_run:
+            raw, failure = _run_peer(
+                "code", lambda: do_code(q, state.get("evidence") or [], state), state)
         prior = state.get("code_result")
+        logged = {"turn_log_id": log.id, "plan": _plan_after_run(state, log, bound_run.run)}
         if failure is not None:
             # Degrade to a code_result that states the failure (executed=False), and let
             # synthesis answer from what search and analyze already produced.
-            return _with_failure({"code_result": _merge_peer_result(
+            return _with_failure({**logged, "code_result": _merge_peer_result(
                 prior, {"answer": "", "executed": False, "tool_calls": [], "tool_results": [],
-                        "error": failure["error"]})},
+                        "error": failure["error"]}, log, "code")},
                                  state, failure)
         clean, needs = _extract_needs(raw)
+        log.record_needs("code", bound_run.run, needs)
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
-        update: Dict[str, Any] = {"code_result": _merge_peer_result(prior, clean)}
+        update: Dict[str, Any] = {**logged,
+                                  "code_result": _merge_peer_result(prior, clean, log, "code")}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
         if enq is not None:
             update["needs"] = enq
@@ -5883,6 +5956,12 @@ def build_supervisor_graph(
         failures = state.get("peer_failures") or []
         try:
             update = _synthesize_core(state)
+            # Every exit but the one that asks for a re-grounding pass clears the flag. Each
+            # early return (the general-knowledge answer, the insufficiency reply) used to leave
+            # an earlier pass's `reground: True` in state, and the conditional edge sent the graph
+            # back to the supervisor on every composition, to the recursion limit.
+            if not update.get("reground"):
+                update["reground"] = False
         except BaseException as exc:                  # noqa: BLE001 - deliberately total
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -5898,7 +5977,14 @@ def build_supervisor_graph(
                              node="synthesize")
             final = _deterministic_answer(state, reason)
             merged = {**state, "answer": final, "audit": {}}
+            # What the turn did is still recorded: a turn whose answer could not be composed
+            # did its work all the same, and the next turn should know it.
+            _record_turn(state, state.get("analysis_results"), state.get("code_result"))
             return {"answer": final, "final_answer": final,
+                    # A failed composition must not route the graph back for a re-grounding
+                    # pass: the flag from an earlier pass would otherwise survive, and every
+                    # pass back would fail the same way until the graph's recursion limit.
+                    "reground": False, "grounding_gaps": [],
                     "audit": {"hallucination_detected": False, "severity": "none", "issues": [],
                               "summary": "Composed without the model; synthesis failed."},
                     "peer_failures": [*failures,
@@ -5908,25 +5994,35 @@ def build_supervisor_graph(
         # A turn that survived a peer failure must SAY so. The answer is real but incomplete,
         # and presenting it as a normal answer hides that a capability the user asked for did
         # not run.
-        # A list of features says which source it came from (see _with_feature_source). Before
+        # Every answer that used data names its sources (see _with_sources, stage 45). Before
         # the failure note, so the note stays last.
+        _numbers = (update.get("verdict") or {}).get("numbers") or []
         for key in ("answer", "final_answer"):
             if isinstance(update.get(key), str):
-                update[key] = _with_feature_source(update[key], state)
+                update[key] = _with_sources(update[key], {**state, **update}, _numbers)
         if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
             update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+        # ONE verdict (stage 44): every check's findings, including the peers that failed and
+        # were never made good, rendered as a single banner, or none.
         unresolved = _unresolved_peer_failures({**state, **update})
-        if unresolved:
-            note = _peer_failure_note(unresolved)
+        findings = [turn_verdict.Finding(**f) for f in
+                    ((update.get("verdict") or {}).get("findings") or [])]
+        findings += turn_verdict.from_peer_failures(unresolved)
+        if not update.get("reground"):
             for key in ("answer", "final_answer"):
                 if isinstance(update.get(key), str) and update[key].strip():
-                    update[key] = f"{update[key]}\n\n---\n\n{note}"
+                    update[key] = turn_verdict.render(update[key], findings)
             if isinstance(update.get("distilled"), dict) and update["distilled"].get("answer"):
-                update["distilled"]["answer"] = update["final_answer"]
+                update["distilled"]["answer"] = update.get("final_answer") or update["distilled"]["answer"]
+            update["verdict"] = {**(update.get("verdict") or {}),
+                                 "findings": [f.to_dict() for f in findings],
+                                 "status": turn_verdict.status(findings)}
         return update
 
     def _synthesize_core(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
+        verdict_findings: List[Any] = []
+        number_links: List[Dict[str, Any]] = []
         evidence = state.get("evidence") or []
         ar, cr = state.get("analysis_results"), state.get("code_result")
         # Scope artifacts to THIS turn: a plot/map shown in an earlier turn must not be
@@ -6006,6 +6102,20 @@ def build_supervisor_graph(
             _map_env = _map_environment_lines(_map_layer_was_delivered(
                 {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
             _note = _prior_actions_note(_rows)
+            # THE FACTS (stage 44): every number the turn recorded, typed ones listed for the
+            # writer with their units and where they were measured. The answer is then held to
+            # them, number by number, by a deterministic scan.
+            _log = turn_log.get_log(state.get("turn_log_id"))
+            _results = [*((ar or {}).get("tool_results") or [] if isinstance(ar, dict) else []),
+                        *((cr or {}).get("tool_results") or [] if isinstance(cr, dict) else [])]
+            fact_set = turn_facts.build(log=_log, results=_results, query=q, evidence=evidence,
+                                        prior_rows=_rows)
+            _facts_text = fact_set.render()
+            if _facts_text:
+                _note = (f"{_note}\n\n" if _note else "") + (
+                    "Measured values this turn recorded (the record the answer is checked "
+                    "against; each number stated is matched to one of these or to a tool "
+                    "result):\n" + _facts_text)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
@@ -6020,6 +6130,12 @@ def build_supervisor_graph(
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
                         "this_turn": _ledger_lines(_turn_rows),
                         "prior_actions": _ledger_text, "environment": _map_env}
+            # The gate speaks for the code runs the ANSWER USES. Live, 2026-10-08 21:34 UTC
+            # (sess-07bc717f): a correct 23-school answer showed COULD NOT VERIFY whose three
+            # findings all came from side runs (a directory listing, a 0-row lookup, a failed
+            # first attempt); the run that produced the numbers raised none.
+            resolutions = turn_facts.resolve(answer, fact_set)
+            gate_ctx = _scope_to_used_runs(exec_ctx, resolutions, answer)
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
@@ -6032,50 +6148,86 @@ def build_supervisor_graph(
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx,
+            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=gate_ctx,
                                                     prior_rows=_rows)
-            # A flagged claim no bound tool can produce (a road distance, with no routing tool)
-            # is cut from the answer: re-running a peer cannot establish it, and a caveat over
-            # a figure we know is unsupported is worse than not printing the figure.
-            _bound = state.get("bound_tools") or []
-            answer, audit, _ = _remove_unproducible_claims(answer, audit, _bound)
-            # ... and one the audit did not flag, or that reconciliation let through.
-            answer, audit, _ = _remove_unrecorded_travel(answer, audit, _bound, exec_ctx)
+            # THE NUMBER SCAN (stage 44). Every stated figure that resolves to no recorded
+            # number is a finding, whatever it is about: an area, a population, a road distance.
+            # The producer check (stage 42) says whether some bound tool could produce it. If
+            # none can, it is cut: printing it under a caveat is worse than leaving it out. If
+            # one can, the work goes back once. Stage 39's travel scan and stage 37's routing
+            # list were two classes of this; reconciliation rule (2) was a substring version.
+            qualitative = [c for c in _unsupported_claims(audit)
+                           if not any(turn_facts.is_claim(x) for x in turn_facts.quantities(c))]
+            _producer_memo: Dict[str, Optional[str]] = {}
+
+            def _producers_for(sentences_: List[str]) -> Dict[str, Optional[str]]:
+                # One producer check for the figures and the qualitative claims together.
+                _producer_memo.update(_producing_tools(
+                    [*sentences_, *qualitative], state.get("bound_tool_docs") or {}, llm)
+                    if (sentences_ or qualitative) else {})
+                return _producer_memo
+
+            answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
+                answer, fact_set, _producers_for)
+            if qualitative and not _producer_memo:
+                _producers_for([])
+            _producers = _producer_memo
+            scan_findings: List[turn_verdict.Finding] = []
+            if dropped:
+                scan_findings.append(turn_verdict.Finding(
+                    "number_scan", turn_verdict.NOTE,
+                    f"{len(dropped)} statement(s) with figures that none of the tools available "
+                    f"here can produce were left out", evidence=dropped[:6]))
+                _LEDGER_LOG.info("number scan cut %d unproducible statement(s)", len(dropped))
             if state.get("grounding_retries"):
                 answer = _drop_draft_mentions(answer)
-            # THE GATE. A surviving flag means the audit still cannot find these claims in the
-            # record after all four deterministic drops — the shape of "answered from memory".
-            # Send the work back once instead of shipping a caveat over unfinished work.
-            _reground_to = _reground_target(state) if _audit_flagged(audit) else None
+            # A re-grounding pass, for figures and claims some bound tool could produce, plus
+            # anything the gate found wrong in the code the answer uses.
+            gate_fail = [g for g in _unsupported_claims(audit)
+                         if g.startswith("computed value from")]
+            gaps = [*[r.quantity.sentence for r in kept_unresolved],
+                    *[c for c in qualitative if _producers.get(c, "unknown") is not None],
+                    *gate_fail]
+            gaps = list(dict.fromkeys(g for g in gaps if g))[:6]
+            _reground_to = _reground_target(state) if gaps else None
             if _reground_to:
-                # A claim that could not be cut (paraphrased by the auditor) but still needs a
-                # tool nobody bound keeps its caveat and does not buy a re-run.
-                gaps = [g for g in _unsupported_claims(audit)
-                        if _unproducible_capability(g, _bound) is None]
-                if gaps:
-                    emit_trace_event(
-                        "node_completed",
-                        {"stage": "synthesize",
-                         "message": f"answer not grounded — re-running {_reground_to} to "
-                                    f"establish: {'; '.join(g[:80] for g in gaps[:2])}"},
-                        node="synthesize",
-                    )
-                    _LEDGER_LOG.info("re-grounding pass: %d unsupported claim(s): %s",
-                                     len(gaps), gaps[:3])
-                    return {
-                        # Routed through the needs FIFO on purpose: the supervisor fulfils a
-                        # need BEFORE consulting the decider, and the decider is what already
-                        # said "done" on this state. A plain edge back would just be told done
-                        # again.
-                        "needs": [*(state.get("needs") or []),
-                                  {"capability": _reground_to, "by": "synthesize",
-                                   "reason": "answer was not grounded in the execution record"}],
-                        "grounding_gaps": gaps,
-                        "grounding_retries": state.get("grounding_retries", 0) + 1,
-                        "reground": True,
-                    }
-            # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
-            final = _apply_grounding_caveat(answer, audit)
+                emit_trace_event(
+                    "node_completed",
+                    {"stage": "synthesize",
+                     "message": f"answer not grounded — re-running {_reground_to} to "
+                                f"establish: {'; '.join(g[:80] for g in gaps[:2])}"},
+                    node="synthesize",
+                )
+                _LEDGER_LOG.info("re-grounding pass: %d unsupported claim(s): %s",
+                                 len(gaps), gaps[:3])
+                return {
+                    # Routed through the needs FIFO on purpose: the supervisor fulfils a
+                    # need BEFORE consulting the decider, and the decider is what already
+                    # said "done" on this state. A plain edge back would just be told done
+                    # again.
+                    "needs": [*(state.get("needs") or []),
+                              {"capability": _reground_to, "by": "synthesize",
+                               "reason": "answer was not grounded in the execution record"}],
+                    "grounding_gaps": gaps,
+                    "grounding_retries": state.get("grounding_retries", 0) + 1,
+                    "reground": True,
+                }
+            if kept_unresolved:
+                shown = list(dict.fromkeys(r.quantity.text.strip() for r in kept_unresolved))
+                scan_findings.append(turn_verdict.Finding(
+                    "number_scan", turn_verdict.UNVERIFIABLE,
+                    "these figures are not in any tool result, the question or the retrieved "
+                    "evidence: " + ", ".join(f"\"{t}\"" for t in shown[:6]),
+                    evidence=shown[:6]))
+            verdict_findings = [*turn_verdict.from_gate(audit),
+                                *turn_verdict.from_audit(audit, numeric_claims_resolved=True),
+                                *scan_findings]
+            number_links = [{"text": r.quantity.text, "fact": r.fact.id if r.fact else None,
+                             "source": r.fact.source if r.fact else None,
+                             "call_id": r.fact.call_id if r.fact else None}
+                            for r in resolutions if turn_facts.is_claim(r.quantity)]
+            # The verdict is rendered ONCE, by synthesize_node, after peer failures are known.
+            final = answer
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
             final = _append_image_embeds(final, artifacts)
             # Defuse sandbox: pseudo-URLs, internal filesystem paths, and any link that merely
@@ -6126,10 +6278,13 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        final = _correct_artifact_claims(final, ar, cr, prior_rows=_rows)
+        final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        verdict_findings = [*verdict_findings,
+                            *[turn_verdict.Finding("correction", turn_verdict.PROBLEM, n)
+                              for n in corrections]]
         # Record what this turn DID before the state is discarded — the next turn's routing
         # decision is the only thing standing between a follow-up and a redundant search.
-        _record_actions(state, ar, cr, extra_rows=state.get("action_rows"))
+        _record_turn(state, ar, cr)
         merged = {**state, "answer": final, "audit": audit}
         # Clear the turn's rows on the way out. They are already in the thread ledger, this
         # state ships to the client verbatim, and an empty list makes double-recording
@@ -6138,6 +6293,8 @@ def build_supervisor_graph(
                 # Cleared so a second synthesize cannot re-route, and so the gaps do not leak
                 # into the client payload or a later turn's state.
                 "reground": False, "grounding_gaps": [],
+                "verdict": {"findings": [f.to_dict() for f in verdict_findings],
+                            "numbers": number_links},
                 "distilled": {**_distill(merged), "answer": final}}
 
     builder = StateGraph(SupervisorState)
@@ -6207,20 +6364,31 @@ def run_supervisor(
     # and `evidence`, so a follow-up would start at step 8 and route straight to `done`.
     run_thread = f"{thread_id or 'auto'}::run::{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": run_thread}}
-    state = graph.invoke(
-        {
-            "query": query,
-            "chat_history": chat_history or [],
-            "thread_id": thread_id,
-            "unified_peer": unified_peer,
-            "evidence": [],
-            "needs": [],
-            "actions": [],
-            "step": 0,
-            "max_steps": max_steps,
-        },
-        config,
-    )
+    log = turn_log.new_log()
+    initial = {
+        "query": query,
+        "chat_history": chat_history or [],
+        "thread_id": thread_id,
+        "unified_peer": unified_peer,
+        "evidence": [],
+        "needs": [],
+        "actions": [],
+        "step": 0,
+        "max_steps": max_steps,
+        "turn_log_id": log.id,
+    }
+    try:
+        state = graph.invoke(initial, config)
+    except Exception:
+        # The ledger used to be written only at the end of synthesis, so a turn that raised
+        # left no trace of what it had already done. The log has it.
+        try:
+            _record_turn(initial)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    if isinstance(state, dict):
+        state.setdefault("turn_log_summary", log.summary())
     # Handed back so a caller that wants the partial state after an unexpected failure has a
     # key to read it with. Recording it is the difference between "unused" and "unrecoverable".
     if isinstance(state, dict):

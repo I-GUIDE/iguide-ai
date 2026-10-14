@@ -1,0 +1,102 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`:\n\n## Fastest Travel Time\nThe fastest travel time from the intersection at (41.87408\u00b0 N, 87.65075\u00b0 W) to the one at (41.89222\u00b0 N, 87.62683\u00b0 W) is **approximately 3.43 minutes**.\n\nThe route travels east along a 70 km/h road for 2 km (5 \u00d7 400 m segments), then north along another 70 km/h road for 2 km (5 \u00d7 400 m segments). Each 400 m segment at 70 km/h takes 0.343 minutes, so 10 segments total 3.43 minutes.\n\n## Intersections Reachable Within 2 Minutes\n**15 intersections** (including the start) can be reached within 2 minutes of travel time from the starting intersection.\n\nThis was determined using Dijkstra's algorithm with travel-time weights, where each edge's weight was calculated as length \u00f7 speed. Edge lengths were measured in a projected metric CRS (UTM zone 16N, appropriate for the Chicago area) to ensure accurate ground distances. The network contains 36 intersections total and is fully connected.",
+  "seconds": 108.2,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 188204,
+    "cached_input_tokens": 150528,
+    "output_tokens": 4596,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791499410-0"
+}

@@ -1,0 +1,90 @@
+{
+  "task": "T06",
+  "title": "DEM: slope + watershed",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "dem.tif is a 30 m elevation model. What is its mean slope in degrees? And what is the area, in km\u00b2, of the watershed draining to the outlet at 40.04950\u00b0 N, 88.26302\u00b0 W (UTM 16N x=392265, y=4434015)?",
+  "files": [
+    "dem.tif"
+  ],
+  "expected": {
+    "mean_slope_deg": 5.79043106550576,
+    "analytic_slope_deg": 5.822915528381649,
+    "watershed_km2": 16.2,
+    "outlet_utm": [
+      392265.0,
+      4434015.0
+    ],
+    "outlet_lonlat": [
+      -88.263024,
+      40.049496
+    ]
+  },
+  "expected_why": {
+    "watershed_km2": "by construction: 150 cols x 120 rows x 900 m^2",
+    "mean_slope_deg": "Horn 3x3 over interior cells; analytic 5.823 elsewhere"
+  },
+  "score": {
+    "task": "T06",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_slope_deg",
+        "kind": "number",
+        "expected": 5.79043106550576,
+        "matched": true,
+        "found": "5.926\u00b0"
+      },
+      {
+        "name": "watershed_km2",
+        "kind": "number",
+        "expected": 16.2,
+        "matched": true,
+        "found": "16"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Using `dem.tif` in EPSG:32616 (UTM Zone 16N) with 30 m \u00d7 30 m cells:\n\n- **Mean slope:** **5.926\u00b0** (approximately **5.93\u00b0**)\n- **Watershed area draining to the outlet at 40.04950\u00b0 N, 88.26302\u00b0 W** \u2014 UTM 16N **(392265, 4434015):** **21.2625 km\u00b2** (approximately **21.26 km\u00b2**)\n\nThe watershed area is based on **23,625 DEM cells**, with each cell covering **0.0009 km\u00b2**.",
+  "seconds": 57.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 81193,
+    "cached_input_tokens": 0,
+    "output_tokens": 2195,
+    "usage_absent": 0,
+    "cost_usd": 0.0189,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T06-gpt-5.6-luna-1791496097-1"
+}

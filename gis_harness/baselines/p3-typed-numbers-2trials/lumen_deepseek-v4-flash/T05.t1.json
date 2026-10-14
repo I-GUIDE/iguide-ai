@@ -1,0 +1,90 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254.14 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the computation performed, the optimal solution to your facility location problem is:\n\n**The two sites that minimize total population-weighted distance are C1 and C3.**\n\n**Total population-weighted distance: 382,254.14 person-kilometres**\n\n### How this was determined\nAll 28 possible pairs of the 8 candidate sites were evaluated. For each pair, the straight-line (haversine) distance from every demand point to its nearest chosen site was calculated, weighted by that demand point's population, and summed.\n\n### Top 5 pairs by performance\n\n| Rank | Pair | Total (person-km) |\n|------|------|-------------------|\n| 1 | **C1 + C3** | **382,254.14** |\n| 2 | C2 + C3 | 418,879.72 |\n| 3 | C7 + C8 | 420,410.88 |\n| 4 | C1 + C7 | 423,999.04 |\n| 5 | C3 + C7 | 428,722.67 |\n\n### Assignment under the optimal pair\n- **C1** serves 15 demand points \u2192 115,744.81 person-km\n- **C3** serves 25 demand points \u2192 266,509.33 person-km\n\nThe winning pair (C1 + C3) outperforms the runner-up (C2 + C3) by approximately 36,600 person-km, making it a clear and decisive choice.",
+  "seconds": 109.3,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 90442,
+    "cached_input_tokens": 57600,
+    "output_tokens": 2647,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T05-deepseek-v4-flash-1791500319-1"
+}

@@ -19,12 +19,36 @@ Fully stubbed, like test_supervisor_graph.py: no network, no keys.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from agent_runtime.supervisor_graph import run_supervisor
 
 QUERY = "what is the area of Champaign County, Illinois, and how far is London from Paris?"
+
+# A scripted stand-in for the producer check's model: it knows that a travel distance or time
+# needs a routing tool, and that anything else the agent computes, execute_code can. These two
+# patterns were the agent's own rules until stage 44 (stage 37's claim list, stage 39's travel
+# words); now they are only what this test's "model" believes.
+ROUTING_CLAIM_RE = re.compile(
+    r"\bby\s+(?:the\s+)?(?:road|car|rail|train|bus|coach|ferry|plane|air|bike|bicycle)\b"
+    r"|\b(?:road|rail|railway|train|driving|walking|cycling|flight|flying)\s+"
+    r"(?:distance|time|route|journey|trip|ride)s?\b"
+    r"|(?<!google )(?<!hard )\bdriv(?:e|es|ing|en)\b"
+    r"(?!\s+(?:factors?|forces?|variables?|mechanisms?|causes?|process(?:es)?)\b)"
+    r"|\bflights?\b|\btravel(?:l?ing|l?ed|s)?\s+(?:distance|time)s?\b"
+    r"|\b(?:eurostar|amtrak|tgv)\b|\b\d+(?:[.,]\d+)?[\s-]*(?:h|hrs?|hours?|mins?|minutes?)[\s-]+"
+    r"(?:drive|walk|ride|flight|journey|trip)\b",
+    re.I)
+ROUTING_TOOL_RE = re.compile(r"rout|directions|isochrone|travel_time|osrm|valhalla|graphhopper",
+                             re.I)
+
+
+def scripted_producers(claims, tool_docs, llm=None):
+    routing = any(ROUTING_TOOL_RE.search(t) for t in tool_docs)
+    return {c: (None if ROUTING_CLAIM_RE.search(c) and not routing else "execute_code")
+            for c in claims}
 
 _ADMIN = json.dumps({"ok": True, "level": "county",
                      "matched": [{"geoid": "17019", "name": "Champaign County"}],
@@ -133,6 +157,11 @@ def _run(monkeypatch, audits, *, passes=(FIRST_PASS, SECOND_PASS), answers=(ANSW
 
     monkeypatch.setattr(g, "audit_answer_grounding", fake_audit)
 
+    # Stage 42: whether a bound tool produces a flagged claim is the producer check's answer (a
+    # model call in production). Scripted here as a model that knows only routing needs a
+    # routing tool; the graph's reaction to that answer is what these tests hold.
+    monkeypatch.setattr(g, "_producing_tools", scripted_producers)
+
     def peer(q, ev, st):
         seen["analyze"].append(list(st.get("grounding_gaps") or []))
         return json.loads(json.dumps(passes[min(len(seen["analyze"]) - 1, len(passes) - 1)]))
@@ -222,13 +251,16 @@ def test_routing_claims_are_dropped_and_nothing_re_runs(monkeypatch, ledger):
     assert "340.0 km" in final and "2,584.6 km²" in final
     assert "straight-line distance" in final and "interactive map" in final
     # no warning: every flagged claim is gone from the answer
-    assert "Grounding check" not in final and "COULD NOT VERIFY" not in final, final
-    assert not state["audit"].get("issues"), state["audit"]
+    assert "Check this answer" not in final and "could be checked" not in final, final
+    # Stage 44: the verdict, not the raw audit, decides; numeric claims are the number scan's.
+    assert state["verdict"]["status"] == "verified", state["verdict"]
 
 
 def test_a_routing_claim_with_a_routing_tool_bound_still_re_runs(monkeypatch, ledger):
     """The rule is "no BOUND tool can produce it", not "routing is never computable"."""
-    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"]}
+    first = {**FIRST_PASS, "bound_tools": ["execute_code", "network_route_distance"],
+             "bound_tool_docs": {"execute_code": "run code",
+                                 "network_route_distance": "road distance between points"}}
     state, seen = _run(monkeypatch, [ROUTING_AUDIT, GROUNDED], passes=(first, SECOND_PASS))
     assert state["actions"].count("analyze") == 2, state["actions"]
     assert "bound_tools" not in state["analysis_results"]
@@ -254,23 +286,12 @@ def test_an_unproducible_claim_that_cannot_be_located_is_not_re_run(monkeypatch,
     answer = ANSWER_1 + " The quickest drive follows the A26 motorway."
     state, _ = _run(monkeypatch, [audit, GROUNDED], answers=(answer,))
     assert state["actions"].count("analyze") == 1
-    assert "Grounding check" in state["final_answer"]
+    assert "not supported by what the turn" in state["final_answer"]
 
 
-@pytest.mark.parametrize("claim", ["roughly 460 km by road", "~340 km by the Eurostar rail line",
-                                   "a 5 h drive", "about 2 hours by train", "the driving route",
-                                   "a travel time of 45 minutes", "a 3 hour flight"])
-def test_routing_claims_are_recognised(claim):
-    from agent_runtime.supervisor import graph as g
-    assert g._unproducible_capability(claim, []) == "routing", claim
-
-
-@pytest.mark.parametrize("claim", ["340.0 km as the crow flies", "GEOID 17019",
-                                   "the great-circle distance", "2,584.6 km²",
-                                   "the road network layer has 1,204 segments"])
-def test_ordinary_claims_are_not_routing(claim):
-    from agent_runtime.supervisor import graph as g
-    assert g._unproducible_capability(claim, []) is None, claim
+# Stage 44 deleted the routing classifier these two tests held (`_unproducible_capability`):
+# whether a bound tool produces a claim is the producer check's answer (stage 42), a model call,
+# scripted in these tests by `scripted_producers` below.
 
 
 # --- dropping a claim from the text -------------------------------------------------------------
@@ -360,18 +381,29 @@ def test_the_directive_does_not_invite_restating_or_mentioning_a_draft():
 
 # --- 2. the units gate reads the units a run actually writes ------------------------------------
 
+def _unit_findings(outputs):
+    """Stage 43: units are judged agent-side with a unit library, from the sandbox's report."""
+    from agent_runtime import declared_outputs
+    from agent_runtime.sandbox_verify import DECLARED_OUTPUTS, run_checks
+
+    rep = run_checks({DECLARED_OUTPUTS: outputs})
+    extra, _ = declared_outputs.evaluate(rep)
+    return [f for f in [*rep["findings"], *extra]
+            if f["check"] in ("declared_units", "finite_value", "measured_in")]
+
+
 @pytest.mark.parametrize("unit", ["square_miles", "square miles", "mi2", "mi²", "sq mi", "km2",
                                   "acres", "hectares", "m", "km", "mi", "miles", "mile", "ft",
                                   "sq ft", "square_feet", "ft2", "yards", "nautical miles"])
 def test_common_area_and_length_units_are_recognised(unit):
-    from agent_runtime.sandbox_verify import PASS, check_declared_units
-    out = check_declared_units({"v": {"value": 997.93, "unit": unit}})
+    from agent_runtime.sandbox_verify import PASS
+    out = _unit_findings({"v": {"value": 997.93, "unit": unit}})
     statuses = {f["check"]: f["status"] for f in out}
     assert statuses.get("declared_units") == PASS, (unit, out)
 
 
 def test_the_live_runs_declared_outputs_all_pass():
-    from agent_runtime.sandbox_verify import PASS, check_declared_units
+    from agent_runtime.sandbox_verify import PASS
     for outputs in (
             {"champaign_area_km2": {"value": 2584.62, "unit": "km2"},
              "champaign_area_mi2": {"value": 997.93, "unit": "mi2"},
@@ -381,25 +413,31 @@ def test_the_live_runs_declared_outputs_all_pass():
              "champaign_area_mi2": {"value": 997.93, "unit": "square_miles"},
              "london_paris_km": {"value": 340.0, "unit": "km"},
              "london_paris_mi": {"value": 211.3, "unit": "miles"}}):
-        bad = [f for f in check_declared_units(outputs) if f["status"] != PASS]
+        bad = [f for f in _unit_findings(outputs) if f["status"] != PASS]
         assert not bad, bad
 
 
-def test_an_unrecognised_unit_alone_is_a_quiet_note_not_an_alarm():
-    """A unit the gate cannot read is "not checked", not evidence of a hallucination."""
+def test_a_unit_that_does_not_parse_is_not_quietly_passed():
+    """Stage 43: units parse with a unit library, so `furlongs2`, `square_miles` and `schools`
+    no longer reach here (test_invariant_gate.py holds that). What does is a unit nobody can
+    read, and that is a number nobody can check: it says COULD NOT VERIFY, without calling it
+    a hallucination."""
     from agent_runtime.supervisor import graph as g
     report = {"verdict": "cannot_determine", "counts": {"pass": 6, "cannot_determine": 1},
               "findings": [{"check": "declared_units", "status": "cannot_determine",
-                            "target": "area_furlongs2",
-                            "message": "unrecognised unit 'furlongs2'; not checked"}]}
+                            "target": "rate", "unit": "km/hr^^",
+                            "message": "unit 'km/hr^^' does not parse as a unit; the number "
+                                       "cannot be checked"}]}
     ctx = {"analysis_results": {"tool_results": [_result(
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["invariant_gate"] == "cannot_determine"
-    assert audit["hallucination_detected"] is False
-    note = g._apply_grounding_caveat("The area is 12 furlongs².", audit)
-    assert "COULD NOT VERIFY" not in note and "hallucination" not in note.lower()
-    assert "furlongs2" in note and "not checked" in note
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert [f.kind for f in findings] == [V.UNVERIFIABLE] and "km/hr^^" in findings[0].message
+    # Stage 46: reported in the verdict, not printed into the answer.
+    note = g._apply_grounding_caveat("The rate is 12.", audit)
+    assert note == "The rate is 12." and "hallucination" not in note.lower()
 
 
 def test_a_gate_unknown_does_not_disable_reconciling_a_number_another_tool_returned():
@@ -450,24 +488,29 @@ def test_any_other_gate_unknown_still_says_could_not_verify():
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is True
-    assert "COULD NOT VERIFY" in g._apply_grounding_caveat("x", audit)
+    from agent_runtime import verdict as V
+    assert V.status(V.from_gate(audit)) == "unverified"
 
 
 def test_an_advisory_gate_unknown_is_a_note_not_could_not_verify():
-    """Live 19:42 UTC: a metres column carried back to WGS84 that the gate cannot trace is not a
-    reason to say COULD NOT VERIFY (with or without an unrecognised unit beside it)."""
+    """A finding the gate marks advisory is "left unchecked", not a reason to say COULD NOT
+    VERIFY. (Stage 43's gate no longer emits the two advisory classes this was written for; the
+    flag stays the general mechanism.)"""
     from agent_runtime.supervisor import graph as g
     report = {"verdict": "cannot_determine", "counts": {"pass": 9, "cannot_determine": 2},
               "findings": [
                   {"check": "projected_crs", "status": "cannot_determine",
                    "target": "schools_within_4326", "advisory": True,
                    "message": "EPSG:4326 frame holds a measurement column ('distance_m') …"},
-                  {"check": "declared_units", "status": "cannot_determine", "target": "x",
-                   "message": "unrecognised unit 'furlongs'; not checked"}]}
+                  {"check": "coverage", "status": "cannot_determine", "target": "x",
+                   "advisory": True, "message": "left unchecked"}]}
     ctx = {"analysis_results": {"tool_results": [_result(
         "execute_code", "c9", json.dumps({"ok": True, "verification": report}))]}}
     audit = g._reconcile_audit_with_artifacts(GROUNDED, [], execution_context=ctx)
     assert audit["hallucination_detected"] is False and audit["severity"] == "low"
-    note = g._apply_grounding_caveat("18 schools.", audit)
-    assert note.count("ℹ️") == 1 and "COULD NOT VERIFY" not in note
-    assert "distance_m" in note
+    from agent_runtime import verdict as V
+    findings = V.from_gate(audit)
+    assert V.PROBLEM not in {f.kind for f in findings}
+    assert any("distance_m" in f.message for f in findings)
+    # Stage 46: a note is kept in the verdict and not printed.
+    assert g._apply_grounding_caveat("18 schools.", audit) == "18 schools."

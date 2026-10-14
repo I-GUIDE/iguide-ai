@@ -23,6 +23,8 @@ import { fetchWhoAmI, listConversations, putConversation, getConversation,
 import { renderMarkdown } from './markdown';
 import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
+import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
+import { layerVerdicts, type ReplayMeta } from './replay';
 import {
   deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -171,7 +173,12 @@ export default function App() {
     return () => ro.disconnect();
   }, [mapVisible]);
 
-  const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
+  // A replay sends its one turn to the replay server, whatever endpoint and key the settings
+  // hold. Overridden here rather than set, so a developer's saved settings are never rewritten.
+  const asAgentConfig = useCallback((): AgentConfig => (REPLAY_KEY
+    ? { ...cfg, apiKey: '', uploadEndpoint: '/agent/files/upload',
+        endpoint: `/agent/chat/stream?replay=${encodeURIComponent(REPLAY_KEY)}` }
+    : { ...cfg }), [cfg]);
   // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
   // so a link can be handed to an audience without also handing them a credential to paste.
   // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
@@ -396,6 +403,7 @@ export default function App() {
   useEffect(() => {
     if (turnsEnded === savedTurns.current) return;
     savedTurns.current = turnsEnded;
+    if (REPLAY_KEY) return;           // a replayed recording is nobody's conversation
     snapshotRef.current();
   }, [turnsEnded]);
 
@@ -863,6 +871,36 @@ export default function App() {
 
   const runAgent = useCallback((text: string) => (mode === 'live' ? runLive(text) : runLocal(text)), [mode, runLive, runLocal]);
 
+  // ---- REPLAY (dev and replay builds only): one recorded turn, through runLive unchanged ----
+  // The recorded query is sent as if typed; the replay server answers with the recorded stream
+  // and the captured layer files. When the turn has ended, the layers the page actually holds
+  // are compared with the stream's map_layer events, and the strip says which did not draw.
+  // `data-replay` on <html> is what the screenshot driver waits for.
+  const [replayMeta, setReplayMeta] = useState<ReplayMeta | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const [replayVerdict, setReplayVerdict] = useState<ReplayVerdict | null>(null);
+  const replayStarted = useRef(false);
+  useEffect(() => {
+    if (!REPLAY_KEY) return;
+    setSpatial(true);
+    void fetch(`/agent/replay/meta?key=${encodeURIComponent(REPLAY_KEY)}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`no recording for "${REPLAY_KEY}" (HTTP ${r.status})`);
+        setReplayMeta(await r.json());
+      })
+      .catch((e) => { setReplayError(String(e.message || e)); document.documentElement.dataset.replay = 'error'; });
+  }, []);
+  useEffect(() => {
+    if (!replayMeta || replayStarted.current) return;
+    replayStarted.current = true;
+    void runLive(replayMeta.query || '(the query was not recorded)');
+  }, [replayMeta, runLive]);
+  useEffect(() => {
+    if (!replayMeta || turnsEnded === 0) return;
+    setReplayVerdict(layerVerdicts(replayMeta, new Set(layers.map((l) => l.id))));
+    document.documentElement.dataset.replay = 'done';
+  }, [replayMeta, turnsEnded, layers]);
+
   const onUpload = useCallback(async (files: File[]) => {
     // Always try to show GeoJSON on the map locally for instant feedback.
     // previews[i] is the layer files[i] drew, if it drew one.
@@ -919,7 +957,8 @@ export default function App() {
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
 
   return (
-    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}`}>
+    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}${REPLAY_KEY ? ' replay-capture' : ''}`}>
+      {REPLAY_KEY && <ReplayStrip meta={replayMeta} verdict={replayVerdict} error={replayError} />}
       <TopNav demoMode={demoMode || tokenMode} me={tokenMode ? me : null}
         onToggleSettings={() => setShowSettings((s) => !s)}
         onToggleHistory={() => { setShowHistory((v) => !v); void refreshSessions(); }}

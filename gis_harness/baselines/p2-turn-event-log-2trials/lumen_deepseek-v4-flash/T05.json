@@ -1,0 +1,94 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254.14 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the exhaustive analysis of all 28 possible pairs of candidate sites, the optimal solution is:\n\n**The optimal two sites are C1 and C3.**\n\n**Total population-weighted distance: 382,254.14 person-kilometres** (\u2248 382,254 person-km).\n\n### How it was computed\n- **Distances:** straight-line (great-circle/haversine) distances in km between each of the 40 demand points and each of the 8 candidate sites.\n- **Objective:** for every demand point, take the distance to its *nearest* chosen site, multiply by that point's population, and sum over all 40 points.\n- **Search:** exhaustively evaluated all C(8,2) = 28 pairs of sites.\n\n### Ranking of the top pairs\n| Pair | Total (person-km) |\n|------|-------------------|\n| **C1 + C3** | **382,254.14** |\n| C2 + C3 | 418,879.72 |\n| C7 + C8 | 420,410.88 |\n| C1 + C7 | 423,999.04 |\n| C3 + C7 | 428,722.67 |\n\n### Assignment for the winning pair\n- **C1** serves the eastern demand points (D1, D2, D10, D14, D15, D16, D19, D21, D23, D26, D29, D31, D36, D37) \u2014 14 points.\n- **C3** serves the western demand points (the remaining 26 points).\n\nFor context, the best *single* site (C7) would give 547,022.82 person-km, so adding the second site cuts the total by about 30%.",
+  "seconds": 89.7,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 122085,
+    "cached_input_tokens": 86784,
+    "output_tokens": 3423,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T05-deepseek-v4-flash-1791497194-0"
+}

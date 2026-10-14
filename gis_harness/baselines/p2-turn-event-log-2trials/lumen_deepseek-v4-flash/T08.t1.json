@@ -1,0 +1,104 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"Mean NDVI 2020: 0.5326\\\\nMean NDVI 2024: 0.4998\\\\n\\\\nPixels valid in both: 9975\\\\nTotal pixels: 10000\\\\n\\\\nPixels with NDVI loss > 0.2: 900\\\\nPixel ar"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the two satellite scenes, here are the results:\n\n## NDVI Analysis: 2020 vs 2024\n\nBoth scenes are identical in extent (100\u00d7100 pixels, 10 m resolution, EPSG:32616 UTM zone 16N), so they align pixel-for-pixel. NDVI = (NIR \u2212 Red) / (NIR + Red), computed from band 2 (NIR) and band 1 (Red).\n\n### Mean NDVI per date\n| Date | Mean NDVI |\n|------|-----------|\n| **2020** | **0.5326** |\n| **2024** | **0.4998** |\n\nThe scene's vegetation index declined by **0.033** on average between the two dates.\n\n### Area with NDVI loss > 0.2\n- **900 pixels** lost more than 0.2 NDVI between 2020 and 2024.\n- Each pixel is 10 m \u00d7 10 m = 100 m\u00b2 = **0.01 ha**.\n- **Area lost > 0.2 NDVI = 9.00 hectares** (out of 99.75 ha of valid, cloud-free pixels common to both dates \u2014 i.e. ~9% of the scene).\n\n### Change detail\n- Change range: **\u22120.350 to +0.001** (every valid pixel either stayed flat or lost NDVI; none gained).\n- Mean change: **\u22120.033**.\n\n### Artifacts produced\n- `ndvi_2020.tif`, `ndvi_2024.tif` \u2014 per-date NDVI rasters (float32, nodata \u22129999).\n- `ndvi_change.tif` \u2014 NDVI difference (2024 \u2212 2020) raster.\n- `ndvi_loss_gt02.tif` \u2014 binary mask of pixels with loss > 0.2.\n- Downloadable change raster: **file_86d88b5de617** (`ndvi_change_2020_2024.tif`).\n\nThe change raster is a per-pixel surface (not a polygon layer), so it's delivered as a GeoTIFF rather than a clickable GeoJSON layer.",
+  "seconds": 201.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 161005,
+    "cached_input_tokens": 124928,
+    "output_tokens": 4812,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791497801-1"
+}

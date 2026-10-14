@@ -1,0 +1,76 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://z.overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "19"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "OpenStreetMap has **19 schools within 1 mile** of the point at 41.9231 N, 87.7093 W.\n\nI searched OpenStreetMap for all features tagged `amenity=school` in the surrounding area (which returned 31 schools), then calculated the exact great-circle distance from your reference point to each school and counted those within 1 mile (1,609.344 m).\n\n### The 19 schools within 1 mile (closest first):\n\n| School | Distance |\n|---|---|\n| Darwin Elementary School | 0.22 mi |\n| Saint Sylvester School | 0.37 mi |\n| Funston Elementary School | 0.54 mi |\n| Jehovah School | 0.61 mi |\n| (unnamed school, N Ridgeway Ave) | 0.63 mi |\n| Our Lady of Grace School | 0.63 mi |\n| Logan Square Elementary School | 0.66 mi |\n| Mozart Elementary School | 0.68 mi |\n| Stowe Elementary School | 0.75 mi |\n| Yates Elementary School | 0.76 mi |\n| Marine Leadership Academy | 0.82 mi |\n| Chase Elementary School | 0.82 mi |\n| Avondale-Logandale Elementary School | 0.82 mi |\n| Goethe Elementary School | 0.82 mi |\n| St. Hyacinth Catholic School | 0.87 mi |\n| Brentano Elementary Math and Science Academy | 0.89 mi |\n| McAuliffe Elementary School | 0.94 mi |\n| Moos Elementary School | 0.95 mi |\n| ASPIRA Business & Finance High School | 1.00 mi |\n\nThe next-closest school, St. John Berchmans School, sits at 1.005 mi \u2014 just outside the 1-mile radius.\n\n**Notes on the count:**\n- This reflects what OSM contributors have mapped (`amenity=school`), including public, private, and religious schools. It is not an official register, so a recently opened or closed school may be missing or still listed.\n- Distances were measured from the reference point to each school's centroid (for polygon features) or point location.\n- The 31 schools found in the search area are now on your interactive map as a clickable layer (\"OSM Schools near 41.9231,-87.7093\").",
+  "seconds": 116.6,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 2,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 118399,
+    "cached_input_tokens": 81920,
+    "output_tokens": 4064,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791499309-0"
+}

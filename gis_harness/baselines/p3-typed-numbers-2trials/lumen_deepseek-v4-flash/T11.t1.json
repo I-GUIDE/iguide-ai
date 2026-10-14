@@ -1,0 +1,104 @@
+{
+  "task": "T11",
+  "title": "Multi-criteria suitability",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?",
+  "files": [
+    "landcover.tif",
+    "road_distance_m.tif",
+    "slope_deg.tif"
+  ],
+  "expected": {
+    "suitable_ha": 103.85,
+    "best_cell_utm": [
+      390305.0,
+      4439325.0
+    ],
+    "best_cell_lonlat": [
+      -88.28689672461265,
+      40.097073108688406
+    ],
+    "best_score": 0.9812499992549419
+  },
+  "expected_why": {
+    "suitable_ha": "boolean overlay on the stored float32 values"
+  },
+  "score": {
+    "task": "T11",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "suitable_ha",
+        "kind": "number",
+        "expected": 103.85,
+        "matched": true,
+        "found": "103.85 hectares"
+      },
+      {
+        "name": "best_cell_lonlat",
+        "kind": "point",
+        "expected": [
+          -88.28689672461265,
+          40.097073108688406
+        ],
+        "matched": true,
+        "found": "-88.2869\u00b0 / 40.0971\u00b0"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": null, \"stdout\": \"Collecting gdal\\\\n Downloading gdal-3.13.3.tar.gz (940 kB)\\\\n \\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\\\u2501\\"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the three aligned 10 m rasters (slope, road distance, and land cover), here are the results:\n\n## Total Suitable Area\n- **103.85 hectares** (10,385 suitable cells \u00d7 0.01 ha per cell)\n\nThe suitability mask was applied as specified:\n- Slope strictly **under 8\u00b0**\n- Road distance **\u2264 500 m**\n- Land cover **not 1 (water)** and **not 2 (wetland)**\n\n## Highest-Scoring Cell\n- **Score: 0.98125** (slope = 0.30\u00b0, road distance = 0 m, land cover = 5)\n- **Centre coordinates:**\n  - **UTM 16N:** x = 390,305 m, y = 4,439,325 m\n  - **Geographic (lon, lat):** **-88.2869\u00b0, 40.0971\u00b0**\n\nThis cell is essentially flat (0.3\u00b0 slope) and sits directly on a road (0 m distance), giving it a near-maximum score of 0.981 out of a possible 1.0 (the small reduction is due to the 0.3\u00b0 slope rather than 0\u00b0).\n\nThe analysis was performed using `rasterio` and `numpy` on the three perfectly aligned rasters (120\u00d7120 cells at 10 m resolution in EPSG:32616, UTM zone 16N).",
+  "seconds": 147.2,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 133521,
+    "cached_input_tokens": 96256,
+    "output_tokens": 3657,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T11-deepseek-v4-flash-1791500590-1"
+}

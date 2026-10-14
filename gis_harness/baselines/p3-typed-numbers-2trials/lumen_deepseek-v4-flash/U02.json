@@ -1,0 +1,68 @@
+{
+  "task": "U02",
+  "title": "Unsolvable: NDVI without a near-infrared band",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "Compute the mean NDVI of the attached scene.",
+  "files": [
+    "scene_red_only.tif"
+  ],
+  "expected": {},
+  "expected_why": null,
+  "score": {
+    "task": "U02",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "scene_red_only.tif",
+    "refusal": {
+      "refused": true,
+      "outcome": "refused",
+      "refusal_text": "cannot",
+      "fabricated": null,
+      "value_given": null
+    },
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "The mean NDVI **cannot be computed** from the uploaded scene because the file contains only a single red band \u2014 there is no near-infrared (NIR) band present.\n\n**What I found in the scene (`scene_red_only.tif`):**\n- **Bands:** 1 (single band, described as `red`)\n- **Size:** 60 \u00d7 60 pixels\n- **Data type:** uint16\n- **CRS:** EPSG:32616 (WGS 84 / UTM zone 16N)\n- **Pixel size:** 10 m\n- **Red band values:** min = 400, max = 899, mean = **650.79**\n\n**Why NDVI can't be computed:** The NDVI formula is:\n\n```\nNDVI = (NIR \u2212 Red) / (NIR + Red)\n```\n\nThis requires **two bands** \u2014 a red band and a near-infrared (NIR) band. Since this scene contains only the red band (band count = 1, description = `red`), the NDVI index is mathematically undefined.\n\n**What I can report instead:** The mean value of the single red band present in the scene is **650.79** (on a 0\u201365535 uint16 scale, i.e., a raw digital number, not a reflectance fraction). But this is the mean *red* band value, **not** NDVI.\n\n**To compute the mean NDVI, I need the NIR band.** If you can provide the near-infrared band of the same scene (e.g., a `scene_nir.tif`, or a multi-band file containing both red and NIR), I can immediately compute the NDVI and its mean. Alternatively, if the scene is from a known sensor (e.g., Sentinel-2, Landsat), let me know the band numbers and I can help extract the correct bands.",
+  "seconds": 127.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 93172,
+    "cached_input_tokens": 60672,
+    "output_tokens": 2716,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U02-deepseek-v4-flash-1791499864-0"
+}

@@ -1,0 +1,88 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.4298 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Using the 65 road edges in `roads.geojson`, the fastest travel time from the intersection at **41.87408\u00b0 N, 87.65075\u00b0 W** to **41.89222\u00b0 N, 87.62683\u00b0 W** is:\n\n- **3.4298 minutes** \u2014 approximately **3 minutes 26 seconds**\n- **15 intersections**, including the starting intersection, can be reached within **2 minutes**\n\nThe calculation used geodesic edge lengths, weights of `length / speed_kph`, and Dijkstra\u2019s shortest-path algorithm. The supplied coordinates matched network endpoints within approximately **0.4\u20130.5 meters**.",
+  "seconds": 36.2,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 68678,
+    "cached_input_tokens": 0,
+    "output_tokens": 1727,
+    "usage_absent": 0,
+    "cost_usd": 0.0158,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T04-gpt-5.6-luna-1791498367-0"
+}

@@ -1,0 +1,101 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog (`usgs_comcat_ridgecrest_2019-07.csv`), here are the results:\n\n**Largest event's magnitude:** **7.1 (Mw)** \u2014 This is the mainshock of the Ridgecrest earthquake sequence, occurring on **2019-07-06 03:19:53 UTC** at 35.7695\u00b0N, 117.5993\u00b0W (event id `ci38457511`).\n\n**Events within 7 days after it and within 25 km of its epicentre:** **673 events**\n\n**Of those, magnitude 4 or greater:** **63 events**\n\n### Method\n- **Largest event:** identified as the row with the maximum `mag` value (7.1).\n- **Time window:** events strictly after the mainshock's time (2019-07-06 03:19:53 UTC) up to 7 days later (2019-07-13 03:19:53 UTC).\n- **Distance:** computed great-circle (haversine) distance from the mainshock epicentre; kept events \u2264 25 km.\n- **Magnitude filter:** counted events with `mag >= 4` within that subset.\n\n### Summary table\n\n| Question | Answer |\n|---|---|\n| Largest event magnitude | **7.1** (Mw) |\n| Events within 7 days after & \u226425 km | **673** |\n| Of those, magnitude \u2265 4 | **63** |\n\nThe 673 aftershocks within 25 km ranged from magnitude 3.0 to 5.5 (mean 3.46), with 63 reaching magnitude 4 or greater.\n\n**Sources:** usgs_comcat_ridgecrest_2019-07.csv (your upload).",
+  "seconds": 65.3,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 91814,
+    "cached_input_tokens": 59904,
+    "output_tokens": 2578,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791514296-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

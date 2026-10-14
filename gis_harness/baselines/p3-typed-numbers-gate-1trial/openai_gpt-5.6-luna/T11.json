@@ -1,0 +1,100 @@
+{
+  "task": "T11",
+  "title": "Multi-criteria suitability",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?",
+  "files": [
+    "landcover.tif",
+    "road_distance_m.tif",
+    "slope_deg.tif"
+  ],
+  "expected": {
+    "suitable_ha": 103.85,
+    "best_cell_utm": [
+      390305.0,
+      4439325.0
+    ],
+    "best_cell_lonlat": [
+      -88.28689672461265,
+      40.097073108688406
+    ],
+    "best_score": 0.9812499992549419
+  },
+  "expected_why": {
+    "suitable_ha": "boolean overlay on the stored float32 values"
+  },
+  "score": {
+    "task": "T11",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "suitable_ha",
+        "kind": "number",
+        "expected": 103.85,
+        "matched": true,
+        "found": "103.85 hectares"
+      },
+      {
+        "name": "best_cell_lonlat",
+        "kind": "point",
+        "expected": [
+          -88.28689672461265,
+          40.097073108688406
+        ],
+        "matched": true,
+        "found": "390,305 m / 4,439,325 m"
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "- **Total suitable area:** **103.85 hectares** (10,385 suitable cells \u00d7 100 m\u00b2 per cell).\n- **Highest-scoring suitable cell centre:** **(390,305 m E, 4,439,325 m N)** in **EPSG:32616 (UTM Zone 16N)**.\n- **Highest score:** **0.98125**.\n\nThe rasters were aligned at 10 m resolution, with dimensions of 120 \u00d7 120 cells.\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names",
+  "seconds": 32.1,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 49108,
+    "cached_input_tokens": 0,
+    "output_tokens": 1496,
+    "usage_absent": 0,
+    "cost_usd": 0.0116,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T11-gpt-5.6-luna-1791502785-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

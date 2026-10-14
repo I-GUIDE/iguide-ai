@@ -1,0 +1,116 @@
+{
+  "task": "T02",
+  "title": "Buffer/overlay: schools within a mile (pinned upload)",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "The attached schools.geojson has school locations. How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?",
+  "files": [
+    "schools.geojson"
+  ],
+  "expected": {
+    "count_within_mile": 20,
+    "names_within_mile": [
+      "School 01",
+      "School 02",
+      "School 04",
+      "School 07",
+      "School 08",
+      "School 09",
+      "School 12",
+      "School 13",
+      "School 15",
+      "School 19",
+      "School 20",
+      "School 21",
+      "School 25",
+      "School 29",
+      "School 30",
+      "School 31",
+      "School 32",
+      "School 33",
+      "School 34",
+      "School 35"
+    ],
+    "nearest_school": "School 08",
+    "nearest_m": 412.6788919857677
+  },
+  "expected_why": {
+    "count_within_mile": "brute-force geodesic distance, pyproj Geod(WGS84)"
+  },
+  "score": {
+    "task": "T02",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "20"
+      },
+      {
+        "name": "nearest_school",
+        "kind": "text",
+        "expected": "School 08",
+        "matched": true,
+        "found": "School 08"
+      },
+      {
+        "name": "nearest_m",
+        "kind": "number",
+        "expected": 412.6788919857677,
+        "matched": true,
+        "found": "412.53 meters"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "schools.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded `schools.geojson` file:\n\n**20 schools** are located within 1 mile (1,609.344 meters) of the site at 41.8827\u00b0 N, 87.6233\u00b0 W.\n\nThe **nearest school is School 08** (id=8), located approximately **412.53 meters** from the site.\n\nDistances were calculated using a projected coordinate system (UTM zone 16N, EPSG:26916 \u2014 the correct zone for Chicago), ensuring accurate ground distances rather than degree-based approximations.\n\nThe 20 schools within 1 mile, with their distances from the site, are:\n\n| School | Distance (m) |\n|--------|-------------|\n| School 08 | 412.53 |\n| School 04 | 520.97 |\n| School 30 | 558.19 |\n| School 29 | 566.05 |\n| School 12 | 692.43 |\n| School 20 | 802.10 |\n| School 07 | 804.01 |\n| School 01 | 1,021.38 |\n| School 09 | 1,060.78 |\n| School 02 | 1,130.13 |\n| School 25 | 1,188.09 |\n| School 31 | 1,249.54 |\n| School 21 | 1,270.12 |\n| School 32 | 1,319.52 |\n| School 19 | 1,404.78 |\n| School 33 | 1,409.48 |\n| School 15 | 1,496.66 |\n| School 34 | 1,499.45 |\n| School 13 | 1,525.70 |\n| School 35 | 1,589.41 |\n\nAll 37 schools from the file have also been loaded onto your interactive map as a clickable point layer for further exploration.",
+  "seconds": 156.2,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 123920,
+    "cached_input_tokens": 86272,
+    "output_tokens": 3718,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02-deepseek-v4-flash-1791499991-1"
+}

@@ -1,0 +1,100 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"[\\'cell_id\\', \\'value\\', \\'hotspot_class\\', \\'gi_z\\', \\'gi_p\\']\\\\n cell_id value hotspot_class gi_z gi_p\\\\n0 38 75.4818 Hot spot (p < 0.01) 2.080447 0"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "**Summary of Results**\n\nBoth spatial statistics were computed successfully on the 100-cell lattice grid.\n\n**Global Moran's I** (queen contiguity, row-standardised weights) = **0.2252**, with a z-score of 4.495 and p < 0.01. This indicates **significant positive spatial autocorrelation** \u2014 similar values are clustered together rather than randomly distributed. The connectivity structure shows 100 cells, 0 islands, and a mean of 6.84 neighbours per cell (range 3\u20138).\n\n**Getis-Ord Gi*** (binary queen weights, each cell included in its own neighbourhood) \u2014 using the strict z-score threshold of **z > 1.96**, exactly **1 cell** qualifies as a hot spot: **cell_id 38** (value 75.48, Gi* z = 2.080, p = 0.001).\n\nNote: The tool's permutation-based p-value classification flagged 15 cells as \"hot spots\" (6 at p<0.05, 9 at p<0.01), but this is because permutation p-values can be significant even at modest z-scores (e.g., cell 27 has z = 0.98 but p = 0.006). Your criterion was specifically the **z-score threshold of 1.96**, and under that strict criterion only **1 cell** qualifies.\n\n**Deliverables:**\n- **Hotspot map layer** (Gi* classified): [lattice_value_hotspots.geojson](/agent/files/file_5aba0c491cdf/download) \u2014 styled by hotspot class on your interactive map.\n- **Per-cell z-scores CSV**: [lattice_value_hotspots.csv](/agent/files/file_8decd27a00ff/download) \u2014 contains `gi_z` and `gi_p` for all 100 cells.\n\n**Final answer:** Global Moran's I = **0.2252** (significant positive spatial autocorrelation, p < 0.01). Under Getis-Ord Gi* with binary queen weights including self-neighbourhood, **1 cell** is a hot spot with z > 1.96 (cell_id 38, z = 2.080).",
+  "seconds": 158.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 157184,
+    "cached_input_tokens": 120832,
+    "output_tokens": 3233,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T09-deepseek-v4-flash-1791497805-1"
+}

@@ -1,0 +1,72 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "240,000 m\u00b2"
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the DEM file, here are the results:\n\n## Result\n\nThe DEM (`coast_dem.tif`) is a 100\u00d7100 grid in **EPSG:32616** (UTM zone 16N) with **10 m \u00d7 10 m** pixels (100 m\u00b2 each). The sea is along the southern edge, and the valid elevation data ranges from 0.1 m to 19.9 m (nodata = -9999).\n\n**Bathtub fill at 5 m:**\n\n- **Cells at or below 5 m:** 2,400 cells\n- **Area:** 2,400 \u00d7 100 m\u00b2 = 240,000 m\u00b2\n- **= 24.0 hectares**\n\nSo if water rises to 5 m, **24.0 hectares** of the DEM are at or below that level (every cell \u2264 5 m counted, treating it as a simple bathtub).",
+  "seconds": 92.0,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 63914,
+    "cached_input_tokens": 31744,
+    "output_tokens": 1648,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791500346-1"
+}

@@ -1,0 +1,120 @@
+{
+  "task": "T05",
+  "title": "Location-allocation: 2-median",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?",
+  "files": [
+    "candidates.csv",
+    "demand.csv"
+  ],
+  "expected": {
+    "sites": [
+      "C1",
+      "C3"
+    ],
+    "objective_person_km": 382357.1735256163,
+    "runner_up_ratio": 1.0953321144608168
+  },
+  "expected_why": {
+    "sites": "exhaustive over all 28 pairs, geodesic distances"
+  },
+  "score": {
+    "task": "T05",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "sites",
+        "kind": "ids",
+        "expected": [
+          "C1",
+          "C3"
+        ],
+        "matched": true,
+        "found": "C1, C3"
+      },
+      {
+        "name": "objective_person_km",
+        "kind": "number",
+        "expected": 382357.1735256163,
+        "matched": true,
+        "found": "382,254 person-kilometres"
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f"
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "## Optimal Solution\n\n**The two sites that minimize total population-weighted distance are C1 and C3:**\n\n- **C1** (coordinates: 41.88899, -87.63185)\n- **C3** (coordinates: 41.85090, -87.71800)\n\n**Total population-weighted straight-line distance: 382,254 person-kilometres** (approximately 382,254.14 person-km)\n\n## Method\n\nFor each pair:\n- Every one of the 40 demand points was assigned to its **nearest** of the two sites\n- Distances were calculated using the **haversine formula** (great-circle distance) in kilometres\n- The total was computed as: \u03a3 (population \u00d7 nearest distance)\n\n## Top 5 Candidate Pairs\n\n| Rank | Pair | Total (person-km) |\n|------|------|-------------------|\n| 1 | **C1 + C3** | **382,254** |\n| 2 | C2 + C3 | 418,880 |\n| 3 | C7 + C8 | 420,411 |\n| 4 | C1 + C7 | 423,999 |\n| 5 | C3 + C7 | 428,723 |\n\n---\n\n\u2139\ufe0f\n- Note: 3 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 166.2,
+  "route": [
+    "code",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 14,
+    "input_tokens": 189079,
+    "cached_input_tokens": 117760,
+    "output_tokens": 5480,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T05-deepseek-v4-flash-1791511163-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

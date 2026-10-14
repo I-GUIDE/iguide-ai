@@ -1,0 +1,191 @@
+{
+  "task": "T06",
+  "title": "DEM: slope + watershed",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "dem.tif is a 30 m elevation model. What is its mean slope in degrees? And what is the area, in km\u00b2, of the watershed draining to the outlet at 40.04950\u00b0 N, 88.26302\u00b0 W (UTM 16N x=392265, y=4434015)?",
+  "files": [
+    "dem.tif"
+  ],
+  "expected": {
+    "mean_slope_deg": 5.79043106550576,
+    "analytic_slope_deg": 5.822915528381649,
+    "watershed_km2": 16.2,
+    "outlet_utm": [
+      392265.0,
+      4434015.0
+    ],
+    "outlet_lonlat": [
+      -88.263024,
+      40.049496
+    ]
+  },
+  "expected_why": {
+    "watershed_km2": "by construction: 150 cols x 120 rows x 900 m^2",
+    "mean_slope_deg": "Horn 3x3 over interior cells; analytic 5.823 elsewhere"
+  },
+  "score": {
+    "task": "T06",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_slope_deg",
+        "kind": "number",
+        "expected": 5.79043106550576,
+        "matched": true,
+        "found": "5.75\u00b0"
+      },
+      {
+        "name": "watershed_km2",
+        "kind": "number",
+        "expected": 16.2,
+        "matched": true,
+        "found": "16"
+      }
+    ],
+    "steps": {
+      "tool_calls": 12,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": "dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis performed on your uploaded DEM:\n\n## Results\n\n### 1. Mean Slope of dem.tif\nThe DEM is a 30 m resolution elevation model in UTM 16N (EPSG:32616), covering 150\u00d7200 pixels (4.5 km \u00d7 6.0 km). Slope was computed using **Horn's method** at the true 30 m ground resolution:\n\n- **Mean slope: 5.75\u00b0** (median 5.82\u00b0, max 5.82\u00b0)\n- The terrain is a gently sloping valley with elevations ranging from 200.3 m to 496.7 m.\n\n### 2. Watershed Area Draining to the Outlet\nThe outlet at **40.04950\u00b0 N, 88.26302\u00b0 W** (UTM 16N x=392265, y=4434015) sits at the southern edge of the DEM \u2014 it is the lowest point of the model (200.3 m). Using the **D8 flow-direction algorithm**:\n\n- The outlet receives flow from **18,000 cells** within the DEM.\n- **Watershed area: 16.20 km\u00b2** (18,000 cells \u00d7 30 m \u00d7 30 m).\n\n**Important caveat:** Because the outlet lies on the DEM's southern boundary, the true watershed may extend beyond the DEM's extent to the south. The **16.2 km\u00b2** figure represents the watershed area *within the provided DEM*. If the DEM does not cover the full contributing area, the actual watershed could be larger.\n\n### Interactive Map Deliverables\nBoth results are available as live layers on your interactive map:\n- **Watershed polygon** (16.2 km\u00b2) \u2014 [watershed_16_2_km.geojson](https://agent/files/file_3a8e9e5b2985/download)\n- **Outlet point** \u2014 [outlet.geojson](https://agent/files/file_f6b77b9150e9/download)\n\nYou can pan, zoom, and click on these layers to explore the delineated watershed and outlet location.\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- computed value from `module scope`: invariant gate (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names\n- \u2026and 5 more\n\n![4437000_000_392250_000_slope.png](/agent/files/file_a5f70fb882c3/download)",
+  "seconds": 263.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 3,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "terrain_derivative",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 16,
+    "input_tokens": 436966,
+    "cached_input_tokens": 392448,
+    "output_tokens": 8635,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T06-deepseek-v4-flash-1791501968-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

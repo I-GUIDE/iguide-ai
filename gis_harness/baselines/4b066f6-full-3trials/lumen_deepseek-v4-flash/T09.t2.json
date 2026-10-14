@@ -1,0 +1,95 @@
+{
+  "task": "T09",
+  "title": "Spatial autocorrelation: Moran's I + Gi*",
+  "trial": 2,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "lattice.geojson is a grid of cells with a 'value' field. Compute global Moran's I for value using queen contiguity with row-standardised weights. Then compute Getis-Ord Gi* with binary queen weights, each cell included in its own neighbourhood: how many cells are hot spots with z > 1.96?",
+  "files": [
+    "lattice.geojson"
+  ],
+  "expected": {
+    "morans_i": 0.2252247688297281,
+    "hot_spots": 13
+  },
+  "expected_why": {
+    "morans_i": "numpy, queen, row-standardised",
+    "hot_spots": "Gi* z > 1.96"
+  },
+  "score": {
+    "task": "T09",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "morans_i",
+        "kind": "number",
+        "expected": 0.2252247688297281,
+        "matched": true,
+        "found": "0.2252"
+      },
+      {
+        "name": "hot_spots",
+        "kind": "count",
+        "expected": 13,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "## Results\n\nBoth spatial analyses are complete. Here are the findings:\n\n### Global Moran's I (queen contiguity, row-standardised weights)\n\n- **Moran's I = 0.2252** (expected under spatial randomness: \u22120.0101)\n- **z-score = 4.482, p < 0.01** \u2014 statistically significant\n- **Interpretation:** significant **positive spatial autocorrelation** \u2014 similar `value` cells sit next to each other; the map is clustered, not random. (Geary's C = 0.7772, p < 0.01, and global Getis-Ord G z = 3.122, p < 0.01, corroborate this.)\n- Connectivity: 100 cells, 0 islands, mean 6.84 neighbours (min 3, max 8).\n\n### Getis-Ord Gi* (binary queen weights, each cell in its own neighbourhood)\n\nThe tool classifies hot spots by permutation p-value and reports **15 hot-spot cells** (9 at p<0.01 + 6 at p<0.05) and 7 cold-spot cells. But your question asks specifically for cells that are hot spots with **z > 1.96**, so I counted the actual Gi* z-scores:\n\n- **Number of cells with Gi* z > 1.96: 1** \u2014 only **cell_id 38** (value 75.48, z = 2.080, p = 0.001).\n- The maximum Gi* z across all 100 cells is 2.080, so cell 38 is the only one exceeding the 1.96 threshold.\n\n**Answer: 1 cell is a hot spot with z > 1.96.**\n\nNote the distinction: the tool's p-value-based classification flags 15 cells as hot spots because the permutation p-values are significant even at modest z-scores (e.g. z \u2248 0.97 with p = 0.006), but by the strict z > 1.96 criterion only cell 38 qualifies.\n\n### Artifacts produced\n- **Hot-spot map layer** (GeoJSON, categorical by hotspot_class): [lattice_value_hotspots.geojson](/agent/files/file_8ac5b2cb12f6/download)\n- **Per-cell Gi* table** (CSV with cell_id, value, hotspot_class, gi_z, gi_p): [lattice_value_hotspots.csv](/agent/files/file_e65c2954aeda/download)",
+  "seconds": 102.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "low",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "global_spatial_autocorrelation",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "local_getis_ord",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 153970,
+    "cached_input_tokens": 143360,
+    "output_tokens": 3619,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T09-deepseek-v4-flash-1791495509-2"
+}

@@ -1,0 +1,91 @@
+{
+  "task": "T12",
+  "title": "Space-time: earthquake aftershocks",
+  "trial": 2,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?",
+  "files": [
+    "usgs_comcat_ridgecrest_2019-07.csv"
+  ],
+  "expected": {
+    "mainshock_mag": 7.1,
+    "mainshock_id": "ci38457511",
+    "aftershocks_7d_25km": 673,
+    "aftershocks_m4_7d_25km": 63
+  },
+  "expected_why": {
+    "aftershocks_7d_25km": "pandas over the pinned snapshot, geodesic distance"
+  },
+  "score": {
+    "task": "T12",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mainshock_mag",
+        "kind": "number",
+        "expected": 7.1,
+        "matched": true,
+        "found": "7.1"
+      },
+      {
+        "name": "aftershocks_7d_25km",
+        "kind": "count",
+        "expected": 673,
+        "matched": true,
+        "found": "673"
+      },
+      {
+        "name": "aftershocks_m4_7d_25km",
+        "kind": "count",
+        "expected": 63,
+        "matched": true,
+        "found": "63"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "USGS",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded USGS earthquake catalog:\n\n**Largest event's magnitude: 7.1** \u2014 This is the M7.1 Ridgecrest mainshock, which occurred on 2019-07-06 at 03:19:53 UTC (35.7695\u00b0N, -117.5993\u00b0W).\n\n**Events within 7 days after it and within 25 km of its epicentre: 673**\n\n**Of those, magnitude 4 or greater: 63**\n\n### Details\n- The largest event is the **M7.1 Ridgecrest Earthquake Sequence** mainshock on July 6, 2019.\n- Counting events strictly after the mainshock and within 7 days (through July 13, 03:19 UTC), and within 25 km (haversine distance) of its epicentre, there were **673** events.\n- Of those 673, **63** had magnitude \u2265 4.0. The largest aftershocks in that window were M5.5 (July 6, ~20 km away) and M5.4 (July 6, ~17 km away).\n\n**Method note:** \"Within 7 days after\" was interpreted as events occurring after the mainshock's origin time and up to 7 days later (exclusive of the mainshock itself). Distances were computed with the haversine formula (great-circle distance on a sphere of radius 6371 km).",
+  "seconds": 63.1,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 88517,
+    "cached_input_tokens": 80640,
+    "output_tokens": 2325,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T12-deepseek-v4-flash-1791495612-2"
+}

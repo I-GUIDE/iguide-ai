@@ -1,0 +1,89 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Using \\(NDVI=(NIR-Red)/(NIR+Red)\\), with band 1 as red and band 2 as near-infrared:\n\n- **Mean NDVI in 2020:** **0.5326**\n- **Mean NDVI in 2024:** **0.4998**\n- **Mean change:** **\u22120.0328**\n- **Area losing more than 0.2 NDVI:** **9.00 hectares**\n\nThe loss area corresponds to **900 pixels**, with each pixel measuring \\(10 \\times 10\\) m (100 m\u00b2), across **9,975 valid overlapping pixels**. NoData and zero-denominator pixels were excluded.\n\nDownload the computed rasters:\n\n- [NDVI 2020](/agent/files/file_4326353f19e1/download)\n- [NDVI 2024](/agent/files/file_f0566f3e00ca/download)\n- [NDVI change, 2024 minus 2020](/agent/files/file_521993363e40/download)\n- [Summary report](/agent/files/file_091dd1485b2d/download)",
+  "seconds": 58.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 72573,
+    "cached_input_tokens": 0,
+    "output_tokens": 2511,
+    "usage_absent": 0,
+    "cost_usd": 0.0175,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T08-gpt-5.6-luna-1791498734-1"
+}

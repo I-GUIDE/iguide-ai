@@ -1,0 +1,99 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 2,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.532619"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.499840"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Using **NDVI = (NIR \u2212 Red) / (NIR + Red)**, excluding pixels with invalid or zero denominators:\n\n- **Mean NDVI in 2020:** **0.532619**\n- **Mean NDVI in 2024:** **0.499840**\n- **Area that lost more than 0.2 NDVI:** **9.0 hectares**\n\nThe comparison used **9,975 paired valid pixels**, of which **900 pixels** exceeded the 0.2 NDVI-loss threshold.",
+  "seconds": 87.3,
+  "route": [
+    "analyze",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 13,
+    "input_tokens": 187699,
+    "cached_input_tokens": 0,
+    "output_tokens": 3191,
+    "usage_absent": 0,
+    "cost_usd": 0.0414,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T08-gpt-5.6-luna-1791496356-2"
+}

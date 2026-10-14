@@ -1,0 +1,100 @@
+{
+  "task": "T01",
+  "title": "CRS-aware area + great-circle distance",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "What is the area of Champaign County, Illinois, in square kilometres? And what is the great-circle distance in km between Trafalgar Square, London (51.5080 N, 0.1281 W) and Notre-Dame de Paris (48.8530 N, 2.3499 E)?",
+  "files": [],
+  "expected": {
+    "area_km2": 2586.008557,
+    "distance_km": 344.2529934224686
+  },
+  "expected_why": {
+    "area_km2": "Census TIGERweb AREALAND+AREAWATER, GEOID 17019",
+    "distance_km": "pyproj Geod(WGS84).inv; a spherical haversine is within 0.3%"
+  },
+  "score": {
+    "task": "T01",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "area_km2",
+        "kind": "number",
+        "expected": 2586.008557,
+        "matched": true,
+        "found": "2,586.01 km\u00b2"
+      },
+      {
+        "name": "distance_km",
+        "kind": "number",
+        "expected": 344.2529934224686,
+        "matched": true,
+        "found": "343.89 km"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.",
+      "\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong."
+    ],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "- **Champaign County, Illinois area:** **2,586.01 km\u00b2**\n- **Great-circle distance** between Trafalgar Square and Notre-Dame de Paris: **343.89 km** (using the haversine formula and mean Earth radius).\n\n---\n\n\u26a0\ufe0f A deterministic invariant check COULD NOT VERIFY this run, so its numeric results are unconfirmed \u2014 this is not the same as them being wrong.\n\n- computed value from `this run`: invariant gate (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked.\n- computed value from `this run`: invariant gate (not_applicable): nothing in this run was checkable: no frame-like binding, no geospatial import and no declared outputs. This is not a failed verification \u2014 publish IGUIDE_OUTPUTS to have the numbers you quote checked.",
+  "seconds": 54.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "admin_boundary",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 55984,
+    "cached_input_tokens": 0,
+    "output_tokens": 1167,
+    "usage_absent": 0,
+    "cost_usd": 0.0126,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T01-gpt-5.6-luna-1791502439-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    }
+  ]
+}

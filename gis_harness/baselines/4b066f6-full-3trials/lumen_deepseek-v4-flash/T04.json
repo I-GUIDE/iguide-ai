@@ -1,0 +1,114 @@
+{
+  "task": "T04",
+  "title": "Network: fastest path + isochrone",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the one at 41.89222\u00b0 N, 87.62683\u00b0 W? How many intersections, counting the start, can be reached within 2 minutes of it?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "T04",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "fastest_minutes",
+        "kind": "number",
+        "expected": 3.429819958843825,
+        "matched": true,
+        "found": "3.43 minutes"
+      },
+      {
+        "name": "nodes_within_iso",
+        "kind": "count",
+        "expected": 15,
+        "matched": true,
+        "found": "15"
+      }
+    ],
+    "steps": {
+      "tool_calls": 8,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the road network in `roads.geojson`:\n\n**Fastest travel time from (41.87408\u00b0 N, 87.65075\u00b0 W) to (41.89222\u00b0 N, 87.62683\u00b0 W): \u2248 3.43 minutes**\n\n**Intersections reachable within 2 minutes of the start (counting the start): 15**\n\n### How this was computed\n\n1. **Graph construction**: Each LineString edge connects two intersections (its endpoints). The analysis extracted all 36 unique endpoints as nodes and 65 edges from the network.\n\n2. **Node matching**: The given coordinates (rounded to 5 decimals) correspond to the nearest actual nodes in the network \u2014 the start at (\u221287.6507522, 41.8740771) and the end at (\u221287.6268277, 41.8922237).\n\n3. **Edge travel time calculation**: Each edge's length was measured in a projected CRS (UTM zone 16N, EPSG:32616) to get true meters, then travel time was computed as `time = length / speed_kph`, converted to minutes.\n\n4. **Shortest path**: Dijkstra's algorithm found the shortest travel-time path from the start to every node.\n\n### Key details\n\n- **Fastest time to the destination**: **3.43 minutes** \u2014 the graph is fully connected, so a path exists.\n- **Within 2 minutes of the start**: **15 intersections** including the start itself (14 others). These are the nodes along the first few \"rings\" of the grid network radiating from the start \u2014 the reachable set spans roughly the southwest corner of the network (nodes at ~41.874\u201341.892\u00b0 N, ~87.650\u201387.627\u00b0 W), with the farthest reachable nodes at (41.89209, \u221287.65094) at 1.71 min and (41.87421, \u221287.62665) at 1.71 min.\n\nThe destination at 3.43 minutes is beyond the 2-minute reachable set, which is consistent \u2014 the end node is in the northeast corner of the network, roughly 3.4 minutes of travel away.",
+  "seconds": 132.0,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 13,
+    "input_tokens": 288029,
+    "cached_input_tokens": 250624,
+    "output_tokens": 6427,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T04-deepseek-v4-flash-1791494311-0"
+}

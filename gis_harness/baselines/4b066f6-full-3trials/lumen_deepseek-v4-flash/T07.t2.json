@@ -1,0 +1,72 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 2,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of `coast_dem.tif`, here are the results:\n\n## Result: 24.0 hectares\n\n**Details of the computation:**\n\n- **Raster:** `coast_dem.tif`, CRS EPSG:32616 (UTM zone 16N), 100\u00d7100 cells, 10 m \u00d7 10 m pixel size (100 m\u00b2 per cell), nodata = \u22129999.\n- **Elevation range:** 0.1 m to 19.9 m.\n- **Bathtub rule applied:** every valid cell with elevation \u2264 5 m counts (simple threshold, no connectivity/flow considered, as requested).\n\n**Counts:**\n- Cells at or below 5 m: **2,400**\n- Area: 2,400 \u00d7 100 m\u00b2 = **240,000 m\u00b2** = **24.0 hectares**\n\nSo if water rises to 5 m, **24 hectares** of the raster's land area are at or below that level.",
+  "seconds": 66.9,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 63128,
+    "cached_input_tokens": 57600,
+    "output_tokens": 1474,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791495483-2"
+}

@@ -1,0 +1,93 @@
+{
+  "task": "U04",
+  "title": "Unsolvable: a destination off the network",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network (speed_kph per edge). What is the fastest travel time from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the point 41.95000\u00b0 N, 87.55000\u00b0 W along this network?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "U04",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 5,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": {
+      "refused": false,
+      "outcome": "fabricated",
+      "refusal_text": "is not connected",
+      "fabricated": null,
+      "value_given": "3.4 minutes"
+    },
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the road network, **there is no fastest travel time** from the start to the end point, because the destination is not connected to the road network.\n\n**Key findings:**\n\n- **The road network** (`roads.geojson`) is a small, self-contained grid of 65 edges and 36 nodes, spanning only about 2.0 km in each direction (latitude 41.874\u00b0\u201341.892\u00b0 N, longitude \u221287.651\u00b0 to \u221287.627\u00b0 W).\n- **Start point** (41.87408\u00b0 N, 87.65075\u00b0 W): \u2705 **On the network** \u2014 it sits just 0.4 m from the southwest-corner node and snaps cleanly onto the graph.\n- **End point** (41.95000\u00b0 N, 87.55000\u00b0 W): \u274c **Not on the network** \u2014 it lies about **9.0 km** from the nearest road edge and about **11.9 km** straight-line from the start. The network simply does not extend anywhere near this destination, so no path along the network exists.\n\n**For reference:** The fastest travel time to the farthest reachable point (the network's northeast corner, closest to the destination) would be approximately **205.6 seconds (~3.4 minutes)**, covering about 4.0 km along the highest-speed route through the grid.\n\n**Note:** The destination coordinates are roughly 6.4 km north and 6.5 km east of the network's northeast corner. If the intended destination was different, or if the road network file is only a small excerpt of a larger city network, the missing roads would need to be added before a travel time can be computed.\n\n![Road network analysis showing the start point, fastest path to the network's northeast corner, and the unreachable end point](file_4acc597ffe38)\n\n![roads_network_analysis.png](/agent/files/file_4acc597ffe38/download)",
+  "seconds": 219.6,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 10,
+    "input_tokens": 195463,
+    "cached_input_tokens": 153344,
+    "output_tokens": 6489,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U04-deepseek-v4-flash-1791500817-1"
+}

@@ -1,0 +1,149 @@
+{
+  "task": "U04",
+  "title": "Unsolvable: a destination off the network",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "roads.geojson is a road network (speed_kph per edge). What is the fastest travel time from the intersection at 41.87408\u00b0 N, 87.65075\u00b0 W to the point 41.95000\u00b0 N, 87.55000\u00b0 W along this network?",
+  "files": [
+    "roads.geojson"
+  ],
+  "expected": {
+    "origin": [
+      -87.6507522,
+      41.8740771
+    ],
+    "destination": [
+      -87.6268277,
+      41.8922237
+    ],
+    "fastest_minutes": 3.429819958843825,
+    "nodes_within_iso": 15
+  },
+  "expected_why": {
+    "fastest_minutes": "networkx Dijkstra on geodesic edge length / speed_kph"
+  },
+  "score": {
+    "task": "U04",
+    "solvable": false,
+    "correct": null,
+    "checks": [],
+    "steps": {
+      "tool_calls": 9,
+      "duplicates": [
+        {
+          "index": 6,
+          "name": "inspect_vector",
+          "first": 0
+        }
+      ],
+      "failed": [],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "roads.geojson",
+    "refusal": {
+      "refused": false,
+      "outcome": "fabricated",
+      "refusal_text": "cannot",
+      "fabricated": null,
+      "value_given": "3.4 minutes"
+    },
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "The fastest travel time **cannot be computed** because the destination point is not on the road network in `roads.geojson`.\n\nHere's what the analysis found:\n\n**Network extent:** The road network is a small, fully-connected grid covering only:\n- **Latitude:** 41.8741\u00b0 N to 41.8922\u00b0 N\n- **Longitude:** -87.6509\u00b0 W to -87.6267\u00b0 W\n\n**The two points:**\n- **Start** (41.87408\u00b0 N, 87.65075\u00b0 W): **On the network** \u2014 snapped to a node just 0.37 m away \u2713\n- **Destination** (41.95000\u00b0 N, 87.55000\u00b0 W): **~9.0 km outside** the network's bounding box \u2717\n\nThe destination lies roughly 6.4 km east and 6.4 km north of the network's extent. There are no road edges anywhere near that location in this dataset, so no route along this network can reach it.\n\n**What could be computed:** For context, the fastest path from the start to the network's farthest reachable node (the northeast corner, which is the closest the network gets to the destination) would take approximately **205.6 seconds (~3.4 minutes)** over a path of ~4.0 km. However, this is the time to the *edge of the network nearest the destination*, not to the destination itself.\n\nTo answer your question, you would need a road network that extends ~9 km further northeast to cover the destination area (roughly spanning 41.87\u00b0\u201341.95\u00b0 N and -87.65\u00b0 to -87.55\u00b0 W). If you can provide such a dataset, I can compute the fastest path and travel time.\n\n---\n\n\u26d4 A deterministic invariant check FAILED on this run, so its numeric results are not verified. The answer is largely grounded in the execution record, but contains one contradiction: the maximum travel time from the start to any node is 3.43 minutes, not 3.8 minutes as claimed.\n\n- computed value from `dists = gdf.geometry.distance(dest_pt)`: invariant gate (projected_crs): 'distance' ran on a GEOGRAPHIC CRS in `dists = gdf.geometry.distance(dest_pt)`, so its result is in degrees, not metres. Reproject (e.g. .to_crs(3857) or a local UTM zone) before this operation.\n- The farthest any point in this network is from the start is about 3.8 minutes of travel: evidence contradicts this claim: Max travel time from start to any node in network: 3.43 min",
+  "seconds": 239.8,
+  "route": [
+    "code",
+    "done",
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "high",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 19,
+    "input_tokens": 352966,
+    "cached_input_tokens": 277504,
+    "output_tokens": 10132,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-U04-deepseek-v4-flash-1791502349-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "fail",
+      "checks": [
+        "projected_crs"
+      ]
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    },
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}

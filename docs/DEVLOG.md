@@ -5181,6 +5181,27 @@ rather than from the previous one.
   `chat_history[].elements` and `ratings` (latent, since no live caller sends a non-empty one).
   The file metadata store is on the Docker volume, not this cluster.
 
+## 2026-10-08 · M8.78 · Whole GIS tasks, re-run after every change (architecture stage 41)
+
+**Change** New `gis_harness/`: 12 classic GIS problems, 1 live-data variant and 4 unsolvable
+  questions. They run through a local server's `/agent/chat/stream` (`AGENT_MODE=local`) and are
+  scored mechanistically per model: correct within tolerance, no repeated or failed calls, no
+  banner, source named, graceful refusal. New `llm_usage` trace event from
+  `streaming_trace.UsageCallbackHandler`, installed through LangChain's configure hook so that
+  the supervisor's own model calls report tokens too; `api/server.py` forwards it.
+
+**Why** Stages 36–39 were five patches in one day, each checked only against the turn that
+  prompted it. Nothing re-ran whole tasks, so there was no way to tell whether a patch
+  generalised or broke another task. The cost of a turn counted only the peers' calls.
+
+**Measured** 4-task sample on `81fd7c8`: deepseek-v4-flash 3/3 correct, 1/1 refused, strict
+  3/4; gpt-5.6-luna 3/3, 1/1, strict 1/4 (no source named on 3; one failed call). Luna: $0.062
+  for the 4. Usage tests: 3 of 5 fail on the base. Harness tests: 19, including Moran's I and
+  Gi* against esda.
+
+**Not fixed** The harness measures; it changes no behaviour. The live-OSM task's reference can
+  move between runs. The number matcher accepts the right value anywhere in the answer.
+
 ## 2026-10-08 · M8.79 · A file_id the code names is staged without being listed
 
 **Change** `execute_code` (`agent_runtime/langchain_exec_tools.py`) now stages every minted file_id
@@ -5214,3 +5235,113 @@ rather than from the previous one.
   scanned, because a staged name is excluded from the run's artifacts, so a run that writes a file
   under an earlier file's name would lose its output. The claude and opencode peers stage the
   conversation's files once, at the start of a run. They do not scan.
+
+## 2026-10-08 · M8.80 · One record of the turn, progress instead of counts, a plan in state (architecture stage 42)
+
+**Change** New `agent_runtime/turn_log.py`.
+- The peers' tool records, the ledger and the progress rule all read it.
+- Identical calls are answered from it for the whole turn while nothing new has happened.
+- Two steps that add nothing end a peer run, and a peer whose last run added nothing is not re-run.
+- The task and plan ride in every peer step's system message.
+- Gate failures are superseded by a later run that fixes the same target.
+- Re-runs are decided by a producer check over bound tools.
+- Every composition clears the re-ground flag.
+
+**Why** Seven records of one turn, loop bounds that counted steps and not progress, and a plan
+  that lived only in the model's context: review flaws 3–5, and 14 + 15 + 12 catalogued incidents.
+
+**Measured** See stage 42: the harness before and after, per model.
+
+**Not fixed** A step that adds a wrong fact counts as productive (phases 3–4). The producer check
+  is a model call: a wrong "yes" costs one bounded re-run.
+
+## 2026-10-08 · M8.81 · A number carries its unit and where it was measured (architecture stage 43)
+
+**Change** `agent_runtime/units.py` parses units with pint. The sandbox gate reports
+  declarations, metric operations with their CRS, and frame sizes. `declared_outputs.py` judges
+  them agent-side and returns typed outputs. Tools that measure emit typed outputs, and the turn
+  log records them as facts. The unit vocabularies and the column- and variable-name heuristics
+  are deleted.
+
+**Why** Class A of the review's catalogue: 17 incidents, 8 fixed by adding a word to a list,
+  most of them a correct answer marked unverified.
+
+**Measured** Harness, gate off (2 trials) and on (1 trial), both models: correct answers
+  unchanged (deepseek 23/26 and 10/13, luna 26/26 and 13/13). No model declared `IGUIDE_OUTPUTS`
+  in 96 gate reports, so the new declaration checks never ran. deepseek's rise in
+  `cannot_determine` (26 → 44) is one task, T06, a pysheds thrash (numpy 2 removed `in1d`); the
+  `coverage` rate per run is unchanged. Stage 42's progress rule did not stop it, because every
+  step printed something new. Details in stage 43.
+
+**Not fixed** Models are not asked to declare outputs, so the declaration checks are idle in
+  practice. A number typed by hand into a script with the wrong unit still parses. Shapely-level
+  operations on raw coordinates bypass the operation tracker. The agent image needs rebuilding
+  to get pint; until then declared units are explicit unknowns.
+
+## 2026-10-08 · M8.82 · Facts, a number scan, one verdict (architecture stage 44)
+
+**Change**
+- **Facts and scan:** `agent_runtime/facts.py` holds the turn's facts, and a deterministic scan
+  resolves every stated figure to one, across units and at the precision shown.
+- **Cuts:** a figure no bound tool produces is cut, whatever its class.
+- **One verdict:** `agent_runtime/verdict.py` turns every check's findings into a single banner.
+- **Scoping:** the gate speaks only for the runs the answer uses.
+- **Deleted:** stage 37's routing list and stage 39's travel scan.
+
+**Why** Review flaws 2 and 7, and the live 21:34 UTC turn: a correct answer whose COULD NOT
+  VERIFY came entirely from side runs.
+
+**Measured** deepseek-v4-flash only (user's budget decision), gate on, 1 trial. The first run
+  regressed: correct answers with a banner went from 4 to 10. The records show six reading
+  errors, all fixed here:
+  - a compass letter read as a unit;
+  - a recorded number labelled by its whole output, not by the words beside it;
+  - a unit read across a line break;
+  - arithmetic on stated figures cut;
+  - `not_applicable` shown as "not checked";
+  - one unresolved figure widening the gate's scope.
+
+  Replayed offline over the recorded answers, unresolved figures in correct answers fell from
+  11.4% to 3.2% (p3-gate) and from 11.8% to 4.6% (p3-after). Not re-run live, because of the
+  Lumen cap.
+
+**Not fixed** English words pint knows as units ("20 are"). The gate's `all_nan` check on sparse
+  OSM join columns. A correct number attached to the wrong noun resolves. A memorised figure that
+  equals some recorded number resolves (the "~340 km by Eurostar" case).
+
+## 2026-10-08 · M8.83 · Every source catalogued, every answer naming its sources (architecture stage 45)
+
+**Change** `agent_runtime/source_catalog.py` gives every data source its coverage, extent and
+  licence. Peers see what each source leaves out. `dem_for_region` checks its extent before
+  fetching. Every answer that used data gets a Sources line rendered from the results it used.
+
+**Why** Review flaw 6. The baseline's answers named their source on 33/50 (deepseek) and 18/51
+  (luna) runs; the 10-08 schools answer did not say it was one district's file.
+
+**Measured** deepseek-v4-flash only (user's budget decision), gate on, 1 trial: a source the
+  task's data came from is named on 17/17 answers (was 12/17), and 15/17 carry the rendered
+  Sources line. The two that did not read their uploads only through `execute_code`, whose
+  string arguments hid `input_files`; that is fixed after the run, with tests. luna is not
+  re-measured.
+
+**Not fixed** The map layer event carries no source yet. Choosing a source is still the model's,
+  now with each source's coverage in front of it.
+
+## 2026-10-09 · M8.84 · A banner only when a check found something (architecture stage 46)
+
+**Change** `verdict.render` prints only a problem or a failed peer; a cut is one quiet line;
+  "not checked" stays in the verdict payload. The number scan no longer splits sentences at a
+  decimal point, resolves unit conversions, numbers inside lists and short sums of operands in
+  the same sentence. The gate's `all_nan` fails a join only when nothing matched. Two offline
+  tools: `gis_harness/replay_number_scan.py`, `gis_harness/banner_calibration.py`.
+
+**Why** Across 437 archived turns a banner marked a wrong answer 8% of the time (98 correct, 9
+  wrong) and caught 9 of 39 wrong answers. Of 49 number-scan cuts, 19 began mid-number (a sentence split
+  at a decimal point), among them p5-gate T02's headline.
+
+**Measured** Replay over 1,226 figures: split sentences 335 → 0, unresolved 60 → 55. Calibration
+  over 50 recorded verdicts: correct answers with a banner 33 → 3.
+
+**Not fixed** Method errors among the 30 unmarked wrong answers need reference recomputation. The map
+  UI does not show the verdict payload yet.
+

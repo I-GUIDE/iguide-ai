@@ -103,8 +103,9 @@ def test_the_state_keys_are_unchanged_by_the_merge():
     import inspect
 
     src = inspect.getsource(g)
-    # Stage 37 merges a second run into the slot instead of overwriting it; the KEY is the same.
-    assert '"analysis_results": _merge_peer_result(prior, clean)' in src
+    # Stage 37 merges a second run into the slot instead of overwriting it, and stage 42 fills
+    # its tool records from the turn log; the KEY is the same.
+    assert '"analysis_results": _merge_peer_result(prior, clean, log,' in src
     assert 'update["evidence"] = merged' in src
 
 

@@ -1,0 +1,111 @@
+{
+  "task": "T01",
+  "title": "CRS-aware area + great-circle distance",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "What is the area of Champaign County, Illinois, in square kilometres? And what is the great-circle distance in km between Trafalgar Square, London (51.5080 N, 0.1281 W) and Notre-Dame de Paris (48.8530 N, 2.3499 E)?",
+  "files": [],
+  "expected": {
+    "area_km2": 2586.008557,
+    "distance_km": 344.2529934224686
+  },
+  "expected_why": {
+    "area_km2": "Census TIGERweb AREALAND+AREAWATER, GEOID 17019",
+    "distance_km": "pyproj Geod(WGS84).inv; a spherical haversine is within 0.3%"
+  },
+  "score": {
+    "task": "T01",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "area_km2",
+        "kind": "number",
+        "expected": 2586.008557,
+        "matched": true,
+        "found": "2,584.62 km\u00b2"
+      },
+      {
+        "name": "distance_km",
+        "kind": "number",
+        "expected": 344.2529934224686,
+        "matched": true,
+        "found": "343.89 km"
+      }
+    ],
+    "steps": {
+      "tool_calls": 4,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Note:**"
+    ],
+    "source": "Census",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the computations performed in this session:\n\n**1. Area of Champaign County, Illinois**\n\nThe area was computed using the authoritative US Census TIGERweb county boundary (GEOID 17019), projected to UTM zone 16N (EPSG:26916) and applying the shoelace formula.\n\n- **Area: 2,584.62 km\u00b2** (\u2248 2,584,615,046 m\u00b2)\n\n**2. Great-circle distance between Trafalgar Square and Notre-Dame de Paris**\n\nUsing the haversine formula with Earth radius 6371 km on the given coordinates:\n- Trafalgar Square: 51.5080\u00b0 N, 0.1281\u00b0 W\n- Notre-Dame de Paris: 48.8530\u00b0 N, 2.3499\u00b0 E\n\n- **Distance: 343.89 km**\n\nBoth results were computed directly in this session \u2014 the county area from the Census boundary polygon, and the distance from the haversine formula on the provided coordinates.\n\n**Sources:** US Census TIGERweb, which leaves out anything outside the United States; neighbourhoods and informal areas (US public domain).\n\n---\n\n\u2139\ufe0f **Note:**\n- Note: 2 statement(s) with figures that none of the tools available here can produce were left out",
+  "seconds": 89.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "admin_boundary",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 9,
+    "input_tokens": 79310,
+    "cached_input_tokens": 55296,
+    "output_tokens": 2895,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T01-deepseek-v4-flash-1791513613-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "not_applicable"
+      ]
+    }
+  ]
+}

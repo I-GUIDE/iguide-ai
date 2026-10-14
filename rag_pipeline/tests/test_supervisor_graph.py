@@ -468,7 +468,7 @@ def test_grounding_audit_appends_caveat_when_flagged():
         do_rerank=False, do_audit=True,
     )
     assert "raw answer" in state["final_answer"]
-    assert "Grounding check" in state["final_answer"]  # caveat appended -> not cosmetic
+    assert "not supported by what the turn" in state["final_answer"]  # not cosmetic
     assert state["audit"]["severity"] == "high"
 
 
@@ -813,7 +813,7 @@ def test_medium_severity_does_not_warn_user():
     assert _apply_grounding_caveat("the answer", medium) == "the answer"  # unchanged
     high = {"hallucination_detected": True, "severity": "high", "summary": "fabricated statistic"}
     assert _audit_flagged(high) is True
-    assert "Grounding check" in _apply_grounding_caveat("the answer", high)
+    assert "Check this answer" in _apply_grounding_caveat("the answer", high)
 
 
 def test_reconcile_audit_tolerates_malformed_issue_strings():
@@ -2043,7 +2043,7 @@ def test_the_gate_spends_at_most_one_pass(monkeypatch):
     assert state["actions"].count("analyze") == 2, state["actions"]
     assert state.get("grounding_retries") == 1
     # second pass still ungrounded -> ship WITH the caveat rather than loop
-    assert "may not be fully supported" in state["final_answer"]
+    assert "not supported by what the turn" in state["final_answer"]
 
 
 def test_a_grounded_answer_never_triggers_a_pass(monkeypatch):
@@ -2152,7 +2152,9 @@ def _gated_analyze(report, calls):
 _UNVERIFIABLE = {"verdict": "cannot_determine", "counts": {"pass": 3, "fail": 0,
                                                            "cannot_determine": 1},
                  "findings": [{"check": "declared_units", "status": "cannot_determine",
-                               "target": "buffer_radius", "message": "unrecognised unit 'furlongs'"}]}
+                               "target": "buffer_radius",
+                               "message": "unit 'km/hr^^' does not parse as a unit; the number "
+                                          "cannot be checked"}]}
 _DEGREES = {"verdict": "fail", "counts": {"pass": 3, "fail": 1, "cannot_determine": 0},
             "findings": [{"check": "projected_crs", "status": "fail", "target": "bad = gdf.buffer(0.1)",
                           "message": "'buffer' ran on a GEOGRAPHIC CRS. Reproject before this operation."}]}
@@ -2164,11 +2166,11 @@ def test_a_gate_cannot_determine_does_not_send_the_turn_back_to_analyze(monkeypa
                                    analyze_fn=_gated_analyze(_UNVERIFIABLE, calls))
     assert state["actions"].count("analyze") == 1, state["actions"]
     assert not state.get("grounding_retries")
-    # Not swallowed: the caveat still reaches the user, with the finding that caused it. An
-    # unrecognised unit is the whole finding here, so since stage 37 it is a note, not "COULD
-    # NOT VERIFY" (test_regrounding_turn_record.py has the unit-only and other-unknown cases).
-    assert "did not recognise a declared unit" in state["final_answer"]
-    assert "furlongs" in state["final_answer"]
+    # Not swallowed: the finding that caused it is in the turn's verdict. Since stage 46 a
+    # "not checked" finding is reported there and no longer printed into the answer.
+    assert state["verdict"]["status"] == "unverified"
+    assert any("km/hr^^" in f["message"] for f in state["verdict"]["findings"])
+    assert "km/hr^^" not in state["final_answer"]
 
 
 def test_a_gate_fail_still_re_runs_and_the_peer_is_told_what_failed(monkeypatch):

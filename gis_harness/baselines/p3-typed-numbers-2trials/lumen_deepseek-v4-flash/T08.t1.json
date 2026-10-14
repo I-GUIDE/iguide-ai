@@ -1,0 +1,91 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 1,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.5326"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.4998"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.00 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of both satellite scenes, here are the results:\n\n## Mean NDVI per Date\n\n| Date | Mean NDVI |\n|------|-----------|\n| **2020** | **0.5326** |\n| **2024** | **0.4998** |\n\nThe scene-wide mean NDVI declined by **0.033** between the two dates.\n\n## Area That Lost More Than 0.2 NDVI\n\n- **900 pixels** had NDVI decrease by more than 0.2 between 2020 and 2024.\n- Each pixel is 10 m \u00d7 10 m = 100 m\u00b2 = **0.01 ha**.\n- **Area lost > 0.2 NDVI = 9.00 hectares** (out of a valid scene area of 99.75 ha, i.e. ~9% of the scene).\n\n## Additional Details\n\n- Both scenes are identical in extent: **100 \u00d7 100 pixels at 10 m resolution** (EPSG:32616, UTM zone 16N), covering a 1 km \u00d7 1 km area.\n- Band 1 = red, Band 2 = NIR; NDVI = (NIR \u2212 RED) / (NIR + RED).\n- Change range (valid pixels): **\u22120.350 to +0.001** \u2014 every valid pixel either stayed flat or lost vegetation; none gained.\n- Mean change: **\u22120.033**.\n- 25 pixels were excluded as nodata (red+NIR = 0 on at least one date).\n\n**Summary:** Mean NDVI fell from **0.53 (2020)** to **0.50 (2024)**, and **9.00 hectares** of the scene lost more than 0.2 NDVI between the two dates.",
+  "seconds": 143.1,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 96208,
+    "cached_input_tokens": 61952,
+    "output_tokens": 3272,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791500428-1"
+}

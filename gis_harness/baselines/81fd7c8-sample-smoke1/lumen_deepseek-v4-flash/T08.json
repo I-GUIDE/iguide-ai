@@ -1,0 +1,95 @@
+{
+  "task": "T08",
+  "title": "NDVI change detection",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?",
+  "files": [
+    "scene_2020.tif",
+    "scene_2024.tif"
+  ],
+  "expected": {
+    "mean_ndvi_2020": 0.5326190771370533,
+    "mean_ndvi_2024": 0.4998396407102441,
+    "loss_ha": 9.0
+  },
+  "expected_why": {
+    "loss_ha": "float64 NDVI from the stored integers; NoData = both bands 0"
+  },
+  "score": {
+    "task": "T08",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "mean_ndvi_2020",
+        "kind": "number",
+        "expected": 0.5326190771370533,
+        "matched": true,
+        "found": "0.533"
+      },
+      {
+        "name": "mean_ndvi_2024",
+        "kind": "number",
+        "expected": 0.4998396407102441,
+        "matched": true,
+        "found": "0.500"
+      },
+      {
+        "name": "loss_ha",
+        "kind": "number",
+        "expected": 9.0,
+        "matched": true,
+        "found": "9.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of the two satellite scenes:\n\n**Mean NDVI:**\n- **2020: 0.533**\n- **2024: 0.500**\n\n**Vegetation loss:** 900 pixels dropped by more than 0.2 NDVI between the two dates, which equals **9.0 hectares** (each pixel is 0.01 ha at 10 m resolution).\n\n**Supporting details:**\n- Overall mean change: \u22120.033 (a general decline across the scene)\n- Largest single-pixel drop: \u22120.35 NDVI\n- The change is almost entirely negative (max change +0.0014), so the scene broadly lost greenness, with a concentrated patch of ~9 ha losing more than 0.2.\n\nThe figure below shows the two NDVI surfaces and the change map (red = loss):\n\n![NDVI change](file_d788337ea350)\n\n![ndvi_change.png](/agent/files/file_d788337ea350/download)",
+  "seconds": 63.2,
+  "route": [
+    "code",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 120910,
+    "cached_input_tokens": 89088,
+    "output_tokens": 2644,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T08-deepseek-v4-flash-1791493420-0"
+}

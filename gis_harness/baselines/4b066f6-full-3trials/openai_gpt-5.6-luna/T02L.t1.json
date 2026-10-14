@@ -1,0 +1,79 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 1,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "execute_code",
+          "excerpt": "content='{\"ok\": false, \"exit_code\": 1, \"stdout\": \"\", \"stderr\": \"Traceback (most recent call last):\\\\n File \\\\\"/work/script.py\\\\\", line 2, in <module>\\\\n with open(\\'file_de68850773a4\\') as f: d=json.l"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "OpenStreetMap has **39 mapped schools within 1 mile** of **41.9231\u00b0 N, 87.7093\u00b0 W**.\n\nThis count includes features tagged `amenity=school`, including public, private, and religious schools. OSM coverage may be incomplete or outdated.",
+  "seconds": 59.2,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 123640,
+    "cached_input_tokens": 0,
+    "output_tokens": 1013,
+    "usage_absent": 0,
+    "cost_usd": 0.0259,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T02L-gpt-5.6-luna-1791496038-1"
+}

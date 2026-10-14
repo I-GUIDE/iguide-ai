@@ -1,0 +1,96 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 3,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [
+      "\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:"
+    ],
+    "source": "coast_dem.tif",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the analysis of `coast_dem.tif`, **24.0 hectares** of the DEM are at or below 5 m elevation.\n\n**Method (simple bathtub):**\n- The raster is in UTM zone 16N (EPSG:32616) with a 100\u00d7100 grid of 10 m \u00d7 10 m cells (100 m\u00b2 each), and NoData = -9999.\n- There are 9,900 valid cells (100 are NoData).\n- Cells with elevation \u2264 5 m: **2,400**.\n- Area = 2,400 \u00d7 100 m\u00b2 = 240,000 m\u00b2 = **24.0 ha**.\n\n**Cross-check:** The inundation tool independently reports a flooded fraction of 0.2424 (2,400 / 9,900), exactly matching the cell count. (Its absolute area figures are reported in a non-metric unit scale, so the fraction and direct metric computation are the reliable values.)\n\nThe flooded area is also shown on the map as a raster layer (the \"Under 5.0 m\" layer), and a depth GeoTIFF is available at `file_b7c5d0447cfd` if you want per-zone flooded fractions.\n\n![4439500_000_390500_000_inundation.png](/agent/files/file_e55b936f5cb4/download)\n\n**Sources:** coast_dem.tif (your upload).\n\n---\n\n\u2139\ufe0f **Not everything here could be checked.** Unchecked is not the same as wrong:\n- Not checked: the code check (coverage): a geospatial library is imported but no frame-like binding was reachable at module scope, so no frame was checked \u2014 work done inside a function cannot be verified; assign results to module-level names (`module scope`)",
+  "seconds": 81.3,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "medium",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inundation_at_level",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 8,
+    "input_tokens": 126135,
+    "cached_input_tokens": 91392,
+    "output_tokens": 2688,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T07-deepseek-v4-flash-1791513990-0",
+  "gate": [
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    },
+    {
+      "verdict": "cannot_determine",
+      "checks": [
+        "coverage"
+      ]
+    }
+  ]
+}

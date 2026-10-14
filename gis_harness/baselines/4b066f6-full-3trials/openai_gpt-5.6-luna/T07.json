@@ -1,0 +1,79 @@
+{
+  "task": "T07",
+  "title": "Inundation (bathtub)",
+  "trial": 0,
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "query": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts.",
+  "files": [
+    "coast_dem.tif"
+  ],
+  "expected": {
+    "flooded_ha": 24.0,
+    "flooded_km2": 0.24,
+    "trap_ha_with_nodata": 25.0
+  },
+  "expected_why": {
+    "flooded_ha": "count of valid cells with z <= 5 m, x 100 m^2"
+  },
+  "score": {
+    "task": "T07",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "flooded_ha",
+        "kind": "number",
+        "expected": 24.0,
+        "matched": true,
+        "found": "24.0 hectares"
+      }
+    ],
+    "steps": {
+      "tool_calls": 2,
+      "duplicates": [],
+      "failed": [
+        {
+          "name": "dem_for_region",
+          "excerpt": "content='{\"ok\": false, \"error\": \"could not read a geographic extent from file_29a73739fc04\", \"hint\": \"Pass bbox=[minlon, minlat, maxlon, maxlat], or lon/lat for a point.\"}' name='dem_for_region' tool_"
+        }
+      ],
+      "unproductive": 1
+    },
+    "banners": [],
+    "source": null,
+    "refusal": null,
+    "error": null,
+    "productive": false,
+    "strict": false
+  },
+  "answer": "Using the DEM\u2019s projected CRS (EPSG:32616), **2,400 cells** are at or below 5 m. Each cell is 10 m \u00d7 10 m, or 100 m\u00b2, giving a total inundated area of **24.0 hectares** under the simple bathtub assumption.",
+  "seconds": 52.5,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 0,
+  "tool_calls": [
+    {
+      "name": "dem_for_region",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 7,
+    "input_tokens": 65321,
+    "cached_input_tokens": 0,
+    "output_tokens": 1017,
+    "usage_absent": 0,
+    "cost_usd": 0.0143,
+    "unpriced_models": []
+  },
+  "error": null,
+  "thread_id": "harness-T07-gpt-5.6-luna-1791495871-0"
+}

@@ -1,0 +1,69 @@
+{
+  "task": "T02L",
+  "title": "Buffer/overlay: schools within a mile (live OpenStreetMap)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "How many schools does OpenStreetMap have within 1 mile of 41.9231 N, 87.7093 W?",
+  "files": [],
+  "expected": {
+    "count_within_mile": 20
+  },
+  "expected_why": {
+    "count_within_mile": "Overpass https://lz4.overpass-api.de/api/interpreter at run time, nwr amenity=school"
+  },
+  "score": {
+    "task": "T02L",
+    "solvable": true,
+    "correct": false,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": false,
+        "found": null
+      }
+    ],
+    "steps": {
+      "tool_calls": 1,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "OpenStreetMap",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": false
+  },
+  "answer": "Based on the evidence provided, I cannot determine how many schools are within 1 mile of the point (41.9231 N, 87.7093 W).\n\nHere's what the evidence does support:\n\n- An OpenStreetMap search was performed for `amenity=school` within a bounding box that was enlarged by 1 mile around the target point. The search returned **24 schools** in that bounding box.\n- The analysis explicitly notes that because the bounding box was enlarged by 1 mile, **some of these 24 schools may fall outside the actual 1-mile radius** from the point.\n- The next step \u2014 computing the exact distance from the point to each school's centroid to filter those within 1 mile (1609.34 meters) \u2014 was planned but **did not execute**. The code in the analysis results did not run, so no distance calculations or final filtered count were produced.\n\n**In short:** The evidence confirms 24 schools exist in the enlarged search area, but the exact count of schools within the strict 1-mile radius was not computed. To get the precise answer, the distance calculation would need to be run.",
+  "seconds": 143.4,
+  "route": [
+    "analyze",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "overpass_search",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 6,
+    "input_tokens": 51293,
+    "cached_input_tokens": 20736,
+    "output_tokens": 2099,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02L-deepseek-v4-flash-1791501809-0",
+  "gate": []
+}

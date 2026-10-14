@@ -1,0 +1,27 @@
+{
+  "openai:gpt-5.6-luna": {
+    "tasks": 4,
+    "correct": "3/3",
+    "refused_gracefully": "1/1",
+    "strict": "1/4",
+    "zero_unproductive": "3/4",
+    "unproductive_steps": 1,
+    "duplicate_calls": 0,
+    "failed_calls": 1,
+    "banners_on_correct": 0,
+    "banners_total": 0,
+    "source_named": "1/4",
+    "errors": 0,
+    "seconds_total": 221.6,
+    "llm_calls": 29,
+    "input_tokens": 286559,
+    "output_tokens": 3908,
+    "cost_usd": 0.0619,
+    "per_task": {
+      "T01": "OK  [unprod=1 no-source] 58.2s",
+      "T02": "OK  [no-source] 58.3s",
+      "T08": "OK  [no-source] 51.8s",
+      "U02": "REFUSED [] 53.3s"
+    }
+  }
+}

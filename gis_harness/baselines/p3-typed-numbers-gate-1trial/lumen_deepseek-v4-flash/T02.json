@@ -1,0 +1,159 @@
+{
+  "task": "T02",
+  "title": "Buffer/overlay: schools within a mile (pinned upload)",
+  "trial": 0,
+  "provider": "lumen",
+  "model": "deepseek-v4-flash",
+  "query": "The attached schools.geojson has school locations. How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?",
+  "files": [
+    "schools.geojson"
+  ],
+  "expected": {
+    "count_within_mile": 20,
+    "names_within_mile": [
+      "School 01",
+      "School 02",
+      "School 04",
+      "School 07",
+      "School 08",
+      "School 09",
+      "School 12",
+      "School 13",
+      "School 15",
+      "School 19",
+      "School 20",
+      "School 21",
+      "School 25",
+      "School 29",
+      "School 30",
+      "School 31",
+      "School 32",
+      "School 33",
+      "School 34",
+      "School 35"
+    ],
+    "nearest_school": "School 08",
+    "nearest_m": 412.6788919857677
+  },
+  "expected_why": {
+    "count_within_mile": "brute-force geodesic distance, pyproj Geod(WGS84)"
+  },
+  "score": {
+    "task": "T02",
+    "solvable": true,
+    "correct": true,
+    "checks": [
+      {
+        "name": "count_within_mile",
+        "kind": "count",
+        "expected": 20,
+        "matched": true,
+        "found": "20"
+      },
+      {
+        "name": "nearest_school",
+        "kind": "text",
+        "expected": "School 08",
+        "matched": true,
+        "found": "School 08"
+      },
+      {
+        "name": "nearest_m",
+        "kind": "number",
+        "expected": 412.6788919857677,
+        "matched": true,
+        "found": "412.53 meters"
+      }
+    ],
+    "steps": {
+      "tool_calls": 12,
+      "duplicates": [],
+      "failed": [],
+      "unproductive": 0
+    },
+    "banners": [],
+    "source": "schools.geojson",
+    "refusal": null,
+    "error": null,
+    "productive": true,
+    "strict": true
+  },
+  "answer": "Based on the analysis of the uploaded `schools.geojson` file, here are the results:\n\n**How many schools are within 1 mile of the site?**\n**20 schools** are within 1 mile (1,609.344 meters) of the site at 41.8827\u00b0 N, 87.6233\u00b0 W.\n\n**Which school is nearest, and how far is it?**\n**School 08** is the nearest, at **412.53 meters** (~0.26 miles) from the site.\n\n**Method:**\n- Loaded `schools.geojson` (37 school points, EPSG:4326).\n- Reprojected to **NAD83 / UTM zone 16N (EPSG:26916)** \u2014 a projected CRS \u2014 so distances are true ground meters, not degrees.\n- Computed the straight-line distance from the site to each school, counted those \u2264 1,609.344 m, and identified the minimum.\n\n**Nearest schools (top 5):**\n\n| School | Distance (m) |\n|--------|-------------|\n| School 08 | 412.5 |\n| School 04 | 521.0 |\n| School 30 | 558.2 |\n| School 29 | 566.1 |\n| School 12 | 692.4 |\n\n**Deliverables:**\n- **Interactive map:** The 37 schools are now on your map as a clickable point layer (all 37, not sampled).\n- **Downloadable CSV:** `school_distances.csv` ([download](/agent/files/file_d51f0b62c210/download)) lists every school with its distance in meters and whether it falls within 1 mile.\n\nFor reference on distance calculations in spatial analysis, you may find this resource helpful: [Distance and Nearest Features](https://platform.i-guide.io/notebooks/02f7f46b-c45f-4a06-81e0-d7df3f81ca23).",
+  "seconds": 288.4,
+  "route": [
+    "analyze",
+    "search",
+    "done"
+  ],
+  "audit_severity": "none",
+  "map_layers": 1,
+  "tool_calls": [
+    {
+      "name": "inspect_vector",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "execute_code",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "add_map_layer",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "write_output_file",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "inspect_file_for_analysis",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "list_available_skills",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "semantic_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "agent_kb_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "keyword_search",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "mcp_fetch_element_source",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "qgis_processing_help",
+      "agent": "orchestrator_agent"
+    },
+    {
+      "name": "qgis_processing_help",
+      "agent": "orchestrator_agent"
+    }
+  ],
+  "usage": {
+    "llm_calls": 16,
+    "input_tokens": 218672,
+    "cached_input_tokens": 144128,
+    "output_tokens": 7801,
+    "usage_absent": 0,
+    "cost_usd": null,
+    "unpriced_models": [
+      "deepseek-v4-flash"
+    ]
+  },
+  "error": null,
+  "thread_id": "harness-T02-deepseek-v4-flash-1791501793-0",
+  "gate": [
+    {
+      "verdict": "pass",
+      "checks": []
+    }
+  ]
+}
