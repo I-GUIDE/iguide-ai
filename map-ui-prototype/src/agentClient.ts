@@ -4,7 +4,7 @@
 // authoritative terminal `result`. This module IS the swap point that replaces the
 // local deterministic agentBrain.
 import type { AuthReason } from './auth';
-import { authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
+import { AuthError, authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
   withTokenRetry } from './auth';
 export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
@@ -208,6 +208,34 @@ export async function getConversation(cfg: AgentConfig, memoryId: string): Promi
     });
   } catch {
     return null;
+  }
+}
+
+export type DeleteOutcome = { ok: true } | { ok: false; message: string };
+
+/** Delete one of THIS USER's conversations on the server, permanently: the conversation and
+ *  every recorded turn of it. Files it made are kept (they are shared by id).
+ *
+ *  A 404 counts as done. The row came from this user's own list, so "no such conversation" means
+ *  it is already gone, deleted from another tab or device, and the right thing is to drop it.
+ *  Anything else is a failure the caller must SHOW, leaving the row in place: the old × removed
+ *  only the browser's copy, said nothing, and the conversation came back on the next refresh. */
+export async function deleteConversation(cfg: AgentConfig, memoryId: string): Promise<DeleteOutcome> {
+  try {
+    return await withTokenRetry(async () => {
+      const r = await fetch(absoluteUrl(`/agent/conversations/${encodeURIComponent(memoryId)}`, cfg), {
+        method: 'DELETE', headers: authHeaders(cfg, false), credentials: CREDENTIALS,
+      });
+      if (isAuthStatus(r.status)) throw await authErrorFrom(r);
+      if (r.ok || r.status === 404) return { ok: true } as DeleteOutcome;
+      return { ok: false, message: `The server could not delete this conversation (HTTP ${r.status}). `
+                                   + 'Nothing was removed; try again.' } as DeleteOutcome;
+    });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return { ok: false, message: `${err.message} Nothing was deleted.` };
+    }
+    return { ok: false, message: 'Could not reach the server, so nothing was deleted. Try again.' };
   }
 }
 

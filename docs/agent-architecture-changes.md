@@ -1972,6 +1972,367 @@ runner exists here, as `check:sources` and the other `check:*` scripts already n
 server-side text is unchanged, so saved conversations render correctly once the new bundle is
 served.
 
+### Stage S9.13 Deleting a conversation deletes it
+
+*Branch `claude/delete-conversation`, on prototype `75df473`.*
+
+A user on agent.i-guide.io (token mode) reported on 2026-10-13 that deleting a chat did nothing.
+Read from the code, it never could have. Three things combined:
+
+- **The API had no delete.** `/agent/conversations/<memory_id>` answered GET and PUT only.
+- **History in token mode is the server's list.** S9.6 made it so, and the client keeps an
+  IndexedDB copy only as a cache.
+- **The × removed only that cache, and by the wrong key.** `deleteSession(row.id)` deleted the
+  IndexedDB record whose key is the row id. In token mode the row id is the server's
+  `memoryId`, while the cache is keyed by the client's session id (`sess-…`) and carries the
+  `memoryId` as a field. So in token mode the × removed nothing at all. The next refresh listed
+  the conversation again from the server, which still held it.
+
+**`DELETE /agent/conversations/<memory_id>`** (`api/server.py`, `memory_module.delete_conversation`).
+It deletes the conversation's `chat_memory` document, which holds both the agent's memory and
+the client's snapshot, and every `chat_traces` document of that conversation. It answers like the
+GET route:
+- 404 for another user's id or an unknown one, never 403 (S9.3).
+- 404 `persistent_memory_disabled` in local mode.
+- the identity errors `_identity_error_response` already maps.
+
+It is stricter than GET in two ways, each because a delete cannot be undone:
+
+- **Nobody identified, no delete.** Dev, demo and a service-key caller have no user, so GET and
+  PUT let them through, and a delete would remove any conversation whose id they held. Every
+  answer prints its conversation's id. These callers get 403 `identity_required`.
+- **Unowned is never deletable.** `assert_owner(..., allow_unowned=False)` holds even while
+  `AGENT_TOKEN_STRICT=0`. The migration window keeps legacy conversations *readable* by id. It was
+  never meant to let anyone destroy one.
+
+**Traces go with it, and go first.** The traces route checks ownership on the conversation, not
+on the trace (S9.6), so a trace's access is its parent's. Once the parent is gone, `owner_of`
+returns None, and under `AGENT_TOKEN_STRICT=0` the route lets anyone holding the id read every
+turn's question and answer. A test reproduces exactly that against the fake store. Whether the VM
+runs non-strict was not checked; strict is the default. Deleting traces first means a failure
+halfway leaves an owned conversation with fewer traces, which a retry finishes, rather than
+unowned traces. The cost is diagnostic: a deleted conversation's turns are gone from the corpus
+the harness and failure reproduction draw on. A user's request to delete what they asked
+outranks that.
+
+The trace delete is a `delete_by_query` on `memory_id.keyword`. A memory id is a UUID and
+tokenises on its hyphens, so the bare field would match nothing and delete nothing, with no
+error. The conversation delete waits for a refresh (`refresh="wait_for"`), because the client
+re-lists the moment it returns. Without the wait, the deleted conversation is still in the search
+index and comes straight back, the save-then-list bug of S9.7 in reverse.
+
+**Files are not deleted.** A file id is printed into answers as a download link and can be used
+by the owner's other conversations, so no conversation owns its files. Reclaiming a deleted
+conversation's files would need a reference count across conversations and answers, which
+nothing keeps. `AGENT_FILE_RETENTION_DAYS` remains the only mechanism, and it is off.
+
+The server logs each deletion as `memory_id`, `owner` and trace count, with no content.
+
+**The client** (`App.tsx`, `agentClient.deleteConversation`, `sessionStore.deleteLocalCopies`):
+- **Confirm first.** The × now asks before deleting: "Delete from your account?" in token mode,
+  "…from this browser?" in dev and demo.
+- **Server first.** In token mode it calls the server first. Only on success does it remove the
+  local copies, found by `memoryId` and not by key, and re-list.
+- **Failures are shown.** A failure leaves the row and says why on it. A 404 counts as done: the
+  row came from this user's own list, so it means the conversation was already deleted elsewhere.
+- **The open conversation resets.** Deleting the open conversation starts a fresh one. Otherwise
+  its next turn would continue a deleted `memoryId`, and the end-of-turn save would recreate it.
+  For the same reason, the × is disabled on the open conversation while a turn is running.
+- **Dev and demo stay local.** They keep the local-only delete.
+
+`isOpenConversation` matches either id, and that also fixes the History highlight. The highlight
+compared the row with the session id, which in token mode never matched.
+
+**Measured.**
+- **Server tests.** `rag_pipeline/tests/test_conversation_delete.py` has 15 tests over the fake
+  store, which models analysed `owner_id` and `memory_id` and near-real-time deletes. All 15 fail
+  on prototype `75df473`.
+- **Mutations.** Each guard was removed in turn, and each removal fails at least one test:
+  - no refresh: 1 test fails;
+  - bare `memory_id`: 3 fail;
+  - no trace delete: 4 fail;
+  - default `allow_unowned`: 1 fails.
+- **Client check.** `npm run check:conversations` has 15 checks. Against prototype's source it
+  does not build, because neither export exists.
+- **Browser.** Local mode cannot exercise token mode, so the browser check used a replica:
+  - **What ran.** `api/server.py` ran in `AGENT_MODE=token` and verified a locally signed test
+    JWT. The store was replaced in process by the test fake, with no `.env` read and no cluster
+    reachable. The Vite dev page was proxied to it.
+  - **Token mode in Chrome.** Each check ran in its own tab:
+    - Cancel sends nothing.
+    - Delete sends one `DELETE` (200), then one list, and the row is gone after a reload.
+    - A forced server failure (500) leaves the row with the message under it.
+    - Deleting the open conversation resets the chat.
+    - A cache copy keyed `sess-…` with that `memoryId` is removed, and an unrelated record is kept.
+  - **Dev mode.** The same gesture sends no request and removes only the local record.
+  - **Not covered.** The real platform cookie and the prod cluster were not exercised.
+
+**Not done here.** Two cases remain, both read from the code:
+- **Other tabs.** Another tab still showing the deleted conversation keeps it until it next
+  re-lists. If that tab sends a turn, the chat path's `get_or_create_memory` re-creates the
+  document under the same owner. That path has no ownership check. The turn's PUT then passes,
+  because the caller owns the new document.
+- **A turn already in flight.** A turn in flight from another tab or device ends differently. Its
+  `update_memory` fails on the missing document (logged, not raised). Its end-of-turn PUT is then
+  refused 404 under the default `AGENT_TOKEN_STRICT=1`, but re-creates the conversation under
+  `AGENT_TOKEN_STRICT=0`.
+
+Closing either needs a server-side tombstone. Neither was observed. Both are closed in S9.14,
+which also found that the first one reached across users.
+
+### Stage S9.14 A deleted conversation stays deleted
+
+*Branch `claude/delete-tombstone`, stacked on S9.13 (`claude/delete-conversation`, `bfa0b510`).*
+
+S9.13 left two ways for a deleted conversation to come back, both read from the code: another
+tab's next turn, and a turn already in flight. This stage measured them, closed them, and closed
+a cross-user path found while measuring.
+
+**Measured first.** The measurement drove `POST /agent/chat` in token mode with the model stubbed,
+against the analysing fake store, under both `AGENT_TOKEN_STRICT` settings. Alice owns a
+conversation with one turn, and Bob is a second signed-in user.
+
+| Case, on `bfa0b510` | strict (default) | `STRICT=0` |
+| --- | --- | --- |
+| Bob, Alice's id as `memoryId` | 404 | 404 |
+| Bob, Alice's id as `threadId` only | **200**: his agent got her history, his turn was appended to her conversation | same |
+| After delete: a `memoryId` turn | 404 | **200**, re-created under the caller |
+| After delete: a `threadId`-only turn | **200**, re-created | **200**, re-created |
+| After delete: end-of-turn PUT | 404 | **200**, re-created |
+| After delete: an in-flight turn's trace | **stored**, an orphan | stored, and Bob could read it |
+| A normal first turn (`threadId` only, new id) | 200, owned | 200, owned |
+
+AGENTS.md said `get_or_create_memory` verifies the owner. It does not, and it never needed to,
+because the chat routes call `assert_owner` first. That call checked `memoryId`. The service
+keys the turn's memory on `memoryId or threadId`, and the map UI sends every first turn with
+`threadId` alone. So a turn naming someone else's conversation as its `threadId` skipped the
+check, read the conversation into its own context, and wrote to it. Strict mode did not help:
+strict changes what `assert_owner` does, and `assert_owner` never ran. This was not observed in
+production. It needs the victim's id, which every answer prints.
+
+**The chat edge** (`api/server.py`, `_assert_chat_memory_owner`) now checks the id the service
+will use. When the turn has no `memoryId` and persistent memory is on, it checks the `threadId`
+with a new `assert_owner(..., allow_missing=True)`. A missing document passes, because that is
+every first turn. A document someone else owns does not. Without `allow_missing`, a missing id
+reads as unowned and strict mode would refuse every first turn: one test pins that.
+
+This check is a new store read on a path that never read at the edge before. Until now, a first
+turn whose store was unreachable failed inside the service and fell back to in-process memory. So
+when the check cannot read the store, the turn runs with persistent memory off, which is the same
+fallback. The fallback is chosen at the edge, so the service never makes the read the check could
+not make. A store that recovers mid-turn therefore cannot let an unchecked turn through. Refusing
+instead would turn an outage into failed first turns.
+
+**The tombstone** (`memory_module.delete_conversation`). The delete now overwrites the
+conversation document with `{"deletedAt": <time>}` instead of removing it. Every re-creation path
+above writes to the conversation's id, and each reads the id first. With the slot empty they
+created a fresh document. With a tombstone there they meet a refusal:
+- **`assert_owner`** raises `ConversationDeleted`, a `MemoryAccessDenied`, before the owner test,
+  so every route answers 404, including to the owner. The owner's own stale tab is the likeliest
+  caller.
+- **`get_or_create_memory`, `update_memory` and `save_session_snapshot`** each refuse a tombstone
+  as well. The edge is skipped by callers with no identity (dev, demo, the service key, or a
+  local server pointed at the shared cluster), and it is passed by a turn that began before the
+  delete.
+- **`save_turn_trace`** skips the trace for a deleted parent, at the cost of one GET per turn. If
+  that GET fails, it still tries the store.
+- **`get_memory`** returns None for a tombstone, so readers see nothing there. The list needs no
+  change: it filters on an owner and a snapshot, and a tombstone has neither.
+
+**Alternatives considered:**
+- **An in-process set of recently deleted ids** is smaller, but it is lost on restart and not
+  shared across workers or containers. The in-flight case is exactly a second request, possibly
+  served elsewhere.
+- **A separate tombstone index** is a new index on the website's cluster. It is also a second
+  write that can fail after the delete succeeded, which leaves exactly the open slot. Every check
+  would then read two indexes.
+- **A `deletedAt` field on the full document** keeps the content, which is not a delete.
+- **Relying on strict mode** leaves the `threadId` path and the orphan trace open, per the table.
+
+Overwriting in place is one write, it removes the content in the same operation, and it uses the
+id itself as the lock.
+
+**Not short-lived.** The tombstone is never reclaimed. An expiry would reopen the stale-tab case
+for any tab left open past it. It would also need a sweeper, or lazy expiry in every reader, to
+save a document smaller than the deletion's own log line: one timestamp, no owner, no content. A
+conversation id is a random UUID that nothing legitimately reuses, so refusing it forever costs
+nothing.
+
+The overwrite waits for a refresh, for S9.13's reason. Until a refresh, search returns the
+version that was there before, so the deleted conversation would come back in the immediate
+re-list. The test fake's base class hid an unrefreshed write instead. That is right for a new
+document and wrong for an overwrite: the tombstone would leave the list at once whether or not it
+asked for a refresh, and the S9.13 refresh test would pass vacuously. The fake now keeps the
+previous version searchable until a refresh.
+
+**Measured after.** The same table, re-run, gives 404 for every Bob row and every after-delete
+row, in both modes. The in-flight trace is not stored, and a first turn is still 200 and owned.
+
+- **Tests.** There are 14 new or changed test functions, 16 cases:
+  - 5 new in `rag_pipeline/tests/test_memory_ownership.py`;
+  - 8 new and 1 changed in `rag_pipeline/tests/test_conversation_delete.py`, two of them
+    parametrised over strict.
+
+  Of the 16 cases, 15 fail on `bfa0b510`:
+  - **Two fail for a weaker reason.** The strict variants of the `memoryId` turn and of the PUT
+    fail there only because no tombstone is left. Their 404 already held under strict. They stay
+    as guards.
+  - **The outage test passes by design.** It guards against this stage's own edge read, so it
+    cannot fail on code that has no such read. It does fail if the check refuses on a store error
+    (500), and it fails if the check proceeds with persistence still on.
+- **Mutations.** Each guard was removed in turn, and each removal fails at least one test:
+
+  | Guard removed | Tests that fail |
+  | --- | ---: |
+  | edge check on `threadId` | 3 |
+  | `allow_missing` | 2 |
+  | `assert_owner` tombstone check | 2 |
+  | snapshot guard | 2 |
+  | trace guard | 1 |
+  | `update_memory` guard | 2 |
+  | `get_or_create_memory` guard | 1 |
+  | `get_memory` hiding the tombstone | 1 |
+  | the tombstone's refresh | 9 |
+  | hard delete in place of the tombstone | 9 |
+
+**Not done here:**
+- **The VM's `AGENT_TOKEN_STRICT` setting** was not checked. The `threadId` path was open either
+  way.
+- **The update race.** `update_memory` reads, then writes. A delete landing between the two puts
+  that one turn's history into the tombstone document, which stays hidden from every reader.
+  Passing `if_seq_no` and `if_primary_term` from the read would close it.
+- **Other state keyed by `threadId`.** The LangGraph checkpointer and the in-process session
+  memory are both keyed by the client's `threadId`. When a turn sends its own `memoryId` with
+  someone else's `threadId`, nothing checks the `threadId`. Whether that resumes the other user's
+  agent thread was not measured. Measured and closed in S9.15: it did.
+- **Files.** The S9.13 position is unchanged: deleting a conversation does not delete its files.
+
+### Stage S9.15 Another user's threadId names none of your agent state
+
+*Branch `claude/thread-owner-scope`, stacked on S9.14 (`claude/delete-tombstone`, `28294473`).*
+
+S9.14 left one row unmeasured: state the agent keeps under the client's `threadId`. The chat
+edge checks the conversation DOCUMENT, keyed by `memoryId or threadId`. A turn that sends its
+own `memoryId` passes that check whatever `threadId` it sends, and the agent keeps everything
+else between turns under the `threadId`. The map UI prints that id in every answer.
+
+**Where `threadId` is a key**, read from the code before measuring:
+- the peers' checkpointed threads, `child_thread_id(thread_id, "analysis" | "sup_search" |
+  "code")` on the process-global `DEFAULT_CHECKPOINTER`;
+- session memory, session files and the action ledger (`session_memory`);
+- the sandbox workspace on disk (`child_thread_id(thread_id, "codeexec")`), which the code peer
+  lists and runs in, and the Claude peer's CLI session directory (`"claudepeer"`);
+- staged inputs and the QGIS session (`"code_qgis"`, `"analysis_qgis"`);
+- the lineage graph, keyed by the file store's session, which the edge binds to the raw
+  `threadId`.
+
+The file store is not on the list. Its records carry `owner_id`, and every read checks it
+(Stage 30), so its session stays the raw `threadId`.
+
+**Measured first**, on `28294473`, token mode, strict, model stubbed. The stub does with the
+thread id it is handed what the graph does: a real `create_agent` graph on the real
+`DEFAULT_CHECKPOINTER` under the analysis child id, the workspace listing, the ledger read, and
+`lineage.active()`. Alice ran two turns on T with an uploaded file. Bob ran one turn on his own
+conversation, then sent `{memoryId: his own, threadId: T}`.
+
+| Bob's turn received | `AGENT_PERSISTENT_MEMORY` on | off (or a store outage) |
+| --- | --- | --- |
+| edge | **200** | **200** for a `threadId`-only turn: no document to check |
+| analysis peer's checkpointed messages | **both of Alice's questions, her file id and filename** | same |
+| session file ids in his input | **her file id** (the name was withheld: the file store refused the record) | same |
+| sandbox workspace | **her `alice_result.csv`** | same |
+| action ledger | **her rows** | same |
+| lineage graph | **her source node** | same |
+| chat history | his own | **her questions and answers** |
+
+Her file's content was not reachable: `get_file_record` refused it. Her workspace was, because
+the sandbox mounts the directory, and a workspace file has no owner record.
+
+**Two fixes considered.**
+- **Check the `threadId` at the edge too**, or require it to equal `memoryId`. This only works
+  where a document exists to check. With persistence off, or during a store outage (which falls
+  back to it), there is none, and session memory is then the turn's only history. Distinct
+  `threadId`/`memoryId` pairs, which the API docs show, would have no owner record anywhere.
+- **Scope the key to the caller.** The agent's key is the client's id plus a digest of the
+  signed-in user. Two users who send the same id get two keys, in every mode, with no registry
+  and no store read. **Chosen.**
+
+**The change.**
+- **`agent_runtime/thread_scope.py`**: `scoped(id)` returns `<id>@u-<16 hex of sha256(user
+  id)>`, and `unscoped` inverts it. A digest, not the id: platform ids are URLs, and the key ends
+  up in directory names and log lines. With nobody signed in (dev, demo, the service key) the key
+  is the client's id, unchanged. An unsigned id that already carries a scope is scoped again
+  (`@u-anon`), so a service-key caller cannot reach a user's state by spelling out its key.
+- **The chat service scopes once, where the id enters the agent.** `run_agent_chat` and
+  `stream_agent_chat_events` hand the scoped key to the graph and to session memory and files.
+  Every child id, workspace, ledger row and staged input below that inherits the scope, with no
+  change at those sites. Scoping at each consumer instead was rejected: a missed or future
+  consumer would be unscoped, silently.
+- **The client never sees the key.** The map UI adopts a `thread_id` from ANY event as the
+  conversation id (`agentClient.ts`). A scoped key reaching it would come back as the next
+  `threadId` and be scoped twice. `_for_client` translates `data.thread_id` in the graph's status
+  and completed events, which are the only events that carry one. The response, the
+  `agent_chat_started` status and the stored trace keep the client's id.
+- **A signed-in turn with no id gets one from the service.** The graph generates
+  `auto-thread-<uuid>` when given none. That id would be unscoped, and the next turn, sending it
+  back, would be scoped and find nothing of the first.
+- **Lineage** scopes its key itself (`lineage._conversation`). Its key is the file store's
+  session, and the edge binds that to the raw id. It reads the identity ContextVar, as the file
+  store's owner checks in the same tool code already do.
+- **`llm_usage` records** keep the client's conversation id as their `session`.
+
+**At deploy.** Keys change for signed-in conversations started before it. The checkpointer,
+session memory and lineage are in-process, so a restart drops them anyway. Workspaces and Claude
+peer directories are on disk: an older conversation's next code run starts in an empty
+workspace, and its old directory expires on the 72-hour sweep. Files in the file store are
+unaffected.
+
+**Measured after.** The same turns: Bob's agent ran under `T@u-<his digest>`. His peer saw only
+his own question, and the workspace, ledger, lineage, session files and history held nothing of
+Alice's, in both persistence modes. Alice's second turn still saw all of her first.
+
+- **Tests.** `rag_pipeline/tests/test_thread_scope.py` has 9 functions, 11 cases. 6 fail on
+  `28294473`:
+  - Bob's own `memoryId` with Alice's `threadId`;
+  - a `threadId`-only turn with persistence off, and during a store outage;
+  - Bob's turn leaving nothing in Alice's state;
+  - the service key spelling out a scoped key;
+  - the client never seeing the scoped key, driven through the real `graph_runtime` stream with
+    only the orchestrator graph stubbed.
+
+  5 pass on the base by design, as guards:
+  - Alice keeping her own conversation (2 cases);
+  - an unsigned caller's key being unchanged;
+  - a signed-in turn with no id keeping its state on the next turn, which guards this stage's own
+    generated id;
+  - the key's unit test.
+- **Mutations.** Each part was removed in turn, against `test_thread_scope.py`,
+  `test_conversation_delete.py` and `test_memory_ownership.py`:
+
+  | Part removed | Tests that fail |
+  | --- | ---: |
+  | the service scoping the key | 6 |
+  | lineage scoping its own key | 4 |
+  | re-scoping an unsigned scoped id | 2 |
+  | translating the key back for the client | 1 |
+  | the service generating a signed-in turn's id | 1 |
+
+  The `llm_usage` unscoping has no test: it changes a diagnostic field only.
+- **Full suites.** `rag_pipeline/tests` + `tests`, offline: 4361 passed and 1 failed, against
+  4350 passed and 1 failed on `28294473`. The one failure on both is
+  `test_the_installed_networkx_matches_the_pin`, the Mac environment against the image pin.
+
+**Not done here:**
+- **Measured with the graph stubbed, not live.** The stub calls the same helpers with the id it
+  is handed, at the call sites listed above. A consumer that reads the request's raw id some
+  other way would not be covered. None was found.
+- **`AGENT_PERSISTENT_MEMORY=0` in token mode refuses a `memoryId` turn** (404), because no
+  document exists to own. The map UI does not send one in that mode (the response carries no
+  `memoryId`), so this was not changed.
+- **Delete does not clear in-process or workspace state** for the conversation. It is now
+  reachable only by its owner, and it expires.
+- **Deployment.** Not merged, not deployed.
+
 
 ---
 

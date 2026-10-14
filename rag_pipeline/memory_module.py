@@ -194,6 +194,36 @@ class MemoryAccessDenied(Exception):
     """This conversation belongs to someone else."""
 
 
+class ConversationDeleted(MemoryAccessDenied):
+    """This conversation was deleted, and its id may not be used again, by anyone."""
+
+
+# A deleted conversation's document is not removed: it is OVERWRITTEN with this one field, a
+# tombstone holding no content and no owner. The id itself is then the guard. Every path that
+# could re-create a conversation does so by writing to that id (`get_or_create_memory`'s create
+# half, `update_memory`, the snapshot PUT's NotFound branch), and each of them reads the id first,
+# so each meets the tombstone instead of an empty slot. A hard delete left the slot empty, and a
+# second tab's next turn or a turn still in flight elsewhere filled it again (S9.14).
+TOMBSTONE_FIELD = "deletedAt"
+
+
+def _raw_memory(memory_id: str) -> Optional[Dict]:
+    """The stored document as it is, tombstone included; None if there is nothing at that id."""
+    try:
+        return _get_opensearch_client().get(index=MEMORY_INDEX, id=memory_id)["_source"]
+    except NotFoundError:
+        return None
+
+
+def _is_tombstone(doc: Optional[Mapping[str, Any]]) -> bool:
+    return bool(doc) and doc.get(TOMBSTONE_FIELD) is not None
+
+
+def is_deleted(memory_id: str) -> bool:
+    """Whether this id belongs to a conversation its owner deleted."""
+    return _is_tombstone(_raw_memory(memory_id))
+
+
 def _current_owner() -> Optional[str]:
     """The signed-in user, or None in a deployment that identifies nobody."""
     try:
@@ -210,7 +240,8 @@ def owner_of(memory_id: str) -> Optional[str]:
     return str(value).strip() or None if value else None
 
 
-def assert_owner(memory_id: str, *, allow_unowned: Optional[bool] = None) -> None:
+def assert_owner(memory_id: str, *, allow_unowned: Optional[bool] = None,
+                 allow_missing: bool = False) -> None:
     """Refuse to touch a conversation that belongs to someone else.
 
     Checked at the EDGE rather than inside every read and write, for one specific reason: a
@@ -221,17 +252,30 @@ def assert_owner(memory_id: str, *, allow_unowned: Optional[bool] = None) -> Non
 
     A memory_id is a UUID4 and not guessable, which is why an unowned legacy conversation stays
     reachable during the migration and closes with everything else once strict.
+
+    ``allow_missing`` is for an id the caller is about to CREATE: a chat turn that names its
+    conversation only by ``threadId``, which is how every first turn starts. Nothing at the id
+    passes; a document someone else owns does not, and neither does a deleted one's tombstone.
+    Without it, a missing id reads as "unowned" and strict mode would refuse every first turn.
     """
     caller = _current_owner()
     if not caller:
         return                      # dev / demo / service: no identity, nothing to enforce
+    doc = _raw_memory(memory_id)
+    if _is_tombstone(doc):
+        # Before the owner test, and for the owner too: the owner deleted it, and a stale tab of
+        # theirs is exactly the caller that would otherwise bring it back.
+        raise ConversationDeleted(f"conversation {memory_id} was deleted")
+    if doc is None and allow_missing:
+        return                      # nothing there yet: the turn creates it, under this caller
     if allow_unowned is None:
         try:
             from agent_runtime import identity
             allow_unowned = not identity.token_strict()
         except Exception:  # noqa: BLE001
             allow_unowned = True
-    owner = owner_of(memory_id)
+    value = (doc or {}).get("owner_id")
+    owner = (str(value).strip() or None) if value else None
     if owner is None:
         if not allow_unowned:
             raise MemoryAccessDenied(f"conversation {memory_id} has no owner")
@@ -388,6 +432,11 @@ def save_session_snapshot(memory_id: str, snapshot: Mapping[str, Any]) -> Dict[s
     and the document's own ``owner_id`` is left untouched, so a snapshot cannot hand a
     conversation to someone else by claiming to.
     """
+    if is_deleted(memory_id):
+        # The route's assert_owner already refuses a tombstone, but only for a caller with an
+        # identity; dev, demo and the service key skip it. Without this, the update below would
+        # write the client's whole record into the tombstone, under a deleted conversation's id.
+        raise ConversationDeleted(f"conversation {memory_id} was deleted")
     clean = {k: v for k, v in dict(snapshot or {}).items() if k not in _SNAPSHOT_RESERVED}
     encoded = _encode_snapshot(clean)
     size = len(encoded.encode("utf-8"))
@@ -498,6 +547,17 @@ def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
     Never raises: a trace is diagnostic, and losing the answer because the diagnostics could not
     be written would invert the priority. Failures are logged and reported in the return value.
     """
+    try:
+        deleted = is_deleted(memory_id)
+    except Exception as err:  # noqa: BLE001 - an unreadable parent is no reason to drop a trace
+        logger.warning("Could not check %s before storing its trace: %s", memory_id, err)
+        deleted = False
+    if deleted:
+        # A turn that was running when its conversation was deleted ends here. Stored, its trace
+        # would be an orphan: the delete already took every trace, and the traces route checks
+        # the parent, which a tombstone leaves without an owner.
+        logger.info("Trace not stored: conversation %s was deleted during the turn", memory_id)
+        return {"stored": False, "reason": "conversation_deleted"}
     doc_id = f"{memory_id}:{uuid.uuid4().hex[:12]}"
     kept, dropped = _fit_events(list(events or []), _trace_max_bytes())
     body = {
@@ -607,6 +667,10 @@ def get_or_create_memory(memory_id: str) -> Dict:
     client = _get_opensearch_client()
     try:
         response = client.get(index=MEMORY_INDEX, id=memory_id)
+        if _is_tombstone(response["_source"]):
+            # The chat edge refuses this for a caller with an identity; this catches a turn that
+            # passed the edge before the delete, and callers with no identity.
+            raise ConversationDeleted(f"conversation {memory_id} was deleted")
         return response["_source"]
     except NotFoundError:
         # Claiming the id on creation is what stops a later caller inheriting this conversation
@@ -622,7 +686,8 @@ def get_or_create_memory(memory_id: str) -> Dict:
 def get_memory(memory_id: str) -> Optional[Dict]:
     try:
         response = _get_opensearch_client().get(index=MEMORY_INDEX, id=memory_id)
-        return response["_source"]
+        # A tombstone is a deleted conversation; to anything reading its content it is not there.
+        return None if _is_tombstone(response["_source"]) else response["_source"]
     except NotFoundError:
         logger.info("Memory not found for ID %s", memory_id)
         return None
@@ -642,6 +707,10 @@ def update_memory(
     try:
         client = _get_opensearch_client()
         doc = client.get(index=MEMORY_INDEX, id=memory_id)
+        if _is_tombstone(doc["_source"]):
+            # A turn in flight when its conversation was deleted. Writing its answer back would
+            # put content into the tombstone, under the id of a conversation the user deleted.
+            raise ConversationDeleted(f"conversation {memory_id} was deleted")
         chat_history = doc["_source"].get("chat_history", [])
 
         entry = {
@@ -682,6 +751,59 @@ def delete_memory(memory_id: str) -> None:
     except Exception as err:
         logger.error("Error deleting memory %s: %s", memory_id, err)
         raise
+
+
+def delete_conversation(memory_id: str) -> Dict[str, Any]:
+    """Delete one conversation for good: its recorded turns, then the conversation itself, whose
+    document is replaced by a content-free tombstone so that the id cannot be re-created.
+
+    Caller must already own it. Returns ``{"deleted": bool, "traces": n}``; ``deleted`` is False
+    only when the conversation was already gone. Raises if either store refuses, leaving the
+    conversation in place so the same request can be retried.
+
+    TRACES FIRST, because a trace's access is its conversation's (the traces route checks the
+    parent, not the trace). With the conversation gone and its traces left behind, the parent has
+    no owner, so ``assert_owner`` lets anyone holding the id through while
+    ``AGENT_TOKEN_STRICT=0``, and the traces are the whole question and answer of every turn.
+    Deleted in the other order, a failure halfway would leave exactly that. In this order it
+    leaves an owned conversation with fewer traces, which a retry finishes.
+
+    The tombstone stays. It holds one timestamp, no owner and no content, which is less than the
+    deletion's own log line; and a conversation id is a random UUID that nobody legitimately
+    reuses, so refusing it forever costs nothing, while letting the refusal lapse would reopen the
+    stale-tab case for a tab left open past the expiry.
+
+    Files are NOT deleted. A file id is printed into answers as a download link and can be used
+    by the owner's other conversations, so a conversation does not own its files.
+    """
+    client = _get_opensearch_client()
+    try:
+        # `.keyword` for the reason `list_turn_traces` gives: a memory id tokenises on its hyphens,
+        # and a term query on the analysed field would match nothing and delete nothing, silently.
+        # `conflicts="proceed"`: a turn still being recorded must not abort the whole delete.
+        result = client.delete_by_query(
+            index=TRACE_INDEX,
+            body={"query": {"term": {"memory_id.keyword": memory_id}}},
+            conflicts="proceed", refresh=True)
+    except NotFoundError:
+        result = {"deleted": 0}         # no trace index yet: nothing was ever recorded
+    if result.get("failures"):
+        raise RuntimeError(f"could not delete every trace of {memory_id}: "
+                           f"{len(result['failures'])} failed")
+    traces = int(result.get("deleted") or 0)
+    existing = _raw_memory(memory_id)
+    if existing is None or _is_tombstone(existing):
+        return {"deleted": False, "traces": traces}
+    # OVERWRITTEN, not deleted: `index` replaces the whole document, so the history, the
+    # snapshot and the owner are gone in this one write, and what is left is the tombstone that
+    # stops this id being re-created (see TOMBSTONE_FIELD). It is never listed: the list filters
+    # on an owner and a snapshot, and it has neither.
+    # `refresh="wait_for"` for the snapshot's reason, in reverse: the client re-lists the moment
+    # this returns, and the overwrite is not visible to search until the next refresh, so without
+    # it the conversation it just deleted comes straight back in the list.
+    client.index(index=MEMORY_INDEX, id=memory_id, refresh="wait_for",
+                 body={TOMBSTONE_FIELD: _now()})
+    return {"deleted": True, "traces": traces}
 
 
 def _needs_context(new_query: str) -> bool:
@@ -927,12 +1049,15 @@ def update_rating(memory_id: str, message_id: str, ratings: Dict) -> None:
 __all__ = [
     "configure_embedder",
     "configure_opensearch_client",
+    "ConversationDeleted",
     "create_memory",
+    "delete_conversation",
     "delete_memory",
     "form_comprehensive_user_query",
     "get_memory",
     "get_or_create_memory",
     "initialize_state",
+    "is_deleted",
     "update_memory",
     "update_rating",
 ]

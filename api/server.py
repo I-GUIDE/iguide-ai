@@ -17,11 +17,11 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
-from rag_pipeline.memory_module import (MemoryAccessDenied, PersistentMemoryDisabled,
-                                        SnapshotTooLarge,
+from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
+                                        PersistentMemoryDisabled, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
-                                        get_session_snapshot, get_turn_trace, list_memories,
-                                        list_turn_traces, save_session_snapshot)
+                                        delete_conversation, get_session_snapshot, get_turn_trace,
+                                        list_memories, list_turn_traces, save_session_snapshot)
 from rag_pipeline.pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -353,6 +353,35 @@ def _persistent_memory_allowed() -> bool:
     within a conversation). Unset honours the request, exactly as before.
     """
     return (os.getenv(PERSISTENT_MEMORY_ENV) or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _assert_chat_memory_owner(normalized: dict) -> None:
+    """Refuse a turn on a conversation that is not the caller's, or that was deleted.
+
+    The service keys the turn's memory on ``memory_id or thread_id``, so the edge checks THAT,
+    not ``memory_id`` alone. Checking only ``memory_id`` let a turn that named another user's
+    conversation as its ``threadId`` read that conversation's history into its own context and
+    append its turn to it, in strict mode too (measured in S9.14). A ``threadId``-only turn is
+    also how every first turn starts, so there a missing document passes: the turn creates it.
+    """
+    if normalized.get("memory_id"):
+        assert_memory_owner(normalized["memory_id"])
+    elif normalized.get("thread_id") and normalized.get("use_persistent_memory"):
+        try:
+            assert_memory_owner(normalized["thread_id"], allow_missing=True)
+        except MemoryAccessDenied:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # The store could not be read. Before this check existed, such a first turn read the
+            # store only inside the service, failed there, and fell back to in-process memory;
+            # refusing it now would turn a store outage into failed first turns. So the turn runs
+            # with that fallback on purpose: persistence off, which also means the service never
+            # makes the read this check could not, so a store that recovers mid-turn cannot let it
+            # through unchecked.
+            logger.warning("Chat ownership check for thread %s could not read the store (%s); "
+                           "running the turn without persistent memory",
+                           normalized["thread_id"], exc)
+            normalized["use_persistent_memory"] = False
 
 
 def _normalize_agent_chat_request(data: dict) -> dict:
@@ -1185,6 +1214,10 @@ def agent_conversation(memory_id):
                 return jsonify({"error": "Body must be a conversation object."}), 400
             try:
                 return jsonify(save_session_snapshot(memory_id, body))
+            except ConversationDeleted:
+                # A caller with no identity skipped assert_owner; the store refused instead.
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
             except SnapshotTooLarge as exc:
                 # A real ceiling rather than a silent truncation: a conversation that came back
                 # missing half its layers would look like data loss with no explanation.
@@ -1196,6 +1229,78 @@ def agent_conversation(memory_id):
                         "reason": "persistent_memory_disabled"}), 404
     except Exception as exc:  # noqa: BLE001
         logger.error("Error on conversation %s: %s", memory_id, exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/conversations/<memory_id>', methods=['DELETE'])
+def agent_conversation_delete(memory_id):
+    """
+    Delete one of the signed-in user's conversations, permanently.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: memory_id
+        type: string
+        required: true
+    responses:
+      200:
+        description: >-
+          `{ deleted: true, memoryId, traces }`. The conversation (agent memory and the client's
+          stored view) is gone, and so is every recorded turn of it (`traces` counts them).
+          Files it uploaded or produced are kept: a file id is a download link that other
+          conversations and earlier answers may still use.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: >-
+          Not signed in, not permitted, or a caller with no identity (dev, demo, the service
+          key): with no owner to check against, nothing may be deleted.
+      404:
+        description: No such conversation, or it belongs to someone else.
+    """
+    try:
+        try:
+            user = _require_user()
+        except identity.IdentityError as exc:
+            return _identity_error_response(exc)
+        if not deployment_mode.persistent_memory_allowed():
+            return jsonify({"error": "Conversations are not stored in local mode.",
+                            "reason": "persistent_memory_disabled"}), 404
+        if not user:
+            # GET and PUT let an anonymous caller through because they cannot destroy anything.
+            # A delete with nobody to check ownership against would delete any conversation
+            # whose id the caller holds, and an id is printed into every shared answer.
+            return jsonify({"error": "Deleting a conversation needs a signed-in user.",
+                            "reason": "identity_required"}), 403
+        token = identity.set_user(user)
+        try:
+            try:
+                # `allow_unowned=False` even while AGENT_TOKEN_STRICT=0. The migration window
+                # keeps unowned legacy conversations READABLE by id; it was never meant to let a
+                # caller destroy one that is not theirs. Unowned and unknown both land here.
+                assert_memory_owner(memory_id, allow_unowned=False)
+            except MemoryAccessDenied:
+                logger.info("Conversation delete refused: %s is not this caller's", memory_id)
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
+            result = delete_conversation(memory_id)
+        finally:
+            identity.reset_user(token)
+        if not result["deleted"]:
+            return jsonify({"error": "No conversation found for that id."}), 404
+        # Ids only: this line is the record that a deletion happened, not of what was deleted.
+        logger.info("Conversation deleted: memory_id=%s owner=%s traces=%d",
+                    memory_id, user.id, result["traces"])
+        return jsonify({"deleted": True, "memoryId": memory_id, "traces": result["traces"]})
+    except PersistentMemoryDisabled:
+        return jsonify({"error": "Conversations are not stored in local mode.",
+                        "reason": "persistent_memory_disabled"}), 404
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error deleting conversation %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
@@ -2200,16 +2305,15 @@ def agent_chat():
             # Checked INSIDE the identity binding: assert_owner reads the caller from the same
             # ContextVar everything else does, so before this line it would see nobody and wave
             # every conversation through.
-            if normalized.get("memory_id"):
-                try:
-                    assert_memory_owner(normalized["memory_id"])
-                except MemoryAccessDenied:
-                    # 404 for the same reason the download endpoint uses it: a 403 confirms the
-                    # conversation exists, and a memory_id is the only thing guarding it.
-                    logger.info("Chat refused: memory %s is not this caller's",
-                                normalized["memory_id"])
-                    return jsonify({"error": "No conversation found for that id.",
-                                    "reason": "not_your_conversation"}), 404
+            try:
+                _assert_chat_memory_owner(normalized)
+            except MemoryAccessDenied:
+                # 404 for the same reason the download endpoint uses it: a 403 confirms the
+                # conversation exists, and a memory_id is the only thing guarding it.
+                logger.info("Chat refused: memory %s is not this caller's",
+                            normalized.get("memory_id") or normalized.get("thread_id"))
+                return jsonify({"error": "No conversation found for that id.",
+                                "reason": "not_your_conversation"}), 404
             raw = run_agent_chat(
                 user_input=user_query,
                 thread_id=normalized.get("thread_id"),
@@ -2738,17 +2842,16 @@ def agent_chat_stream():
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
             try:
-                if normalized.get("memory_id"):
-                    try:
-                        assert_memory_owner(normalized["memory_id"])
-                    except MemoryAccessDenied:
-                        logger.info("Stream refused: memory %s is not this caller's",
-                                    normalized["memory_id"])
-                        # Headers are long gone by now, so the refusal travels as an SSE frame
-                        # rather than a status code. Same wording as the JSON path.
-                        yield _sse_event("error", {"error": "No conversation found for that id.",
-                                                   "reason": "not_your_conversation"})
-                        return
+                try:
+                    _assert_chat_memory_owner(normalized)
+                except MemoryAccessDenied:
+                    logger.info("Stream refused: memory %s is not this caller's",
+                                normalized.get("memory_id") or normalized.get("thread_id"))
+                    # Headers are long gone by now, so the refusal travels as an SSE frame
+                    # rather than a status code. Same wording as the JSON path.
+                    yield _sse_event("error", {"error": "No conversation found for that id.",
+                                               "reason": "not_your_conversation"})
+                    return
                 for item in stream_agent_chat_events(
                     user_input=user_query,
                     thread_id=normalized.get("thread_id"),

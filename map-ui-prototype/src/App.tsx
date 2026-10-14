@@ -18,7 +18,7 @@ import {
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
 import { AuthError, authMessage } from './auth';
-import { fetchWhoAmI, listConversations, putConversation, getConversation,
+import { fetchWhoAmI, listConversations, putConversation, getConversation, deleteConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
 import { unavailableChoice } from './modelChoice';
@@ -26,7 +26,7 @@ import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
 import { layerVerdicts, type ReplayMeta } from './replay';
 import {
-  deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
+  deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
 } from './sessionStore';
 
@@ -484,7 +484,7 @@ export default function App() {
       `${(rec.fileIds || []).length ? `, ${(rec.fileIds || []).length} file(s) re-attached` : ''}.` });
   }, [resolveUrl, fitView, pushMsg, tokenMode, asAgentConfig]);
 
-  const startNewSession = useCallback(() => {
+  const resetConversation = useCallback(() => {
     sessionIdRef.current = newSessionId();
     threadRef.current = newThreadId();
     memoryRef.current = null;
@@ -495,9 +495,47 @@ export default function App() {
     setDrawnRegion(null);
     autoRevealed.current = false;
     setMapVisible(false);
-    setShowHistory(false);
     setMessages([{ role: 'agent', text: "New conversation. Ask me anything." }]);
   }, []);
+
+  const startNewSession = useCallback(() => {
+    resetConversation();
+    setShowHistory(false);
+  }, [resetConversation]);
+
+  /** Whether a History row is the conversation on screen. A row's id is the client's session id
+   *  in dev and demo but the server's memoryId in token mode, so either may match. */
+  const isOpenConversation = useCallback((id: string) =>
+    id === sessionIdRef.current || (!!memoryRef.current && id === memoryRef.current), []);
+
+  // Deleting from History. In token mode History is the SERVER's list, so the × used to remove
+  // only this browser's copy (and by the wrong key: the row id is a memoryId, the local store is
+  // keyed by session id) and the next refresh listed the conversation again. Now the server
+  // deletes it first, and only then does the local copy go, so a failure leaves the row and says
+  // why. Dev and demo identify nobody and keep their local-only delete.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<{ id: string; text: string } | null>(null);
+  const removeConversation = useCallback(async (id: string) => {
+    setConfirmDelete(null);
+    setDeleteError(null);
+    setDeletingId(id);
+    try {
+      if (tokenMode) {
+        const out = await deleteConversation(asAgentConfig(), id);
+        if (!out.ok) { setDeleteError({ id, text: out.message }); return; }
+        await deleteLocalCopies(id);
+      } else {
+        await deleteSession(id);
+      }
+      // The open conversation is gone, so do not keep typing into it: its next turn would
+      // continue a memoryId that no longer exists, and the end-of-turn save would recreate it.
+      if (isOpenConversation(id)) resetConversation();
+      await refreshSessions();
+    } finally {
+      setDeletingId(null);
+    }
+  }, [tokenMode, asAgentConfig, isOpenConversation, resetConversation, refreshSessions]);
 
   // `viewer` is in the deps even though refreshSessions reads it from a REF. The ref exists so
   // the callback is not rebuilt on every identity change, but that also meant nothing re-ran
@@ -997,7 +1035,7 @@ export default function App() {
           )}
           <ul className="hlist">
             {sessions.map((s2) => (
-              <li key={s2.id} className={s2.id === sessionIdRef.current ? 'hrow current' : 'hrow'}>
+              <li key={s2.id} className={isOpenConversation(s2.id) ? 'hrow current' : 'hrow'}>
                 <button className="hopen" onClick={() => void restoreSession(s2.id)} title="Open and continue">
                   <span className="htitle">{s2.title}</span>
                   <span className="hmeta">
@@ -1006,8 +1044,26 @@ export default function App() {
                     {s2.fileCount ? ` · ${s2.fileCount} files` : ''}
                   </span>
                 </button>
-                <button className="hdel" title="Delete this conversation"
-                  onClick={() => void deleteSession(s2.id).then(() => refreshSessions())}>×</button>
+                {confirmDelete === s2.id ? (
+                  <span className="hconfirm" role="group" aria-label="Confirm delete">
+                    <span>{tokenMode ? 'Delete from your account?' : 'Delete from this browser?'}</span>
+                    <button className="hbtn hdanger" onClick={() => void removeConversation(s2.id)}>Delete</button>
+                    <button className="hbtn" onClick={() => setConfirmDelete(null)}>Cancel</button>
+                  </span>
+                ) : deletingId === s2.id ? (
+                  <span className="hmeta">Deleting…</span>
+                ) : (
+                  // A turn still running here ends with a save that would recreate it.
+                  <button className="hdel" aria-label={`Delete "${s2.title}"`}
+                    disabled={busy && isOpenConversation(s2.id)}
+                    title={busy && isOpenConversation(s2.id)
+                      ? 'Wait for the answer to finish before deleting this conversation'
+                      : 'Delete this conversation'}
+                    onClick={() => { setDeleteError(null); setConfirmDelete(s2.id); }}>×</button>
+                )}
+                {deleteError?.id === s2.id && (
+                  <p className="herr" role="alert">{deleteError.text}</p>
+                )}
               </li>
             ))}
           </ul>

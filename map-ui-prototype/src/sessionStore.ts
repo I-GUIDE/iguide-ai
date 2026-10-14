@@ -198,6 +198,25 @@ export async function deleteSession(id: string): Promise<void> {
   }
 }
 
+/** Which local records are copies of one server conversation. In token mode a History row's id
+ *  is the server's `memoryId`, but this store is keyed by the client's own session id and keeps
+ *  the memoryId as a field, so deleting by the row's id alone removed nothing at all. */
+export function localCopiesOf(records: Pick<StoredSession, 'id' | 'memoryId'>[],
+                              memoryId: string): string[] {
+  if (!memoryId) return [];
+  return records.filter((r) => r.id === memoryId || r.memoryId === memoryId).map((r) => r.id);
+}
+
+/** Remove this browser's copies of a server conversation, after the server has deleted it. */
+export async function deleteLocalCopies(memoryId: string): Promise<void> {
+  try {
+    const all = await tx<StoredSession[]>('readonly', (store) => store.getAll() as IDBRequest<StoredSession[]>);
+    for (const id of localCopiesOf(all || [], memoryId)) await deleteSession(id);
+  } catch (err) {
+    console.warn('[sessions] delete failed', err);
+  }
+}
+
 export function newSessionId(): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `sess-${Date.now().toString(36)}-${rand}`;

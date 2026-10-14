@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
+from . import identity, thread_scope
 from .file_store import get_file_record
 from .graph_runtime import run_agent_query, stream_agent_query_events
 from .runtime_utils import sanitize_answer_links
@@ -243,6 +244,36 @@ def _llm_for_request(provider: Optional[str], model: Optional[str],
     return llm
 
 
+def _thread_ids(thread_id: Optional[str], memory_id: Optional[str]) -> tuple:
+    """``(client id, agent key)`` for this turn's conversation.
+
+    The client id is what the client sent and gets back. The agent key is what every piece of
+    per-conversation agent state is stored under: the client id scoped to the caller
+    (thread_scope, S9.15), so another user's ``threadId`` names none of it. A signed-in turn with
+    no id gets one here rather than from the graph, which would otherwise generate an UNSCOPED
+    one and hand it back for the next turn to scope differently.
+    """
+    client = thread_id or memory_id
+    if not client and identity.current_user_id():
+        client = f"auto-thread-{uuid4()}"
+    return client, thread_scope.scoped(client)
+
+
+def _for_client(event: Dict[str, Any], agent_key: Optional[str],
+                client: Optional[str]) -> Dict[str, Any]:
+    """The event with the agent key replaced by the client's id.
+
+    The map UI adopts a ``thread_id`` from ANY event as the conversation's id
+    (agentClient.ts), so one scoped key reaching it would be sent back as the next turn's
+    ``threadId`` and scoped a second time. graph_runtime reports the key it was given in
+    ``data.thread_id`` of its status and completed events; nothing else carries one.
+    """
+    data = event.get("data")
+    if agent_key != client and isinstance(data, Mapping) and data.get("thread_id") == agent_key:
+        return {**event, "data": {**data, "thread_id": client}}
+    return event
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -269,7 +300,7 @@ def run_agent_chat(
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    effective_thread_id = thread_id or memory_id
+    effective_thread_id, agent_thread_id = _thread_ids(thread_id, memory_id)
     effective_memory_id = memory_id or thread_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
@@ -290,17 +321,17 @@ def run_agent_chat(
             memory_warning = f"persistent_memory_unavailable: {exc}"
             effective_memory_id = memory_id
             # Fall back to session-local memory so the turn is not memoryless.
-            memory_doc = build_session_memory_doc(effective_thread_id)
+            memory_doc = build_session_memory_doc(agent_thread_id)
     else:
         effective_memory_id = None
         # Persistent memory is off, but conversation context must still be
         # preserved locally within the session (keyed by thread_id).
-        memory_doc = build_session_memory_doc(effective_thread_id)
+        memory_doc = build_session_memory_doc(agent_thread_id)
 
     # Files attached on ANY earlier turn of this session stay accessible: union the
     # session's tracked file_ids with this turn's, so "visualize it" / "execute it"
     # still reach an upload from a previous turn.
-    effective_file_ids = list(dict.fromkeys([*get_session_files(effective_thread_id), *normalized_file_ids]))
+    effective_file_ids = list(dict.fromkeys([*get_session_files(agent_thread_id), *normalized_file_ids]))
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
@@ -318,7 +349,7 @@ def run_agent_chat(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
-        thread_id=effective_thread_id,
+        thread_id=agent_thread_id,
         skill_roots=normalized_skill_roots,
         code_exec=code_exec,
         code_peer=code_peer,
@@ -329,9 +360,11 @@ def run_agent_chat(
 
     answer = sanitize_answer_links(_extract_agent_answer(result))
     message_id = str(uuid4())
-    effective_thread_id = result.get("thread_id") or effective_thread_id
+    # The graph reports the key it ran under, or one it generated when it was given none.
+    agent_thread_id = result.get("thread_id") or agent_thread_id
+    effective_thread_id = effective_thread_id or agent_thread_id
     # Track this turn's uploads in the session so later turns can still use them.
-    append_session_files(effective_thread_id, normalized_file_ids)
+    append_session_files(agent_thread_id, normalized_file_ids)
     persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:
@@ -352,13 +385,13 @@ def run_agent_chat(
     # durably persisted to OpenSearch, so follow-up turns keep their context
     # within the process even when persistent memory is off (or unavailable).
     if not persisted_to_opensearch:
-        append_session_turn(effective_thread_id, user_input, answer)
+        append_session_turn(agent_thread_id, user_input, answer)
 
     response: Dict[str, Any] = {
         "answer": answer,
         "message_id": message_id,
         "memory_id": effective_memory_id,
-        "thread_id": result.get("thread_id") or effective_thread_id,
+        "thread_id": effective_thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
         "skill_roots": normalized_skill_roots,
@@ -431,7 +464,7 @@ def stream_agent_chat_events(
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
 ) -> Generator[Dict[str, Any], None, None]:
-    effective_thread_id = thread_id or memory_id
+    effective_thread_id, agent_thread_id = _thread_ids(thread_id, memory_id)
     effective_memory_id = memory_id or thread_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
@@ -474,7 +507,7 @@ def stream_agent_chat_events(
             memory_warning = f"persistent_memory_unavailable: {exc}"
             effective_memory_id = memory_id
             # Fall back to session-local memory so the turn is not memoryless.
-            memory_doc = build_session_memory_doc(effective_thread_id)
+            memory_doc = build_session_memory_doc(agent_thread_id)
             yield {
                 "event": "warning",
                 "data": {
@@ -486,7 +519,7 @@ def stream_agent_chat_events(
         effective_memory_id = None
         # Persistent memory is off, but conversation context must still be
         # preserved locally within the session (keyed by thread_id).
-        memory_doc = build_session_memory_doc(effective_thread_id)
+        memory_doc = build_session_memory_doc(agent_thread_id)
         yield {
             "event": "status",
             "data": {
@@ -496,7 +529,7 @@ def stream_agent_chat_events(
         }
 
     # Carry files attached on earlier turns of this session (see run_agent_chat).
-    effective_file_ids = list(dict.fromkeys([*get_session_files(effective_thread_id), *normalized_file_ids]))
+    effective_file_ids = list(dict.fromkeys([*get_session_files(agent_thread_id), *normalized_file_ids]))
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
@@ -526,7 +559,7 @@ def stream_agent_chat_events(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
-        thread_id=effective_thread_id,
+        thread_id=agent_thread_id,
         skill_roots=normalized_skill_roots,
         agent_dev=agent_dev,
         code_exec=code_exec,
@@ -542,6 +575,7 @@ def stream_agent_chat_events(
             # been persisted, so the caller's error handling is unchanged.
             stream_error = event
             break
+        event = _for_client(event, agent_thread_id, effective_thread_id)
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
         yield event
@@ -555,9 +589,12 @@ def stream_agent_chat_events(
         answer = (f"[This request could not be completed: "
                   f"{type(stream_error).__name__}: {stream_error}]"[:400])
     message_id = str(uuid4())
+    # Already translated for the client (_for_client), so this is the client id, or the one the
+    # graph generated when it was given none (then both ids are that one).
     effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
+    agent_thread_id = agent_thread_id or effective_thread_id
     # Track this turn's uploads in the session so later turns can still use them.
-    append_session_files(effective_thread_id, normalized_file_ids)
+    append_session_files(agent_thread_id, normalized_file_ids)
 
     # Beside the conversation, not inside it: the snapshot has a 5 MB cap and is fetched to
     # render a sidebar. Deliberately unable to fail the turn — save_turn_trace swallows its own
@@ -603,7 +640,7 @@ def stream_agent_chat_events(
     # persisted to OpenSearch, so follow-up turns keep their context within the
     # process even when persistent memory is off (or unavailable).
     if not persisted_to_opensearch:
-        append_session_turn(effective_thread_id, user_input, answer)
+        append_session_turn(agent_thread_id, user_input, answer)
         yield {
             "event": "memory_saved",
             "data": {

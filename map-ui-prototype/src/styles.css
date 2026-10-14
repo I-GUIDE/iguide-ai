@@ -414,7 +414,7 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .hbtn:hover { background: var(--soft); }
 .hempty { color: var(--muted); font-size: 13px; margin: 6px 2px; }
 .hlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.hrow { display: flex; align-items: center; gap: 6px; border-radius: 8px; }
+.hrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-radius: 8px; }
 .hrow:hover { background: var(--soft); }
 .hrow.current { background: var(--soft); box-shadow: inset 2px 0 0 var(--brand); }
 .hopen { flex: 1; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 8px;
@@ -424,6 +424,12 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .hdel { border: 0; background: none; color: #9aa0a6; font-size: 16px; cursor: pointer;
   padding: 4px 8px; box-shadow: none; }
 .hdel:hover { color: #b42318; }
+.hdel:disabled { opacity: .35; cursor: not-allowed; }
+/* Its own line under the row: beside the title it squeezed a long title into three lines. */
+.hconfirm { flex-basis: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  font-size: 12px; color: var(--muted); padding: 0 8px 8px; }
+.hdanger { color: #b42318; border-color: #f1b5ae; }
+.herr { flex-basis: 100%; margin: 0 8px 8px; font-size: 12px; color: #b42318; }
 
 /* ---- workspace tabs -------------------------------------------------------------------
    A temporary demo surface beside the ordinary chat. Understated on purpose: this is a

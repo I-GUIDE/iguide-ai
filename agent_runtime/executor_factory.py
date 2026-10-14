@@ -1650,6 +1650,9 @@ def _make_instrumentation_middleware() -> Any:
             # group a turn on its own. `seq` below is what orders the calls; a turn boundary
             # shows up as `messages` dropping back down.
             session, _, label = thread.partition("::")
+            # The conversation id the client knows, not the caller-scoped key (S9.15).
+            from agent_runtime.thread_scope import unscoped
+            session = unscoped(session) or session
             model = getattr(request, "model", None)
             key = (session, label)
             _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
