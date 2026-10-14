@@ -110,6 +110,45 @@ def test_slope_accounts_for_longitude_shrinking_with_latitude(store, tmp_path):
     assert out_n["mean"] > out_eq["mean"], (out_eq["mean"], out_n["mean"])
 
 
+@pytest.mark.parametrize("rises_towards, gx, gy, faces", [
+    ("east", 1.0, 0.0, 270.0), ("north", 0.0, 1.0, 180.0),
+    ("west", -1.0, 0.0, 90.0), ("south", 0.0, -1.0, 0.0),
+    ("north-east", 1.0, 1.0, 225.0)])
+def test_aspect_is_the_compass_bearing_the_ground_faces(store, tmp_path, rises_towards, gx,
+                                                        gy, faces):
+    """Ground rising to the east faces WEST (270). Only the flat case used to be tested, and
+    the formula was wrong in every other direction: it called this ramp 180."""
+    n, res = 20, 30.0
+    cols = np.arange(n, dtype="float64")
+    rows = np.arange(n, dtype="float64")[:, None]
+    # Row 0 is the north edge, so height rising northwards falls with the row index.
+    values = 500.0 + 10.0 * (gx * cols[None, :] - gy * rows)
+    rid = _raster(tmp_path, values, _equator_box(n, res))
+
+    out = json.loads(_tools()["terrain_derivative"].func(raster_file_id=rid, kind="aspect"))
+
+    assert out["ok"] is True, out
+    assert out["min"] == pytest.approx(faces, abs=0.5), (rises_towards, out)
+    assert out["max"] == pytest.approx(faces, abs=0.5), (rises_towards, out)
+
+
+def test_hillshade_lights_the_slope_that_faces_the_sun(store, tmp_path):
+    """The default sun is in the north-west (azimuth 315). A slope facing north-west is lit,
+    and one facing south-east is in shade. The mirrored sign lit them the other way round."""
+    n = 20
+    cols = np.arange(n, dtype="float64")[None, :]
+    rows = np.arange(n, dtype="float64")[:, None]
+    faces_nw = 500.0 + 10.0 * (cols + rows)      # rises east and south: faces north-west
+    faces_se = 500.0 - 10.0 * (cols + rows)
+
+    lit = json.loads(_tools()["terrain_derivative"].func(
+        raster_file_id=_raster(tmp_path, faces_nw, _equator_box(n, 30.0)), kind="hillshade"))
+    shade = json.loads(_tools()["terrain_derivative"].func(
+        raster_file_id=_raster(tmp_path, faces_se, _equator_box(n, 30.0)), kind="hillshade"))
+
+    assert lit["mean"] > 200 > 100 > shade["mean"], (lit["mean"], shade["mean"])
+
+
 def test_nodata_gets_no_slope_rather_than_an_invented_one(store, tmp_path):
     """np.gradient over NaN spreads it; filling the hole to keep the arithmetic alive would
     invent a gradient at the edge of the data. The hole has to come back."""

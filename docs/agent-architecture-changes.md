@@ -60,6 +60,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 44 | [Facts, a number scan, one verdict](#stage-44) | 2026-10-08 | every stated figure is resolved to a recorded number across units; figures no bound tool produces are cut; every check feeds one banner; the gate speaks only for the runs the answer uses |
 | 45 | [Every source catalogued, every answer naming its sources](#stage-45) | 2026-10-08 | a source catalogue with coverage, extent and licence; peers see what each source leaves out; extents checked before fetching; a Sources line rendered from the results the answer used |
 | 46 | [A banner only when a check found something](#stage-46) | 2026-10-09 | the answer carries a banner only for a problem or a failed peer; "not checked" stays in the verdict payload; a decimal point no longer ends a sentence; unit conversions, numbers inside lists and short local sums resolve; a matched join with sparse columns passes |
+| 47 | [A projected raster is measured in metres and drawn where it is](#stage-47) | 2026-10-09 | the terrain tools read the raster's CRS: the T06 UTM DEM's pixel goes from 3,339,600 m to 30.01 m and its layer from nowhere to Champaign; the PROJ repair is probed per call; aspect and hillshade directions fixed |
 | 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
 | 49 | [Three ways to reach public data](#stage-49) | 2026-10-09 | sandbox code gets public data through a tool bridge (two mounted directories, the agent's fetch policy per call, every call in the turn record) or, for measurement only, a network; on the sweep's 12 failed questions: offline 4 correct, network 8, bridge 8, and only the bridge names the data its code fetched |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
@@ -7877,6 +7878,139 @@ they used to assert the printed caveat.
 - No live run of this stage. It changes no tool and no route; the replay and calibration above
   are offline over recorded turns.
 
+
+## Stage 47 — A projected raster is measured in metres and drawn where it is {#stage-47}
+
+*2026-10-09. Branch `claude/terrain-projected-rasters`, from `prototype` at `23cfd02`. Open PRs
+and worktrees claim stages 41–46, so 47 is the next free number. Revises S7.8, whose rule
+"never read the CRS" this stage replaces.*
+
+GIS task T06 (slope and watershed from an uploaded 30 m DEM in EPSG:32616) was run live on prod
+`23cfd02`. The answer was right only because the agent computed slope in its own code. The tool's
+layer was invisible:
+
+- `_open_raster` read `src.transform` and never `src.crs`, on S7.8's reasoning that every raster
+  here is dem_for_region's EPSG:4326 and that reading a CRS fails under the deployed PROJ. A UTM
+  grid was therefore measured as degrees: `ground_resolution_m` 3,339,600, and slope about 5e-5°.
+- The layer's "lon/lat" bounds were `[390000, 4434000, 394500, 4440000]`. It was listed on the map
+  and drew nowhere.
+- The slope GeoTIFF was stamped EPSG:4326 over those same UTM numbers, so every later reader
+  misplaced it too.
+- `add_raster_layer` failed with *"CRS is invalid: None"* on a plain WGS84 GeoTIFF. The agent
+  retried with explicit bounds, took 107 steps to redraw the slope correctly, and left six layers.
+
+### Stage S47.1 The PROJ repair went stale
+
+S7.8 repairs PROJ in-process: it points rasterio at its bundled `proj.db` without touching
+`PROJ_LIB`, because the QGIS worker inherits the environment. The repair ran once, and a flag
+stopped it running again. Probed inside the deployed `agent-api` container:
+
+| step | `CRS.from_epsg(4326)` |
+|---|---|
+| process start (`PROJ_LIB=/usr/share/proj`, layout minor 5) | fails |
+| after the repair, main thread | works |
+| fresh threads afterwards (4 of them) | work |
+| a thread that opens `rasterio.Env()` | failed inside the Env in one probe, worked in another |
+| in that second probe, the NEXT fresh thread | **fails**, and so does `transform_bounds` there |
+| the same sequence, the fresh thread repairing again itself (S47.4) | works |
+
+The agent runs tools on worker threads. Once one of them had opened an Env, `_wgs84()` could return
+None for good, and `src.crs != None` raises *"CRS is invalid: None"*. `_ensure_proj()` now probes
+on every call and repairs whenever the probe fails. `_wgs84()` goes through it, and so does every
+raster read.
+
+### Stage S47.2 One reader for every terrain tool
+
+`_open_raster` now returns a `_Grid`: the values, the native transform and bounds, the CRS, the
+lon/lat bounds, and the ground size of one pixel in each axis. `terrain_derivative`,
+`inundation_at_level` and `zonal_stats_for_raster` use it, and so does `add_raster_layer`'s
+GeoTIFF path, through `drapable_geotiff`.
+
+- **Geographic CRS**, or **no CRS with bounds inside ±180/±90**: measured as before. This keeps
+  dem_for_region's rasters, and the case where PROJ cannot be repaired at all, working with no
+  PROJ dependency.
+- **Projected CRS**: one pixel's step along a row and down a column, taken at the grid's centre,
+  is carried to lon/lat and measured with the WGS84 ellipsoid's local radii. On T06 that gives
+  30.01 m, which is UTM's own scale error. Web Mercator gets 30 × cos 40° = 22.98 m, not 30, and a
+  grid in feet gets metres. Using the CRS's linear unit alone would be wrong in both cases.
+  Bounds go through `transform_bounds`, densified to 21 points per edge.
+- **No CRS, and coordinates that cannot be degrees**: refused, with a hint to assign the CRS.
+  Guessing is what produced the original failure.
+
+Outputs follow the grid. A derived GeoTIFF is written in the source's CRS. A layer from a
+projected grid is warped to EPSG:4326 with nearest-neighbour resampling, because blending two
+slopes invents a third, and it is placed by the warped grid's own bounds. Unwarped, UTM grid
+north is turned about 0.8° from true north at T06. In the test, a 3×3 hole near the NE corner
+drew 73.6 m from where it is when unwarped, and 4.8 m when warped. `zonal_stats_for_raster`
+reprojects the polygons onto the raster's CRS rather than the raster onto the polygons'. Its
+coverage ratio stays a ratio of two areas in the raster's own units. Results add `crs`,
+`native_bounds` and `pixel_size_native` for a projected grid. `region_bbox` is always lon/lat.
+
+### Stage S47.3 Aspect and hillshade pointed the wrong way
+
+The UTM aspect test failed for a reason unrelated to the CRS. Aspect was `atan2(dz_dy, -dz_dx)`,
+a maths angle from east with the north gradient's sign reversed. Every direction was wrong:
+ground rising east (facing west, 270) came out 180, and ground rising north (facing south, 180)
+came out 90. Only flat ground had a test. Aspect is now `atan2(-dz_dx, -dz_dy)`, the bearing of
+the downslope direction. Hillshade's aspect had the same sign error, so its light came from the
+mirror image of `azimuth`. A separate commit.
+
+### Stage S47.4 Measurements
+
+T06's own `dem.tif`, through the tools on a worker thread, after a `rasterio.Env` on another
+thread. Run in the deployed `agent-api` container (overlay under `/tmp`, removed afterwards,
+nothing under `/app` written), with the deployed code and with this branch:
+
+| | deployed `23cfd02` | this branch |
+|---|---|---|
+| PROJ usable in a fresh thread | no | yes |
+| slope `ground_resolution_m` | 3,339,600 | 30.01 |
+| slope max / mean | 0.0° / 0.0° | 5.82° / 5.79° |
+| slope layer bounds | 390000, 4434000, 394500, 4440000 | −88.2906, 40.0491, −88.2369, 40.1037 |
+| inundation `region_km2` | 332,243,445,600 | 27.01 (150 × 200 px × 30 m = 27.00) |
+| `add_raster_layer`, WGS84 GeoTIFF | *"CRS is invalid: None"* | ok |
+| `add_raster_layer`, the UTM DEM | *"CRS is invalid: None"* | ok, same bounds as the slope |
+
+The slope layer's bounds equal those the agent computed for itself in the live run. Its own
+slope mean, 5.75°, differs from the tool's 5.79° only in edge handling.
+
+Tests: `test_terrain_projected_rasters.py` (12) and 6 new cases in
+`test_terrain_derivative_and_inundation.py`.
+
+- A synthetic copy of the T06 grid: slope against the hand value atan(15/30) = 26.565°, aspect
+  270°, flooded area 13.5 of 27 km², Web Mercator ground metres, layer and `region_bbox` at the
+  live run's lon/lat, the derived GeoTIFF keeping EPSG:32616, and the corner-hole placement
+  above.
+- `add_raster_layer` without bounds, and lon/lat zones on the UTM grid.
+- The no-CRS refusal.
+- A second PROJ break, simulated through the probe.
+- The deployed condition itself: a subprocess points rasterio at a copy of `proj.db` with
+  `DATABASE.LAYOUT.VERSION.MINOR` set to 5 and runs `terrain_derivative` on a worker thread. A
+  fresh process is needed because PROJ caches the database, and once a process has repaired the
+  break it cannot be re-created there.
+
+On `23cfd02`, 17 of the 18 fail. The one that passes is `add_raster_layer`'s bounds, on a Mac
+whose PROJ is healthy; in the deployed container that call failed. Results:
+
+- Mac: 3786 passed, 19 skipped, and 1 failure, the networkx-pin contract test, which fails on
+  `23cfd02` too (the Mac has 3.4.2).
+- Inside the deployed container, the terrain, raster-routing, zonal, DEM, layer-identity and
+  zonal-to-fit suites: 123 passed.
+
+### Stage S47.5 What this stage does not fix
+
+- **A broken layer cannot be removed.** The client replaces a layer whose `id` matches, but a
+  corrected result gets a new id, because its inputs differ. So it is added beside the broken one,
+  and nothing lets the agent take a layer off the map. Discussed separately, not built here.
+- **Elevation is assumed to be metres.** A state-plane DEM in feet with feet elevations is
+  measured in ground metres and still gets a slope 3.28× too steep. The docstring says so; there
+  is no `z_factor`.
+- **Aspect on a projected grid is from grid north**, within a degree or two of true north inside
+  a UTM zone.
+- **Rotated or sheared transforms** (b, d ≠ 0) are still measured as if north-up, as before.
+- **dem_for_region is unchanged.** It still fetches EPSG:4326 from 3DEP. Only the readers of a
+  stored raster changed.
+- **Not deployed.**
 
 ## Stage 48 — Measured numbers reach the gate without being declared {#stage-48}
 
