@@ -2077,7 +2077,136 @@ compared the row with the session id, which in token mode never matched.
   refused 404 under the default `AGENT_TOKEN_STRICT=1`, but re-creates the conversation under
   `AGENT_TOKEN_STRICT=0`.
 
-Closing either needs a server-side tombstone. Neither was observed.
+Closing either needs a server-side tombstone. Neither was observed. Both are closed in S9.14,
+which also found that the first one reached across users.
+
+### Stage S9.14 A deleted conversation stays deleted
+
+*Branch `claude/delete-tombstone`, stacked on S9.13 (`claude/delete-conversation`, `bfa0b510`).*
+
+S9.13 left two ways for a deleted conversation to come back, both read from the code: another
+tab's next turn, and a turn already in flight. This stage measured them, closed them, and closed
+a cross-user path found while measuring.
+
+**Measured first.** The measurement drove `POST /agent/chat` in token mode with the model stubbed,
+against the analysing fake store, under both `AGENT_TOKEN_STRICT` settings. Alice owns a
+conversation with one turn, and Bob is a second signed-in user.
+
+| Case, on `bfa0b510` | strict (default) | `STRICT=0` |
+| --- | --- | --- |
+| Bob, Alice's id as `memoryId` | 404 | 404 |
+| Bob, Alice's id as `threadId` only | **200**: his agent got her history, his turn was appended to her conversation | same |
+| After delete: a `memoryId` turn | 404 | **200**, re-created under the caller |
+| After delete: a `threadId`-only turn | **200**, re-created | **200**, re-created |
+| After delete: end-of-turn PUT | 404 | **200**, re-created |
+| After delete: an in-flight turn's trace | **stored**, an orphan | stored, and Bob could read it |
+| A normal first turn (`threadId` only, new id) | 200, owned | 200, owned |
+
+AGENTS.md said `get_or_create_memory` verifies the owner. It does not, and it never needed to,
+because the chat routes call `assert_owner` first. That call checked `memoryId`. The service
+keys the turn's memory on `memoryId or threadId`, and the map UI sends every first turn with
+`threadId` alone. So a turn naming someone else's conversation as its `threadId` skipped the
+check, read the conversation into its own context, and wrote to it. Strict mode did not help:
+strict changes what `assert_owner` does, and `assert_owner` never ran. This was not observed in
+production. It needs the victim's id, which every answer prints.
+
+**The chat edge** (`api/server.py`, `_assert_chat_memory_owner`) now checks the id the service
+will use. When the turn has no `memoryId` and persistent memory is on, it checks the `threadId`
+with a new `assert_owner(..., allow_missing=True)`. A missing document passes, because that is
+every first turn. A document someone else owns does not. Without `allow_missing`, a missing id
+reads as unowned and strict mode would refuse every first turn: one test pins that.
+
+This check is a new store read on a path that never read at the edge before. Until now, a first
+turn whose store was unreachable failed inside the service and fell back to in-process memory. So
+when the check cannot read the store, the turn runs with persistent memory off, which is the same
+fallback. The fallback is chosen at the edge, so the service never makes the read the check could
+not make. A store that recovers mid-turn therefore cannot let an unchecked turn through. Refusing
+instead would turn an outage into failed first turns.
+
+**The tombstone** (`memory_module.delete_conversation`). The delete now overwrites the
+conversation document with `{"deletedAt": <time>}` instead of removing it. Every re-creation path
+above writes to the conversation's id, and each reads the id first. With the slot empty they
+created a fresh document. With a tombstone there they meet a refusal:
+- **`assert_owner`** raises `ConversationDeleted`, a `MemoryAccessDenied`, before the owner test,
+  so every route answers 404, including to the owner. The owner's own stale tab is the likeliest
+  caller.
+- **`get_or_create_memory`, `update_memory` and `save_session_snapshot`** each refuse a tombstone
+  as well. The edge is skipped by callers with no identity (dev, demo, the service key, or a
+  local server pointed at the shared cluster), and it is passed by a turn that began before the
+  delete.
+- **`save_turn_trace`** skips the trace for a deleted parent, at the cost of one GET per turn. If
+  that GET fails, it still tries the store.
+- **`get_memory`** returns None for a tombstone, so readers see nothing there. The list needs no
+  change: it filters on an owner and a snapshot, and a tombstone has neither.
+
+**Alternatives considered:**
+- **An in-process set of recently deleted ids** is smaller, but it is lost on restart and not
+  shared across workers or containers. The in-flight case is exactly a second request, possibly
+  served elsewhere.
+- **A separate tombstone index** is a new index on the website's cluster. It is also a second
+  write that can fail after the delete succeeded, which leaves exactly the open slot. Every check
+  would then read two indexes.
+- **A `deletedAt` field on the full document** keeps the content, which is not a delete.
+- **Relying on strict mode** leaves the `threadId` path and the orphan trace open, per the table.
+
+Overwriting in place is one write, it removes the content in the same operation, and it uses the
+id itself as the lock.
+
+**Not short-lived.** The tombstone is never reclaimed. An expiry would reopen the stale-tab case
+for any tab left open past it. It would also need a sweeper, or lazy expiry in every reader, to
+save a document smaller than the deletion's own log line: one timestamp, no owner, no content. A
+conversation id is a random UUID that nothing legitimately reuses, so refusing it forever costs
+nothing.
+
+The overwrite waits for a refresh, for S9.13's reason. Until a refresh, search returns the
+version that was there before, so the deleted conversation would come back in the immediate
+re-list. The test fake's base class hid an unrefreshed write instead. That is right for a new
+document and wrong for an overwrite: the tombstone would leave the list at once whether or not it
+asked for a refresh, and the S9.13 refresh test would pass vacuously. The fake now keeps the
+previous version searchable until a refresh.
+
+**Measured after.** The same table, re-run, gives 404 for every Bob row and every after-delete
+row, in both modes. The in-flight trace is not stored, and a first turn is still 200 and owned.
+
+- **Tests.** There are 14 new or changed test functions, 16 cases:
+  - 5 new in `rag_pipeline/tests/test_memory_ownership.py`;
+  - 8 new and 1 changed in `rag_pipeline/tests/test_conversation_delete.py`, two of them
+    parametrised over strict.
+
+  Of the 16 cases, 15 fail on `bfa0b510`:
+  - **Two fail for a weaker reason.** The strict variants of the `memoryId` turn and of the PUT
+    fail there only because no tombstone is left. Their 404 already held under strict. They stay
+    as guards.
+  - **The outage test passes by design.** It guards against this stage's own edge read, so it
+    cannot fail on code that has no such read. It does fail if the check refuses on a store error
+    (500), and it fails if the check proceeds with persistence still on.
+- **Mutations.** Each guard was removed in turn, and each removal fails at least one test:
+
+  | Guard removed | Tests that fail |
+  | --- | ---: |
+  | edge check on `threadId` | 3 |
+  | `allow_missing` | 2 |
+  | `assert_owner` tombstone check | 2 |
+  | snapshot guard | 2 |
+  | trace guard | 1 |
+  | `update_memory` guard | 2 |
+  | `get_or_create_memory` guard | 1 |
+  | `get_memory` hiding the tombstone | 1 |
+  | the tombstone's refresh | 9 |
+  | hard delete in place of the tombstone | 9 |
+
+**Not done here:**
+- **The VM's `AGENT_TOKEN_STRICT` setting** was not checked. The `threadId` path was open either
+  way.
+- **The update race.** `update_memory` reads, then writes. A delete landing between the two puts
+  that one turn's history into the tombstone document, which stays hidden from every reader.
+  Passing `if_seq_no` and `if_primary_term` from the read would close it.
+- **Other state keyed by `threadId`.** The LangGraph checkpointer and the in-process session
+  memory are both keyed by the client's `threadId`. When a turn sends its own `memoryId` with
+  someone else's `threadId`, nothing checks the `threadId`. Whether that resumes the other user's
+  agent thread was not measured.
+- **Files.** The S9.13 position is unchanged: deleting a conversation does not delete its files.
+
 
 ---
 

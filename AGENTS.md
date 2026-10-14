@@ -886,8 +886,11 @@ are not roles), so `identity.ROLE_NAMES` lives next to the scale it names rather
 second copy in TypeScript that stops matching the day the platform adds a tier.
 
 **Ownership.** Every file and conversation id is effectively a public link once printed into an
-answer, so both are checked at the edge: `GET /agent/files/<id>/download` and
-`get_or_create_memory` now verify the owner before doing anything else. A mismatch answers
+answer, so both are checked at the edge: `GET /agent/files/<id>/download` and the routes that
+take a conversation id verify the owner before doing anything else. `get_or_create_memory` itself
+does not; the chat routes call `assert_owner` on the id the turn will use, which is
+`memoryId or threadId`, because a check on `memoryId` alone let a `threadId`-only turn into
+another user's conversation (S9.14). A mismatch answers
 **404, not 403** — a 403 confirms the id exists and turns the endpoint into an enumeration
 oracle. The one gotcha worth knowing before touching an ownership query: `owner_id` is mapped as
 analysed `text` with a `.keyword` subfield, and a `term` query against the bare field compares

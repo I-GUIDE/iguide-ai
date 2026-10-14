@@ -23,7 +23,7 @@ library. The VM then ran `prototype` at `23cfd02`, which includes the extraction
 
 | Store | Where | Holds | Owner check | Reclaimed by |
 | --- | --- | --- | --- | --- |
-| Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | only its owner's delete (S9.13) |
+| Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | only its owner's delete (S9.13), which leaves a tombstone (S9.14) |
 | Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | deleted with their conversation (S9.13) |
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation | 72-hour TTL |
@@ -120,9 +120,24 @@ document can have either without the other**, and that asymmetry is load-bearing
 ### Who deletes a conversation
 
 Only its owner, through `DELETE /agent/conversations/<id>` (S9.13), which the map UI's History ×
-calls in token mode. It removes the whole document, so both halves go: the agent's memory and the
+calls in token mode. It replaces the whole document, so both halves go: the agent's memory and the
 client's record. It also removes every `chat_traces` document of the conversation, first (see
 1b). Nothing else deletes from this index. No retention applies, and no age-based sweep runs.
+
+**What is left is a tombstone (S9.14).** The document is overwritten with `{"deletedAt": <time>}`,
+not removed: no owner, no content. With the slot left empty, the next write to that id re-created
+the conversation. That write could come from another tab's first turn, which names it by
+`threadId`, from a `memoryId` turn or the end-of-turn PUT under `AGENT_TOKEN_STRICT=0`, or from a
+turn already in flight. Every path that writes a conversation reads the id first, and now refuses
+a tombstone:
+- `assert_owner`, so every route answers 404, including to the owner;
+- `get_or_create_memory`, `update_memory` and `save_session_snapshot`, for callers with no
+  identity and for a turn that passed the edge before the delete;
+- `save_turn_trace`, which skips the trace rather than leave an orphan.
+
+To a reader (`get_memory`, the list) a tombstone is not there. Tombstones are never reclaimed. Each
+holds less than the deletion's own log line, and a conversation id is a random UUID that nothing
+legitimately reuses.
 
 - **Refused callers.** The route is refused (403 `identity_required`) to a caller with no
   identity: dev, demo or the service key.
@@ -352,7 +367,9 @@ be reachable by an id its conversation would refuse.
 Deleting a conversation (section 1) first runs a `delete_by_query` on `memory_id.keyword` here.
 It runs first because a trace inherits its conversation's access. With the conversation gone,
 `owner_of` finds no owner, and under `AGENT_TOKEN_STRICT=0` the route above would serve the
-traces to anyone holding the id. Otherwise nothing deletes a trace.
+traces to anyone holding the id. Otherwise nothing deletes a trace. A turn still running when its
+conversation is deleted stores no trace at its end (S9.14): `save_turn_trace` checks the parent
+for a tombstone first.
 
 ---
 
