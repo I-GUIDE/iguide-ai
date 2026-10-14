@@ -308,10 +308,14 @@ _TOOL_NOTES: Dict[str, Dict[str, str]] = {}
 
 
 def _conversation() -> Optional[str]:
+    """The graph's key: the file store's session, scoped to the caller like every other piece of
+    per-conversation agent state (thread_scope, S9.15). The session is the client's raw
+    ``threadId``, so unscoped, another user who sent it recorded into and read this graph."""
     try:
         from agent_runtime.file_store import current_session
+        from agent_runtime.thread_scope import scoped
 
-        return current_session()
+        return scoped(current_session())
     except Exception:  # noqa: BLE001
         return None
 
