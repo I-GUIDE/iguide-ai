@@ -568,7 +568,19 @@ def _read_checks(work: Path, stdout: Any = None) -> Dict[str, Any]:
                                for o in data["metric_ops"][:12] if isinstance(o, dict)]}
                if data.get("metric_ops") else {}),
             **({"findings_truncated": truncated} if truncated else {}),
+            # The reference recomputations (plan step 4b), compact: no arrays, at most eight.
+            **({"reference": [_compact_reference(r) for r in data["reference"][:8]
+                              if isinstance(r, dict)]}
+               if data.get("reference") else {}),
             **({"error": data["error"]} if data.get("error") else {})}
+
+
+def _compact_reference(r: Dict[str, Any]) -> Dict[str, Any]:
+    keep = ("method", "status", "reason", "engine", "model", "pykrige_parameters", "target",
+            "diagonal_max", "n", "transform", "star", "agent", "reference", "agent_z_max",
+            "reference_z_max", "max_abs_z_diff", "counts", "cold_counts", "candidates",
+            "coordinates")
+    return {k: r[k] for k in keep if k in r}
 
 
 def session_workspace_dir(session: Optional[str]) -> Optional[Path]:

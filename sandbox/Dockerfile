@@ -72,6 +72,11 @@ RUN pip install --no-cache-dir \
     spreg \
     pygeoda
 
+# pykrige is the reference the invariant gate recomputes a hand-written ordinary kriging with
+# (agent_runtime/reference_sandbox.py). Without it the gate falls back to its own numpy
+# kriging and says so (`engine: numpy`).
+RUN pip install --no-cache-dir pykrige
+
 # The run container is --read-only with only /work writable and a /tmp tmpfs, and runs as a
 # uid that owns neither /root nor this image's HOME. Without these, matplotlib's font cache
 # and pyproj's scratch writes hit a read-only filesystem and fail naming the library rather

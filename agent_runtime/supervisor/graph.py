@@ -39,7 +39,9 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime import agreement as turn_agreement
 from agent_runtime import facts as turn_facts
+from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
 from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
@@ -6129,6 +6131,19 @@ def build_supervisor_graph(
                     "Measured values this turn recorded (the record the answer is checked "
                     "against; each number stated is matched to one of these or to a tool "
                     "result):\n" + _facts_text)
+            # CROSS-RUN AGREEMENT (plan step 4a): two runs that computed the same figure and
+            # disagree. The writer is told before writing, so it settles the disagreement
+            # instead of reporting the last value silently (T10: 309.531 then 295.06 ppm).
+            _disagreements = turn_agreement.for_log(_log)
+            # REFERENCE RECOMPUTATION (plan step 4b): a standard method the turn ran, recomputed
+            # with a reference library from the same inputs (kriging with pykrige, Gi* and
+            # Moran's I with esda, Horn slope, zonal mean).
+            _references = turn_reference.for_log(_log)
+            _reconcile = "\n\n".join(n for n in (
+                turn_agreement.reconcile_note(_disagreements),
+                turn_reference.reconcile_note(_references)) if n)
+            if _reconcile:
+                _note = (f"{_note}\n\n" if _note else "") + _reconcile
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
@@ -6234,7 +6249,11 @@ def build_supervisor_graph(
                     evidence=shown[:6]))
             verdict_findings = [*turn_verdict.from_gate(audit),
                                 *turn_verdict.from_audit(audit, numeric_claims_resolved=True),
-                                *scan_findings]
+                                *scan_findings,
+                                *turn_agreement.findings(answer, _disagreements,
+                                                         kind=turn_agreement.KIND),
+                                *turn_reference.findings(answer, _references,
+                                                         kind=turn_reference.KIND)]
             number_links = [{"text": r.quantity.text, "fact": r.fact.id if r.fact else None,
                              "source": r.fact.source if r.fact else None,
                              "call_id": r.fact.call_id if r.fact else None}

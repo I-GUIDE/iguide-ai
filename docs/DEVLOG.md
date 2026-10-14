@@ -5366,3 +5366,80 @@ rather than from the previous one.
 
 **Not fixed** Raster pixel-count areas, `pyproj.Transformer` arithmetic and shapely scalars carry
   no CRS; Web Mercator's scale error is not a unit error.
+
+## 2026-10-12 · M8.89 · Every check measured against the scored archive (architecture stage 52)
+
+**Change** `gis_harness/validators_bench.py` replays the agent's validation checks offline (no
+  model call, no network) over every scored turn in `gis_harness_runs_archive/`. Each turn
+  carries its supervisor state in its `result` event, so the replay feeds the recorded tool
+  results, gate reports and the auditor's claim ledger through this checkout's unit and count
+  checks, gate scoping, audit reconciliation, number scan, corrections and `verdict.shown`. It
+  writes `report.json` and `report.md`: per check, firings on correct, wrong and refused answers,
+  precision, recall, the same without coincidental catches, false alarms by cause, and sources
+  the Sources line drops. CI runs it on 22 committed turns and fails when the numbers move;
+  `--update-expected` commits the new ones.
+
+**Why** Step 1 of the validation plan: every later step is judged by this benchmark. The banner's
+  8% precision had been counted from answer text, with no check attributed.
+
+**Measured** The stage 46 baseline reproduces exactly: 437 turns, 39 wrong, a banner on 9 wrong
+  and 98 others. Over 493 scored turns, with made-up answers to unsolvable tasks counted wrong
+  and five T10 turns relabelled wrong by hand (the scorer matched an aside, not the reported 295.1
+  ppm): the banner as printed, precision 22%, recall 36%. This checkout replayed: precision 40%,
+  recall 13% (10 of 77), and 6 of those 10 catches are related to the error (four peer failures, two
+  degree distances on U04). The count and unit checks have no earned catch. The audit's printed
+  findings are mostly claims the record holds. The Sources line drops a source on 19 turns, 14
+  of them because a code run reread files an earlier call fetched.
+
+**Not fixed** The in-sandbox checks are measured, not re-run. There is no turn log in the archive,
+  so its typed facts are rebuilt. The 71 of 77 wrong answers the banner does not mark for a
+  related reason are not yet classified by what went wrong.
+
+
+## 2026-10-12 · M8.90 · Two runs that disagree, and a standard method recomputed (architecture stage 53)
+
+**Change** `agent_runtime/agreement.py`: the same typed figure from two runs of one turn must
+  agree. Names must match word for word, units by dimension, and a name of only generic words
+  is never compared. The writer is told before answering, and a finding is raised when the
+  answer reports one side the runs did not settle on.
+  `agent_runtime/reference_sandbox.py`: the gate records ordinary-kriging systems and esda
+  Gi*/Moran calls, recovers the inputs (variogram, coordinates, target), and recomputes with
+  pykrige and esda. `agent_runtime/reference_checks.py` does the same for the Gi*, Moran, slope
+  (Horn) and zonal-mean tools, ties the figures to what the run printed, and raises findings.
+  The validators bench replays both (`--reexec` re-runs the code in the sandbox image). pykrige
+  is added to the sandbox image.
+
+**Why** Steps 4a and 4b of the validation plan. T09 (Gi* on row-standardised weights) and T10
+  (kriging with the nugget on the diagonal) hold 30 of the archive's wrong answers, and no check
+  saw either: each run was consistent with its own mistake.
+
+**Measured** Bench with stage 52's relabels, 462 replayable turns, 77 wrong. Agreement: 2 turns,
+  both wrong. Reference: 33 turns, all wrong, recall 43%. Its only apparent false positives in the
+  first run were the 5 T10 turns the scorer credited for an aside, which stage 52 now relabels.
+  Both are banners. The replayed banner goes from precision 40% and recall 13% to 74% and 56%
+  (earned: 24%/8% to 67%/51%).
+
+**Not fixed** `local_getis_ord` still row-standardises (the root of T09; fixed in M8.92). Kriging systems that
+  are inconsistent, inverted with `inv`, or in covariance form stay silent. Hand-written Moran
+  and Gi* are not recomputed. The sandbox image is not rebuilt.
+
+
+## 2026-10-12 · M8.92 · Gi* as Getis and Ord define it (architecture stage 55)
+
+**Change** `local_getis_ord` uses binary weights with the focal area included by default, and
+  passes the transform to `G_Local` too (esda re-applies its own default, "R"). The new
+  `transform` argument asks for row-standardised Gi*; kernels keep their own values ("O"). The
+  result names the transform and has `z_counts` (areas beyond ±1.645/1.96/2.576), and the
+  transform is part of the layer key. The reference check reads the transform: a result without
+  one is an old row-standardised record and is still flagged, a binary one agrees, and a
+  requested non-binary one is not held to binary.
+
+**Why** Stage 53's reference check found the tool was the root of T09's 16 tool-side wrong
+  answers: 1 cell with z > 1.96 where binary Gi* gives 13.
+
+**Measured** T09 lattice: 13 (was 1). Validators bench: fixtures and full-archive report.md
+  unchanged; archived turns ran the old tool and are still flagged.
+
+**Not fixed** No new T09 run. The classes still use permutation p (15 hot), now beside
+  `z_counts`. Agent-written `G_Local` without `transform="B"` is only flagged.
+

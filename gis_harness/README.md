@@ -132,6 +132,26 @@ Expected values are computed in `datasets.py` from the same bytes that are uploa
 force, a closed form, or a second library. `tests/test_gis_harness.py` holds them and checks
 that each trap still changes the answer.
 
+## How good are the checks? (`validators_bench`)
+
+```bash
+# every scored turn in the archive (default: gis_harness_runs_archive/ in the main checkout)
+python3 -m gis_harness.validators_bench
+
+# against a previous full run: each check's precision and recall delta
+python3 -m gis_harness.validators_bench --baseline OLD/report.json
+
+# the committed fixture subset, as CI runs it; after an intended change, commit the new numbers
+python3 -m gis_harness.validators_bench --fixtures --check
+python3 -m gis_harness.validators_bench --fixtures --update-expected
+```
+
+It replays the agent's validation checks (gate, number scan, audit reconciliation, corrections,
+peer note, banner policy) on each archived turn's recorded state, with no model call. It scores
+them against the harness's labels: correct, wrong, or an honest refusal. It reports each check's
+precision as a "this answer is wrong" signal, its recall over wrong answers, and false alarms by
+cause. Architecture stage 52 has the measurements and what the replay can and cannot re-run.
+
 ## Data and licences
 
 - Synthetic datasets are generated at run time from fixed seeds.

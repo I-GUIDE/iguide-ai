@@ -79,6 +79,8 @@ _CONTIGUITY = {"queen", "rook"}
 # Row-standardisation ("r") is GeoDa's default and the only sane one for Moran's I: it makes the
 # spatial lag a neighbour AVERAGE, so a tract with 3 neighbours and one with 12 are comparable.
 _TRANSFORMS = ("r", "b", "v", "d", "o")
+_TRANSFORM_MEANING = {"b": "binary", "r": "row-standardised", "v": "variance-stabilised",
+                      "d": "doubly-standardised", "o": "original (unstandardised)"}
 
 _SIB = ("For an uploaded shapefile, pass the .shp's file_id (or any single component) — the tool "
         "auto-finds the .shx/.dbf/.prj among the attached files. GeoJSON, GeoPackage, GeoParquet "
@@ -795,6 +797,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
     def local_getis_ord(file_id: str, column: str, weights: str = "queen", k: int = 6,
                         threshold_km: Optional[float] = None, star: bool = True,
+                        transform: Optional[str] = None,
                         permutations: int = 999, name: Optional[str] = None,
                         label_column: Optional[str] = None,
                         siblings: Optional[List[str]] = None) -> str:
@@ -803,8 +806,11 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
         The other standard hot-spot statistic (ArcGIS's "Hotspot Analysis"). Where LISA
         distinguishes clusters from outliers, Gi* answers "is this a cluster of HIGH values or
         of LOW values", banded by confidence. `star=True` includes each area itself in its own
-        neighbourhood (Gi*, the usual choice); False gives classic Gi. Returns a categorical map
-        layer with a legend plus a CSV of z-scores and p-values.
+        neighbourhood (Gi*, the usual choice); False gives classic Gi. `transform` is the
+        weights' standardisation: "B" (binary, the default and Getis and Ord's definition), "R"
+        (row-standardised) only when that is asked for. Kernel weights keep their own values
+        ("O") unless told otherwise. Returns a categorical map layer with a legend plus a CSV of
+        z-scores and p-values.
         """
         notes: List[str] = []
         try:
@@ -816,10 +822,21 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 return err
             perms = max(99, min(int(permutations or 999), 99999))
             y = frame[column].to_numpy(dtype="float64")
+            # Gi* as Getis and Ord define it weights every neighbour 1, the focal area included
+            # (star). Row-standardising instead divides each area's sum by its own neighbour
+            # count, which shrinks the z-scores of well-connected areas: on T09's 10x10 lattice it
+            # gave 1 cell with z > 1.96 where the statistic gives 13. A kernel's weights ARE its
+            # distance decay, so binary would discard them; it keeps its own ("O").
+            kind = str(weights or "queen").strip().lower()
+            tr = str(transform or ("o" if kind == "kernel" else "b")).strip().lower()
+            if tr not in _TRANSFORMS:
+                return _fail(ValueError(f"unsupported transform {transform!r}; use B (binary, "
+                                        f"the default), R (row-standardised) or "
+                                        f"{'/'.join(t.upper() for t in _TRANSFORMS[2:])}"), _SIB)
 
             import warnings
 
-            with _weights_for(frame, weights, k, threshold_km, "r", notes) as w:
+            with _weights_for(frame, weights, k, threshold_km, tr, notes) as w:
                 diag = _weights_diagnostics(w)
                 _island_note(w, notes)
                 island_idx = set(int(i) for i in w.islands)
@@ -830,8 +847,10 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                     # agent process. Below about 10,000 areas that pool saves a fraction of a
                     # second at best, and the seeded result is identical either way. The cost on
                     # larger layers: docs/agent-architecture-changes.md, Stage 26.
-                    g = esda.G_Local(y, w, permutations=perms, star=bool(star), seed=42,
-                                     n_jobs=1)
+                    # The transform goes to G_Local too: it re-applies its own, which is "R"
+                    # unless told otherwise, whatever the W arrived with.
+                    g = esda.G_Local(y, w, transform=tr.upper(), permutations=perms,
+                                     star=bool(star), seed=42, n_jobs=1)
 
             z = np.asarray(g.Zs, dtype="float64")
             p = np.asarray(g.p_sim, dtype="float64")
@@ -861,7 +880,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             layer_key = content_key("gistar" if star else "gi", column,
                                     input=_input_key(file_id, siblings), column=column,
                                     **_weights_key(weights, k, threshold_km), star=bool(star),
-                                    permutations=perms)
+                                    transform=tr, permutations=perms)
             base = _stem(name, _source_stem(file_id), f"{column}_hotspots")
             rec = _write_geojson(out, base, _source_stem(file_id), "hotspots", key=layer_key)
 
@@ -873,15 +892,26 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
 
             hot = sum(v for kls, v in counts.items() if kls.startswith("Hot"))
             cold = sum(v for kls, v in counts.items() if kls.startswith("Cold"))
+            # The classes above come from the permutation p-values. "How many cells have
+            # z > 1.96" is the other common reading (ArcGIS bands by z), and counting it from
+            # the ten hottest rows below is wrong as soon as more than ten pass.
+            zf = z[np.isfinite(z)]
+            z_counts = {**{f"z > {t}": int(np.sum(zf > t)) for t in (1.645, 1.96, 2.576)},
+                        **{f"z < -{t}": int(np.sum(zf < -t)) for t in (1.645, 1.96, 2.576)}}
             return _dumps({
                 "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                 "download_url": rec.get("download_url"),
                 "column": column, "statistic": stat_name,
-                "features_analyzed": int(len(frame)), "weights": weights, "permutations": perms,
-                "connectivity": diag, "class_counts": counts,
+                "features_analyzed": int(len(frame)), "weights": weights,
+                "transform": tr.upper(), "transform_meaning": _TRANSFORM_MEANING.get(tr, tr),
+                "permutations": perms,
+                "connectivity": diag, "class_counts": counts, "z_counts": z_counts,
                 "interpretation": (
                     f"{hot} hot-spot area(s) (clusters of HIGH {column}) and {cold} cold-spot "
-                    f"area(s) (clusters of LOW {column}) out of {len(frame)}, by {stat_name}"),
+                    f"area(s) (clusters of LOW {column}) out of {len(frame)} at permutation "
+                    f"p < 0.05, by {stat_name} with {_TRANSFORM_MEANING.get(tr, tr)} {kind} "
+                    f"weights. By z-score: {z_counts['z > 1.96']} area(s) with z > 1.96 and "
+                    f"{z_counts['z < -1.96']} with z < -1.96 (z_counts has the other bands)"),
                 "hottest": csv_frame.head(10).to_dict(orient="records"),
                 "coldest": csv_frame.tail(10).to_dict(orient="records")[::-1],
                 "csv": _asset(csv_rec),
@@ -1454,7 +1484,10 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "banded by confidence (99%/95%). Use when the question is 'where are the "
                 "clusters of HIGH values (or LOW values)' by intensity; use local_moran_lisa "
                 "instead when spatial OUTLIERS matter too. `star=True` (default) includes each "
-                "area in its own neighbourhood. Returns a categorical map layer with a legend "
+                "area in its own neighbourhood. `transform` defaults to \"B\" (binary weights, "
+                "Getis and Ord's definition); pass \"R\" only when row-standardised Gi* is "
+                "asked for. Result has `z_counts` (cells with z > 1.645/1.96/2.576 and below "
+                "the negatives). Returns a categorical map layer with a legend "
                 "plus a CSV of z-scores and p-values. " + _SIB)),
         StructuredTool.from_function(func=accept_null_defaults(moran_scatterplot), name="moran_scatterplot", metadata=meta,
             description=(

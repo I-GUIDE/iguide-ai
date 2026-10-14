@@ -63,6 +63,9 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 48 | [Measured numbers reach the gate without being declared](#stage-48) | 2026-10-09 | a figure printed with a unit is typed, and inherits the CRS of the measuring call whose value it equals; a geographic CRS or a feet CRS read as metres fails; no declaration or prompt needed |
 | 49 | [Three ways to reach public data](#stage-49) | 2026-10-09 | sandbox code gets public data through a tool bridge (two mounted directories, the agent's fetch policy per call, every call in the turn record) or, for measurement only, a network; on the sweep's 12 failed questions: offline 4 correct, network 8, bridge 8, and only the bridge names the data its code fetched |
 | 50 | [The extraction work lands, and the agent reads a record of its own](#stage-50) | 2026-10-08 (recorded 2026-10-10) | PR #83 merges M8.1–M8.71; the VM searches a static Postgres copy with the bundle on; the ingestion service is not deployed |
+| 52 | [Every check measured against the scored archive](#stage-52) | 2026-10-12 | each check's precision and recall replayed offline over 493 scored turns; the stage 46 baseline reproduced; false alarms by cause; a fixture subset in CI fails when a check's numbers move |
+| 53 | [Two runs that disagree, and a standard method recomputed](#stage-53) | 2026-10-12 | the same figure from two runs must agree; hand-written kriging, esda Gi*/Moran and the Gi*, Moran, slope and zonal tools are recomputed with a reference library from the run's own inputs; both are banners at 100% measured precision; the replayed banner goes from 40% / 13% to 74% / 56% |
+| 55 | [Gi\* as Getis and Ord define it](#stage-55) | 2026-10-12 | `local_getis_ord` uses binary weights with the focal area included by default (it row-standardised): 13 hot spots on T09's lattice where it said 1; `transform` asks for another, `z_counts` counts the z-scores |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -8357,6 +8360,427 @@ setup errors that neither side produced alone, and M8.71 fixed it.
 - **The ingestion port.** If `metadata-extraction-server` is started, port 5001 publishes on
   every interface, because the platform form and MinIO post to it from elsewhere. That decision
   is still open.
+
+## Stage 52 — Every check measured against the scored archive {#stage-52}
+
+*2026-10-12. Branch `claude/validators-bench`, stacked on "A banner only when a check found
+something" (stage 46). DEVLOG M8.89. Step 1 of the five-step plan for validation: (1) measure every
+check offline against the scored archive; (2) a lineage graph, so every number and source is traced
+by construction; (3) quantity types inferred from the computation, not declared by the model;
+(4) independent evidence (plausibility envelopes, metamorphic checks, a second route for the
+headline number, positive controls for absence claims); (5) claim-level verdicts, with banner
+thresholds set from measured precision. Every later step is judged by the benchmark this one
+builds. No model call, no deploy.*
+
+**Why.**
+
+- The banner's 8% precision ("A banner only when a check found something") was counted from
+  answer text. Nothing said which check produced which banner. Nothing re-ran the checks of the
+  code being changed, so a fix could be judged only by a new harness run, at about 4M Lumen tokens
+  per phase.
+- That entry's calibration covered 50 turns of three runs. The archive holds 493 scored turns.
+
+**What changed.**
+
+1. **`gis_harness/validators_bench.py`.** Every scored turn in `gis_harness_runs_archive/` becomes a
+   labelled row:
+   - **correct**;
+   - **wrong**: a solvable task answered wrong, or an unsolvable one given a made-up value;
+   - **honest refusal**: refused, or a disclosed substitute.
+
+   The checks are scored in two views:
+   - **recorded**: what the live turn showed. That is its recorded verdict (from "Facts, a number
+     scan, one verdict", stage 44, on), or the items of the banner in the answer, in each of the
+     eight formats the archive holds.
+   - **replay**: the checks of this checkout, re-run on the state each turn's `result` event
+     carries. That state holds every peer's tool results with their call ids (the gate's report
+     rides inside each `execute_code` result), the evidence, the audit with its claim ledger, and
+     the peer failures. 462 of the 493 turns carry it; the live browser sweep does not.
+
+   Replayed are:
+   - the unit and count checks (`declared_outputs.evaluate`) on each run's recorded declarations;
+   - the gate's supersession and its scoping to the runs the answer uses;
+   - the audit's reconciliation and `verdict.from_audit`;
+   - the number scan;
+   - the corrections and the peer note;
+   - `verdict.shown`.
+
+   Inputs, as recorded:
+   - the checks that run inside the sandbox, which read live objects;
+   - the auditor's own verdict. The ledger's absent and contradicted rows are its issues. Its
+     severity is inferred on 17 turns, where the gate or a reconciliation overwrote it.
+
+   Whether the number scan would cut a figure needs the producer check, an LLM call. So an
+   unresolved figure is reported as unverifiable, and a cut the live turn made is carried from
+   its verdict.
+2. **Per check, and for the banner:**
+   - the turns it fired on, split by correct, wrong and refusal;
+   - precision, the share of those turns that were wrong;
+   - recall, the share of wrong turns it fired on;
+   - the same two **earned**, without coincidental catches. A catch is coincidental when the
+     finding's cause is a known false-alarm class (`KNOWN_FALSE_ALARMS`), which would fire on a
+     correct answer just the same. Example: the count check firing on T11L's 239 patches, an
+     answer that was wrong because its roads query dropped primary roads.
+3. **Labels corrected by hand** (`LABEL_OVERRIDES`): five T10 turns the harness scored correct are
+   wrong. Each reports 295.1 ppm, the plain `exp()` of the kriged log value 5.6872. The scorer
+   matched an aside: the lognormal back-transform `exp(5.6872 + 0.1158/2)`, 311 to 312.6 ppm,
+   which the answer says it does not report, and which falls within 1% of the expected 309.53.
+   The cross-run agreement session found them; every T10 turn in the archive was checked, and no
+   others match. The stage 46 reproduction keeps the original scores.
+4. **Causes.** Every finding gets one, by rule. Two are read by hand (`HAND_CAUSES`):
+   - the L2A offset in `threeway-bridge-fix4` T08L, which came from the bridge's Planetary Computer
+     note;
+   - a difference of two recorded counts.
+
+   An audited claim is "in the record" when every figure in it resolves to a recorded number, as
+   the number scan resolves it, or, for a claim without figures, when three quarters of its words
+   are in what the tools returned and the code ran.
+5. **The Sources line.** The bench lists the data sources a turn's record holds that its rendered
+   Sources line leaves out, with the cause.
+6. **CI.** `python3 -m gis_harness.validators_bench --fixtures --check` runs in the `tests` job on 22
+   committed turns (`gis_harness/fixtures/validators_bench/turns.jsonl`, 1.8 MB; scrubbed of thread
+   and session ids, local paths and email addresses). It compares the report with the committed
+   `expected.md` and fails on any difference. A change to a check commits the new numbers with it
+   (`--update-expected`), so its precision and recall delta is in the pull request's diff.
+   `--baseline REPORT.json` prints the delta against any earlier full run. Disabling the count
+   check, as a test, moved the fixture banner's recall from 86% to 71% and its earned precision
+   from 29% to 31%.
+
+**How faithful the replay is.**
+
+- **Every turn with a recorded verdict** (55 turns): the replay gives the same set of (check, kind)
+  for the gate, audit, correction and peer checks as the live turn. One exception: nine
+  `not_applicable` items that `from_gate` in this checkout no longer reports. Two fixes were needed
+  to get there:
+  - The answer's figures must resolve first to the typed facts of the turn log, as they did live.
+    The log is not archived, so the bench rebuilds it from each successful result's `outputs`.
+    Without it, `threeway-bridge` T05L resolved a figure to an earlier failed run, and that run's
+    `projected_crs` failure came into scope.
+  - Outputs that stage 48's branch types from printed numbers (`source` "printed") are left as
+    recorded. This checkout read "incidents per 1,000" as a count and failed it.
+- **The number scan** gives the same unresolved figures on 13 of 18 turns. The rest are turns
+  with a re-grounding pass, or figures that stage 46's resolver changes (unit conversions).
+- **Over the full archive** the bench runs in about 6 s. On the fixtures it takes 1.7 s, and
+  their rows equal the full run's rows for the same turns.
+
+**Measured** (493 scored turns: 325 correct, 86 wrong, 82 honest refusals; 7 unscored left out;
+five T10 turns relabelled wrong, see item 3).
+
+The stage 46 baseline is reproduced exactly. Over the 18 runs archived by then (437 turns, 39 wrong
+by that entry's split), there was a banner on 9 wrong and 98 others: precision 8%, recall 23%. That
+split counted the 19 answers to unsolvable tasks with a made-up value as not wrong. Here they are
+wrong.
+
+| banner | turns | wrong | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
+|---|---|---|---|---|---|---|---|---|
+| as the live turns printed it | 493 | 86 | 31 (19) | 109 | 22% | 36% | 14% | 22% |
+| the same, on the 462 replayable turns | 462 | 77 | 26 (18) | 96 | 21% | 34% | 15% | 23% |
+| this checkout, replayed | 462 | 77 | 10 (6) | 15 | 40% | 13% | 24% | 8% |
+
+What the replayed banner prints, per check (wrong answers, of which coincidental, in brackets):
+
+| check | kind | on correct | on wrong | on refusal | precision | recall | precision earned |
+|---|---|---|---|---|---|---|---|
+| peer failed | unverifiable | 0 | 4 (0) | 0 | 100% | 5% | 100% |
+| gate `projected_crs` | problem | 4 | 2 (0) | 0 | 33% | 3% | 33% |
+| gate `count_population` | problem | 4 | 3 (3) | 0 | 43% | 4% | 0% |
+| gate `declared_units` | problem | 1 | 1 (1) | 0 | 50% | 1% | 0% |
+| gate `all_nan` | problem | 3 | 0 | 0 | 0% | 0% | 0% |
+| gate `finite_value` | problem | 1 | 0 | 0 | 0% | 0% | 0% |
+| audit | problem | 6 | 1 (1) | 1 | 12% | 1% | 0% |
+
+What it keeps in the verdict payload:
+
+| check | kind | on correct | on wrong | on refusal | precision | recall |
+|---|---|---|---|---|---|---|
+| number scan | unverifiable | 99 | 30 (0) | 10 | 22% | 39% |
+| number scan | note (cut) | 23 | 14 (0) | 6 | 33% | 18% |
+| gate `coverage` | unverifiable | 47 | 7 (7) | 10 | 11% | 9% |
+
+As the live turns printed them, the audit fired on 8 correct, 4 wrong and 1 refusal. Three of the
+4 catches are coincidental:
+- in `baseline` T09 (twice) it called z-scores contradicted that a second recorded call holds, on
+  answers wrong for their hot-spot count;
+- in `p2-after` U04.t1 it called distances unsupported that the code printed, on an answer wrong
+  for a made-up travel time.
+
+False alarms of this checkout's banner, by cause (correct answers and refusals):
+
+| cause | findings | turns |
+|---|---|---|
+| audit: the record holds the claim; the auditor marked it absent | 8 | 5 |
+| count check: a count of things that are not frame rows (people, pixels, patches) | 8 | 4 |
+| `all_nan`: an optional column empty after a join that matched | 7 | 3 |
+| `projected_crs`: an exploratory print measured in degrees, not the answer's run | 3 | 3 |
+| a mean, median or index typed as a count (a fractional "count") | 3 | 1 |
+| audit: knowledge or interpretation in no record | 3 | 1 |
+| `finite_value`: a declared NaN | 2 | 1 |
+| `projected_crs`: a degree area used only as a non-zero test (`.area > 0`) | 2 | 1 |
+| audit: arithmetic on recorded figures; the reason a refusal gives; a fact from a tool description | 1 each | 1 each |
+
+As the live turns printed them, the false alarms were mostly "not checked":
+- the gate could not reach the frames: 165 findings on 58 turns;
+- it had nothing to check: 62 on 41;
+- cuts: 27;
+- unit words the vocabulary before "A number carries its unit and where it was measured"
+  (stage 43) did not know: 15 on 7.
+
+The Sources line, replayed, leaves out a data source its record holds on 19 turns (10 correct,
+9 wrong; 23 sources):
+- 14 because a code run reread files an earlier call fetched (the figure resolves to the code
+  run, and the fetch's source drops out: `threeway-bridge-fix4` T08L loses Planetary Computer);
+- 9 whose result no stated figure came from, mostly a geocoder.
+
+**What this says.**
+
+- **Stage 46 cut the false alarms; it did not make the banner a detector.** On the same 462 turns,
+  the answers that are not wrong but carry a banner fell from 96 to 15, and wrong answers with a
+  banner fell from 26 to 10. Of those 10, six are earned: four peer failures and two
+  `projected_crs` failures on U04, a distance measured in degrees. On U04 the answer then made up a
+  travel time; the gate does not establish that one caused the other. A banner now means a wrong
+  answer 40% of the time, and 24% for a reason related to it. It marks 10 of the 77 wrong
+  answers, and only 6 of them for a related reason. It marks none of the five T10 answers that
+  reported the wrong back-transform.
+- **Neither the count check nor the unit check has an earned catch.** Every one of the count
+  check's seven firings, and the unit check's two, is a count of non-rows or a mean typed as a
+  count.
+- **The audit's printed findings are almost all claims the record holds.** That is the
+  auditor's view of the record failing (truncation, a second call, a figure in code), not the
+  answer.
+- **The highest recall of any check is the number scan's "not in any record", at 39%,** and it
+  is not printed. At 22% precision it is not a banner by itself. It is the obvious input to
+  claim-level verdicts (step 5).
+- **The in-sandbox checks** (`all_nan`, `projected_crs`, coverage) can be measured here but not
+  re-run. A fix to them, like stage 46's `all_nan` rule, shows only in new runs.
+
+**Not done.**
+- The replay has no turn log, so typed facts are rebuilt from the recorded outputs, and turns
+  with a re-grounding pass are replayed from their final state only.
+- The audit's own severity is inferred on 17 turns.
+- Causes are rules over message text, with two hand labels. A new class shows up as "other" or
+  under the nearest rule until someone reads it.
+- The 71 of 77 wrong answers the banner does not mark for a related reason are not classified
+  by what went wrong (method, data, arithmetic). That is step 4's input. The harness scorer's
+  matching can credit an aside (the T10 relabels); `gis_harness/score.py` is unchanged here.
+
+## Stage 53 — Two runs that disagree, and a standard method recomputed {#stage-53}
+
+*2026-10-12. Branch `claude/independent-evidence`, stacked on "Measured numbers reach the gate
+without being declared" (stage 48) and merging "Every check measured against the scored archive"
+(stage 52), whose benchmark measures it. DEVLOG M8.90. Steps 4a and 4b of the validation plan:
+the two cheapest checks that use evidence the turn did not produce by checking itself. Offline
+only: no model call, no deploy.*
+
+**Why.** Stage 52 left 71 of 77 wrong answers with no related banner, mostly method errors. Every
+check looked at one run at a time, and a run that implements a method wrongly is consistent with
+its own mistake. Two tasks hold 30 of the archive's wrong answers:
+
+- **T10, ordinary kriging** (14 wrong of 28 scored). Nearly every wrong answer is 295.1 ppm
+  where the reference is 309.53. The model wrote the kriging system in numpy and put the nugget
+  on the diagonal of the semivariance matrix (gamma(0) = nugget instead of 0). In
+  `stack-live-cases`, one run declared `kriging_zinc = 309.531` and a later one
+  `krige_zinc = 295.06`. The answer reported 295.1 and no check said anything.
+- **T09, Getis-Ord Gi\*** (16 wrong of 25). The wrong answers say 1 hot spot where the reference
+  is 13. esda's `G_Local` row-standardises its weights unless given `transform="B"`. The
+  `local_getis_ord` tool fixes `"r"`, and agent code that passed binary weights with the
+  diagonal filled was re-standardised all the same. Row-standardised, the lattice has exactly
+  one cell over 1.96 (z = 2.0804, the figure the wrong answers quote). Binary, it has 13.
+
+**What changed.**
+
+1. **Cross-run agreement** (`agent_runtime/agreement.py`). Typed facts ("A number carries its unit
+   and where it was measured", stage 43; "Measured numbers reach the gate without being
+   declared", stage 48) from different runs are "the same figure" only when the kind is known on
+   both sides:
+   - the names agree word for word once spelling is folded (`kriging_zinc`/`krige_zinc`,
+     `kriging_logzinc`/`krige_logz`, not `distance`/`district`);
+   - a name of only generic or unit words (`total_area`, `area_km2`, `value`) names no kind;
+   - the units have one dimension and are converted before comparing;
+   - the runs did not read disjoint inputs.
+
+   Never compared: a figure the sandbox measured by itself (`area sum`, named after the
+   operation), and permutation results (`p_sim`, p-values), which move with the number of
+   shuffles. Values more than 0.5% apart, beyond rounding, disagree.
+   - **Before the answer is written**, the writer gets a reconcile note: the figures, the runs,
+     and an instruction to say which is right and why, or to report both.
+   - **After**, a finding, when the answer states one side and not the other **and the turn's
+     runs did not settle on that side**. Settled means more runs computed the answer's value than
+     any value it disagrees with. A zero does not compete with non-zero values. In the archive's
+     correct turns, early attempts computed 0 or a broken area (T06 slope 0, a 0.0666 km²
+     watershed, T07L area 0) before later runs agreed, and the answer reported what they agreed
+     on. In T10 the two runs are one against one.
+2. **Reference recomputation**, in the sandbox (`agent_runtime/reference_sandbox.py`, inlined into
+   the gate's prologue like the rest of `sandbox_verify`):
+   - **Kriging written by hand.** Every `numpy.linalg.solve`, `numpy.linalg.lstsq` and
+     `scipy.linalg.solve` is recorded when its matrix is an ordinary-kriging system: last row and
+     column ones, zero corner. After the run, the system is turned back into its inputs. No
+     variable's name is read.
+     - The **variogram**: a standard model (spherical, exponential, gaussian, linear) is fitted to
+       the matrix's off-diagonal and must reproduce it to 1e-6.
+     - The **coordinates**: the pair of the run's length-n vectors whose distances make the
+       matrix a function of distance.
+     - The **target**: trilaterated from the right-hand side by inverting the variogram. It must
+       rebuild the right-hand side.
+
+     pykrige then kriges every length-n vector the run left bound at that point (numpy's own
+     ordinary kriging, with gamma(0) = 0, when pykrige is not installed). On T10 the recovered
+     inputs are Sph(0.05, 0.59, 897) at (179500, 331500), and pykrige gives log 5.73506 (exp
+     309.53) against the run's 5.68717 (exp 295.06).
+   - **esda `G_Local` and `Moran` in agent code** are recorded with their inputs. Gi\* is
+     recomputed with binary weights and the focal cell included (`transform="B"`, `star=True`:
+     the statistic as Getis and Ord define it), Moran's I with row-standardised weights. Weights
+     that are not contiguity or k-nearest (inverse distance, kernels) are not recomputed.
+
+   The record travels back as `verification.reference`, at most eight, with no arrays.
+3. **Reference recomputation of the built-in tools** (`agent_runtime/reference_checks.py`), in the
+   agent process where the tools run, from the same input file:
+   - `local_getis_ord` with esda, binary weights and the focal area included;
+   - `global_spatial_autocorrelation` with esda, row-standardised (it agrees);
+   - `terrain_derivative` slope with Horn's 3x3 method in numpy, on ground distances from the
+     raster's CRS. The tolerance is 15%, because Horn's kernel smooths where central differences
+     do not;
+   - `zonal_stats_for_raster`, each zone's mean over its own rasterio mask, so overlapping
+     zones do not share pixels.
+
+   The neighbour structure is built by the tool module's `_weights_for`. It is not what is under
+   test.
+4. **Figures, then findings.** A recomputation becomes figure pairs, the run's value against the
+   reference.
+   - A kriged value counts only if the run printed or declared it, or its exp().
+   - A Gi\* count is tied to its threshold: "cells with z > 1.96" must be stated in a sentence
+     that also states 1.96.
+
+   The writer gets a reconcile note before answering. After answering, a finding is raised when
+   the answer states the run's value and not the reference value. For a count, any other count
+   stated beside the threshold also triggers it: baseline T09 (luna) wrote "15 cells are hot
+   spots with Gi\* z > 1.96", the tool's p-value class count.
+5. **The validators bench replays both** (`gis_harness/validators_bench.py`,
+   `_independent_evidence`). Agreement and the tool-side references run on the recorded state,
+   and the task's input files are rebuilt by the harness's dataset builders. The in-sandbox half
+   needs the run re-executed: `--reexec` re-runs each turn's kriging and esda code under the
+   current gate in a sandbox image with no network (`gis_harness/reference_reexec.py`, per call,
+   cached by content). `typed_coverage --reexec` (stage 48) covers correct turns only, so it does
+   not serve here. CI's fixture check runs without re-execution, and its `expected.md` moves by
+   one catch.
+6. **The sandbox image installs pykrige** (`sandbox/Dockerfile`, `verify_imports.py`). Until it is
+   rebuilt, the kriging reference runs on numpy and says `engine: numpy`.
+
+**Measured** (validators bench, `--reexec`, 462 replayable turns, 77 wrong, with stage 52's
+`LABEL_OVERRIDES`; 60 runs re-executed in `iguide-codeexec:latest` plus pykrige, 57 wrote a record,
+3 failed). Before is the base, `claude/validators-bench` at 774d1102.
+
+| check | kind | fired on | wrong | correct | precision | recall |
+|---|---|---|---|---|---|---|
+| cross-run agreement | problem | 2 | 2 | 0 | 100% | 3% |
+| reference recomputation | problem | 33 | 33 | 0 | 100% | 43% |
+| of which tool-side only (no re-execution) | | 16 | 16 | 0 | 100% | 21% |
+
+By method: Gi\* 16, ordinary kriging 17. Agreement's two catches are T10 (`stack-live-cases`,
+`threeway-net`), which the reference check also catches. No catch is coincidental, and there is no
+false alarm. Five of the kriging catches are the T10 turns the scorer had credited for an aside:
+the lognormal back-transform exp(5.6872 + 0.1158/2) ≈ 311 to 312.6 ppm, mentioned beside a
+headline of 295.1. This stage's first measurement found them as the check's only "false
+positives". Stage 52 now relabels them (`LABEL_OVERRIDES`).
+
+Both checks clear the plan's bar for a banner (a banner means a wrong answer at least 80% of the
+time), so both are `problem`. Agreement clears it on two turns, a small sample: the Wilson 95%
+lower bound for 2 of 2 is 34%.
+
+The banner, this checkout replayed (stage 52's table), before and after:
+
+| | bannered wrong (earned) | bannered not wrong | precision | recall | precision earned | recall earned |
+|---|---|---|---|---|---|---|
+| before | 10 (6) | 15 | 40% | 13% | 24% | 8% |
+| after | 43 (39) | 15 | 74% | 56% | 67% | 51% |
+
+Against the plan's three targets: the precision bar (80%) is not yet met by the banner as a whole,
+at 74%. The 15 banners on answers that are not wrong are all stage 52's, from the gate, audit and
+count checks. The share of correct answers with a banner is unchanged. Recall passes 50%; the
+target is 60%.
+
+The re-executed records put the reference values into the tool result, as they will be live. The
+number scan's figures did not move.
+
+What the writer would have been told (the reconcile notes, which no replay can score):
+- the agreement note on 8 turns, 4 of them wrong;
+- the reference note on 48, 33 of them wrong.
+
+On the correct ones the run had already reported the reference value: luna recomputing Gi\*
+itself after the tool, for instance.
+
+**Not fixed.**
+
+- **`local_getis_ord` still computes row-standardised Gi\*.** The check flags it on every call
+  whose answer quotes its count. Fixing the tool would remove the 16 wrong T09 answers at the
+  source. That is a separate change. (Fixed: "Gi\* as Getis and Ord define it", stage 55.)
+- **A kriging system whose right-hand side is not its own matrix's variogram at any one point**
+  (baseline luna T10.t1: a covariance-form matrix with a variogram right-hand side, 3,320 ppm) is
+  recorded as `inconsistent` and stays silent. So is kriging done through `np.linalg.inv`, and in
+  covariance form.
+- **Moran's I written by hand, and Gi\* written by hand** (no esda call) are not recomputed.
+  Neither appears among the wrong answers.
+- **The live browser sweep** (`live-sweep-23cfd02`, one wrong T10) carries no state, so neither
+  check is replayed on it.
+- **Recall stops where the method errors stop.** The checks catch T09 and T10, the tasks whose
+  methods have a reference library. The other wrong answers (live data, routing, siting) need
+  steps 4c to 4g.
+- **The sandbox image is not rebuilt.** Until it is, the kriging reference is numpy's.
+
+
+## Stage 55 — Gi\* as Getis and Ord define it {#stage-55}
+
+*2026-10-12. Branch `claude/gi-star-binary-weights`, stacked on "Two runs that disagree, and a
+standard method recomputed" (stage 53), whose reference check found it. DEVLOG M8.92. Stage 54 is
+"A figure's kind is read from the code that computed it", on its own branch. No model call, no
+deploy.*
+
+**Why.** `local_getis_ord` built its weights row-standardised (`_weights_for(..., "r", ...)`) and
+called `esda.G_Local` without a transform, whose default is also `"R"`. Gi\* as Getis and Ord
+define it, and as users and the T09 task ask for it, uses binary weights with the focal area
+included. Row-standardising divides each area's neighbourhood sum by its neighbour count, which
+pulls the z-scores of well-connected areas toward zero. On T09's 10x10 lattice
+(`gis_harness.datasets.lattice_autocorrelation`) the tool gave 1 cell with z > 1.96 (max z
+2.0804); binary Gi\* gives 13 (max 6.51). Every one of the archive's 16 tool-side T09 wrong
+answers quotes that 1. Stage 53's reference check flags these answers. This stage stops the tool
+producing them.
+
+**What changed** (`agent_runtime/analysis_spatial_stats_tools.py`, `local_getis_ord`):
+
+1. **Binary by default.** A new `transform` argument defaults to `"B"`. It goes to `_weights_for`
+   and, explicitly, to `G_Local` as well, because `G_Local` re-applies its own transform to
+   whatever `W` it is given. `"R"` (and libpysal's V, D and O) are available when asked for.
+   Kernel weights default to `"O"`: their values are the distance decay, and binary would flatten
+   it.
+2. **The result says which.** `transform` and `transform_meaning` are in the result, and the
+   interpretation names the weights ("by Gi\* with binary queen weights"). The transform is part
+   of the layer key, so a binary map and a row-standardised one of the same column are two layers.
+3. **`z_counts`.** The hot and cold classes come from permutation p-values (15 hot on T09). "How
+   many cells have z > 1.96" is the other reading, and the one T09 asks. Until now it could only
+   be counted from the ten hottest rows, which is wrong once more than ten pass. The result now
+   counts areas beyond ±1.645, ±1.96 and ±2.576, and the interpretation states the 1.96 count.
+4. **The reference check reads the transform** (`agent_runtime/reference_checks.py`, `_tool_gi`).
+   A result that names no transform predates this stage and was row-standardised. It is
+   recomputed and flagged as before, and the detail says "row-standardised its weights". A
+   binary result agrees with the reference and raises nothing. A non-binary transform that the
+   call asked for is not held to binary. When the tool's layer cannot be read, its counts come
+   from `z_counts` instead of the ten hottest rows.
+
+**Measured.**
+- On T09's lattice the tool now reports `z_counts["z > 1.96"] == 13`, the harness's expected
+  value (`test_getis_ord_is_binary_gi_star_by_default`). With `transform="R"` it reproduces the
+  old 1.
+- The validators bench is unchanged: the fixture check passes, and the full archive's report.md
+  is byte-identical to the base's. Every archived T09 turn ran the old tool, so its record names
+  no transform, and the reference check still fires on all 16 (precision 100%, recall 21%,
+  tool-side). Only the finding's wording moved. The fix shows up in new runs, not in the archive.
+
+**Not fixed.**
+- **No new T09 run.** Whether the agent now answers 13 is untested. Doing that takes a harness
+  run on lumen:deepseek-v4-flash.
+- **The hot/cold classes still use permutation p-values**, not ArcGIS's z bands. The two
+  disagree on T09 (15 against 13). Both are now in the result, labelled.
+- **Agent-written Gi\*** that calls `G_Local` without `transform="B"` is still row-standardised by
+  esda. Stage 53's in-sandbox reference check flags it. Nothing prevents it.
 
 ## Stage 57 — A cited source links to its platform page {#stage-57}
 

@@ -257,6 +257,51 @@ def test_getis_ord_non_star_variant(lattice):
     assert r["ok"] is True and r["statistic"] == "Gi"
 
 
+@pytest.fixture()
+def t09_lattice(monkeypatch, tmp_path):
+    """The GIS harness's T09 lattice: 10x10 one-km cells with a planted hot cluster."""
+    D = pytest.importorskip("gis_harness.datasets")
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
+    files, expected = D.lattice_autocorrelation(tmp_path)
+    return _upload(files["lattice.geojson"]), expected
+
+
+def _gi_z(r):
+    from agent_runtime.file_store import resolve_file_id
+    return gpd.read_file(resolve_file_id(r["file_id"]))["gi_z"].to_numpy(dtype=float)
+
+
+def test_getis_ord_is_binary_gi_star_by_default(t09_lattice):
+    """Gi* as Getis and Ord define it: binary weights, the focal cell included. The tool used to
+    row-standardise (esda's default), which on this lattice gives 1 cell with z > 1.96 (max z
+    2.08) where the statistic gives 13: the source of 16 wrong T09 answers."""
+    fid, expected = t09_lattice
+    assert expected["hot_spots"] == 13
+    r = json.loads(_tools()["local_getis_ord"].invoke(
+        {"file_id": fid, "column": "value", "weights": "queen"}))
+    assert r["ok"] is True and r["statistic"] == "Gi*"
+    assert r["transform"] == "B" and "binary" in r["interpretation"]
+    assert "13 area(s) with z > 1.96" in r["interpretation"]
+    assert r["z_counts"]["z > 1.96"] == 13
+    assert int((_gi_z(r) > 1.96).sum()) == 13
+
+
+def test_getis_ord_row_standardised_only_when_asked(t09_lattice):
+    fid, _ = t09_lattice
+    tools = _tools()
+    binary = json.loads(tools["local_getis_ord"].invoke(
+        {"file_id": fid, "column": "value", "weights": "queen"}))
+    row = json.loads(tools["local_getis_ord"].invoke(
+        {"file_id": fid, "column": "value", "weights": "queen", "transform": "R"}))
+    assert row["ok"] is True and row["transform"] == "R"
+    assert row["z_counts"]["z > 1.96"] == 1
+    # Different statistics, so different layers.
+    assert row["map_layer"]["id"] != binary["map_layer"]["id"]
+    bad = json.loads(tools["local_getis_ord"].invoke(
+        {"file_id": fid, "column": "value", "transform": "Q"}))
+    assert bad["ok"] is False and "transform" in bad["error"]
+
+
 def test_permutation_inference_starts_no_process_pool(lattice, monkeypatch):
     """esda.G_Local defaults to n_jobs=-1, a joblib/loky pool of one fresh interpreter per core,
     each forked from the agent process. Every esda statistic here runs in this process instead;
