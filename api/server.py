@@ -509,6 +509,11 @@ def _format_agent_chat_result(payload: dict) -> dict:
         "availableSkills": payload.get("availableSkills") or payload.get("available_skills") or [],
         "opengeodata_results": payload.get("opengeodata_results") or [],
     }
+    usage = payload.get("usage")
+    if usage:
+        # What the turn's model calls cost: per call, per model and in total. cost_usd is None
+        # for a model with no per-token price (Lumen), never 0 (agent_runtime/model_pricing.py).
+        formatted["usage"] = usage
     warning = payload.get("warning")
     if warning:
         formatted["warning"] = warning

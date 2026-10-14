@@ -30,7 +30,6 @@ from .tasks import BY_ID, SAMPLE, TASKS, live_osm_schools
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-PRICING = json.loads((HERE / "pricing.json").read_text())["models"]
 
 
 # Run in the server's environment before it starts: the code peer binds exactly what
@@ -131,23 +130,13 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
 
 
 def cost_usd(usage: List[Dict[str, Any]]) -> Dict[str, Any]:
-    tin = sum(u.get("input_tokens") or 0 for u in usage)
-    tout = sum(u.get("output_tokens") or 0 for u in usage)
-    tcached = sum(u.get("cached_input_tokens") or 0 for u in usage)
-    cost, unpriced = 0.0, set()
-    for u in usage:
-        rate = PRICING.get(u.get("model") or "")
-        if not rate or rate.get("input") is None:
-            unpriced.add(u.get("model"))
-            continue
-        cached = u.get("cached_input_tokens") or 0
-        fresh = (u.get("input_tokens") or 0) - cached
-        cost += (fresh * rate["input"] + cached * rate["cached_input"]
-                 + (u.get("output_tokens") or 0) * rate["output"]) / 1e6
-    return {"llm_calls": len(usage), "input_tokens": tin, "cached_input_tokens": tcached,
-            "output_tokens": tout, "usage_absent": sum(1 for u in usage if u.get("usage")),
-            "cost_usd": None if unpriced and not cost else round(cost, 4),
-            "unpriced_models": sorted(m for m in unpriced if m)}
+    """A turn's cost from its llm_usage events, priced by the SAME table the server uses
+    (agent_runtime/model_pricing.py), so a harness run and a live turn cannot disagree."""
+    from agent_runtime.model_pricing import summarize
+
+    s = summarize(usage)
+    return {k: s[k] for k in ("llm_calls", "input_tokens", "cached_input_tokens", "output_tokens",
+                              "usage_absent", "cost_usd", "unpriced_models")}
 
 
 def expected_for(task, data_dir: Path, cache: Path):
