@@ -5623,3 +5623,21 @@ rather than from the previous one.
   by hand is not an edge. The graph is in memory; only file lineage persists. The bridge hook is
   a separate commit on #104.
 
+
+## 2026-10-13 · M8.94 · Text2Cypher asks the model the agent runs on (architecture stage 58)
+
+**Change** `rag_pipeline/search/agents._llm_chat` calls `build_default_llm()` rather than POSTing
+  to an OpenAI-compatible URL with its own model, `max_tokens` and `temperature`. Both search
+  agents use it: Text2Cypher and the OpenSearch DSL agent.
+
+**Why** On the VM every Text2Cypher call was a 400: 12 in the journal from 2026-10-13 14:06Z, and
+  none succeeded. The agent ran on Lumen, but the search agent called OpenAI with
+  `OPENAI_CHAT_MODEL=gpt-5.6-luna`. That model refuses `max_tokens` (unsupported_parameter), and
+  refuses `temperature` 0 unless `reasoning_effort` is `none`. Graph search silently fell back to
+  keyword matching.
+
+**Measured** In `agent-api`, the four journal queries that had fallen back took 1.7–2.1 s each
+  on Lumen deepseek-v4-flash and returned 4–12 typed graph hits.
+
+**Not fixed** A per-request model pick does not reach the search; the fallback is still silent
+  in the answer; the tier now spends Lumen coins.
