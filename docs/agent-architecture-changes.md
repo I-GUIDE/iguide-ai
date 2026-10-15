@@ -73,6 +73,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 | 58 | [Text2Cypher asks the model the agent runs on](#stage-58) | 2026-10-13 | the search agents' LLM call goes through `build_default_llm`, so it follows `AGENT_LLM_PROVIDER` and that builder's per-model parameters; on the VM it had called OpenAI gpt-5.6-luna with `max_tokens` and got a 400 every time |
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
+| 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10354,4 +10355,74 @@ prototype (no `model_pricing`). They cover:
 - the handler pricing each call;
 - the history entry's types;
 - the trace record, and the API forwarding `usage`.
+
+## Stage 63 — A chat-only client gets no map machinery {#stage-63}
+
+**Why.** The agent has two entrances.
+- **The map UI** (agent.i-guide.io) calls `/agent/chat/stream` from the browser.
+- **The I-GUIDE platform** calls the same endpoint server-to-server, from its backend
+  (`iguide-ue-backend`, `routes/agent_routes.js`, mounted at `/beta/agent/search`) with the shared
+  service key. It reads only `status` events and the final `result`, and its frontend shows the
+  answer text and the source cards.
+
+Measured from the VM's nginx log over 14 days of `POST /agent/chat*`: 184 calls from browsers on
+agent.i-guide.io, 35 from `backend.i-guide.io` and 48 from `backend-dev.i-guide.io`. A replay of
+the backend's exact request and its stream parser against the live agent (2026-10-15) still parsed
+a `result` with an answer and 16 evidence documents. But the turn was built for a map:
+- the peers could call `add_map_layer` / `add_raster_layer`, which produce nothing a chat client
+  can show;
+- `map_layer` events were sent and dropped;
+- the supervisor retried a peer that answered a map request without a layer;
+- `_correct_artifact_claims` told the user the layer was "already on your interactive map";
+- the peers' instructions described the live map.
+
+The platform had no way to ask for less.
+
+**What changed** (`agent_runtime/client_profile.py`). A per-request profile, held in a ContextVar.
+`graph_runtime` runs the graph under `contextvars.copy_context()`, so every tool and check in the
+turn sees it. A turn is chat-only when any of these holds:
+- the request sets `chatOnly: true`;
+- it presents a key listed in `AGENT_CHAT_ONLY_KEYS`;
+- its source is listed in `AGENT_CHAT_ONLY_SOURCES`.
+
+The source is nginx's `X-Real-IP`, trusted because the API publishes its port on loopback only. A
+spoofed header can only make a turn chat-only, which removes capability and grants none. The
+source rule is what lets the platform's two backends become chat-only with a VM setting and no
+change on their side.
+
+A chat-only turn:
+- **binds no map-only tool.** `add_map_layer` and `add_raster_layer` are filtered in
+  `build_agent_executor`, which builds every peer. Tools that also write a downloadable file
+  (overpass, admin_boundary, the analysis tools) stay.
+- **swaps the peers' instructions.** `VISUALIZATION_ROUTES_RULE` becomes
+  `CHAT_ONLY_DISPLAY_RULE`, the same facts for a client with no map, so a peer is not told about a
+  tool it was not given.
+- **sends no `map_layer` event.** That covers tool layers in `streaming_trace` and the CLI peers'
+  layers.
+- **skips the map-not-delivered retry** in the analyze peer.
+- **tells the answer writer** that the reply is shown without a map (`CHAT_ONLY_NOTE`). A
+  capability statement, checked deterministically: an answer that still talks about a map (the
+  `_MAP_CLAIM_MARKERS` and affordance pattern the audit already uses) gets `CHAT_ONLY_CORRECTION`
+  appended instead of the "already on your interactive map" note.
+- **says so in its `result`**, with `chatOnly: true`.
+
+Everything else, including search, analysis, code, files and memory, is unchanged, and so is
+every turn of the map UI.
+
+**Tests.** `rag_pipeline/tests/test_chat_only_mode.py` has 18 tests, and the file errors on
+prototype (no `client_profile`). They cover:
+- the three ways to turn it on;
+- tool binding and the prompt swap, each beside the map profile keeping both;
+- `map_layer` emission, both ways;
+- the corrections;
+- the answer writer's note;
+- the request edge;
+- the result flag.
+
+**Not done here.**
+- Platform conversations still have no owner: the backend authenticates the user itself and calls
+  with the service key.
+- Knowledge-base hits still carry `resource_type` where the backend reads `resource-type` or
+  `element_type`, which is one way its cards end up linking to `/undefined/`.
+- Node's `fetch` gives up after 300 s of a silent stream, and the agent sends no heartbeat.
 

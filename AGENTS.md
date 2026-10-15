@@ -263,6 +263,13 @@ model from whether a call succeeded.
 
 ## The delivery contract
 
+**A chat-only client gets none of this.** The I-GUIDE platform calls the agent server-to-server
+and shows only text and sources. A turn is chat-only when the request sets `chatOnly: true`, or it
+presents a key in `AGENT_CHAT_ONLY_KEYS`, or it comes from a source in `AGENT_CHAT_ONLY_SOURCES`
+(nginx's `X-Real-IP`). Such a turn binds no map-only tool, emits no `map_layer`, skips the map
+retry, and is told there is no map (`agent_runtime/client_profile.py`, Stage 63). A new
+map-specific behaviour must check `client_profile.chat_only()` too.
+
 An analysis result reaches the user as an **interactive map layer**, not a file path in prose:
 
 - `add_map_layer` (`agent_runtime/langchain_geo_tools.py`) is how a **vector** result gets

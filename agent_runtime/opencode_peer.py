@@ -450,7 +450,8 @@ def run_opencode_code_peer(
     # runs in the request's trace context — the same place a tool callback would — so the
     # descriptors go out here, through the same build_map_layers boundary every tool's
     # layer crosses, and get the same validation.
-    for layer in build_map_layers("opencode_run", result):
+    from agent_runtime.client_profile import chat_only as _chat_only  # no map, no layer
+    for layer in ([] if _chat_only() else build_map_layers("opencode_run", result)):
         emit_trace_event("map_layer", layer, node="code")
 
     answer = result.get("answer") or ""
