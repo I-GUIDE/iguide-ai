@@ -109,7 +109,9 @@ def render(answer: str, findings: List[Finding]) -> str:
         if len(loud) > MAX_LINES:
             lines.append(f"- …and {len(loud) - MAX_LINES} more")
     for f in quiet:
-        lines.append(("\n" if loud else "") + f"_{_cut_sentence(f)}_")
+        # Asterisks, not underscores: the map UI's renderer (map-ui-prototype/src/markdown.ts)
+        # italicises only *text*, and showed _text_ with its underscores.
+        lines.append(("\n" if loud else "") + f"*{_cut_sentence(f)}*")
     body = (answer or "").rstrip()
     return f"{body}\n\n---\n\n" + "\n".join(lines) if body else "\n".join(lines)
 

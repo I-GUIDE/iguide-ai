@@ -124,7 +124,7 @@ def test_a_failed_peer_still_says_the_answer_is_incomplete():
 def test_a_cut_is_one_quiet_line_with_the_full_count():
     out = V.render("x", [V.Finding("number_scan", V.NOTE, "8 statement(s) were left out",
                                    evidence=list("abcdef"))])
-    assert out.endswith("_8 statements with figures no tool here can produce were left out._")
+    assert out.endswith("*8 statements with figures no tool here can produce were left out.*")
     assert "⚠️" not in out and "ℹ️" not in out
 
 

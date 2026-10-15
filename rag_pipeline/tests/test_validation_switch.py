@@ -132,7 +132,7 @@ def test_off_the_turn_runs_no_check_and_says_so(monkeypatch, validation_off):
     assert audits == [], "the grounding audit ran"
     assert len(analyses) == 1, "a re-grounding pass re-ran the analysis"
     assert "118.0" in out["final_answer"], "the number scan cut a statement"
-    assert out["final_answer"].rstrip().endswith(f"_{V.VALIDATION_OFF_LINE}_")
+    assert out["final_answer"].rstrip().endswith(f"*{V.VALIDATION_OFF_LINE}*")
     findings = out["verdict"]["findings"]
     assert [f["check"] for f in findings] == ["validation"]
     assert V.status([V.Finding(**f) for f in findings]) == "unverified"
