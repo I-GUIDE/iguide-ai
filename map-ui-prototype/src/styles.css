@@ -606,7 +606,6 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
             background: #fff; cursor: pointer; }
 .demotags { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
 .demotag { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #eef1f4; color: #3b4046; }
-.demotag.rel { background: #e6f4ee; color: #12664a; }
 .demofiles { font-size: 11.5px; color: #6b7280; margin: 0 0 8px; overflow-wrap: anywhere; }
 .demostart { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; flex-wrap: wrap; }
 .demosteps { list-style: none; margin: 0; padding: 0; counter-reset: demostep; display: grid; gap: 8px; }

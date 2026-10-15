@@ -93,9 +93,8 @@ export function DemoPanel(p: Props) {
       <p className="demoblurb">{open.blurb}</p>
       <div className="demotags">
         {open.tags.map((t) => <span key={t} className="demotag">{t}</span>)}
-        <span className="demotag rel" title={`Step 1 is harness task ${open.harnessTask}`}>
-          {open.reliability}
-        </span>
+        {/* `reliability` ("N of N harness runs") stays in the catalogue for the demo check,
+            but is not shown: it is a test statistic, not something a visitor needs. */}
       </div>
       {open.files.length > 0 && (
         <p className="demofiles">
