@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadDemoFiles, type DemoCase } from './demos';
+import { DemoPanel } from './components/DemoPanel';
 import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
@@ -120,6 +121,14 @@ export default function App() {
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [tab, setTab] = useState<AppTab>('chat');
+  // A demo step on its way to the composer (see ChatPanel's `seed`).
+  const [demoSeed, setDemoSeed] = useState<{ text: string; n: number; send: boolean } | null>(null);
+  // The Demos sidebar can fold to a rail. On a narrow window it is a drawer over the chat, so it
+  // folds itself once a case starts or a step is asked: the answer is what you came to see.
+  const [demoOpen, setDemoOpen] = useState(true);
+  const foldIfNarrow = useCallback(() => {
+    if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) setDemoOpen(false);
+  }, []);
   // Where the RS-Embed Demo tab lands you. The demo is about this pair of cities, and a map
   // opened over the whole country asks the visitor to go and find the subject first.
   const CHAMPAIGN_URBANA: [number, number, number, number] = [-88.32, 40.05, -88.14, 40.16];
@@ -1085,6 +1094,27 @@ export default function App() {
         </div>
       )}
       <div className="workspace" style={{ '--chat-w': `${chatW}px` } as CSSProperties}>
+        {/* The Demos tab's steps live in their own column on the LEFT, not above the composer:
+            there they took half the chat column and crowded the answers they produce. */}
+        {tab === 'demos' && (
+          <aside className={`demoside${demoOpen ? '' : ' closed'}`} aria-label="Demo cases">
+            {/* Hidden, not unmounted, when folded: the open case and the steps already asked
+                are the panel's own state, and folding must not throw them away. */}
+            <div hidden={!demoOpen}>
+              <DemoPanel busy={busy} live={mode === 'live'}
+                onStart={async (c) => { await startDemo(c); foldIfNarrow(); }}
+                onRun={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: true })); foldIfNarrow(); }}
+                onStage={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: false })); foldIfNarrow(); }}
+                onHide={() => setDemoOpen(false)} />
+            </div>
+            {!demoOpen && (
+              <button type="button" className="demorail" onClick={() => setDemoOpen(true)}
+                      title="Show the demo cases" aria-label="Show the demo cases">
+                <span>Demos</span>
+              </button>
+            )}
+          </aside>
+        )}
         {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
             at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
             canvas painted nothing (observed 400x300 inside an 820x646 container). */}
@@ -1150,7 +1180,7 @@ export default function App() {
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
           onSetSpatial={setSpatial}
-          onStartDemo={startDemo}
+          seed={demoSeed}
         />
       </div>
     </div>

@@ -11,6 +11,8 @@ interface Props {
   onRun: (prompt: string) => void;
   /** Put a step's question in the composer to edit before sending. */
   onStage: (prompt: string) => void;
+  /** Fold the sidebar to its rail. */
+  onHide: () => void;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'error';
@@ -23,9 +25,6 @@ export function DemoPanel(p: Props) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState('');
   const [done, setDone] = useState<Set<number>>(new Set());
-  // Folded to one line so the answers have room: on a narrow pane the full panel took half the
-  // chat column (observed 2026-10-15, Chicago case at 800x600).
-  const [folded, setFolded] = useState(false);
   const open = DEMOS.find((d) => d.id === openId) ?? null;
 
   const choose = (id: string | null) => {
@@ -33,7 +32,6 @@ export function DemoPanel(p: Props) {
     setPhase('idle');
     setError('');
     setDone(new Set());
-    setFolded(false);
   };
 
   const start = async (c: DemoCase) => {
@@ -57,6 +55,11 @@ export function DemoPanel(p: Props) {
   if (!open) {
     return (
       <div className="demopanel" aria-label="Demo cases">
+        <div className="demohead">
+          <strong className="demotitle">Demos</strong>
+          <button type="button" className="demoback fold" onClick={p.onHide}
+                  title="Fold the demos to a rail so the conversation has the room">Hide</button>
+        </div>
         <p className="demohint">
           Pick a case. Each one starts a new conversation with its data attached, then you ask
           its steps in order. {p.live ? '' : 'Connect to the live agent first: the offline demo cannot run these.'}
@@ -79,24 +82,13 @@ export function DemoPanel(p: Props) {
   }
 
   const next = nextStep(open, done);
-  if (folded) {
-    return (
-      <div className="demopanel folded" aria-label={`Demo: ${open.title}`}>
-        <span className="demotitle">{open.title}</span>
-        <span className="demometa">
-          {next === null ? 'all steps asked' : `next: ${next + 1}. ${open.steps[next].label}`}
-        </span>
-        <button type="button" className="demoback" onClick={() => setFolded(false)}>Show steps</button>
-      </div>
-    );
-  }
   return (
     <div className="demopanel" aria-label={`Demo: ${open.title}`}>
       <div className="demohead">
         <button type="button" className="demoback" onClick={() => choose(null)}>← All demos</button>
         <strong className="demotitle">{open.title}</strong>
-        <button type="button" className="demoback fold" onClick={() => setFolded(true)}
-                title="Fold the panel to one line so the answers have room">Hide steps</button>
+        <button type="button" className="demoback fold" onClick={p.onHide}
+                title="Fold the demos to a rail so the conversation has the room">Hide</button>
       </div>
       <p className="demoblurb">{open.blurb}</p>
       <div className="demotags">

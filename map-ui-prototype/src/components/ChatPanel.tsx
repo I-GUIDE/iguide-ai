@@ -1,6 +1,4 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { DemoPanel } from './DemoPanel';
-import type { DemoCase } from '../demos';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
@@ -165,8 +163,10 @@ interface Props {
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
-  /** Demos tab: start a case in a new conversation with its files attached. */
-  onStartDemo: (c: DemoCase) => Promise<void>;
+  /** A question handed in from outside the composer (the Demos sidebar): put in the composer,
+   *  or sent as if typed when `send` is set. `n` changes on every hand-off, so the same question
+   *  twice is two hand-offs. */
+  seed?: { text: string; n: number; send: boolean } | null;
 }
 
 const GROUP_LABEL: Record<SourceGroup, string> = {
@@ -573,6 +573,16 @@ export function ChatPanel(p: Props) {
     p.onSend(v);
   };
 
+  // The Demos sidebar asks through here, so a step is exactly a typed question: same trimming,
+  // same busy check, same scroll pinning.
+  useEffect(() => {
+    if (!p.seed) return;
+    if (p.seed.send) send(p.seed.text);
+    else { setText(p.seed.text); taRef.current?.focus(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.seed?.n]);
+
+
   return (
     <section className="chat">
       {p.showSettings && (
@@ -838,12 +848,6 @@ export function ChatPanel(p: Props) {
             </div>
           )}
         </div>
-      )}
-
-      {p.tab === 'demos' && (
-        <DemoPanel busy={p.busy} live={p.mode === 'live'} onStart={p.onStartDemo}
-                   onRun={(t) => send(t)}
-                   onStage={(t) => { setText(t); taRef.current?.focus(); }} />
       )}
 
       <div className="composer">
