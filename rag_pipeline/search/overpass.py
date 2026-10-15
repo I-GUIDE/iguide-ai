@@ -67,15 +67,32 @@ _FEATURE_FILTERS: Dict[str, str] = {
     "power plant": "power=plant", "power line": "power=line", "substation": "power=substation",
     "building": "building", "school district": "amenity=school",
     "airport": "aeroway=aerodrome", "farmland": "landuse=farmland",
+    # Boundaries are relations in OSM (see _relation_geometry). The bare key matches every kind:
+    # administrative, political (electoral districts), census, postal, protected areas.
+    "boundary": "boundary", "boundaries": "boundary",
+    "administrative boundary": "boundary=administrative",
+    "admin boundary": "boundary=administrative",
 }
 
+# Keys accepted bare (every feature carrying the key). Any other single word is taken as a name.
+_BARE_KEYS = frozenset((
+    "amenity", "shop", "leisure", "waterway", "natural", "landuse", "highway", "railway",
+    "power", "aeroway", "building", "boundary", "place", "tourism", "historic", "office",
+    "craft", "emergency", "healthcare", "sport", "barrier", "route", "military", "water",
+    "wetland", "bridge", "tunnel", "aerialway", "geological", "telecom", "harbour", "landmark",
+))
+
 # Tags that indicate an area (closed way -> Polygon rather than LineString).
-_AREA_TAG_KEYS = ("building", "landuse", "leisure", "natural", "amenity", "shop", "aeroway")
+_AREA_TAG_KEYS = ("building", "landuse", "leisure", "natural", "amenity", "shop", "aeroway",
+                  "boundary", "place")
 # Preference order for the human-readable primary tag.
 _PRIMARY_TAG_KEYS = (
     "amenity", "shop", "leisure", "waterway", "natural", "landuse",
-    "highway", "railway", "power", "man_made", "aeroway", "building",
+    "highway", "railway", "power", "man_made", "aeroway", "building", "boundary", "place",
 )
+# A relation outline larger than this is simplified for what the model and the map read; its
+# area is measured on the full outline first, and `full_geometry` keeps it for files.
+_MAX_VERTICES = int(os.getenv("OVERPASS_MAX_VERTICES", "1500"))
 
 
 def _resolve_filter(feature: str) -> Optional[str]:
@@ -92,8 +109,11 @@ def _resolve_filter(feature: str) -> Optional[str]:
     for word in (low, low.rstrip("s")):      # tolerate simple plurals
         if word in _FEATURE_FILTERS:
             return _FEATURE_FILTERS[word]
-    # A single lowercase token with no spaces is treated as a bare OSM key (e.g. "waterway").
-    if " " not in low and low.replace("_", "").isalpha():
+    # A bare OSM key ("waterway", "man_made") matches every feature with that key. Any other
+    # single word is a NAME: before stage 60 every one-word string counted as a key, so
+    # feature="Basco" queried the nonexistent key [basco] and found nothing, silently.
+    if f == low and (low in _BARE_KEYS or ("_" in low or ":" in low)) and \
+            low.replace("_", "").replace(":", "").isalpha():
         return low
     return None                              # -> caller falls back to a name-based search
 
@@ -114,6 +134,14 @@ def _resolve_bbox(place: Optional[str], bbox: Any) -> Optional[Tuple[float, floa
         except Exception as exc:  # noqa: BLE001
             logger.warning("overpass: geocode failed for %r: %s", place, exc)
     return None
+
+
+def _name_pattern(name: str) -> str:
+    """``name`` as a literal inside an Overpass QL regex string ("1st District (North)" etc.)."""
+    out = []
+    for ch in str(name).replace('"', ""):
+        out.append("\\\\" + ch if ch in ".^$*+?()[]{}|\\" else ch)
+    return "".join(out)
 
 
 def _primary_tag(tags: Dict[str, Any]) -> str:
@@ -152,6 +180,8 @@ def _element_to_feature(el: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if lon is None:
                 return None
             geometry = {"type": "Point", "coordinates": [lon, lat]}
+    elif etype == "relation":
+        return _relation_to_feature(el)
     else:
         return None
 
@@ -167,6 +197,133 @@ def _element_to_feature(el: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _relation_geometry(el: Dict[str, Any]) -> Tuple[Optional[Any], bool]:
+    """(shapely geometry, complete) for a relation fetched with ``out geom``.
+
+    A named boundary is never a single way in OSM: it is a relation whose member ways carry
+    the outline in pieces, and usually only the relation carries the name. Before stage 60 the
+    query asked for nodes and ways only, so "the boundary of Basco" came back as 17 unnamed
+    segments and no polygon, and the agent could not measure an area at all.
+
+    Multipolygon and boundary relations are rebuilt into (multi)polygons from their outer and
+    inner members. Any other relation (a river, a route) becomes the lines of its members.
+    ``complete`` is False when the outer members do not close into a ring, which happens when
+    OSM has a gap; the members are then returned as lines, not guessed into a polygon.
+    """
+    from shapely.geometry import LineString, MultiLineString
+    from shapely.ops import linemerge, polygonize, unary_union
+
+    outer, inner = [], []
+    for m in el.get("members") or []:
+        if m.get("type") != "way":
+            continue
+        coords = [(p["lon"], p["lat"]) for p in (m.get("geometry") or [])
+                  if p and p.get("lon") is not None]
+        if len(coords) < 2:
+            continue
+        (inner if m.get("role") == "inner" else outer).append(LineString(coords))
+    if not outer:
+        return None, False
+    if (el.get("tags") or {}).get("type") in ("multipolygon", "boundary"):
+        faces = list(polygonize(unary_union(outer)))
+        if faces:
+            shape = unary_union(faces)
+            if inner:
+                holes = list(polygonize(unary_union(inner)))
+                if holes:
+                    shape = shape.difference(unary_union(holes))
+            return shape, True
+        return MultiLineString(outer), False
+    merged = linemerge(outer)
+    return merged, True
+
+
+def _geodesic_area_km2(shape: Any) -> Optional[float]:
+    try:
+        from pyproj import Geod
+
+        area, _ = Geod(ellps="WGS84").geometry_area_perimeter(shape)
+        return round(abs(area) / 1e6, 4)
+    except Exception as exc:  # noqa: BLE001 - an area is a bonus, never a failure
+        logger.warning("overpass: geodesic area failed: %s", exc)
+        return None
+
+
+def _vertex_count(shape: Any) -> int:
+    from shapely import get_num_coordinates
+
+    return int(get_num_coordinates(shape))
+
+
+def _relation_to_feature(el: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from shapely.geometry import mapping
+
+    tags = el.get("tags") or {}
+    try:
+        shape, complete = _relation_geometry(el)
+    except Exception as exc:  # noqa: BLE001 - one malformed relation must not sink the query
+        logger.warning("overpass: relation %s could not be assembled: %s", el.get("id"), exc)
+        return None
+    if shape is None or shape.is_empty:
+        return None
+    is_area = shape.geom_type in ("Polygon", "MultiPolygon")
+    point = shape.representative_point() if is_area else shape.centroid
+    feat: Dict[str, Any] = {
+        "osm_type": "relation",
+        "osm_id": el.get("id"),
+        "name": tags.get("name") or "(unnamed)",
+        "lat": round(point.y, 6),
+        "lon": round(point.x, 6),
+        "feature_type": _primary_tag(tags),
+        "tags": tags,
+        "geometry": mapping(shape),
+        "vertices": _vertex_count(shape),
+    }
+    if is_area:
+        # Measured on the ellipsoid from the FULL outline, before any simplification for display.
+        feat["area_km2"] = _geodesic_area_km2(shape)
+        if tags.get("boundary"):
+            # Measured live, 2026-10-15: OSM's outline of Basco, Batanes is 690 km², its land
+            # area 33.67 km². Philippine (and many other) boundaries in OSM run out to sea.
+            feat["area_note"] = ("area of the boundary as mapped in OSM; a coastal boundary may "
+                                 "include sea, so it can exceed the official land area")
+    if not complete:
+        feat["incomplete"] = ("the outer members do not close into a ring in OSM, so the outline "
+                              "is returned as lines and no area is given")
+    return feat
+
+
+def simplify_for_display(feature: Dict[str, Any], max_vertices: int = _MAX_VERTICES) -> Dict[str, Any]:
+    """A copy of ``feature`` whose geometry has at most about ``max_vertices`` vertices.
+
+    A province or a coastline runs to tens of thousands of vertices, which would fill the
+    model's context and the map's payload. The area was already measured on the full outline;
+    the full geometry stays under ``full_geometry`` for anything that writes a file. Only
+    features above the budget are touched.
+    """
+    n = feature.get("vertices")
+    if not n or n <= max_vertices or not feature.get("geometry"):
+        return feature
+    from shapely.geometry import mapping, shape as to_shape
+
+    full = to_shape(feature["geometry"])
+    minx, miny, maxx, maxy = full.bounds
+    tol = max(maxx - minx, maxy - miny) / 2000.0 or 1e-6
+    simple = full
+    for _ in range(12):
+        simple = full.simplify(tol, preserve_topology=True)
+        if _vertex_count(simple) <= max_vertices:
+            break
+        tol *= 2
+    out = dict(feature)
+    out["full_geometry"] = feature["geometry"]
+    out["geometry"] = mapping(simple)
+    out["vertices"] = _vertex_count(simple)
+    out["simplified"] = {"vertices_full": n, "tolerance_deg": round(tol, 6),
+                         "note": "outline simplified for display; area_km2 is from the full one"}
+    return out
+
+
 def _record_source(endpoint: str) -> None:
     """The mirror that answered, in the calling tool's lineage (agent_runtime/lineage.py)."""
     try:
@@ -174,6 +331,29 @@ def _record_source(endpoint: str) -> None:
     except Exception:  # noqa: BLE001 - this module also runs outside the agent
         return
     lineage.record_source(source_id="osm_overpass", url=endpoint)
+
+
+def _post(query: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(response json, None) from the first mirror that answers, or (None, last error)."""
+    last_error: Optional[str] = None
+    for endpoint in OVERPASS_ENDPOINTS:
+        try:
+            resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT + 5)
+            resp.raise_for_status()
+            data = resp.json()
+            remark = str(data.get("remark") or "")
+            if "error" in remark.lower() or "timed out" in remark.lower():
+                # Overpass reports a query that ran out of time or memory as HTTP 200 with a
+                # `remark` and an empty or PARTIAL element list. Taken as an answer, it reads as
+                # "nothing here": live, 2026-10-15, a name search for Basco came back count=0
+                # from one mirror while the next returned its boundary.
+                raise RuntimeError(f"overpass remark: {remark[:200]}")
+            _record_source(endpoint)
+            return data, None
+        except Exception as exc:  # noqa: BLE001 - try the next mirror
+            last_error = str(exc)
+            logger.warning("overpass: %s failed (%s); trying next mirror", endpoint, exc)
+    return None, last_error
 
 
 def overpass_search(
@@ -206,26 +386,35 @@ def overpass_search(
     limit = max(1, min(int(limit or _MAX_FEATURES), int(max_limit or 500)))
 
     if osm_filter:
-        selectors = f"node[{osm_filter}]({bbox_str});\n      way[{osm_filter}]({bbox_str});"
+        sel = f"[{osm_filter}]"
     else:                                                       # name-based fallback
-        safe = str(feature).replace('"', "")
-        selectors = (f'node["name"~"{safe}",i]({bbox_str});\n'
-                     f'      way["name"~"{safe}",i]({bbox_str});')
+        sel = f'["name"~"{_name_pattern(feature)}",i]'
 
-    query = f"[out:json][timeout:{_TIMEOUT}];\n(\n      {selectors}\n);\nout geom {limit};"
+    # Relations first and on their own `out`, so a full page of ways cannot crowd them out; then
+    # nodes and ways, minus the ways that are members of a relation just returned: those are the
+    # unnamed pieces of an outline already delivered whole.
+    query = (f"[out:json][timeout:{_TIMEOUT}];\n"
+             f"relation{sel}({bbox_str})->.r;\n"
+             f".r out geom {limit};\n"
+             f"(node{sel}({bbox_str}); way{sel}({bbox_str});)->.nw;\n"
+             f"(.nw; - way(r.r);)->.rest;\n"
+             f".rest out geom {limit};")
 
     data = None
+    if not osm_filter:
+        # A name is usually a place, and a place's outline is a relation. Ask for relations
+        # alone first: over a province-sized box, a regex over every node and way as well ran
+        # past Overpass's timeout (2026-10-15, "1st District of Palawan": 21 s for relations
+        # alone, timed out for all three). A relation with exactly that name answers it.
+        first, _ = _post(f"[out:json][timeout:{_TIMEOUT}];\n"
+                         f"relation{sel}({bbox_str});\nout geom {limit};")
+        want = str(feature).strip().casefold()
+        if first and any(str((el.get("tags") or {}).get("name") or "").casefold() == want
+                         for el in first.get("elements", [])):
+            data = first
     last_error: Optional[str] = None
-    for endpoint in OVERPASS_ENDPOINTS:
-        try:
-            resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT + 5)
-            resp.raise_for_status()
-            data = resp.json()
-            _record_source(endpoint)
-            break
-        except Exception as exc:  # noqa: BLE001 - try the next mirror
-            last_error = str(exc)
-            logger.warning("overpass: %s failed (%s); trying next mirror", endpoint, exc)
+    if data is None:
+        data, last_error = _post(query)
     if data is None:
         return {"error": "overpass_failed", "message": last_error or "all Overpass mirrors failed",
                 "features": [], "count": 0}
@@ -235,8 +424,11 @@ def overpass_search(
         feat = _element_to_feature(el)
         if feat:
             features.append(feat)
-        if len(features) >= limit:
-            break
+    if not osm_filter:
+        # A name search is a regex: "Basco" also finds "Basco Port". The exact name goes first.
+        want = str(feature).strip().casefold()
+        features.sort(key=lambda f: str(f.get("name") or "").casefold() != want)
+    features = features[:limit]
 
     return {
         "query": {"feature": feature, "osm_filter": osm_filter, "place": place,

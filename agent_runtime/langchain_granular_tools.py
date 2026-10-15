@@ -245,6 +245,27 @@ def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: i
     AND an evidence-shaped ``documents`` list, so the found features count as grounding
     evidence for the answer (not just as map geometry).
     """
+    return json.dumps(_for_display(_overpass_payload(feature, place, bbox, limit)),
+                      ensure_ascii=True, default=str)
+
+
+def _for_display(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The payload as the model and the map read it: large outlines simplified (stage 60)."""
+    from rag_pipeline.search.overpass import simplify_for_display
+
+    out = dict(payload)
+    feats = []
+    for f in payload.get("features") or []:
+        g = simplify_for_display(f)
+        if "full_geometry" in g:
+            g = {k: v for k, v in g.items() if k != "full_geometry"}
+        feats.append(g)
+    out["features"] = feats
+    return out
+
+
+def _overpass_payload(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> Dict[str, Any]:
+    """overpass_search plus its evidence documents, with every geometry at full resolution."""
     from rag_pipeline.search.overpass import overpass_search
 
     result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
@@ -264,10 +285,13 @@ def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: i
             continue
         seen_names.add(key)
         osm_ref = f"{feat.get('osm_type', 'osm')}/{feat.get('osm_id', '')}"
+        area = (f", area {feat['area_km2']} km² (geodesic, from the full OSM outline"
+                f"{'; ' + feat['area_note'] if feat.get('area_note') else ''})"
+                if feat.get("area_km2") is not None else "")
         documents.append({
             "doc_id": f"osm:{osm_ref}",
             "title": name,
-            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}).",
+            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}){area}.",
             "source": "overpass",
             "element_type": "osm_feature",
             "url": f"https://www.openstreetmap.org/{osm_ref}" if feat.get("osm_id") else "",
@@ -278,7 +302,7 @@ def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: i
     result["source"] = "overpass"
     result["documents"] = documents
     result["citation_ids"] = [d["doc_id"] for d in documents]
-    return json.dumps(result, ensure_ascii=True, default=str)
+    return result
 
 
 def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = None) -> str:
@@ -435,12 +459,14 @@ def osm_features_tool(feature: str, place: str = "", bbox: str = "",
                       limit: int = _OSM_DEFAULT_LIMIT) -> str:
     """overpass_search for the analyze and code peers: the same query, plus a file and a
     statement of what the list covers."""
-    payload = json.loads(overpass_search_tool(feature, place=place, bbox=bbox,
-                                              limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT,
-                                                              maximum=500)))
-    if payload.get("error"):
-        return json.dumps(payload, ensure_ascii=True, default=str)
-    features = payload.get("features") or []
+    full = _overpass_payload(feature, place=place, bbox=bbox,
+                             limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500))
+    if full.get("error"):
+        return json.dumps(full, ensure_ascii=True, default=str)
+    # The file gets every vertex (it is what execute_code and the overlays measure); the
+    # payload the model reads gets the simplified outlines.
+    features = full.get("features") or []
+    payload = _for_display(full)
     payload["source_statement"] = _osm_source_statement(payload, feature)
     if features:
         from agent_runtime.file_store import create_output_file_from_path
@@ -486,7 +512,10 @@ def make_langchain_osm_tools() -> List[Any]:
                 "that distance and measure the exact distance afterwards. `source_statement` "
                 "says what the list covers. Geocoding names one place at a time; this finds "
                 "every mapped feature of a kind at once. Location: `place` (a name, geocoded) "
-                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. For the boundary of a named US "
+                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. A named boundary (pass its name as "
+                "`feature`, e.g. '1st District of Palawan', with a `place` around it) comes back "
+                "as one polygon with `area_km2` measured on the ellipsoid; the file keeps the full "
+                "outline. For the boundary of a named US "
                 f"state, county or city, admin_boundary is the better source. Default limit "
                 f"{_OSM_DEFAULT_LIMIT}, max 500."
             ),
@@ -819,11 +848,15 @@ def make_langchain_granular_tools(
                 "search return records and links rather than geometry. So it is the one that "
                 "answers 'where are the X', 'what X are in / near / intersect this area or upload', "
                 "and requests to see features on a map. "
-                "EXCEPTION — the boundary of a named US state, county or city: use "
-                "`admin_boundary` instead. OSM returns the boundary as fragmentary ways (a "
-                "'show me Champaign County' query here returned five LineStrings, not the "
-                "county), while admin_boundary returns the one authoritative Census polygon "
-                "with its GEOID, which is also what embed_zones needs. "
+                "BOUNDARIES: a named boundary anywhere (a province, district, municipality, "
+                "electoral district, protected area) comes back as ONE polygon with its name and "
+                "`area_km2`, measured on the ellipsoid from the full OSM outline. For one named "
+                "boundary, pass its name as `feature` and a `place` around it (feature='1st "
+                "District of Palawan', place='Palawan, Philippines'); for every boundary in an "
+                "area, feature='boundary' or 'boundary=administrative'. Large outlines are "
+                "simplified in what you read (`simplified` says so); `area_km2` is not. For a "
+                "named US state, county or city, `admin_boundary` is still preferred: it returns "
+                "the Census polygon with its GEOID, which embed_zones needs. "
                 "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
                 "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
                 "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
@@ -831,7 +864,8 @@ def make_langchain_granular_tools(
                 "geo/file tool or execute_code if you don't already have it). "
                 "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
                 "NOT also call a map-rendering tool (e.g. qgis_map_image) for it. "
-                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
+                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry, "
+                "area_km2 (boundaries and other relation polygons)}]}."
             ),
             metadata={"category": "retrieval_external"},
         ),

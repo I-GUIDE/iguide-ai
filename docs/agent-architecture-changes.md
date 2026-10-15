@@ -10355,3 +10355,67 @@ prototype (no `model_pricing`). They cover:
 - the history entry's types;
 - the trace record, and the API forwarding `usage`.
 
+
+## Stage 60 — A named boundary comes back as one polygon with its area {#stage-60}
+
+**Why.** MultiGlobeQA (arXiv 2608.03882) asks "Is Basco larger in area than 1st District of
+Palawan?". Run through the harness on 2026-10-14 (Lumen deepseek-v4-flash), the agent got the
+right answer for the wrong reason. `overpass_search` asked Overpass for nodes and ways only. A
+boundary in OSM is a **relation**, and usually only the relation carries the name; its member
+ways carry the outline in unnamed pieces. So "boundary=administrative in Palawan" returned 158
+unnamed line segments, Basco 17, and the district could not be found at all. The agent then spent
+7 calls on the knowledge base and 4 on the web, and answered "thousands of km²" from Wikipedia,
+with no area computed.
+
+Two older faults surfaced while fixing it:
+- **A one-word feature was always a tag key.** `feature="Basco"` queried the key `[basco]` and
+  found nothing, silently.
+- **A timed-out query read as an empty answer.** Overpass reports a query that ran out of time
+  as HTTP 200 with a `remark` and an empty or partial element list. Live, a province-sized name
+  search returned one element that way.
+
+**What changed** (`rag_pipeline/search/overpass.py`):
+- **Relations are queried, first and on their own `out`**, so a page of ways cannot crowd them
+  out. Nodes and ways follow, minus the member ways of the relations just returned.
+- **A relation is rebuilt into geometry.** Multipolygon and boundary relations become
+  (multi)polygons from their outer and inner members. Other relations (rivers, routes) become
+  the lines of their members. An outline whose outer members do not close stays as lines,
+  marked `incomplete`, with no area.
+- **`area_km2`** is measured on the WGS84 ellipsoid (pyproj `Geod`) from the full outline. A
+  boundary's area carries `area_note`: OSM boundaries can run out to sea. Basco's OSM outline is
+  690 km² against 33.67 km² of land.
+- **Large outlines are simplified for what the model and the map read** (`simplify_for_display`,
+  `OVERPASS_MAX_VERTICES`, default 1,500). `simplified` says so; `area_km2` is from the full
+  outline. The analyze/code peers' GeoJSON file and the code bridge keep every vertex.
+- **A name search asks for relations alone first** and stops on an exact name. Over the Palawan
+  box, relations alone answered in 21 s, while relations, ways and nodes together timed out. The
+  exact name sorts first among regex matches.
+- **Only real OSM keys are accepted bare** (`_BARE_KEYS`, or a token with `_` or `:`). Any other
+  single word is a name.
+- **A `remark` reporting an error or a timeout fails that mirror**, and the next one is tried.
+  The old loop also kept such a response as `data` when every mirror failed this way.
+- The tool's evidence documents state the area, and both tool descriptions say how to ask for one
+  named boundary. The descriptions no longer say OSM returns boundaries as fragments.
+
+**Measured** (live, default 30 s timeout, called as the agent calls it):
+
+| call | before | after |
+|---|---|---|
+| `Basco` @ Basco, Batanes | 0 features (queried key `[basco]`) | relation, Polygon, 690.45 km², 16 s |
+| `1st District of Palawan` @ Palawan | not found | relation (`boundary=political`), MultiPolygon, 10,920.49 km², 29 s |
+| `boundary=administrative` @ Basco | 17 unnamed ways | 8 named polygons with areas, 15 s |
+| `boundary=administrative` @ Palawan | 158 ways, 1 named | relations first, member ways removed |
+
+**Tests.** `rag_pipeline/tests/test_overpass_boundaries.py` (11): a split outline with an enclave
+becomes one polygon with a hole and the ellipsoidal area, a gap stays lines with no area, a river
+relation stays lines, the query shape, a timeout remark fails over to the next mirror and fails
+the call when every mirror times out, relations first for names, the bare-key rule, regex
+escaping, display simplification, and the area in the evidence text. The 143 tests in the other
+Overpass-touching files pass unchanged.
+
+**Not fixed.**
+- **Area is of the mapped outline**, sea included where OSM draws it; no land-only area is
+  computed.
+- **A province-sized name search runs close to the 30 s timeout** on a loaded mirror.
+- **For `boundary=administrative` over a large area, the `limit` relations returned are chosen by
+  Overpass's id order**, not by size or level.
