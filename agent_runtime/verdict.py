@@ -187,6 +187,18 @@ def from_audit(audit: Optional[Dict[str, Any]], *, numeric_claims_resolved: bool
             continue
         if any(is_claim(q) for q in quantities(claim)):
             continue                  # the number scan decides numeric claims
+        if isinstance(issue, dict) and issue.get("source") == "claim_check":
+            # agent_runtime/claim_checker: the claim was checked by code against the turn's own
+            # data. Contradicted, it is a problem WITH the evidence; not checkable, it is not a
+            # problem at all, only unverified.
+            if issue.get("status") == "fail":
+                out.append(Finding("audit", PROBLEM,
+                                   f"\"{claim[:160]}\" — {str(issue.get('reason') or '')[:240]}"))
+            else:
+                out.append(Finding("audit", UNVERIFIABLE,
+                                   f"not verified: \"{claim[:160]}\" "
+                                   f"({str(issue.get('check_note') or '')[:160]})"))
+            continue
         out.append(Finding("audit", PROBLEM,
                            f"this statement is not supported by what the turn retrieved or "
                            f"computed: \"{claim[:200]}\""))
