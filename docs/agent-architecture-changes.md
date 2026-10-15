@@ -10579,7 +10579,10 @@ still on the map too" after its redraw had replaced that layer.
 SKATER regions layer from the same file with add_map_layer, coloured by region, and name it 'Six
 crime regions'". The agent repeated the original sequence: `add_map_layer` on regionalize's own
 output, a refused choropleth, then categories. The map still listed three layers, and the regions
-layer was renamed in place from "skater 6 regions violent rate" to "Six crime regions".
+layer was renamed in place from "skater 6 regions violent rate" to "Six crime regions". After the
+upload fix, a new conversation started the demo (one layer: "Upload: community_areas") and asked
+for the uploaded community_areas.geojson drawn as outlines named "Community areas". The map then
+listed one layer, "Community areas", in the preview's place.
 
 **What it costs.** The same data drawn two ways is one layer now: a heatmap and then a points view
 of one file leave only the second. A different file is still a different layer, and so is a
