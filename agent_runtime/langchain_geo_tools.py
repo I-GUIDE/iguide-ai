@@ -95,6 +95,13 @@ def _index_attached(file_ids: Optional[List[str]]) -> List[Dict[str, Any]]:
     return idx
 
 
+# What add_map_layer and add_raster_layer tell the model about the layer they drew.
+LAYER_IDENTITY_NOTE = (
+    "The map keeps one layer per source file. If a layer from this same file was already on the "
+    "map (drawn by you or by the tool that wrote the file), this call REPLACED it in place, with "
+    "this name and style; there is no second copy. A different file is a different layer.")
+
+
 def source_content_key(ref: Any, read_path: Any = None) -> str:
     """What a vector INPUT is, as it was actually read. This is the part of a layer's identity
     that stands for its source data.
@@ -848,6 +855,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "note": "A raster carries no legend and nothing on it can be clicked. If the "
                         "classes or values matter to the answer, say what the colours mean in "
                         "the text — the map will not.",
+                "layer_identity": LAYER_IDENTITY_NOTE,
             })
         except Exception as exc:  # noqa: BLE001 - a bad reference is an answerable error
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -1000,6 +1008,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 res["note"] = note
             if qa.get("notes"):
                 res["visual_notes"] = qa["notes"]
+            # The map keeps ONE layer per source file (map_layers.source_layer_id). Said here
+            # because the model cannot see the map: told nothing, it reported "the earlier layer
+            # is still on the map too" after a redraw had replaced it (Chicago demo, 2026-10-15).
+            res["layer_identity"] = LAYER_IDENTITY_NOTE
             return json.dumps(res, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
@@ -1017,7 +1029,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "'auto'. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
-                         "to download.")),
+                         "to download. The map keeps one layer per source file: drawing a file that "
+                         "is already on the map (including a tool's own output) restyles and renames "
+                         "its layer in place.")),
         StructuredTool.from_function(func=accept_null_defaults(add_raster_layer), name="add_raster_layer", metadata=meta,
             description=("Drape a georeferenced IMAGE over the user's map, for pixels that ARE the "
                          "result: a k-means cluster mask over an embedding grid, a per-pixel change "
@@ -1025,7 +1039,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "by file_id plus `bounds` [minlon, minlat, maxlon, maxlat] in EPSG:4326 — "
                          "an embedding package's region_bbox is exactly that. Rows are north-up. "
                          "Use add_map_layer instead whenever the result has geometry: a raster "
-                         "cannot be clicked and carries no legend.")),
+                         "cannot be clicked and carries no legend. One layer per source file: "
+                         "drawing an image already on the map replaces its layer.")),
         StructuredTool.from_function(func=accept_null_defaults(inspect_vector), name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "

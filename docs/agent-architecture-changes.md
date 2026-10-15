@@ -10562,6 +10562,18 @@ their output file (the analysis, temporal and terrain tools) already used `agent
 their ids do not move. The map UI needed no change: it already replaced a layer whose id matched,
 at the same position, with the new name, style and legend.
 
+**The model is told.** It cannot see the map, so `add_map_layer` and `add_raster_layer` return
+`layer_identity` (`LAYER_IDENTITY_NOTE`): a layer already drawn from the same file was replaced in
+place, and there is no second copy. Their descriptions say the same. The live check found it:
+before the note, the agent answered that "the earlier 'skater 6 regions violent rate' layer … is
+still on the map too" after its redraw had replaced that layer.
+
+**Live check** (local demo, Lumen deepseek, 2026-10-15). Chicago steps 1 and 3, then "Redraw the
+SKATER regions layer from the same file with add_map_layer, coloured by region, and name it 'Six
+crime regions'". The agent repeated the original sequence: `add_map_layer` on regionalize's own
+output, a refused choropleth, then categories. The map still listed three layers, and the regions
+layer was renamed in place from "skater 6 regions violent rate" to "Six crime regions".
+
 **What it costs.** The same data drawn two ways is one layer now: a heatmap and then a points view
 of one file leave only the second. A different file is still a different layer, and so is a
 re-run with different inputs, which writes a file with a different key.

@@ -67,6 +67,9 @@ def test_redrawing_regionalize_output_replaces_its_layer(lattice):
     assert json.loads(redraw)["ok"], redraw
     shown = _on_screen(("regionalize", reg), ("add_map_layer", redraw))
     assert len(shown) == 1, shown
+    # The model is told, so it does not report the replaced layer as still on the map (it did,
+    # live, before this note).
+    assert "REPLACED" in json.loads(redraw)["layer_identity"]
     assert list(shown.values()) == ["SKATER 3 regions by rate"], "the redraw renames it"
 
 
