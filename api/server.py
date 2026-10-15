@@ -17,6 +17,7 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
+from agent_runtime.client_profile import reset_chat_only, set_chat_only
 from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
                                         PersistentMemoryDisabled, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
@@ -189,6 +190,18 @@ def _require_agent_chat_api_key(user: Optional[Any] = None) -> None:
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
+
+
+def _request_chat_only(data: dict) -> bool:
+    """Whether this chat request runs chat-only (agent_runtime/client_profile.py): the body's
+    ``chatOnly``, a key in ``AGENT_CHAT_ONLY_KEYS``, or a source in ``AGENT_CHAT_ONLY_SOURCES``.
+    The source is nginx's ``X-Real-IP`` (the API listens on loopback only), with the socket
+    address as a fallback for a caller that reaches the app directly."""
+    from agent_runtime.client_profile import wants_chat_only
+
+    return wants_chat_only(
+        data, presented_key=_extract_presented_api_key(),
+        source_addresses=[request.headers.get("X-Real-IP") or "", request.remote_addr or ""])
 
 
 def _service_key_presented() -> bool:
@@ -509,6 +522,11 @@ def _format_agent_chat_result(payload: dict) -> dict:
         "availableSkills": payload.get("availableSkills") or payload.get("available_skills") or [],
         "opengeodata_results": payload.get("opengeodata_results") or [],
     }
+    from agent_runtime.client_profile import chat_only
+
+    if chat_only():
+        # Says which profile answered, so a caller can tell a chat-only turn from a map one.
+        formatted["chatOnly"] = True
     usage = payload.get("usage")
     if usage:
         # What the turn's model calls cost: per call, per model and in total. cost_usd is None
@@ -2306,6 +2324,7 @@ def agent_chat():
         # from, not what it does with it.
         _session_token = set_file_store_session(normalized.get("thread_id"))
         _user_token = identity.set_user(_request_user)
+        _chat_only_token = set_chat_only(_request_chat_only(data))
         try:
             # Checked INSIDE the identity binding: assert_owner reads the caller from the same
             # ContextVar everything else does, so before this line it would see nobody and wave
@@ -2349,6 +2368,7 @@ def agent_chat():
         finally:
             reset_file_store_session(_session_token)
             identity.reset_user(_user_token)
+            reset_chat_only(_chat_only_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -2840,12 +2860,16 @@ def agent_chat_stream():
             )
 
         logger.info(f"Streaming agent chat: {user_query[:100]}...")
+        _stream_chat_only = _request_chat_only(data)
+        if _stream_chat_only:
+            logger.info("Chat-only turn: map tools and map_layer events are off")
 
         @stream_with_context
         def generate():
             error_emitted = False
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
+            stream_chat_only_token = set_chat_only(_stream_chat_only)
             try:
                 try:
                     _assert_chat_memory_owner(normalized)
@@ -3071,6 +3095,7 @@ def agent_chat_stream():
                 # the conversation; the next request on it would inherit the scope.
                 reset_file_store_session(stream_session_token)
                 identity.reset_user(stream_user_token)
+                reset_chat_only(stream_chat_only_token)
         return Response(
             generate(),
             mimetype="text/event-stream",

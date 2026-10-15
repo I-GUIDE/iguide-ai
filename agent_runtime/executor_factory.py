@@ -1962,9 +1962,21 @@ def build_agent_executor(
         filtered = [tool for tool in tools if getattr(tool, "name", "") in allowed]
         if filtered:
             tools = filtered
+    # A chat-only client has no map, so the tools whose only output is a map layer are not
+    # offered at all (client_profile). Every peer is built here, so this is the one place to do it.
+    from agent_runtime.client_profile import MAP_ONLY_TOOLS, chat_only
+
+    if chat_only():
+        tools = [tool for tool in tools if getattr(tool, "name", "") not in MAP_ONLY_TOOLS]
     active_llm = llm or build_default_llm()
 
     system_prompt = system_prompt_override or DEFAULT_AGENT_PROMPT
+    if chat_only():
+        # The peers' prompts carry a paragraph about the live map; a chat-only peer gets the
+        # same facts for a client with none, so it is not told about a tool it does not have.
+        from agent_runtime.supervisor.prompts import CHAT_ONLY_DISPLAY_RULE, VISUALIZATION_ROUTES_RULE
+
+        system_prompt = system_prompt.replace(VISUALIZATION_ROUTES_RULE, CHAT_ONLY_DISPLAY_RULE)
 
     # LangGraph agent (langchain>=1.0). ``create_agent`` returns a compiled
     # StateGraph whose invocation accepts ``{"messages": [...]}`` and returns the

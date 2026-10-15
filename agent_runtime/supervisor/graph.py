@@ -39,6 +39,7 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime.client_profile import CHAT_ONLY_CORRECTION, CHAT_ONLY_NOTE, chat_only
 from agent_runtime import agreement as turn_agreement
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
@@ -2313,8 +2314,14 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
                 f"other model, not the layer you were given — which was computed here by {ran}."
             )
 
-    if _DENIES_MAP_RE.search(text) and (any(_map_delivered_this_turn(c) for c in contexts)
-                                         or _map_delivered_earlier(prior_rows)):
+    if chat_only():
+        # No map in this client (client_profile). The usual note below would point the user
+        # at a layer they cannot see, so it is replaced by the opposite correction, made only
+        # when the answer itself talks about a map.
+        if _claims_map_in_text(text):
+            notes.append(CHAT_ONLY_CORRECTION)
+    elif _DENIES_MAP_RE.search(text) and (any(_map_delivered_this_turn(c) for c in contexts)
+                                           or _map_delivered_earlier(prior_rows)):
         notes.append(
             "The layer is already on your interactive map — it was added automatically. "
             "There is no need to add it from a URL; the download link is only if you want a "
@@ -2583,6 +2590,15 @@ _MAP_AFFORDANCE_RE = re.compile(
     rf"|\b(?:{_MAP_GESTURE_VERBS})\b[^.;]{{0,40}}?\b(?:{_MAP_AFFORDANCE_NOUNS})\b",
     re.I,
 )
+
+
+def _claims_map_in_text(text: str) -> bool:
+    """Whether an answer talks about a map: the same markers and affordances ``_is_map_claim``
+    reads in one claim, applied to the whole text. Used on chat-only turns, where any such
+    sentence describes something the user cannot see."""
+    low = str(text or "").lower()
+    return (any(m in low for m in _MAP_CLAIM_MARKERS)
+            or bool(_MAP_AFFORDANCE_RE.search(str(text or ""))))
 
 
 def _is_map_claim(claim: str) -> bool:
@@ -4964,7 +4980,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         on_map = _map_delivered_this_turn(artifacts)
         wants_map = bool(_WANTS_MAP_RE.search(query or "")
                          or _CLAIMS_MAP_RE.search(result["summary"] or ""))
-        if input_file_ids and wants_map and not on_map and not caps:
+        # Skipped for a chat-only client: it has no map to deliver to (client_profile).
+        if input_file_ids and wants_map and not on_map and not caps and not chat_only():
             emit_trace_event(
                 "map_layer_not_delivered",
                 {"stage": "analyze",
@@ -5612,6 +5629,10 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
 
             active = build_default_llm()
         parts = [SYNTHESIS_PROMPT]
+        if chat_only():
+            # Shown without a map (client_profile). Stated as the client's capability; the
+            # deterministic correction in _correct_artifact_claims checks what comes back.
+            parts.append(CHAT_ONLY_NOTE)
         history = _format_chat_history(chat_history)
         if history:
             parts.append(f"Conversation so far:\n{history}")

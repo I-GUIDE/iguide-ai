@@ -93,6 +93,22 @@ VISUALIZATION_ROUTES_RULE = (
     "and only claim something is on the interactive map if you produced GeoJSON this turn.\n"
 )
 
+# The same facts for a chat-only client (agent_runtime/client_profile.py): no map, so a GeoJSON
+# file is a download like any other. Swapped in for VISUALIZATION_ROUTES_RULE by
+# build_agent_executor when the turn is chat-only, so the peer is not told about a map tool it
+# was not given.
+CHAT_ONLY_DISPLAY_RULE = (
+    "HOW YOUR OUTPUT IS DISPLAYED (facts about this environment):\n"
+    "  \u2022 This conversation is shown as text only: there is no map, and no layer is drawn "
+    "anywhere the user can see. A GeoJSON, GeoTIFF or CSV you produce reaches the user as a "
+    "downloadable file linked in the answer; `vector_to_geojson` and files returned from "
+    "execute_code register as such files.\n"
+    "  \u2022 A PNG artifact is shown as a static image, which is how to show a spatial result "
+    "here when the user wants to see it.\n"
+    "Describe a spatial result by what it contains (counts, extents, values) and link its file; "
+    "never say it is on a map.\n"
+)
+
 ANALYSIS_WORKFLOW_PROMPT = (
     "You are AnalysisAgent. Execute the geospatial / data ANALYSIS WORKFLOW the user "
     "needs using the available tools (QGIS/PyQGIS, spatial operations, statistics). "

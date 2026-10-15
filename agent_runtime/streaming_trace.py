@@ -480,9 +480,11 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         # `map_layer` event so a map client can plot them live; the `content` above is
         # truncated and not reliably parseable.
         try:
+            from agent_runtime.client_profile import chat_only
             from agent_runtime.map_layers import build_map_layers
 
-            for layer in build_map_layers(tool_name, output):
+            # A chat-only client draws nothing, so no layer is sent to it (client_profile).
+            for layer in ([] if chat_only() else build_map_layers(tool_name, output)):
                 self._emit("map_layer", layer)
         except Exception:  # pragma: no cover - never let map extraction break the stream
             logger.debug("map_layer extraction failed for %s", tool_name, exc_info=True)
