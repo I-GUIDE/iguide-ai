@@ -72,6 +72,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 56 | [Where every file, result and number came from](#stage-56) | 2026-10-12 | a per-conversation lineage graph written by the code that acts (file store, staging, fetches, the turn log), persisted in each file's record; the Sources line names every source upstream of what the answer used; a claim a note the work was shown states is supported by that note |
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 | 58 | [Text2Cypher asks the model the agent runs on](#stage-58) | 2026-10-13 | the search agents' LLM call goes through `build_default_llm`, so it follows `AGENT_LLM_PROVIDER` and that builder's per-model parameters; on the VM it had called OpenAI gpt-5.6-luna with `max_tokens` and got a 400 every time |
+| 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10291,3 +10292,66 @@ https://api.openai.com/v1/chat/completions model='gpt-5.6-luna' params=['max_tok
 - **Generated Cypher quality.** deepseek strips the query to a single keyword (`$q='spatial'` for
   a summer-school query), as the prompt tells it to. Whether that ranks better than the keyword
   tier was not measured.
+
+## Stage 59 — Every turn reports what it cost, and keeps it {#stage-59}
+
+**Why.** The user asked for the cost of each iteration, attached to memory and returned. Every
+model call already emitted an `llm_usage` trace event with the provider's token counts (Stage 41,
+`streaming_trace.UsageCallbackHandler`, installed through LangChain's configure hook so the
+decider, synthesis and audit report too). But only the GIS harness priced them, from
+`gis_harness/pricing.json`. A live turn's tokens were visible only to a developer streaming the
+detail tier, and nothing kept them once the turn ended.
+
+**What a turn now carries** (`agent_runtime/model_pricing.py`):
+- **Each call.** Its `llm_usage` event gains `cost_usd`, priced as the call ends. Cached input is
+  billed at the cached rate, and the rest at the input rate.
+- **The turn.** `usage` has:
+  - totals: `llm_calls`, input, cached, output and reasoning tokens;
+  - `cost_usd`;
+  - `by_model`;
+  - the per-call rows (`calls`, at most 200; `calls_truncated` counts the rest);
+  - `priced_calls`, `unpriced_models` and `usage_absent`.
+- **Where it goes:**
+  - returned in the blocking `/agent/chat` response;
+  - returned in the stream's final `result` event (`_format_agent_chat_result` forwards only named
+    keys, so it had to be added there);
+  - returned in the `completed` payload.
+
+**Unpriced is `None`, never 0.** NCSA Lumen spends the key owner's coins, which have no published
+dollar rate, and AnvilGPT is Purdue's allocation. The VM's default model is Lumen
+deepseek-v4-flash, so a default turn there reports its tokens and `cost_usd: null`. A partly
+priced turn sums only its priced calls, and `priced_calls` and `unpriced_models` say how much of
+the turn that number covers. An operator who has a rate supplies it with `AGENT_MODEL_PRICES`, a
+JSON object laid over the table. A malformed override is logged and ignored, because a typo in a
+price must not stop the agent answering.
+
+**Where it is kept.**
+- **The conversation's `chat_history` entry** gets `usage` in a compact, type-stable form
+  (`model_pricing.memory_summary`). Counts are ints, `cost_usd` is a float or is left out, and model
+  ids are a list rather than keys. `chat_memory` maps new fields dynamically, so a field's first
+  type is its type for good. A model id used as a key (`gpt-5.6-luna`) would become a nested
+  object path in the mapping.
+- **The turn's trace** stores the whole record, per-call rows included. It is an unmapped field
+  there, so `fit_trace_document` stores it as JSON text (`rag_pipeline/trace_mapping.py`, DEVLOG M8.74), and its shape can never
+  refuse the trace.
+
+**One price table.** It moved from `gis_harness/pricing.json` into the Python module, because
+`.dockerignore` excludes `*.json`, so a JSON table would never reach the agent image. The harness
+now prices runs with the same module, so a harness run and a live turn cannot disagree.
+
+**Not fixed.**
+- The blocking `/agent/chat` path installs its own collector (`usage_collection`), because only
+  the streaming path runs inside `trace_context`.
+- A turn that fails before `completed` returns no total. Its calls are still in its trace's
+  `llm_usage` events.
+- Rates are recorded by hand, as the OpenAI rows were on 2026-09-17, and drift when the provider
+  changes them.
+
+**Tests.** `rag_pipeline/tests/test_turn_cost.py` has 13 offline tests, and the file errors on
+prototype (no `model_pricing`). They cover:
+- pricing, including cached input, a `provider:` prefix, mixed and unpriced turns, the override
+  and the row cap;
+- the handler pricing each call;
+- the history entry's types;
+- the trace record, and the API forwarding `usage`.
+

@@ -176,5 +176,5 @@ python3 -m gis_harness.run_notes        # writes <run>/tool_notes.json for AGENT
 
 Each `<task>.json` records every model call's provider token counts, including the
 supervisor's decider, synthesis and audit, not only the peers (`llm_usage` trace events). Prices
-come from `pricing.json`. A model with no per-token price (Lumen) reports `cost_usd: null`, not
+come from `agent_runtime/model_pricing.py`, the table the server prices live turns with. A model with no per-token price (Lumen) reports `cost_usd: null`, not
 0. See the stage 41 entry in `docs/agent-architecture-changes.md` for measured per-task costs.

@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 
@@ -526,6 +526,9 @@ class UsageCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self._models: Dict[str, str] = {}
         self._lock = Lock()
+        # Every call of the turn, priced, so the turn can report what it cost
+        # (model_pricing.summarize). One handler per turn, so this never mixes turns.
+        self.calls: List[Dict[str, Any]] = []
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
         with self._lock:
@@ -566,6 +569,20 @@ class UsageCallbackHandler(BaseCallbackHandler):
         else:
             # "The provider sent no usage" is a different fact from "the call used nothing".
             payload["usage"] = "absent"
+        if usage:
+            # What this call cost, priced as it ends, so each step of the turn carries its own
+            # cost and not only the total. None when the model has no per-token price.
+            try:
+                from agent_runtime.model_pricing import call_cost
+
+                payload["cost_usd"] = call_cost(model, payload.get("input_tokens"),
+                                                payload.get("output_tokens"),
+                                                payload.get("cached_input_tokens"))
+            except Exception:  # noqa: BLE001 - pricing must never break a model call
+                payload["cost_usd"] = None
+        agent = _TRACE_AGENT.get()
+        with self._lock:
+            self.calls.append({**payload, **({"agent": agent} if agent else {})})
         emit_trace_event("llm_usage", payload)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
@@ -582,6 +599,41 @@ try:  # pragma: no cover - exercised by the import itself
     register_configure_hook(_USAGE_HANDLER, inheritable=True)
 except Exception:  # noqa: BLE001 - usage accounting must never break the agent
     logger.warning("llm_usage events disabled: configure hook unavailable", exc_info=True)
+
+
+@contextmanager
+def usage_collection() -> Iterator[UsageCallbackHandler]:
+    """Collect this context's model calls, for a turn run outside ``trace_context``.
+
+    The streaming path already installs a handler in ``trace_context``; the blocking
+    ``/agent/chat`` path does not, and would otherwise report no cost. Nested use reuses the
+    handler already active, so a turn is never split across two."""
+    existing = _USAGE_HANDLER.get()
+    if existing is not None:
+        yield existing
+        return
+    handler = UsageCallbackHandler()
+    token = _USAGE_HANDLER.set(handler)
+    try:
+        yield handler
+    finally:
+        _USAGE_HANDLER.reset(token)
+
+
+def turn_usage() -> Optional[Dict[str, Any]]:
+    """This turn's cost so far (model_pricing.summarize), or None outside a turn."""
+    handler = _USAGE_HANDLER.get()
+    if handler is None:
+        return None
+    try:
+        from agent_runtime.model_pricing import summarize
+
+        with handler._lock:
+            calls = list(handler.calls)
+        return summarize(calls)
+    except Exception:  # noqa: BLE001 - a cost summary must never break a turn
+        logger.warning("turn usage summary failed", exc_info=True)
+        return None
 
 
 def active_callback_handler() -> Optional[StreamingTraceCallbackHandler]:
