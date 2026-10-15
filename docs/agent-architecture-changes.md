@@ -10559,6 +10559,15 @@ status is `unverified`, never `verified`. The answer ends with one quiet line in
 style, not a warning banner: "Not checked: answer validation was turned off for this reply." The
 API result carries `validation: false`.
 
+The quiet lines (this one and the number scan's) are now written as `*text*`. Written as
+`_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises only
+asterisks. The live check below found it.
+
+**Live check** (local demo, Lumen deepseek, `AGENT_VALIDATION=0`, 2026-10-15). Chicago step 1
+took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
+against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02) and
+ended with the not-checked line.
+
 **Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
 - the default, the server switch, the request field and its precedence;
 - the result flag;
