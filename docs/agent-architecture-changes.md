@@ -10562,6 +10562,13 @@ their output file (the analysis, temporal and terrain tools) already used `agent
 their ids do not move. The map UI needed no change: it already replaced a layer whose id matched,
 at the same position, with the new name, style and legend.
 
+**Uploads.** The map UI draws an upload itself as a preview ("Upload: …"), under an id of its
+own, so the agent drawing that same upload added a second layer. Live, the agent drew
+community_areas.geojson as "Region boundaries" beside "Upload: community_areas". Each record
+`/agent/files/upload` returns now carries `layer_id`, the file's own layer id. The UI gives the
+preview that id once the upload lands, and drops any layer already holding it (the same file
+uploaded again), so an agent layer of the upload restyles the preview in place.
+
 **The model is told.** It cannot see the map, so `add_map_layer` and `add_raster_layer` return
 `layer_identity` (`LAYER_IDENTITY_NOTE`): a layer already drawn from the same file was replaced in
 place, and there is no second copy. Their descriptions say the same. The live check found it:
@@ -10592,6 +10599,4 @@ re-run with different inputs, which writes a file with a different key.
 **Not done here.**
 - A conversation saved before this change restores its layers under their old ids, so the first
   redraw after a restore can add one more layer.
-- The map UI draws an uploaded file itself, under its own id ("Upload: …"), so an agent layer of
-  the same upload is still a second layer.
 

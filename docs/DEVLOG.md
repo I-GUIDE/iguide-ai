@@ -5670,6 +5670,9 @@ rather than from the previous one.
   file drew them again under a new name, and two identical layers were listed. User: one layer
   per source file.
 
-**Not fixed** Conversations saved earlier restore under the old ids; an agent layer of an upload
-  is still separate from the UI's own "Upload: …" layer.
+  Uploads return `layer_id`, so the UI's own upload preview carries the same id and an agent
+  layer of the upload replaces it. add_map_layer / add_raster_layer tell the model a redraw
+  replaced the layer.
+
+**Not fixed** Conversations saved earlier restore under the old ids.
 

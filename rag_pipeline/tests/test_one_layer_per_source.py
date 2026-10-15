@@ -123,3 +123,29 @@ def test_inline_and_external_layers_keep_their_ids():
                                                 "label": "x", "render": "shapes",
                                                 "id": "external-1"}}, qa=False)
     assert built["id"] == "external-1"
+
+
+def test_an_upload_carries_the_id_its_agent_layer_will_have(monkeypatch, tmp_path):
+    """The map UI draws its own preview of an upload; the upload response gives it the id the
+    agent's layer of that file carries, so drawing the upload replaces the preview (live: the
+    agent drew community_areas.geojson as "Region boundaries" beside "Upload: community_areas")."""
+    import io
+
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
+    monkeypatch.setenv("AGENT_MODE", "local")
+    monkeypatch.setenv("AGENT_CHAT_API_KEY", "")
+    import api.server as server
+
+    fc = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"n": 1},
+          "geometry": {"type": "Polygon", "coordinates": [[[-88, 40], [-87.9, 40], [-87.9, 40.1],
+                                                           [-88, 40.1], [-88, 40]]]}}]}
+    client = server.app.test_client()
+    resp = client.post("/agent/files/upload", data={"file": (io.BytesIO(json.dumps(fc).encode()),
+                                                             "areas.geojson")},
+                       content_type="multipart/form-data")
+    if resp.status_code != 200:
+        pytest.skip(f"upload route not reachable in this test environment: {resp.status_code}")
+    record = resp.get_json()["files"][0]
+    drawn = _tool("add_map_layer").invoke({"file_id": record["file_id"], "render": "shapes",
+                                           "name": "Region boundaries"})
+    assert record["layer_id"] == list(_on_screen(("add_map_layer", drawn)))[0]

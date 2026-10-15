@@ -258,6 +258,9 @@ export interface FileRecord {
   filename: string;
   download_url: string;
   kind: string;
+  /** The id the agent's layer of this file carries (one layer per source file). The upload
+   *  preview takes it, so an agent layer of the same file replaces the preview. */
+  layer_id?: string;
 }
 
 export interface TraceLine { text: string; kind?: string }
