@@ -33,6 +33,7 @@ ok(groups.map((g) => g.category).join('|') === DEMO_CATEGORIES.filter((k) => DEM
    'groups follow DEMO_CATEGORIES order');
 ok(demosByCategory([{ ...DEMOS[0], category: 'Something new' }])[0].category === 'Something new',
    'an unlisted category is shown, not dropped');
+ok(groups[0].cases[0].id === 'chicago-crime', 'the Chicago case is listed first');
 const c = DEMOS[0];
 ok(nextStep(c, new Set()) === 0, 'next step starts at 1');
 ok(nextStep(c, new Set([0])) === (c.steps.length > 1 ? 1 : null), 'next step follows the asked ones');

@@ -23,15 +23,16 @@ export interface DemoCase {
 
 export const DEMOS: DemoCase[] = catalogue as DemoCase[];
 
-// The panel's groups, in this order: Longley, Goodchild et al.'s types of spatial analysis, from
-// measuring one thing to testing a hypothesis. Each case sits under its main type; the others it
-// touches are in its tags.
+// The panel's groups: Longley, Goodchild et al.'s types of spatial analysis. Each case sits under
+// its main type; the others it touches are in its tags. Hypothesis testing leads because it holds
+// the Chicago case, the fullest demo (join, rates, Moran's I and LISA, regions); the rest run from
+// measuring one thing to optimising.
 export const DEMO_CATEGORIES = [
+  'Hypothesis testing',
   'Measurement',
   'Query and selection',
   'Transformation',
   'Optimisation',
-  'Hypothesis testing',
 ] as const;
 
 /** The cases grouped by category, in DEMO_CATEGORIES order, each group in catalogue order. A
