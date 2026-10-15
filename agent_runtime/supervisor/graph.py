@@ -147,6 +147,7 @@ class SupervisorState(TypedDict, total=False):
     turn_log_summary: Dict[str, Any]  # counts from the log, set by run_supervisor at the end
     bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
     verdict: Dict[str, Any]        # {status, findings, numbers}: the single verdict (stage 44)
+    clarify: Dict[str, Any]        # the clarification gate's decision (AGENT_CLARIFY_POLICY=ask)
 
 
 
@@ -5633,6 +5634,11 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
             # Shown without a map (client_profile). Stated as the client's capability; the
             # deterministic correction in _correct_artifact_claims checks what comes back.
             parts.append(CHAT_ONLY_NOTE)
+        from agent_runtime.clarify_policy import writer_rule
+
+        _rule = writer_rule()
+        if _rule:
+            parts.append(_rule)
         history = _format_chat_history(chat_history)
         if history:
             parts.append(f"Conversation so far:\n{history}")
@@ -6416,6 +6422,36 @@ def build_supervisor_graph(
                             "numbers": number_links},
                 "distilled": {**_distill(merged), "answer": final}}
 
+    def clarify_node(state: SupervisorState) -> Dict[str, Any]:
+        """AGENT_CLARIFY_POLICY=ask: one question before any work, or nothing (clarify_policy)."""
+        from agent_runtime import clarify_policy
+
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        combined = clarify_policy.resolved_query(state.get("query") or "", state.get("thread_id"))
+        if combined:
+            # The answer to our question: work on the whole request, not the fragment.
+            emit_trace_event("node_completed",
+                             {"stage": "clarify", "message": "Continuing the question the user "
+                              "just answered", "detail": {"ask": False, "resolved": True}},
+                             node="clarify")
+            return {"clarify": {"ask": False, "resolved": True}, "query": combined}
+        decision = clarify_policy.gate(state.get("query") or "", state.get("chat_history"),
+                                       state.get("thread_id"), active)
+        emit_trace_event("node_completed",
+                         {"stage": "clarify", "message": ("Asking the user: " + decision["question"])
+                          if decision.get("ask") else "No question needed",
+                          "detail": decision}, node="clarify")
+        if not decision.get("ask"):
+            return {"clarify": decision}
+        q = decision["question"]
+        merged = {**state, "answer": q, "audit": {}}
+        return {"clarify": decision, "answer": q, "final_answer": q, "audit": {},
+                "distilled": {**_distill(merged), "answer": q}}
+
     builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("search", search_node)
@@ -6423,7 +6459,18 @@ def build_supervisor_graph(
     builder.add_node("code", code_node)
     builder.add_node("synthesize", synthesize_node)
 
-    builder.add_edge(START, "supervisor")
+    from agent_runtime.clarify_policy import policy as _clarify_policy
+
+    if _clarify_policy() == "ask":
+        builder.add_node("clarify", clarify_node)
+        builder.add_edge(START, "clarify")
+        builder.add_conditional_edges(
+            "clarify",
+            lambda s: "asked" if (s.get("clarify") or {}).get("ask") else "proceed",
+            {"asked": END, "proceed": "supervisor"},
+        )
+    else:
+        builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         lambda s: s.get("next_action", "done"),
