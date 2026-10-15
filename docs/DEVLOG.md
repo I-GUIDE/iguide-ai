@@ -5658,3 +5658,18 @@ rather than from the previous one.
 **Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
   bound; data the user says they lack can still be substituted when invited; off by default.
 
+
+## 2026-10-15 · M8.101 · One map layer per source file (architecture stage 67)
+
+**Change** A layer's id is `agent-<content key of the file it shows>`, set in `build_map_layer`
+  for every descriptor whose url serves an agent file. Four producers that draw a copy name their
+  source with `source_key`: `add_map_layer`, `add_raster_layer`, `embed_zones`' outline, and
+  `_raster_layer`. Drawing a file again restyles and renames its layer in place.
+
+**Why** Chicago step 3, live: `regionalize` drew the regions, then `add_map_layer` of the same
+  file drew them again under a new name, and two identical layers were listed. User: one layer
+  per source file.
+
+**Not fixed** Conversations saved earlier restore under the old ids; an agent layer of an upload
+  is still separate from the UI's own "Upload: …" layer.
+

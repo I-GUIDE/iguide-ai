@@ -839,7 +839,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 json.dumps({"url": url, "bounds": [round(v, 6) for v in box]},
                            sort_keys=True).encode("utf-8")).hexdigest()[:12]
             layer = {"url": url, "label": label, "render": "raster", "bounds": box,
-                     "opacity": op, "source": "analysis", "id": f"raster-{digest}"}
+                     "opacity": op, "source": "analysis", "id": f"raster-{digest}",
+                     # One layer per source file (map_layers.source_layer_id): the input file,
+                     # whatever image is served for it.
+                     "source_key": source_content_key(file_id)}
             return json.dumps({
                 "ok": True, "map_layer": layer, "bounds": box, "file_id": file_id,
                 "note": "A raster carries no legend and nothing on it can be clicked. If the "
@@ -981,7 +984,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    # Consumed by agent_runtime.map_layers.build_map_layer -> `map_layer` SSE event.
                    "sampled": bool(sampled), "features_total": total,
                    "size_bytes": rec.get("size_bytes"),
-                   "map_layer": {"id": f"agent-{key}",
+                   # One layer per SOURCE file: the styled copy written above stands for the
+                   # input, so drawing the same input again, in any render, replaces this layer
+                   # (map_layers.source_layer_id). `key` stays the copy's own content key.
+                   "map_layer": {"source_key": source_content_key(file_id, read_path),
                                  "url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
                                  "count": int(len(gdf)),

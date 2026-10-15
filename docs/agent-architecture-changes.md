@@ -75,6 +75,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
 | 62 | [Asking the user, measured: a clarification gate and a simulated-user harness](#stage-62) | 2026-10-15 | `AGENT_CLARIFY_POLICY` (never/assume/ask, off by default) and a simulated-user harness; on 14 MultiGlobeQA tasks `ask` got 9 right against 5 for `never` and `assume` |
 | 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
+| 67 | [One map layer per source file](#stage-67) | 2026-10-15 | a layer's id is the content key of the file it shows, applied where every descriptor becomes a `map_layer` event; drawing a file again restyles and renames its layer in place |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10517,4 +10518,68 @@ prototype (no `client_profile`). They cover:
 - Knowledge-base hits still carry `resource_type` where the backend reads `resource-type` or
   `element_type`, which is one way its cards end up linking to `/undefined/`.
 - Node's `fetch` gives up after 300 s of a silent stream, and the agent sends no heartbeat.
+
+
+## Stage 67 — One map layer per source file {#stage-67}
+
+**Why.** Live, Chicago demo step 3 (SKATER), 2026-10-15:
+1. The code peer's `regionalize` drew the six regions as a layer from its output file.
+2. The peer then called `add_map_layer` on that same file to rename it. The first try, a
+   choropleth over the non-numeric `region` column, was refused; the retry as categories was
+   drawn as a second layer.
+3. A re-grounding pass ran `regionalize` again.
+
+The map listed two identical SKATER layers. Every producer built its own layer id, with its own
+prefix (`agent-`, `embed-`, `boundary-`, `raster-`), and `add_map_layer` keyed on the view (render,
+column, sampling) as well as the file: `drawn_layer_key`, deliberately, "the same data drawn as a
+heatmap and as points stays two layers". So the same file drawn twice became two layers. The user
+asked for one layer per source file.
+
+**What changed** (`agent_runtime/map_layers.py`). A layer's id is `source_layer_id(key)` =
+`agent-<key>`, where the key is the content key of the source it shows. `build_map_layer` applies
+this to every descriptor, which is where each one becomes a `map_layer` event, so no producer can
+opt out by building its own id. The source is:
+- the descriptor's `source_key` when it names one;
+- otherwise the file its `url` serves (`/agent/files/<file_id>/download`), through
+  `file_content_key`: the key the producer recorded on the file, or its bytes.
+
+A descriptor that shows no agent file (inline GeoJSON, an external tile URL) keeps the id its tool
+gave it. Four producers draw a different file from the one they stand for, so they name the
+source:
+- `add_map_layer` writes a styled copy and names its input (`source_content_key`, which digests a
+  shapefile's parts);
+- `add_raster_layer` names its input file;
+- `embed_zones`' single-zone outline writes the boundary plus its embedding columns and names the
+  boundary file it redraws;
+- `_raster_layer` (the embedding and terrain rasters) names the bare content key its id digests.
+  That is the key terrain records on its GeoTIFF, so `add_raster_layer` of the DEM lands on the
+  DEM's layer. It also keeps the shared-PCA recolour superseding the raster it recolours, and
+  keeps two embedding periods two layers.
+
+`boundary_layer_id(file_id)` is now simply that file's layer id. `layers_for_artifacts` (a
+toolless code peer's files) keys on the file alone. The tools that recorded their input key on
+their output file (the analysis, temporal and terrain tools) already used `agent-<that key>`, so
+their ids do not move. The map UI needed no change: it already replaced a layer whose id matched,
+at the same position, with the new name, style and legend.
+
+**What it costs.** The same data drawn two ways is one layer now: a heatmap and then a points view
+of one file leave only the second. A different file is still a different layer, and so is a
+re-run with different inputs, which writes a file with a different key.
+
+**Tests.**
+- `rag_pipeline/tests/test_one_layer_per_source.py` has 5 tests:
+  - `regionalize` and then `add_map_layer` of its output is one layer, under the new name;
+  - a restyle is the same layer, and another file is another layer;
+  - a code peer's file and `add_map_layer` of it are one layer;
+  - a tool's own id cannot split a file into two layers;
+  - inline and external layers keep their ids.
+- `test_layer_identity_by_inputs.py`: its "different views stay apart" test now asserts the
+  opposite, and two tests that pinned the `boundary-` prefix were updated.
+- `test_predict_from_package.py`: one test that pinned the `boundary-` prefix was updated.
+
+**Not done here.**
+- A conversation saved before this change restores its layers under their old ids, so the first
+  redraw after a restore can add one more layer.
+- The map UI draws an uploaded file itself, under its own id ("Upload: …"), so an agent layer of
+  the same upload is still a second layer.
 
