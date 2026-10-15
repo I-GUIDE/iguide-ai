@@ -5661,3 +5661,20 @@ rather than from the previous one.
 **Not fixed** No land-only area; province-sized name searches run near the 30 s timeout; the
   relations kept under `limit` follow Overpass's id order.
 
+
+## 2026-10-15 · M8.96 · The agent can see why a tool answered as it did, and ask the service itself (architecture stage 61)
+
+**Change** `overpass_search` always returns `diagnostics` (types, named count, remark, warnings),
+  and on `debug=True` the Overpass QL sent, every mirror attempt and the raw response start, for
+  the model and through the bridge. The bridge gains `overpass_query(ql)`: the code's own
+  read-only query, JSON only, timeout/memory/length capped, configured mirrors only, 10 per run.
+
+**Why** The Basco/Palawan turn got 157 unnamed boundary pieces with no error and could not check
+  them another way, so it answered from Wikipedia. A tool can only be diagnosed with evidence that
+  does not come from the tool.
+
+**Measured** 18 offline tests. Live end-to-end blocked: Overpass mirrors returned 500/502/504 on
+  2026-10-15; bridge refusals now carry each mirror's status because of it.
+
+**Not fixed** Overpass only; no defect report for the repair loop yet.
+

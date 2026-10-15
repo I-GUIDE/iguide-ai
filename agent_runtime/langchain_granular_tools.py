@@ -238,14 +238,15 @@ def opengeodata_search_tool(query: str, limit: Optional[int] = None,
     return _build_payload(hits, source="opengeodata")
 
 
-def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> str:
+def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60,
+                         debug: bool = False) -> str:
     """Query live OpenStreetMap features of a given type inside a place or bbox.
 
     Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature
     AND an evidence-shaped ``documents`` list, so the found features count as grounding
     evidence for the answer (not just as map geometry).
     """
-    return json.dumps(_for_display(_overpass_payload(feature, place, bbox, limit)),
+    return json.dumps(_for_display(_overpass_payload(feature, place, bbox, limit, debug=debug)),
                       ensure_ascii=True, default=str)
 
 
@@ -264,11 +265,13 @@ def _for_display(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _overpass_payload(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> Dict[str, Any]:
+def _overpass_payload(feature: str, place: str = "", bbox: str = "", limit: int = 60,
+                      debug: bool = False) -> Dict[str, Any]:
     """overpass_search plus its evidence documents, with every geometry at full resolution."""
     from rag_pipeline.search.overpass import overpass_search
 
-    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
+    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit,
+                             **({"debug": True} if debug else {}))
 
     # Project features into evidence documents so the synthesis/grounding audit treats
     # "these features exist here" as grounded. Dedupe by name (rivers/roads come back as
@@ -456,11 +459,12 @@ def _osm_source_statement(payload: Dict[str, Any], feature: str) -> str:
 
 
 def osm_features_tool(feature: str, place: str = "", bbox: str = "",
-                      limit: int = _OSM_DEFAULT_LIMIT) -> str:
+                      limit: int = _OSM_DEFAULT_LIMIT, debug: bool = False) -> str:
     """overpass_search for the analyze and code peers: the same query, plus a file and a
     statement of what the list covers."""
     full = _overpass_payload(feature, place=place, bbox=bbox,
-                             limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500))
+                             limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500),
+                             debug=debug)
     if full.get("error"):
         return json.dumps(full, ensure_ascii=True, default=str)
     # The file gets every vertex (it is what execute_code and the overlays measure); the
@@ -512,7 +516,9 @@ def make_langchain_osm_tools() -> List[Any]:
                 "that distance and measure the exact distance afterwards. `source_statement` "
                 "says what the list covers. Geocoding names one place at a time; this finds "
                 "every mapped feature of a kind at once. Location: `place` (a name, geocoded) "
-                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. A named boundary (pass its name as "
+                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. `diagnostics` counts named "
+                "features and warns when a result looks wrong; `debug=true` adds the Overpass "
+                "query sent, each mirror's answer and the raw response start. A named boundary (pass its name as "
                 "`feature`, e.g. '1st District of Palawan', with a `place` around it) comes back "
                 "as one polygon with `area_km2` measured on the ellipsoid; the file keeps the full "
                 "outline. For the boundary of a named US "
@@ -865,7 +871,11 @@ def make_langchain_granular_tools(
                 "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
                 "NOT also call a map-rendering tool (e.g. qgis_map_image) for it. "
                 "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry, "
-                "area_km2 (boundaries and other relation polygons)}]}."
+                "area_km2 (boundaries and other relation polygons)}], diagnostics}. "
+                "`diagnostics.warnings` flags a result that looks wrong (e.g. no feature has a "
+                "name); read it before using the result. `debug=true` adds the Overpass query "
+                "sent, every mirror's answer and the start of the raw response, for when the "
+                "result does not match what you expected."
             ),
             metadata={"category": "retrieval_external"},
         ),

@@ -12,8 +12,11 @@ uses -- the agent process has network; the code-exec sandbox does not.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -333,27 +336,161 @@ def _record_source(endpoint: str) -> None:
     lineage.record_source(source_id="osm_overpass", url=endpoint)
 
 
-def _post(query: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """(response json, None) from the first mirror that answers, or (None, last error)."""
+RAW_EXCERPT_CHARS = 2000
+
+
+def _bad_remark(data: Dict[str, Any]) -> Optional[str]:
+    remark = str(data.get("remark") or "")
+    if "error" in remark.lower() or "timed out" in remark.lower():
+        return remark[:300]
+    return None
+
+
+def _exchange(query: str, *, stream_cap: Optional[int] = None,
+              http_timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Send ``query`` to the first mirror that answers well, and keep the evidence.
+
+    Returns ``{"data", "error", "endpoint", "attempts": [...], "raw_excerpt", "bytes"}``. Every
+    attempt is listed with its mirror, HTTP status, seconds and failure, so a caller (or the
+    model, through ``debug``) can see WHY a result is what it is: which mirror answered, which
+    ones timed out, and what the service itself said.
+    """
+    attempts: List[Dict[str, Any]] = []
     last_error: Optional[str] = None
     for endpoint in OVERPASS_ENDPOINTS:
+        started = time.monotonic()
+        attempt: Dict[str, Any] = {"endpoint": endpoint}
         try:
-            resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT + 5)
+            resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS,
+                                 timeout=http_timeout or _TIMEOUT + 5)
+            attempt["status"] = getattr(resp, "status_code", None)
             resp.raise_for_status()
+            text = getattr(resp, "text", None)
+            if stream_cap is not None and text is not None and len(text) > stream_cap:
+                raise RuntimeError(f"response is {len(text)} bytes, over the {stream_cap}-byte cap")
             data = resp.json()
-            remark = str(data.get("remark") or "")
-            if "error" in remark.lower() or "timed out" in remark.lower():
+            bad = _bad_remark(data)
+            if bad:
                 # Overpass reports a query that ran out of time or memory as HTTP 200 with a
                 # `remark` and an empty or PARTIAL element list. Taken as an answer, it reads as
-                # "nothing here": live, 2026-10-15, a name search for Basco came back count=0
-                # from one mirror while the next returned its boundary.
-                raise RuntimeError(f"overpass remark: {remark[:200]}")
+                # "nothing here". Live, 2026-10-15, one mirror answered a province-sized name
+                # search that way, with 1 element and "Query timed out".
+                attempt["remark"] = bad
+                raise RuntimeError(f"overpass remark: {bad}")
+            attempt["seconds"] = round(time.monotonic() - started, 2)
+            attempts.append(attempt)
             _record_source(endpoint)
-            return data, None
+            raw = text if isinstance(text, str) else json.dumps(data)
+            return {"data": data, "error": None, "endpoint": endpoint, "attempts": attempts,
+                    "raw_excerpt": raw[:RAW_EXCERPT_CHARS], "bytes": len(raw)}
         except Exception as exc:  # noqa: BLE001 - try the next mirror
             last_error = str(exc)
+            attempt.update({"seconds": round(time.monotonic() - started, 2),
+                            "error": last_error[:300]})
+            attempts.append(attempt)
             logger.warning("overpass: %s failed (%s); trying next mirror", endpoint, exc)
-    return None, last_error
+    return {"data": None, "error": last_error, "endpoint": None, "attempts": attempts,
+            "raw_excerpt": None, "bytes": 0}
+
+
+def _post(query: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(response json, None) from the first mirror that answers, or (None, last error)."""
+    ex = _exchange(query)
+    return ex["data"], ex["error"]
+
+
+# A raw query from sandboxed code (agent_runtime/tool_bridge.overpass_query). The text goes to a
+# public mirror, so its length is capped like a fetched URL's: a long query is the channel data
+# would leave by. Output is forced to JSON, and the server-side timeout and memory are capped.
+RAW_QUERY_MAX_CHARS = int(os.getenv("OVERPASS_RAW_MAX_CHARS", "4000"))
+RAW_TIMEOUT_MAX_S = int(os.getenv("OVERPASS_RAW_TIMEOUT_MAX", "90"))
+RAW_MAXSIZE_MAX = int(os.getenv("OVERPASS_RAW_MAXSIZE_MAX", str(256 * 1024 * 1024)))
+_SETTING_RE = re.compile(r"\[\s*(out|timeout|maxsize)\s*:\s*([^\]]*)\]", re.I)
+
+
+class RawQueryRefused(ValueError):
+    """The raw query broke a rule; the message says which."""
+
+
+def prepare_raw_query(ql: str) -> str:
+    """``ql`` with JSON output and capped timeout/memory, or RawQueryRefused.
+
+    Overpass QL cannot write, so the rules are about cost and leakage, not about statements:
+    the length cap above, JSON only (the caller parses it), ``[timeout:]`` at most
+    RAW_TIMEOUT_MAX_S and ``[maxsize:]`` at most RAW_MAXSIZE_MAX, added when missing.
+    """
+    text = str(ql or "").strip()
+    if not text:
+        raise RawQueryRefused("the query is empty")
+    if len(text) > RAW_QUERY_MAX_CHARS:
+        raise RawQueryRefused(f"the query is {len(text)} characters; at most "
+                              f"{RAW_QUERY_MAX_CHARS} are sent")
+    settings = {m.group(1).lower(): m.group(2).strip() for m in _SETTING_RE.finditer(text)}
+    if "out" in settings and settings["out"].lower() != "json":
+        raise RawQueryRefused(f"[out:{settings['out']}] is not allowed; use [out:json]")
+    try:
+        timeout = min(int(settings.get("timeout") or _TIMEOUT), RAW_TIMEOUT_MAX_S)
+        maxsize = min(int(settings.get("maxsize") or RAW_MAXSIZE_MAX), RAW_MAXSIZE_MAX)
+    except ValueError:
+        raise RawQueryRefused("[timeout:] and [maxsize:] take whole numbers") from None
+    # Drop the caller's settings and put the capped ones in front: Overpass reads settings only
+    # from the first statement, so a capped copy appended later would be ignored.
+    body = _SETTING_RE.sub("", text).lstrip()
+    if body.startswith(";"):
+        body = body[1:].lstrip()
+    return f"[out:json][timeout:{timeout}][maxsize:{maxsize}];\n{body}"
+
+
+def raw_query(ql: str, *, max_bytes: int = 50 * 1024 * 1024) -> Dict[str, Any]:
+    """Send a caller-written Overpass QL query (after ``prepare_raw_query``) and return the raw
+    answer with the evidence: ``{"query", "data", "error", "endpoint", "attempts", "bytes",
+    "raw_excerpt"}``. A query the service reports as timed out fails, mirror by mirror, and the
+    attempts carry its remark."""
+    query = prepare_raw_query(ql)
+    server_timeout = int(re.search(r"\[timeout:(\d+)\]", query).group(1))
+    ex = _exchange(query, stream_cap=max_bytes, http_timeout=server_timeout + 10)
+    ex["query"] = query
+    return ex
+
+
+def _diagnostics(data: Optional[Dict[str, Any]], features: List[Dict[str, Any]],
+                 osm_filter: Optional[str], feature: str) -> Dict[str, Any]:
+    """What the answer is made of, and what looks wrong with it. Always returned, and small.
+
+    Live, 2026-10-14: a boundary query returned 158 features and no error, and the agent took it
+    as a result. 157 had no name: they were the pieces of outlines whose names live elsewhere.
+    Nothing in the payload said so, and the model did not count. This counts for it.
+    """
+    elements = (data or {}).get("elements") or []
+    by_type: Dict[str, int] = {}
+    for el in elements:
+        by_type[str(el.get("type"))] = by_type.get(str(el.get("type")), 0) + 1
+    named = sum(1 for f in features if f.get("name") and f.get("name") != "(unnamed)")
+    geoms: Dict[str, int] = {}
+    for f in features:
+        g = str((f.get("geometry") or {}).get("type"))
+        geoms[g] = geoms.get(g, 0) + 1
+    out: Dict[str, Any] = {"elements_by_type": by_type, "features": len(features),
+                           "named": named, "geometry_types": geoms}
+    if (data or {}).get("remark"):
+        out["remark"] = str(data["remark"])[:300]
+    warnings: List[str] = []
+    if features and named == 0:
+        warnings.append(f"none of the {len(features)} features has a name. Unnamed lines are "
+                        "often the pieces of a larger outline (an OSM relation) whose name is on "
+                        "the relation: ask for the place by name as `feature`.")
+    elif len(features) >= 10 and named / len(features) < 0.1:
+        warnings.append(f"only {named} of {len(features)} features have a name.")
+    if not features and not osm_filter:
+        warnings.append(f"nothing in the area has a name matching {feature!r}. Check the "
+                        "spelling, the local-language name, or widen the area.")
+    incomplete = sum(1 for f in features if f.get("incomplete"))
+    if incomplete:
+        warnings.append(f"{incomplete} outline(s) do not close in OSM and came back as lines "
+                        "with no area.")
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def overpass_search(
@@ -362,12 +499,17 @@ def overpass_search(
     bbox: Any = None,
     limit: int = _MAX_FEATURES,
     max_limit: int = 500,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """Query live OSM features of ``feature`` type inside ``place`` (geocoded) or ``bbox``.
 
     Returns ``{"query", "count", "features": [{name, lat, lon, feature_type, tags,
-    geometry}]}``. On a missing location or a transport failure, returns an
+    geometry}], "diagnostics"}``. On a missing location or a transport failure, returns an
     ``{"error", "message", "features": [], "count": 0}`` payload instead of raising.
+
+    ``debug=True`` adds ``debug``: the Overpass QL actually sent, every mirror attempt (status,
+    seconds, error, the service's remark), and the start of the raw response. It is how a caller
+    tells "OSM has nothing here" from "the query asked the wrong thing" from "the mirror failed".
     """
     osm_filter = _resolve_filter(feature)
     region = _resolve_bbox(place, bbox)
@@ -401,23 +543,36 @@ def overpass_search(
              f".rest out geom {limit};")
 
     data = None
+    exchanges: List[Tuple[str, Dict[str, Any]]] = []
     if not osm_filter:
         # A name is usually a place, and a place's outline is a relation. Ask for relations
         # alone first: over a province-sized box, a regex over every node and way as well ran
         # past Overpass's timeout (2026-10-15, "1st District of Palawan": 21 s for relations
         # alone, timed out for all three). A relation with exactly that name answers it.
-        first, _ = _post(f"[out:json][timeout:{_TIMEOUT}];\n"
-                         f"relation{sel}({bbox_str});\nout geom {limit};")
+        rel_only = f"[out:json][timeout:{_TIMEOUT}];\nrelation{sel}({bbox_str});\nout geom {limit};"
+        ex = _exchange(rel_only)
+        exchanges.append((rel_only, ex))
+        first = ex["data"]
         want = str(feature).strip().casefold()
         if first and any(str((el.get("tags") or {}).get("name") or "").casefold() == want
                          for el in first.get("elements", [])):
             data = first
     last_error: Optional[str] = None
     if data is None:
-        data, last_error = _post(query)
+        ex = _exchange(query)
+        exchanges.append((query, ex))
+        data, last_error = ex["data"], ex["error"]
+    debug_block = None
+    if debug:
+        debug_block = {"exchanges": [
+            {"query": q, "endpoint": e["endpoint"], "attempts": e["attempts"],
+             "bytes": e["bytes"], "raw_excerpt": e["raw_excerpt"]} for q, e in exchanges]}
     if data is None:
-        return {"error": "overpass_failed", "message": last_error or "all Overpass mirrors failed",
-                "features": [], "count": 0}
+        failed = {"error": "overpass_failed", "message": last_error or "all Overpass mirrors failed",
+                  "features": [], "count": 0}
+        if debug_block:
+            failed["debug"] = debug_block
+        return failed
 
     features: List[Dict[str, Any]] = []
     for el in data.get("elements", []):
@@ -430,9 +585,13 @@ def overpass_search(
         features.sort(key=lambda f: str(f.get("name") or "").casefold() != want)
     features = features[:limit]
 
-    return {
+    out = {
         "query": {"feature": feature, "osm_filter": osm_filter, "place": place,
                   "bbox": [minlon, minlat, maxlon, maxlat]},
         "count": len(features),
         "features": features,
+        "diagnostics": _diagnostics(data, features, osm_filter, feature),
     }
+    if debug_block:
+        out["debug"] = debug_block
+    return out

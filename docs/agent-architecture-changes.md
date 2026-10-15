@@ -10419,3 +10419,67 @@ Overpass-touching files pass unchanged.
 - **A province-sized name search runs close to the 30 s timeout** on a loaded mirror.
 - **For `boundary=administrative` over a large area, the `limit` relations returned are chosen by
   Overpass's id order**, not by size or level.
+
+## Stage 61 — The agent can see why a tool answered as it did, and ask the service itself {#stage-61}
+
+**Why.** In the MultiGlobeQA Basco/Palawan turn (stage 60), the boundary query returned 158
+features and no error, all but one of them unnamed pieces of outlines. The agent noticed it was
+not getting what it needed, but could neither see why nor check another way: its tools are
+fixed code, the sandbox has no network, and the bridge offered only the same `overpass_search`.
+So it routed around the tool to Wikipedia. The three faults stage 60 fixed were found by running
+the tool live, reading the raw responses and testing hypotheses against the service directly,
+none of which the agent could do. Self-correction works when there is outside evidence to check
+against (CRITIC, arXiv 2305.11738); diagnosing a tool needs evidence that does not come from the
+tool under suspicion.
+
+**What changed.**
+- **`overpass_search` always returns `diagnostics`** (`rag_pipeline/search/overpass.py`):
+  elements by OSM type, features, how many are named, geometry types, the service's `remark`,
+  and `warnings` when a result looks wrong. Examples: no feature has a name (with the likely
+  reason: pieces of a relation), a name search matched nothing, outlines that did not close.
+- **`debug=True`** on `overpass_search` adds, per request: the Overpass QL actually sent, every
+  mirror attempt (endpoint, HTTP status, seconds, error, the service's remark) and the first
+  2,000 characters of the raw response. It reaches the model through both `overpass_search`
+  tools, and sandboxed code through the bridge's `overpass_search(debug=True)` (the first three
+  tiles, and on failure each mirror's status in the refusal).
+- **The bridge gains `overpass_query(ql)`** (`agent_runtime/tool_bridge.py`): the code's own
+  read-only Overpass QL, sent by the agent to the configured mirrors only. The raw JSON answer
+  goes to a file the code reads; the result carries the evidence (the query as sent, which
+  mirror answered, every attempt, elements by type, any remark). The model note tells the code
+  to use it when `overpass_search` does not ask what it needs or looks wrong, and to compare the
+  two before trusting either.
+- **The HTTP exchange is one function, `_exchange`**, which records every attempt; `_post` wraps
+  it.
+
+**Threat model for `overpass_query`.** Overpass QL cannot write, so the risks are cost and
+leakage, not changes:
+- **Leakage.** The query text reaches a public server, so its length is capped
+  (`OVERPASS_RAW_MAX_CHARS`, 4,000), as fetched URLs are (`MAX_URL_CHARS`). It goes only to
+  `OVERPASS_ENDPOINTS`; the code cannot name a host.
+- **Cost.** Output is forced to `[out:json]`; `[timeout:]` is capped at 90 s and `[maxsize:]` at
+  256 MB, written in front of the query because Overpass reads settings only from the first
+  statement. An answer over `AGENT_CODE_BRIDGE_RAW_MAX_MB` (50) fails that mirror. Each run may
+  send `AGENT_CODE_BRIDGE_MAX_RAW_QUERIES` (10), within the bridge's overall call cap.
+- **Record.** Every call is a tool call of the turn, streamed and in the lineage like the other
+  bridge calls.
+
+The bridge as a whole stays off unless `AGENT_CODE_BRIDGE=1`.
+
+**Tests.** `rag_pipeline/tests/test_tool_debug_raw_query.py` (18): diagnostics on unnamed pieces
+and on a name that matches nothing; debug's query, attempts (a timeout remark, then the mirror
+that answered) and raw excerpt, on success and on failure; the model tool passes `debug`; the raw
+query rules (JSON forced, timeout and memory capped and placed first, XML/CSV, empty, too long and
+malformed settings refused); the HTTP wait covers the server timeout; an oversized answer fails a
+mirror; through the bridge, the raw answer as a file with the evidence, refusals, the per-run cap,
+a refusal that names every mirror's status, `debug` and `diagnostics` from the bridge's
+`overpass_search`, and the client and model note. The existing bridge and Overpass tests pass
+unchanged.
+
+**Measured live.** Not yet: on 2026-10-15 every Overpass mirror but one returned 500, 502, 504 or
+timed out, and the end-to-end run through the local executor failed on that outage after 155 s.
+That run is also why bridge refusals now carry each mirror's status.
+
+**Not done.**
+- Debug output and a raw channel exist for Overpass only. The same `_exchange` pattern fits the
+  other agent-side fetchers (TIGERweb, 3DEP, the public-data fetch).
+- Nothing yet records a tool fallback as a defect report for the repair loop.
