@@ -10573,6 +10573,12 @@ default" sends nothing and the deployment's `AGENT_VALIDATION` decides.
 took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
 against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02).
 
+A second run, with the agent's default left on and the UI setting at Off, took 2 min 00 s. The
+server logged that the request turned validation off, and the answer carried no line about it.
+That answer gave the citywide rate as "≈ 30.4", but 80,353 ÷ 2,647,621 × 1,000 = 30.349, which
+rounds to 30.3. The number scan exists to catch a figure no tool produced, so this shows what
+turning validation off gives up.
+
 **Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
 - the default, the server switch, the request field and its precedence;
 - the result flag;
