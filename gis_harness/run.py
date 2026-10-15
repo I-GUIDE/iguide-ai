@@ -81,7 +81,8 @@ def code_peer_toolsets(log_path: Path, offset: int = 0) -> List[Dict[str, Any]]:
     return rows
 
 
-def start_server(port: int, log_path: Path) -> subprocess.Popen:
+def start_server(port: int, log_path: Path,
+                 extra_env: Optional[Dict[str, str]] = None) -> subprocess.Popen:
     """A local agent server that cannot write to shared infrastructure, or pay for geocoding.
 
     AGENT_MODE=local closes the conversation store and keeps KB search read-only (AGENTS.md,
@@ -105,7 +106,7 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
            "AGENT_INVARIANT_GATE": os.environ.get("AGENT_INVARIANT_GATE", "1"),
            "AGENT_CHAT_API_KEY": "", "GOOGLE_MAPS_API_KEY": "",
            "AGENT_TRACE_JSON_LIMIT": "20000", "AGENT_TRACE_TEXT_LIMIT": "20000",
-           "AGENT_TRACE_SSE_TEXT_LIMIT": "20000"}
+           "AGENT_TRACE_SSE_TEXT_LIMIT": "20000", **(extra_env or {})}
     # Appended, not truncated: a --resume run starts a new server on the same label, and a
     # truncated log lost the main run's evidence (2026-10-08, phase 2's after-run).
     staging = probe_staging_tools(env)
