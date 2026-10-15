@@ -123,13 +123,22 @@ records the text it matched, so a reader can check it.
 | T10 | IDW + ordinary kriging, Meuse zinc | Meuse (fetched by SHA-256) | variogram given, so the answer is a linear solve |
 | T11 | multi-criteria suitability | three aligned rasters | land cover is categorical |
 | T12 | aftershocks within 7 days and 25 km | USGS ComCat snapshot, Ridgecrest 2019 | distance in degrees; time window |
+| T13 | violent crime per 1,000 by community area, Moran's I, 6 SKATER regions | Chicago 2024 crimes (259,660 rows), 77 community areas, ACS 2023: a City of Chicago Data Portal **snapshot pinned by SHA-256** (not in the repo; see below) | Fuller Park (2,186 residents) has the highest rate; regions are scored by their constraints (6 regions, all 77 areas, each region contiguous) read from the turn's map layers, because equally valid partitions differ |
 | U01 | slope of a DEM that is not attached | a points file | — |
 | U02 | NDVI without a near-infrared band | a 1-band red scene | — |
 | U03 | kriging mercury, which Meuse lacks | meuse.csv | — |
 | U04 | travel time to a point 7 km off the network | roads.geojson | — |
 
 Expected values are computed in `datasets.py` from the same bytes that are uploaded, by brute
-force, a closed form, or a second library. `tests/test_gis_harness.py` holds them and checks
+force, a closed form, or a second library.
+
+T13's data is a snapshot of three live datasets that the portal revises daily, so the snapshot,
+not the URL, is the task's input. It is 35 MB and not committed. `datasets._chicago_snapshot`
+looks in `gis_harness/.cache/chicago_crime_2024/`, then in `$GIS_HARNESS_SNAPSHOTS`, and refuses
+any file whose SHA-256 differs from `CHICAGO_FILES`. A copy is kept in the git-excluded
+`gis_harness_runs_archive/datasets/`. `python -m gis_harness.datasets --snapshot chicago_crime`
+downloads the current data, which will no longer match the pinned hashes: a new snapshot means
+new hashes and re-checked expected values. `tests/test_gis_harness.py` holds them and checks
 that each trap still changes the answer.
 
 ## How good are the checks? (`validators_bench`)

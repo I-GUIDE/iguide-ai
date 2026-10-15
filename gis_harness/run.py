@@ -179,6 +179,7 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
                     thread_id=thread, raw_log=out / f"{stem}.events.jsonl")
     # The layer files live on this server, which is gone by the time anyone replays the turn.
     layers = capture_layers(base_url, out / f"{stem}.events.jsonl")
+    turn["layer_paths"] = _layer_paths(out, stem)
     s = score(task, expected, turn)
     record = {"task": task_id, "title": task.title, "trial": trial, "provider": provider,
               "model": model, "query": query, "files": sorted(files),
@@ -192,6 +193,11 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
               "gate": turn.get("gate", [])}
     (out / f"{stem}.json").write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
+
+
+def _layer_paths(out: Path, stem: str) -> List[str]:
+    """The vector layers this turn put on the map, as the harness saved them."""
+    return [str(p) for p in sorted((out / "layers").glob(f"{stem}__*.geojson"))]
 
 
 def _scrub(text: str) -> str:
@@ -220,6 +226,7 @@ def rescore(path: Path) -> Dict[str, Any]:
         ev = json.loads(line)
         _reduce(turn, ev["event"], ev["data"])
     turn["error"] = record.get("error") or turn["error"]
+    turn["layer_paths"] = _layer_paths(path.parent, path.name[: -len(".json")])
     record["score"] = score(BY_ID[record["task"]], record["expected"], turn).to_dict()
     record["usage"] = cost_usd(turn["usage"])
     record["gate"] = turn.get("gate", [])
