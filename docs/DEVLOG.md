@@ -5658,3 +5658,20 @@ rather than from the previous one.
 **Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
   bound; data the user says they lack can still be substituted when invited; off by default.
 
+
+## 2026-10-15 · M8.99 · A finished map is not followed by a search of the turn's own files (architecture stage 65)
+
+**Change**
+- In the search peer, `read_text_file` / `inspect_file_for_analysis` refuse the conversation's
+  outputs and read uploads at most once, `AGENT_SEARCH_FILE_READS` (3) per run.
+- A search after a delivered map is vetoed unless the request asks for retrieval.
+- "Next: X" shows the decider's reason.
+- Failure lines name the exception, not a leading warning.
+- `choropleth_image` reads GeoJSON.
+
+**Why** Chicago step 3 (SKATER), live 2026-10-15: the regions were on the map at 14:37:38. The
+  supervisor then chose search, which read about 45 of the turn's own files over 3 min 16 s
+  (prompt 8k → 56k tokens) and added nothing.
+
+**Not fixed** `list_conversation_files` stays open to search; the veto is lexical.
+

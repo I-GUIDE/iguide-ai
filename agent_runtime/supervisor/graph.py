@@ -2171,6 +2171,7 @@ class Decision(str):
 
     plan: Optional[Dict[str, Any]] = None
     subgoal: Optional[str] = None
+    reason: str = ""
 
 
 def _initial_plan(state: SupervisorState) -> Dict[str, Any]:
@@ -2876,6 +2877,34 @@ _RETRIEVAL_REQUEST_RE = re.compile(
 )
 
 
+# Words that ask for something only retrieval can supply. Narrower than _RETRIEVAL_REQUEST_RE on
+# purpose: that one counts "show me … map" as a request for platform maps, which is right for
+# deciding whether an empty knowledge base is a real answer and wrong for deciding whether a
+# finished map still needs a search.
+_OUTSIDE_EVIDENCE_RE = re.compile(
+    r"\b(?:literature|papers?|publications?|studies|references?|citations?|cite|sources?|"
+    r"datasets?|notebooks?|oers?|knowledge\s+elements?|i-?guide|knowledge\s+base|"
+    r"related\s+(?:elements?|resources?)|search|look\s+up|web|online|news)\b",
+    re.I,
+)
+
+
+def _work_delivered_without_retrieval(state: Dict[str, Any]) -> bool:
+    """The analysis put this turn's map on the user's map and the request asks for nothing
+    retrieval supplies, so a search step has nothing to add.
+
+    2026-10-15, Chicago demo, the SKATER step: analyze drew the regions at 14:37:38 and
+    finished at 14:38:42; the decider then chose search, which read 45 of the conversation's
+    own files over 3 min 16 s and added nothing ("2 consecutive steps added nothing"). The
+    decide prompt already says to choose `done` once `map_layer_delivered` holds; it was not
+    enough, so this is enforced here, like the other routing vetoes."""
+    if state.get("analysis_results") is None and state.get("code_result") is None:
+        return False
+    if not _map_delivered_this_turn(state.get("analysis_results"), state.get("code_result")):
+        return False
+    return not _OUTSIDE_EVIDENCE_RE.search(str(state.get("query") or ""))
+
+
 def _needs_kb_evidence(query: str) -> bool:
     """True when the request is for I-GUIDE platform content (so 'no evidence' is a real answer)."""
     return bool(_RETRIEVAL_REQUEST_RE.search(query or ""))
@@ -3288,6 +3317,7 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
                     node="supervisor",
                 )
                 decision = Decision(nxt)
+                decision.reason = reason
                 if isinstance(parsed.get("plan"), dict):
                     decision.plan = parsed["plan"]
                 if parsed.get("subgoal"):
@@ -4571,6 +4601,8 @@ def _decision_sentence(nxt: str, why: str) -> Optional[str]:
         return "Stopping: this turn reached its step limit"
     if why == "search exhausted":
         return "Stopping: the knowledge base has nothing further to give"
+    if why.startswith("map delivered"):
+        return "Stopping: the map is drawn and the request asks for nothing a search would add"
     if why == "nothing has run yet":
         return f"Starting with {nxt}: nothing has run yet this turn"
     if why.startswith("no-progress repeat"):
@@ -5732,6 +5764,7 @@ def build_supervisor_graph(
         needs = [n for n in needs if not _dead(n)]
 
         failures = state.get("peer_failures") or []
+        decided: Any = None
         if any(f.get("fatal") for f in failures):
             # The model backend itself is unreachable. Every remaining peer would pay its full
             # latency to fail the same way, and so would a re-route.
@@ -5778,6 +5811,8 @@ def build_supervisor_graph(
             # Don't keep hitting the search agent once the KB has nothing left to give.
             elif nxt == "search" and _search_exhausted(state):
                 nxt, why = "done", "search exhausted"
+            elif nxt == "search" and _work_delivered_without_retrieval(state):
+                nxt, why = "done", "map delivered; nothing asked to retrieve"
         # A VETO, not a hint: _available_actions only shapes the menu the decider is shown,
         # and it answered `done` at step 0 anyway. Measured on the merged shape — "Find flood
         # risk datasets on I-GUIDE" finished without retrieving and replied "I couldn't find
@@ -5795,9 +5830,14 @@ def build_supervisor_graph(
         # loop did something a reader would otherwise call a bug (stopped early, stopped
         # without searching, ran analysis on a request that named no analysis). Those get a
         # sentence AND their own event, so folding the routing ladder cannot hide them.
+        # The decider's own reason, when this route is the decider's. It was emitted only as a
+        # detail-tier event, so the visible trace read "Next: search" with no hint why a turn
+        # whose map was already drawn went looking for documents.
+        _said = (getattr(decided, "reason", "") or "") if why == "decision" else ""
         emit_trace_event(
             "node_completed",
-            {"stage": "supervisor", "route": nxt, "message": f"Next: {nxt}"},
+            {"stage": "supervisor", "route": nxt,
+             "message": f"Next: {nxt}" + (f" — {_said[:200]}" if _said else "")},
             node="supervisor",
         )
         _reason = _decision_sentence(nxt, why)

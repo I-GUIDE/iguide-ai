@@ -336,8 +336,19 @@ def choropleth_image(gdf_file_id: str, column: str, title: str = "Choropleth map
     silently falls back to a continuous ramp if unavailable. Returns a PNG file_id."""
     import json
 
-    def _choro(gdf, column, title, scheme):
+    # Reads the file the same way heatmap_image does. It went through make_file_handle_tool,
+    # whose GeoDataFrame loader reads GeoParquet only, so the GeoJSON that every vector tool and
+    # upload produces failed with "Parquet magic bytes not found" (Chicago demo, 2026-10-15).
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
+        gdf = _read_any_vector(gdf_file_id)
+        if column not in getattr(gdf, "columns", []):
+            cols = [c for c in getattr(gdf, "columns", []) if c != "geometry"]
+            return json.dumps({"error": f"column {column!r} is not in this file; its columns "
+                                        f"are {cols[:40]}"})
         fig, ax = plt.subplots(figsize=(9, 9))
         kw = dict(column=column, legend=True, cmap="OrRd", edgecolor="0.8", linewidth=0.3)
         if scheme:
@@ -349,11 +360,12 @@ def choropleth_image(gdf_file_id: str, column: str, title: str = "Choropleth map
         gdf.plot(ax=ax, **kw)
         ax.set_title(title)
         ax.set_axis_off()
-    _choro.__annotations__ = {"gdf": "GeoDataFrame", "column": str, "title": str, "scheme": str, "return": type(None)}
-    _choro.__name__ = "choropleth_map"
-    try:
-        return json.dumps(make_file_handle_tool(_choro)(
-            gdf=gdf_file_id, column=column, title=title, scheme=scheme), default=str)
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", title).strip("_").lower() or "choropleth"
+        rec = _save_figure(fig, f"{stem}.png")
+        plt.close(fig)
+        # `png_file_id` is the key make_file_handle_tool returned; callers read it.
+        return json.dumps({"ok": True, "features": int(len(gdf)), "column": column,
+                           "png_file_id": rec["file_id"], **rec}, default=str)
     except Exception as exc:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 

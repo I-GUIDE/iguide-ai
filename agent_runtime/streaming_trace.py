@@ -8,6 +8,7 @@ LangChain callbacks, MCP tool wrappers, and that queue.
 from __future__ import annotations
 
 import json
+import re
 import time
 import logging
 import os
@@ -93,6 +94,41 @@ _TEXT_LIMIT = int(os.environ.get("AGENT_TRACE_TEXT_LIMIT") or 1200)
 _JSON_LIMIT = int(os.environ.get("AGENT_TRACE_JSON_LIMIT") or 3000)
 
 
+_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\.)?[A-Z]\w*(?:Error|Exception|Exit|Interrupt|Fault)\b\s*(?::.*)?$")
+_RAISED_LINE = re.compile(r"^[A-Za-z_][\w.]*(?::\s.*)?$")
+_WARNING_LINE = re.compile(r"\b[A-Z]\w*Warning\b")
+
+
+def _exception_line(text: str) -> Optional[str]:
+    """The line of a failure's text that names the error, or None.
+
+    stderr is read top-down, but a Python failure names its error on the LAST line, after the
+    traceback — and whatever printed first is often a library warning. On 2026-10-15 every
+    failed execute_code in the Chicago SKATER step showed "failed — FutureWarning: …" (a
+    libpysal deprecation printed before the code even ran), so the agent's retries were read
+    as the same warning again and the error that mattered was never visible.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    for ln in reversed(lines):
+        if _EXCEPTION_LINE.match(ln):
+            return ln
+    # After a traceback, the last `Name: message` line is the error whatever it is called
+    # (pyarrow's ArrowInvalid, a library's own class).
+    if any(ln.startswith("Traceback (most recent call last)") for ln in lines):
+        for ln in reversed(lines):
+            if _RAISED_LINE.match(ln) and not _WARNING_LINE.search(ln):
+                return ln
+    if _WARNING_LINE.search(lines[0]):
+        rest = [ln for ln in lines if not _WARNING_LINE.search(ln) and not ln.startswith(
+            ("warnings.warn", "File \"", "^"))]
+        if rest:
+            return rest[-1]
+    return None
+
+
 def _outcome(output: Any) -> Optional[str]:
     """What a tool RETURNED, in a few words, or None when it cannot be said briefly.
 
@@ -136,7 +172,12 @@ def _outcome(output: Any) -> Optional[str]:
         # 600, not 140: the row CLAMPS at 140 in the transcript and expands on click, so the
         # cap here decides what there is to expand INTO. At 140 a python traceback lost the
         # last frame — the one naming the error — which is the only part worth reading.
-        return f"failed — {_short_text(reason or 'failed', limit=600)}"
+        text = reason if isinstance(reason, str) else _short_text(reason or "failed", limit=600)
+        exc = _exception_line(text)
+        if exc:
+            # The error first, where the clamped row shows it; the rest after it, for the expand.
+            return f"failed — {_short_text(exc + ' · ' + text, limit=600)}"
+        return f"failed — {_short_text(text or 'failed', limit=600)}"
 
     # `count` is what every search tool's _build_payload already reports.
     for key in ("count", "feature_count", "zones_with_pixels", "row_count"):
