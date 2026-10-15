@@ -42,6 +42,7 @@ CASES = [
      "blurb": "2024 violent crime by community area: rates per 1,000, Moran's I and LISA "
               "clusters, then 6 contiguous SKATER regions.",
      "tags": ["spatial join", "rates", "autocorrelation", "regionalization", "choropleth"],
+     "category": "Hypothesis testing",
      "steps": [
          {"label": "Rates by community area",
           "prompt": "The attached files are Chicago's 2024 violent crimes with coordinates "
@@ -65,6 +66,7 @@ CASES = [
      "blurb": "Buffer a site in the Chicago Loop by 1 mile, select the schools inside it and "
               "find the nearest one.",
      "tags": ["buffer", "spatial selection", "distance"],
+     "category": "Query and selection",
      "steps": [{"label": "Count and nearest", "prompt": None},
                {"label": "Show it on the map",
                 "prompt": "Show the site, its 1-mile buffer and the schools inside it on the map."}]},
@@ -73,6 +75,7 @@ CASES = [
      "blurb": "Point-in-polygon counts turned into rates: the zone with the most incidents is "
               "not the one with the highest rate.",
      "tags": ["spatial join", "rates", "choropleth"],
+     "category": "Transformation",
      "steps": [{"label": "Rates by zone", "prompt": None},
                {"label": "Map the rates",
                 "prompt": "Map the rate per 1,000 residents for each zone as a choropleth."}]},
@@ -81,6 +84,7 @@ CASES = [
      "blurb": "Travel time from length and speed on every edge: the shortest route is not the "
               "fastest one.",
      "tags": ["network analysis", "routing"],
+     "category": "Optimisation",
      "steps": [{"label": "Fastest travel time", "prompt": None},
                {"label": "Show the route", "prompt": "Show the fastest route on the map."}]},
     {"id": "facility-siting", "task": "T05",
@@ -88,6 +92,7 @@ CASES = [
      "blurb": "A 2-median location-allocation: pick the 2 of 8 sites that minimise "
               "population-weighted distance.",
      "tags": ["location-allocation", "optimisation"],
+     "category": "Optimisation",
      "steps": [{"label": "Choose the sites", "prompt": None},
                {"label": "Map the service areas",
                 "prompt": "Map the demand points coloured by the chosen site that serves each "
@@ -97,12 +102,14 @@ CASES = [
      "blurb": "A bathtub inundation model on an elevation raster, with NoData kept out of the "
               "flooded area.",
      "tags": ["raster", "inundation"],
+     "category": "Transformation",
      "steps": [{"label": "Flooded area", "prompt": None},
                {"label": "Show the flood", "prompt": "Show the flooded cells on the map."}]},
     {"id": "ndvi-change", "task": "T08",
      "title": "Vegetation change from two scenes",
      "blurb": "NDVI from red and near-infrared on two dates, and the area that lost vegetation.",
      "tags": ["raster", "remote sensing", "change detection"],
+     "category": "Transformation",
      "steps": [{"label": "NDVI and loss", "prompt": None},
                {"label": "Map the loss",
                 "prompt": "Map where NDVI fell by more than 0.2 between the two dates."}]},
@@ -110,6 +117,7 @@ CASES = [
      "title": "Site suitability from three layers",
      "blurb": "A weighted overlay of slope and road distance, with water and wetland excluded.",
      "tags": ["raster", "multi-criteria"],
+     "category": "Transformation",
      "steps": [{"label": "Score the cells", "prompt": None},
                {"label": "Map the score", "prompt": "Map the suitability score."}]},
     {"id": "aftershocks", "task": "T12",
@@ -117,6 +125,7 @@ CASES = [
      "blurb": "A space-time filter on a USGS catalogue: events within 7 days and 25 km of the "
               "mainshock.",
      "tags": ["spatio-temporal", "point data"],
+     "category": "Query and selection",
      "steps": [{"label": "Count the aftershocks", "prompt": None},
                {"label": "Map them",
                 "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with "
@@ -126,6 +135,7 @@ CASES = [
      "blurb": "No upload: the agent fetches the county boundary itself, measures it on an "
               "equal-area projection, and gives a great-circle distance.",
      "tags": ["live data", "projections", "geodesic distance"],
+     "category": "Measurement",
      "steps": [{"label": "Area and distance", "prompt": None}]},
 ]
 
@@ -174,7 +184,7 @@ def main() -> int:
             dest.rmdir()
         catalogue.append({
             "id": case["id"], "title": case["title"], "blurb": case["blurb"],
-            "tags": case["tags"], "harnessTask": case["task"],
+            "tags": case["tags"], "category": case["category"], "harnessTask": case["task"],
             "reliability": RELIABILITY[case["task"]],
             "files": [{"name": n, "path": f"demos/{case['id']}/{n}",
                        "bytes": (dest / n).stat().st_size} for n in names],

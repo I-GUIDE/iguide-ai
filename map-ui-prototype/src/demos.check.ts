@@ -2,7 +2,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { DEMOS, demoBytes, formatBytes, nextStep } from './demos';
+import { DEMOS, DEMO_CATEGORIES, demoBytes, demosByCategory, formatBytes, nextStep } from './demos';
 
 let failed = 0;
 const ok = (cond: unknown, msg: string) => { if (!cond) { failed++; console.error('FAIL', msg); } };
@@ -13,6 +13,7 @@ ok(new Set(ids).size === ids.length, 'demo ids are unique');
 for (const d of DEMOS) {
   ok(/^[a-z0-9-]+$/.test(d.id), `${d.id}: id is a url-safe slug`);
   ok(d.steps.length >= 1, `${d.id}: has steps`);
+  ok((DEMO_CATEGORIES as readonly string[]).includes(d.category), `${d.id}: category "${d.category}" is one of DEMO_CATEGORIES`);
   ok(/harness runs$/.test(d.reliability), `${d.id}: says how often step 1 has worked`);
   for (const [k, s] of d.steps.entries()) {
     ok(s.label.trim() && s.prompt.trim().length > 20, `${d.id} step ${k + 1}: label and a real question`);
@@ -26,6 +27,12 @@ for (const d of DEMOS) {
   }
   ok(demoBytes(d) < 10 * 1024 * 1024, `${d.id}: under 10 MB (${formatBytes(demoBytes(d))})`);
 }
+const groups = demosByCategory();
+ok(groups.reduce((n, g) => n + g.cases.length, 0) === DEMOS.length, 'every case is in exactly one group');
+ok(groups.map((g) => g.category).join('|') === DEMO_CATEGORIES.filter((k) => DEMOS.some((d) => d.category === k)).join('|'),
+   'groups follow DEMO_CATEGORIES order');
+ok(demosByCategory([{ ...DEMOS[0], category: 'Something new' }])[0].category === 'Something new',
+   'an unlisted category is shown, not dropped');
 const c = DEMOS[0];
 ok(nextStep(c, new Set()) === 0, 'next step starts at 1');
 ok(nextStep(c, new Set([0])) === (c.steps.length > 1 ? 1 : null), 'next step follows the asked ones');

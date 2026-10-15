@@ -13,6 +13,8 @@ export interface DemoCase {
   title: string;
   blurb: string;
   tags: string[];
+  /** The kind of spatial analysis the case is mainly about (one of DEMO_CATEGORIES). */
+  category: string;
   harnessTask: string;
   reliability: string;
   files: DemoFile[];
@@ -20,6 +22,28 @@ export interface DemoCase {
 }
 
 export const DEMOS: DemoCase[] = catalogue as DemoCase[];
+
+// The panel's groups, in this order: Longley, Goodchild et al.'s types of spatial analysis, from
+// measuring one thing to testing a hypothesis. Each case sits under its main type; the others it
+// touches are in its tags.
+export const DEMO_CATEGORIES = [
+  'Measurement',
+  'Query and selection',
+  'Transformation',
+  'Optimisation',
+  'Hypothesis testing',
+] as const;
+
+/** The cases grouped by category, in DEMO_CATEGORIES order, each group in catalogue order. A
+ *  category with no case is left out; a case whose category is not listed goes last, under its
+ *  own name, rather than disappearing. */
+export function demosByCategory(cases: DemoCase[] = DEMOS): { category: string; cases: DemoCase[] }[] {
+  const known: string[] = [...DEMO_CATEGORIES];
+  const extra = [...new Set(cases.map((c) => c.category).filter((c) => !known.includes(c)))];
+  return [...known, ...extra]
+    .map((category) => ({ category, cases: cases.filter((c) => c.category === category) }))
+    .filter((g) => g.cases.length > 0);
+}
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;

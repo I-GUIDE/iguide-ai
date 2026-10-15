@@ -595,6 +595,9 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .demopanel { padding: 14px 16px 18px; }
 .demohint { font-size: 12.5px; color: #5b6168; margin: 0 0 8px; }
 .democards { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.demogroup { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.demogrouphead { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); margin: 4px 0 0; }
 .democard { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px 12px;
             border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; }
 .democard:hover, .democard:focus-visible { border-color: #c98a1a; background: var(--soft); }

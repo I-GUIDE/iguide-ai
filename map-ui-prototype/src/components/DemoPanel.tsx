@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { DEMOS, demoBytes, formatBytes, nextStep, type DemoCase } from '../demos';
+import { DEMOS, demoBytes, demosByCategory, formatBytes, nextStep, type DemoCase } from '../demos';
 
 interface Props {
   busy: boolean;
@@ -64,19 +64,24 @@ export function DemoPanel(p: Props) {
           Pick a case. Each one starts a new conversation with its data attached, then you ask
           its steps in order. {p.live ? '' : 'Connect to the live agent first: the offline demo cannot run these.'}
         </p>
-        <div className="democards">
-          {DEMOS.map((d) => (
-            <button key={d.id} type="button" className="democard" onClick={() => choose(d.id)}
-                    title={d.blurb}>
-              <span className="demotitle">{d.title}</span>
-              <span className="demoblurb">{d.blurb}</span>
-              <span className="demometa">
-                {d.steps.length} step{d.steps.length > 1 ? 's' : ''} ·{' '}
-                {d.files.length ? `${d.files.length} file${d.files.length > 1 ? 's' : ''}, ${formatBytes(demoBytes(d))}` : 'no upload'}
-              </span>
-            </button>
-          ))}
-        </div>
+        {demosByCategory().map((g) => (
+          <section key={g.category} className="demogroup" aria-label={g.category}>
+            <h3 className="demogrouphead">{g.category}</h3>
+            <div className="democards">
+              {g.cases.map((d) => (
+                <button key={d.id} type="button" className="democard" onClick={() => choose(d.id)}
+                        title={d.blurb}>
+                  <span className="demotitle">{d.title}</span>
+                  <span className="demoblurb">{d.blurb}</span>
+                  <span className="demometa">
+                    {d.steps.length} step{d.steps.length > 1 ? 's' : ''} ·{' '}
+                    {d.files.length ? `${d.files.length} file${d.files.length > 1 ? 's' : ''}, ${formatBytes(demoBytes(d))}` : 'no upload'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
       </div>
     );
   }

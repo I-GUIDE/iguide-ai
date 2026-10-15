@@ -10,6 +10,7 @@
    "regionalization",
    "choropleth"
   ],
+  "category": "Hypothesis testing",
   "harnessTask": "T13",
   "reliability": "3 of 3 harness runs",
   "files": [
@@ -53,6 +54,7 @@
    "spatial selection",
    "distance"
   ],
+  "category": "Query and selection",
   "harnessTask": "T02",
   "reliability": "31 of 31 harness runs",
   "files": [
@@ -82,6 +84,7 @@
    "rates",
    "choropleth"
   ],
+  "category": "Transformation",
   "harnessTask": "T03",
   "reliability": "25 of 25 harness runs",
   "files": [
@@ -115,6 +118,7 @@
    "network analysis",
    "routing"
   ],
+  "category": "Optimisation",
   "harnessTask": "T04",
   "reliability": "24 of 25 harness runs",
   "files": [
@@ -143,6 +147,7 @@
    "location-allocation",
    "optimisation"
   ],
+  "category": "Optimisation",
   "harnessTask": "T05",
   "reliability": "25 of 25 harness runs",
   "files": [
@@ -176,6 +181,7 @@
    "raster",
    "inundation"
   ],
+  "category": "Transformation",
   "harnessTask": "T07",
   "reliability": "25 of 25 harness runs",
   "files": [
@@ -205,6 +211,7 @@
    "remote sensing",
    "change detection"
   ],
+  "category": "Transformation",
   "harnessTask": "T08",
   "reliability": "29 of 29 harness runs",
   "files": [
@@ -238,6 +245,7 @@
    "raster",
    "multi-criteria"
   ],
+  "category": "Transformation",
   "harnessTask": "T11",
   "reliability": "25 of 25 harness runs",
   "files": [
@@ -276,6 +284,7 @@
    "spatio-temporal",
    "point data"
   ],
+  "category": "Query and selection",
   "harnessTask": "T12",
   "reliability": "25 of 26 harness runs",
   "files": [
@@ -305,6 +314,7 @@
    "projections",
    "geodesic distance"
   ],
+  "category": "Measurement",
   "harnessTask": "T01",
   "reliability": "30 of 30 harness runs",
   "files": [],
