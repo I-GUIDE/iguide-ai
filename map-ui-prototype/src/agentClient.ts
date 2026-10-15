@@ -26,6 +26,10 @@ export interface AgentConfig {
    *  search peer and an analyze peer, 'unified' = one agent does both in one context.
    *  Per-request so both shapes can be compared side by side in separate tabs. */
   orchestration?: string;
+  /** Answer validation: '' = the server's AGENT_VALIDATION default, 'on' | 'off' per request.
+   *  Off skips the grounding audit, number scan and re-grounding pass after the answer is
+   *  written (Stage 66): faster, and the answer is not checked. */
+  validation?: string;
 }
 
 export interface ModelCatalogue {
@@ -456,6 +460,8 @@ export async function streamChat(
     // Absent = the deployment's AGENT_UNIFIED_PEER default. Sent as a boolean because the
     // server reads it as one; the two named options exist so the UI can say what they mean.
     ...(cfg.orchestration ? { unifiedPeer: cfg.orchestration === 'unified' } : {}),
+    // Absent = the deployment's AGENT_VALIDATION default; a boolean when chosen.
+    ...(cfg.validation ? { validation: cfg.validation === 'on' } : {}),
   };
 
   // A thunk, not a Promise: a retry has to ISSUE a new POST, and a started request cannot be

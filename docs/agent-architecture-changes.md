@@ -75,7 +75,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
 | 62 | [Asking the user, measured: a clarification gate and a simulated-user harness](#stage-62) | 2026-10-15 | `AGENT_CLARIFY_POLICY` (never/assume/ask, off by default) and a simulated-user harness; on 14 MultiGlobeQA tasks `ask` got 9 right against 5 for `never` and `assume` |
 | 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
-| 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified" and the answer carries one quiet line |
+| 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified"; the map UI has an "Answer validation" setting |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10554,28 +10554,31 @@ it stops fabricated download links and internal paths, so it is safety, not chec
 in-sandbox invariant gate, which enforces library contracts while the code runs and has its own
 switch, `AGENT_INVARIANT_GATE`.
 
-**An unchecked answer says so.** Its verdict has one finding, `validation` / unverifiable, so the
-status is `unverified`, never `verified`. The answer ends with one quiet line in the number scan's
-style, not a warning banner: "Not checked: answer validation was turned off for this reply." The
-API result carries `validation: false`.
+**An unchecked answer is marked in the payload, not in the text.** Its verdict has one finding,
+`validation` / unverifiable, so the status is `unverified`, never `verified`, and the API result
+carries `validation: false`. The answer text carries nothing about it. A first version ended the
+answer with "Not checked: answer validation was turned off for this reply."; the user asked for it
+to go, because whoever turned validation off chose it.
 
-The quiet lines (this one and the number scan's) are now written as `*text*`. Written as
-`_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises only
-asterisks. The live check below found it.
+The number scan's quiet line ("N statements … were left out") is now written as `*text*`. Written
+as `_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises
+only asterisks. The live check below found it.
+
+**The map UI setting.** Settings has an "Answer validation" select: Server default, "On: check
+each answer", or "Off: answer sooner, unchecked". It persists with the other settings
+(`AgentCfg.validation`) and is sent as `validation: true/false` only when chosen, so "Server
+default" sends nothing and the deployment's `AGENT_VALIDATION` decides.
 
 **Live check** (local demo, Lumen deepseek, `AGENT_VALIDATION=0`, 2026-10-15). Chicago step 1
 took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
-against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02) and
-ended with the not-checked line.
+against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02).
 
 **Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
 - the default, the server switch, the request field and its precedence;
 - the result flag;
 - the audit tool unbound when off and bound when on;
-- a whole turn with validation off: no audit, one analysis run, the unrecorded figure kept, the
-  quiet line, status `unverified`;
-- the same turn with validation on, as a control, is audited;
-- the line renders without the warning banner.
-
-**Not done here.** The map UI has no toggle yet; a client sets the request field.
+- a whole turn with validation off: no audit, one analysis run, the unrecorded figure kept,
+  nothing appended, status `unverified`;
+- the same turn with validation on, as a control, is audited and has no `validation` finding;
+- an unchecked verdict renders no text.
 

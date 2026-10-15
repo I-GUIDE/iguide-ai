@@ -78,9 +78,8 @@ def shown(f: Finding) -> bool:
 
 def _quiet(f: Finding) -> bool:
     """The number scan's cut: one plain line, not a banner. Text was removed and the reader is
-    owed knowing that, but it is not a warning about what remains. Likewise an answer whose
-    validation was turned off (client_profile): the reader is owed knowing it was not checked."""
-    return (f.check == "number_scan" and f.kind == NOTE) or f.check == "validation"
+    owed knowing that, but it is not a warning about what remains."""
+    return f.check == "number_scan" and f.kind == NOTE
 
 
 def render(answer: str, findings: List[Finding]) -> str:
@@ -116,12 +115,7 @@ def render(answer: str, findings: List[Finding]) -> str:
     return f"{body}\n\n---\n\n" + "\n".join(lines) if body else "\n".join(lines)
 
 
-VALIDATION_OFF_LINE = "Not checked: answer validation was turned off for this reply."
-
-
 def _cut_sentence(f: Finding) -> str:
-    if f.check == "validation":
-        return VALIDATION_OFF_LINE
     m = re.match(r"\s*(\d+)", f.message or "")      # the producer writes the full count first;
     n = int(m.group(1)) if m else (len(f.evidence) or 1)   # evidence is capped at six
     return ("One statement with a figure no tool here can produce was left out."

@@ -5670,12 +5670,13 @@ rather than from the previous one.
   - the agreement and reference recomputations;
   - the artifact corrections.
 
-  The peers lose the audit tool. The verdict is `unverified` with a `validation` finding, the
-  answer ends with "Not checked: answer validation was turned off for this reply.", and the
-  result carries `validation: false`. Link sanitisation and the invariant gate stay.
+  The peers lose the audit tool. The verdict is `unverified` with a `validation` finding and the
+  result carries `validation: false`; the answer text carries nothing about it. The map UI has an
+  "Answer validation" setting (Server default / On / Off). Link sanitisation and the invariant
+  gate stay.
 
 **Why** Chicago demo, 2026-10-15, local, Lumen deepseek: checking took 2:46 of step 1's 4:57 and
   4:55 of step 3's 7:48.
 
-**Not fixed** No toggle in the map UI.
+**Not fixed** Nothing in the UI marks an unchecked answer once it is shown.
 

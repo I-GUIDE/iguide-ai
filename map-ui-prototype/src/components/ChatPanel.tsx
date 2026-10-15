@@ -23,7 +23,8 @@ export interface ChatMessage {
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
                             model?: string; provider?: string; reasoningEffort?: string;
-                            codePeer?: string; codePeerModel?: string; orchestration?: string }
+                            codePeer?: string; codePeerModel?: string; orchestration?: string;
+                            validation?: string }
 
 // The satellite-embedding models the service actually offers, grouped the way the choice
 // matters: a precomputed model answers in seconds, an on-the-fly one runs the encoder. Six of
@@ -662,6 +663,17 @@ export function ChatPanel(p: Props) {
                 <option value="">Server default</option>
                 <option value="peers">Supervisor + peers</option>
                 <option value="unified">Unified agent (experimental)</option>
+              </select>
+            </label>
+            {/* Whether the answer is checked against the turn's record once it is written
+                (grounding audit, number scan, re-grounding). Off answers sooner, unchecked. */}
+            <label>Answer validation
+              <select value={p.cfg.validation || ''}
+                      title="Off skips the checks that run after the answer is written: faster, but the answer is not checked"
+                      onChange={(e) => p.onSetCfg({ ...p.cfg, validation: e.target.value })}>
+                <option value="">Server default</option>
+                <option value="on">On: check each answer</option>
+                <option value="off">Off: answer sooner, unchecked</option>
               </select>
             </label>
             {/* A SECOND axis, deliberately its own control: `Model` picks what writes

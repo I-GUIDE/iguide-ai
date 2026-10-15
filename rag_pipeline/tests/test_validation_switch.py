@@ -1,5 +1,6 @@
 """Answer validation can be turned off: per request (`validation: false`) or for the server
-(`AGENT_VALIDATION=0`). An unchecked answer says it is unchecked; it is never "verified".
+(`AGENT_VALIDATION=0`). An unchecked answer's verdict is "unverified", never "verified"; the
+answer text itself carries no line about it.
 
 Measured on the Chicago SKATER step, 2026-10-15: checking the answer took 4 min 55 s of 7 min
 48 s, mostly two grounding audits and a second analysis run for one disputed sentence.
@@ -132,7 +133,8 @@ def test_off_the_turn_runs_no_check_and_says_so(monkeypatch, validation_off):
     assert audits == [], "the grounding audit ran"
     assert len(analyses) == 1, "a re-grounding pass re-ran the analysis"
     assert "118.0" in out["final_answer"], "the number scan cut a statement"
-    assert out["final_answer"].rstrip().endswith(f"*{V.VALIDATION_OFF_LINE}*")
+    assert out["final_answer"].rstrip().endswith("118.0 per 1,000."), (
+        "nothing is printed: whoever turned validation off chose it")
     findings = out["verdict"]["findings"]
     assert [f["check"] for f in findings] == ["validation"]
     assert V.status([V.Finding(**f) for f in findings]) == "unverified"
@@ -141,10 +143,11 @@ def test_off_the_turn_runs_no_check_and_says_so(monkeypatch, validation_off):
 def test_on_the_same_turn_is_audited(monkeypatch):
     out, audits, _ = _turn(monkeypatch)
     assert audits, "control: with validation on the audit runs"
-    assert V.VALIDATION_OFF_LINE not in out["final_answer"]
+    assert not [f for f in out["verdict"]["findings"] if f["check"] == "validation"]
 
 
-def test_the_unchecked_line_is_quiet_not_a_warning():
-    rendered = V.render("Answer.", [V.Finding("validation", V.UNVERIFIABLE,
-                                              cp.VALIDATION_OFF_FINDING)])
-    assert "Check this answer" not in rendered and V.VALIDATION_OFF_LINE in rendered
+def test_nothing_is_printed_for_an_unchecked_answer():
+    """The verdict payload says "unverified"; the answer text carries no line about it."""
+    findings = [V.Finding("validation", V.UNVERIFIABLE, cp.VALIDATION_OFF_FINDING)]
+    assert V.render("Answer.", findings) == "Answer."
+    assert V.status(findings) == "unverified"
