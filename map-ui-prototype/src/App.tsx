@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { loadDemoFiles, type DemoCase } from './demos';
 import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
@@ -995,6 +996,19 @@ export default function App() {
     }
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
 
+  // The Demos tab: a case runs in a NEW conversation, so an earlier question's files and layers
+  // cannot leak into it, with its data attached through the same upload path as a file the
+  // visitor picked by hand. The map opens because every case ends on it.
+  const startDemo = useCallback(async (c: DemoCase) => {
+    resetConversation();
+    setMapVisible(true);
+    pushMsg({ role: 'agent', text: `Demo: ${c.title}. ${c.blurb}` });
+    if (c.files.length) {
+      const files = await loadDemoFiles(c);
+      await onUpload(files);
+    }
+  }, [resetConversation, pushMsg, onUpload]);
+
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}${REPLAY_KEY ? ' replay-capture' : ''}`}>
       {REPLAY_KEY && <ReplayStrip meta={replayMeta} verdict={replayVerdict} error={replayError} />}
@@ -1136,6 +1150,7 @@ export default function App() {
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
           onSetSpatial={setSpatial}
+          onStartDemo={startDemo}
         />
       </div>
     </div>

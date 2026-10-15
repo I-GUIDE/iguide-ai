@@ -19,7 +19,7 @@ export const isPlatformVariant = import.meta.env.VITE_UI_VARIANT === 'platform';
 // the remote-sensing capabilities can be shown without a separate build or deployment: the
 // ordinary page is untouched and remains the default, so removing the demo later is deleting
 // a tab rather than unpicking a variant.
-export type AppTab = 'chat' | 'rs';
+export type AppTab = 'chat' | 'rs' | 'demos';
 
 export type UiVariant = 'platform' | 'rsembed';
 export const UI_VARIANT: UiVariant = isPlatformVariant ? 'platform' : 'rsembed';

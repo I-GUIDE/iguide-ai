@@ -1,0 +1,318 @@
+[
+ {
+  "id": "chicago-crime",
+  "title": "Chicago violent crime: rates, clusters and regions",
+  "blurb": "2024 violent crime by community area: rates per 1,000, Moran's I and LISA clusters, then 6 contiguous SKATER regions.",
+  "tags": [
+   "spatial join",
+   "rates",
+   "autocorrelation",
+   "regionalization",
+   "choropleth"
+  ],
+  "harnessTask": "T13",
+  "reliability": "3 of 3 harness runs",
+  "files": [
+   {
+    "name": "crimes_2024_violent.csv",
+    "path": "demos/chicago-crime/crimes_2024_violent.csv",
+    "bytes": 5486013
+   },
+   {
+    "name": "community_areas.geojson",
+    "path": "demos/chicago-crime/community_areas.geojson",
+    "bytes": 2072024
+   },
+   {
+    "name": "acs_2023_community_areas.csv",
+    "path": "demos/chicago-crime/acs_2023_community_areas.csv",
+    "bytes": 21688
+   }
+  ],
+  "steps": [
+   {
+    "label": "Rates by community area",
+    "prompt": "The attached files are Chicago's 2024 violent crimes with coordinates (crimes_2024_violent.csv: homicide, assault, battery, robbery and criminal sexual assault), the 77 community areas (community_areas.geojson) and ACS 2023 population by community area (acs_2023_community_areas.csv). Count the crimes in each community area by each incident's coordinates, compute the rate per 1,000 residents and map it as a choropleth. What is the citywide rate, and which community area has the highest rate?"
+   },
+   {
+    "label": "Are the rates clustered?",
+    "prompt": "Test whether those rates are spatially clustered with global Moran's I (queen contiguity, row-standardised weights), then map the local (LISA) clusters: high-high, low-low and the outliers."
+   },
+   {
+    "label": "Six crime regions",
+    "prompt": "Group the 77 community areas into 6 contiguous regions with similar violent crime rates using SKATER. Map the regions and give each one's community areas, population and mean rate."
+   }
+  ]
+ },
+ {
+  "id": "schools-buffer",
+  "title": "Schools within a mile of a site",
+  "blurb": "Buffer a site in the Chicago Loop by 1 mile, select the schools inside it and find the nearest one.",
+  "tags": [
+   "buffer",
+   "spatial selection",
+   "distance"
+  ],
+  "harnessTask": "T02",
+  "reliability": "31 of 31 harness runs",
+  "files": [
+   {
+    "name": "schools.geojson",
+    "path": "demos/schools-buffer/schools.geojson",
+    "bytes": 5498
+   }
+  ],
+  "steps": [
+   {
+    "label": "Count and nearest",
+    "prompt": "The attached schools.geojson has school locations. How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?"
+   },
+   {
+    "label": "Show it on the map",
+    "prompt": "Show the site, its 1-mile buffer and the schools inside it on the map."
+   }
+  ]
+ },
+ {
+  "id": "zone-rates",
+  "title": "Incidents per 1,000 residents by zone",
+  "blurb": "Point-in-polygon counts turned into rates: the zone with the most incidents is not the one with the highest rate.",
+  "tags": [
+   "spatial join",
+   "rates",
+   "choropleth"
+  ],
+  "harnessTask": "T03",
+  "reliability": "25 of 25 harness runs",
+  "files": [
+   {
+    "name": "incidents.csv",
+    "path": "demos/zone-rates/incidents.csv",
+    "bytes": 6771
+   },
+   {
+    "name": "zones.geojson",
+    "path": "demos/zone-rates/zones.geojson",
+    "bytes": 2386
+   }
+  ],
+  "steps": [
+   {
+    "label": "Rates by zone",
+    "prompt": "zones.geojson holds 9 zones with a population field, and incidents.csv holds incident locations (lat/lon). Count the incidents in each zone and compute the rate per 1,000 residents. Which zone has the highest rate, and what is it?"
+   },
+   {
+    "label": "Map the rates",
+    "prompt": "Map the rate per 1,000 residents for each zone as a choropleth."
+   }
+  ]
+ },
+ {
+  "id": "fastest-route",
+  "title": "Fastest route on a road network",
+  "blurb": "Travel time from length and speed on every edge: the shortest route is not the fastest one.",
+  "tags": [
+   "network analysis",
+   "routing"
+  ],
+  "harnessTask": "T04",
+  "reliability": "24 of 25 harness runs",
+  "files": [
+   {
+    "name": "roads.geojson",
+    "path": "demos/fastest-route/roads.geojson",
+    "bytes": 11581
+   }
+  ],
+  "steps": [
+   {
+    "label": "Fastest travel time",
+    "prompt": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, 87.62683° W? How many intersections, counting the start, can be reached within 2 minutes of it?"
+   },
+   {
+    "label": "Show the route",
+    "prompt": "Show the fastest route on the map."
+   }
+  ]
+ },
+ {
+  "id": "facility-siting",
+  "title": "Where to put two facilities",
+  "blurb": "A 2-median location-allocation: pick the 2 of 8 sites that minimise population-weighted distance.",
+  "tags": [
+   "location-allocation",
+   "optimisation"
+  ],
+  "harnessTask": "T05",
+  "reliability": "25 of 25 harness runs",
+  "files": [
+   {
+    "name": "candidates.csv",
+    "path": "demos/facility-siting/candidates.csv",
+    "bytes": 222
+   },
+   {
+    "name": "demand.csv",
+    "path": "demos/facility-siting/demand.csv",
+    "bytes": 1282
+   }
+  ],
+  "steps": [
+   {
+    "label": "Choose the sites",
+    "prompt": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?"
+   },
+   {
+    "label": "Map the service areas",
+    "prompt": "Map the demand points coloured by the chosen site that serves each one, and mark the two chosen sites."
+   }
+  ]
+ },
+ {
+  "id": "flood",
+  "title": "Land under a 5 m flood",
+  "blurb": "A bathtub inundation model on an elevation raster, with NoData kept out of the flooded area.",
+  "tags": [
+   "raster",
+   "inundation"
+  ],
+  "harnessTask": "T07",
+  "reliability": "25 of 25 harness runs",
+  "files": [
+   {
+    "name": "coast_dem.tif",
+    "path": "demos/flood/coast_dem.tif",
+    "bytes": 40408
+   }
+  ],
+  "steps": [
+   {
+    "label": "Flooded area",
+    "prompt": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts."
+   },
+   {
+    "label": "Show the flood",
+    "prompt": "Show the flooded cells on the map."
+   }
+  ]
+ },
+ {
+  "id": "ndvi-change",
+  "title": "Vegetation change from two scenes",
+  "blurb": "NDVI from red and near-infrared on two dates, and the area that lost vegetation.",
+  "tags": [
+   "raster",
+   "remote sensing",
+   "change detection"
+  ],
+  "harnessTask": "T08",
+  "reliability": "29 of 29 harness runs",
+  "files": [
+   {
+    "name": "scene_2020.tif",
+    "path": "demos/ndvi-change/scene_2020.tif",
+    "bytes": 41000
+   },
+   {
+    "name": "scene_2024.tif",
+    "path": "demos/ndvi-change/scene_2024.tif",
+    "bytes": 41000
+   }
+  ],
+  "steps": [
+   {
+    "label": "NDVI and loss",
+    "prompt": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?"
+   },
+   {
+    "label": "Map the loss",
+    "prompt": "Map where NDVI fell by more than 0.2 between the two dates."
+   }
+  ]
+ },
+ {
+  "id": "suitability",
+  "title": "Site suitability from three layers",
+  "blurb": "A weighted overlay of slope and road distance, with water and wetland excluded.",
+  "tags": [
+   "raster",
+   "multi-criteria"
+  ],
+  "harnessTask": "T11",
+  "reliability": "25 of 25 harness runs",
+  "files": [
+   {
+    "name": "landcover.tif",
+    "path": "demos/suitability/landcover.tif",
+    "bytes": 14768
+   },
+   {
+    "name": "road_distance_m.tif",
+    "path": "demos/suitability/road_distance_m.tif",
+    "bytes": 58008
+   },
+   {
+    "name": "slope_deg.tif",
+    "path": "demos/suitability/slope_deg.tif",
+    "bytes": 58008
+   }
+  ],
+  "steps": [
+   {
+    "label": "Score the cells",
+    "prompt": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?"
+   },
+   {
+    "label": "Map the score",
+    "prompt": "Map the suitability score."
+   }
+  ]
+ },
+ {
+  "id": "aftershocks",
+  "title": "Aftershocks of the 2019 Ridgecrest earthquake",
+  "blurb": "A space-time filter on a USGS catalogue: events within 7 days and 25 km of the mainshock.",
+  "tags": [
+   "spatio-temporal",
+   "point data"
+  ],
+  "harnessTask": "T12",
+  "reliability": "25 of 26 harness runs",
+  "files": [
+   {
+    "name": "usgs_comcat_ridgecrest_2019-07.csv",
+    "path": "demos/aftershocks/usgs_comcat_ridgecrest_2019-07.csv",
+    "bytes": 105636
+   }
+  ],
+  "steps": [
+   {
+    "label": "Count the aftershocks",
+    "prompt": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?"
+   },
+   {
+    "label": "Map them",
+    "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with the mainshock marked."
+   }
+  ]
+ },
+ {
+  "id": "measure",
+  "title": "Measuring area and distance correctly",
+  "blurb": "No upload: the agent fetches the county boundary itself, measures it on an equal-area projection, and gives a great-circle distance.",
+  "tags": [
+   "live data",
+   "projections",
+   "geodesic distance"
+  ],
+  "harnessTask": "T01",
+  "reliability": "30 of 30 harness runs",
+  "files": [],
+  "steps": [
+   {
+    "label": "Area and distance",
+    "prompt": "What is the area of Champaign County, Illinois, in square kilometres? And what is the great-circle distance in km between Trafalgar Square, London (51.5080 N, 0.1281 W) and Notre-Dame de Paris (48.8530 N, 2.3499 E)?"
+   }
+  ]
+ }
+]

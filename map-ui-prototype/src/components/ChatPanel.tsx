@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { DemoPanel } from './DemoPanel';
+import type { DemoCase } from '../demos';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
@@ -163,6 +165,8 @@ interface Props {
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
+  /** Demos tab: start a case in a new conversation with its files attached. */
+  onStartDemo: (c: DemoCase) => Promise<void>;
 }
 
 const GROUP_LABEL: Record<SourceGroup, string> = {
@@ -744,7 +748,7 @@ export function ChatPanel(p: Props) {
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
-      {p.messages.length <= 1 && (
+      {p.messages.length <= 1 && p.tab !== 'demos' && (
         <div className="suggest">
           {(p.tab === 'rs' ? RS_SUGGESTIONS : SUGGESTIONS).map((s) => (
             <button key={s} className="chip" onClick={() => send(s)}>{s}</button>
@@ -834,6 +838,12 @@ export function ChatPanel(p: Props) {
             </div>
           )}
         </div>
+      )}
+
+      {p.tab === 'demos' && (
+        <DemoPanel busy={p.busy} live={p.mode === 'live'} onStart={p.onStartDemo}
+                   onRun={(t) => send(t)}
+                   onStage={(t) => { setText(t); taRef.current?.focus(); }} />
       )}
 
       <div className="composer">
