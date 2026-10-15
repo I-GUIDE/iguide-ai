@@ -162,6 +162,15 @@ def from_audit(audit: Optional[Dict[str, Any]], *, numeric_claims_resolved: bool
                                f"was shown ({s.get('note')}): \"{str(s.get('claim') or '')[:160]}\"",
                 evidence=[str(s.get("note"))])
         for s in (audit or {}).get("supported_by_notes") or [] if isinstance(s, dict)]
+    # Claims the auditor could not see (their part of the record was cut) and nothing else
+    # settled: not verified, which is not the same as unsupported.
+    unseen = [str(c) for c in (audit or {}).get("unverified_claims") or [] if str(c).strip()]
+    if unseen:
+        out.append(Finding("audit", UNVERIFIABLE,
+                           f"not verified ({len(unseen)}): the part of the record that would "
+                           f"settle {'it' if len(unseen) == 1 else 'them'} was cut — "
+                           + "; ".join(f'"{c[:80]}"' for c in unseen[:3])
+                           + ("…" if len(unseen) > 3 else "")))
     severity = str((audit or {}).get("severity") or "").lower()
     if severity == "unknown":
         out.append(Finding("audit", UNVERIFIABLE,

@@ -10580,6 +10580,26 @@ gets outside evidence (CRITIC, arXiv 2305.11738).
 - both recorded Chicago turns, replayed from the model's saved plans against the ground truth
   (skipped without the archive).
 
+**Follow-up in the same stage: the auditor's view of the current turn, and "unseen".** On the
+Chicago LISA step the auditor wrote that "the LISA cluster counts and specific hot/cold spot area
+details are unsupported due to the truncated execution record, constituting minor over-reach".
+Its prompt told it to do exactly that with a claim whose part of the record had been cut.
+- **A larger budget for the current turn.** Its tool and code results get 32,000 characters
+  (`AGENT_AUDIT_TURN_RECORD_CHARS`); earlier turns keep 8,000. Bulk arrays (coordinates,
+  embeddings) are still elided first, so the room goes to names, counts, tables and stdout.
+- **A new ledger status, "unseen".** A claim whose part of the record was cut is marked "unseen",
+  not "absent". It is not an issue, not an over-reach, and the summary says it could not be
+  checked. An "absent" row whose quote blames the cut is treated the same.
+- **Where unseen claims go.** They are listed as `unverified_claims`, which the claim checker
+  takes like any disputed claim: supported ones are dropped, contradicted ones become problems
+  with evidence, and the rest are shown as "not verified … the part of the record that would
+  settle it was cut".
+- **Live, the same LISA step afterwards:** the auditor reported "all substantive claims … are
+  directly supported by the execution record, including … LISA class counts, named hot-spot
+  communities". There was no "over-reach" and no banner.
+- **Tests.** `test_audit_unseen.py` (6), and `test_audit_sees.py` updated to the new
+  instruction.
+
 **Not fixed.**
 - **Only disputed claims are checked.** In live step 3 the answer's regional populations
   (126,437 / 62,993 / 44,215) contradict the agent's own summary table (143,567 / 66,555 /

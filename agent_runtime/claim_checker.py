@@ -285,6 +285,19 @@ def apply(audit: Optional[Dict[str, Any]], verdicts: Sequence[Dict[str, Any]]) -
                          "check_note": v["detail"]})
     if withdrawn:
         logger.info("claim check withdrew %d issue(s): %s", len(withdrawn), withdrawn[:10])
+    # Claims the auditor could not see: checked like the rest. Supported ones are dropped,
+    # contradicted ones become issues (the auditor did not raise them, the check did).
+    still_unseen = []
+    for claim in audit.get("unverified_claims") or []:
+        v = by_claim.get(str(claim))
+        if v is None or v["verdict"] == "unverified":
+            still_unseen.append(claim)
+        elif v["verdict"] == "contradicted":
+            kept.append({"claim": str(claim), "reason": f"checked against the turn's data: {v['detail']}",
+                         "source": "claim_check", "status": "fail"})
+        else:
+            withdrawn.append({"claim": str(claim)[:200], "detail": v["detail"]})
+    audit["unverified_claims"] = still_unseen
     real = [k for k in kept if not (isinstance(k, dict) and k.get("status") == "unverified")]
     out = {**audit, "issues": kept, "claim_check": {
         "supported": len(withdrawn), "contradicted": sum(1 for v in verdicts if v["verdict"] == "contradicted"),
@@ -293,12 +306,19 @@ def apply(audit: Optional[Dict[str, Any]], verdicts: Sequence[Dict[str, Any]]) -
         out["hallucination_detected"] = False
         if not kept:
             out["severity"] = "none"
+    elif any(isinstance(k, dict) and k.get("source") == "claim_check" and k.get("status") == "fail"
+             for k in kept):
+        # A contradiction found by computing is a problem whatever the auditor rated the turn.
+        out["hallucination_detected"] = True
+        out["severity"] = "high"
     return out
 
 
 def claims_to_check(audit: Optional[Dict[str, Any]]) -> List[str]:
-    """The auditor's own disputed claims: not the invariant gate's (deterministic already)."""
-    out = []
+    """The auditor's own disputed claims, and the ones it could not see (``unverified_claims``,
+    "unseen" in its ledger: their part of the record was cut). Not the invariant gate's, which
+    is deterministic already."""
+    out = [str(c).strip() for c in (audit or {}).get("unverified_claims") or [] if str(c).strip()]
     for it in (audit or {}).get("issues") or []:
         if isinstance(it, dict) and it.get("source") in ("invariant_gate", "claim_check"):
             continue

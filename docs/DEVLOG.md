@@ -5673,6 +5673,11 @@ rather than from the previous one.
 **Measured** Recorded Chicago turns: the ranking supported in 6/6 runs; memberships 77/77 on the
   three runs after the fixes. Live step 3: three wrong memberships named with evidence.
 
+**Also** The auditor's view of the current turn grows from 8,000 to 32,000 characters, and a claim
+  whose part of the record was cut is "unseen" (not verified, sent to the checker), never "minor
+  over-reach". Live: the LISA step's cluster counts went from "unsupported due to the truncated
+  execution record" to supported.
+
 **Not fixed** Claims the auditor does not dispute are not checked (live step 3's wrong regional
   populations); off by default.
 
