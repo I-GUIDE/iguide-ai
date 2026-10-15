@@ -10355,3 +10355,93 @@ prototype (no `model_pricing`). They cover:
 - the history entry's types;
 - the trace record, and the API forwarding `usage`.
 
+
+## Stage 62 — Asking the user, measured: a clarification gate and a simulated-user harness {#stage-62}
+
+**Why.** In MultiGlobeQA runs (2026-10-14), several wrong answers were wrong for want of
+something only the user knew. "Which grid cell contains X both in h3 and s2 formats?" was
+answered at H3 resolution 9 and S2 level 30. Both cells were right, but the benchmark wanted
+resolution 5 and level 6. "Nes" resolved to a Nes in Norway instead of the one on the Faroe
+Islands. In the earlier live sweep, U01 substituted data for a DEM that was never attached.
+Whether the agent should ask had been an open question since 2026-09-01. This stage measures
+it rather than argues it.
+
+**What changed.**
+- **`AGENT_CLARIFY_POLICY`** (`agent_runtime/clarify_policy.py`):
+  - unset or `never` is the agent as it was;
+  - `assume` tells the final-answer writer to name the assumption it made and to give the
+    answers under the main alternatives when they differ;
+  - `ask` adds that rule plus a **clarification gate**.
+- **The gate** is a graph node before the supervisor. It makes one model call over the request,
+  the conversation and the attached file names. It returns one question only when all of these
+  hold:
+  - something the answer depends on is genuinely open;
+  - the choices give materially different answers;
+  - nothing settles it;
+  - it has not already asked in this conversation.
+
+  The question becomes the turn's answer, and no work is done. A broken gate proceeds.
+- **The turn after a question works on the whole request.** The user's reply is a fragment
+  ("Use H3 resolution 3"), and only the supervisor sees the conversation; the peers work from
+  the query. Measured: on MG05 the peers reported that the place names "are not available in my
+  current context" and spent 8 steps. `resolved_query` now joins the original request, the
+  question and the answer when the previous turn was the gate's question.
+- **`gis_harness.clarify`** runs each task as a conversation under each policy, on its own
+  server.
+  - A simulated user (the same model) answers questions only from the task's `user_knows`, and
+    says "no preference" otherwise.
+  - Answers are scored strictly (the headline value) and leniently (anywhere; for H3/S2, a
+    finer cell inside the gold one; distances at MultiGlobeQA's tolerances).
+  - It also records whether the agent asked, needless questions, turns and time.
+  - `--rescore` recomputes a finished run.
+  - Benchmark items stay in the git-excluded archive.
+- **Harness fixes.**
+  - The per-turn timeout now fires during server keep-alives. Before, two turns hung for
+    10 hours with `timeout_s=1200`.
+  - An unanswerable catalogue task is scored by its refusal; `score.score` leaves `correct`
+    empty for those.
+
+**Measured.** Run `clarify-1`: Lumen deepseek-v4-flash, one trial, 14 tasks:
+- 10 tasks where something is open: 8 MultiGlobeQA items with an unstated grid level, an
+  ambiguous place name or "how far east", plus U01 and U02;
+- 4 fully specified: a geohash and an S2 cell from MultiGlobeQA, plus T02 and T03.
+
+Four conversations that failed on infrastructure (two Lumen connection errors, two 20-minute
+caps) were rerun.
+
+| | never | assume | ask |
+|---|---|---|---|
+| correct, all 14 | 5 | 5 | **9** |
+| correct, 10 open | 3 | 3 | **7** |
+| correct, 4 specified | 2 | 2 | 2 |
+| asked / needless | 0 / – | 0 / – | 7 / **0** |
+| mean turns | 1.0 | 1.0 | 1.57 |
+| mean seconds | 91 | 107 | 155 |
+
+- **Asking won on the place names (RAT, IRE, MG05) and on the unstated grid levels (MG04,
+  KAM).** Guessing was wrong on every one of those.
+- **`assume` changed no score.** Naming a guess does not make it right.
+- **No needless question was asked** on the 4 specified tasks.
+- **Losses common to all three policies:**
+  - BET: "how far east" was taken as conventional, and the gate did not ask.
+  - MG06 and PAN: the benchmark represents the place by a different point than Nominatim's,
+    3 km away for Guanaja, and the cell differs at that size.
+- **U01 was worse under `ask` in this run.** The simulated user added "use your best judgment"
+  to "I don't have one", and the agent fetched a 3DEP DEM and reported its slope.
+
+Rerun `clarify-1-fix`, with the follow-up fix, on the 7 tasks where `ask` had asked:
+- MG04, KAM, RAT and IRE asked again, and every follow-up used the joined request. All four
+  were correct in 2 turns.
+- **The gate's decision varied between runs:** this time it did not ask on MG05, KUS or U01. KUS
+  and U01 were correct without a question; MG05 hit the 20-minute cap.
+
+**Not done.**
+- **One trial.** The gate's decisions vary between runs; repeated trials are needed for a
+  rate.
+- **The simulated user knows exactly what the benchmark hid**, so this is an upper bound on
+  what asking gains.
+- **The gate's own example over-applies.** Its "two places that share a cell settle the place"
+  was read as settling the resolution too.
+- **An input the user says they do not have should be refused, not substituted.**
+- **No screenshots** of multi-turn conversations yet: the replay renders one turn per record.
+- **The policy is off by default**, and nothing is deployed.

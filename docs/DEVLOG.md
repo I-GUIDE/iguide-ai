@@ -5641,3 +5641,20 @@ rather than from the previous one.
 
 **Not fixed** A per-request model pick does not reach the search; the fallback is still silent
   in the answer; the tier now spends Lumen coins.
+
+
+## 2026-10-15 · M8.97 · Asking the user, measured (architecture stage 62)
+
+**Change** `AGENT_CLARIFY_POLICY` = never (default, as before) | assume (the writer names its
+  assumption and the answers under alternatives) | ask (plus a gate before any work that returns
+  one question when something the answer depends on is open, at most once per conversation;
+  the next turn works on the original request plus the answer). `gis_harness.clarify` runs
+  conversations with a simulated user that answers from what the task's user knows.
+
+**Measured** 14 tasks, Lumen deepseek, one trial: correct 5 / 5 / 9 (never / assume / ask);
+  on the 10 open tasks 3 / 3 / 7; 0 needless questions on the 4 specified ones; +0.57 turns
+  and about +64 s per conversation for ask. assume changed no score.
+
+**Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
+  bound; data the user says they lack can still be substituted when invited; off by default.
+

@@ -108,14 +108,41 @@ def already_asked(thread_id: Optional[str]) -> bool:
         return False
 
 
-def _record_ask(thread_id: Optional[str], decision: Dict[str, Any]) -> None:
+def _record_ask(thread_id: Optional[str], decision: Dict[str, Any], query: str) -> None:
     try:
         from agent_runtime.session_memory import append_session_actions
 
         append_session_actions(thread_id, [{"tool": "clarify", "missing": decision.get("missing"),
-                                            "question": decision.get("question")}])
+                                            "question": decision.get("question"),
+                                            "original_query": str(query)[:4000]}])
     except Exception:  # noqa: BLE001
         logger.debug("clarify: could not record the question", exc_info=True)
+
+
+def resolved_query(query: str, thread_id: Optional[str]) -> Optional[str]:
+    """The original request with the user's answer, on the turn right after the gate asked.
+
+    The user's reply to a clarifying question is a fragment ("Use H3 resolution 3"). Only the
+    supervisor sees the conversation; the peers work from the query. Live, 2026-10-15
+    (gis_harness.clarify, MG05): given the fragment alone, the peers reported that the place
+    names "are not available in my current context" and spent 8 steps before the user repeated
+    them. Returns None when the previous turn was not the gate's question.
+    """
+    try:
+        from agent_runtime.session_memory import get_session_actions, get_session_history
+
+        rows = [r for r in get_session_actions(thread_id) if r.get("tool") == "clarify"]
+        history = get_session_history(thread_id)
+    except Exception:  # noqa: BLE001
+        return None
+    if not rows or not history:
+        return None
+    last = rows[-1]
+    if str(history[-1].get("answer") or "").strip() != str(last.get("question") or "").strip():
+        return None                      # the gate's question was not the previous turn
+    original = last.get("original_query") or history[-1].get("userQuery") or ""
+    return (f"{original}\n\n(You asked the user: \"{last.get('question')}\" "
+            f"They answered: \"{query}\")")
 
 
 def gate(query: str, chat_history: Optional[List[Any]], thread_id: Optional[str],
@@ -141,9 +168,9 @@ def gate(query: str, chat_history: Optional[List[Any]], thread_id: Optional[str]
     decision = {"ask": bool(data.get("ask")) and bool(question),
                 "missing": str(data.get("missing") or "").strip(), "question": question}
     if decision["ask"]:
-        _record_ask(thread_id, decision)
+        _record_ask(thread_id, decision, query)
     return decision
 
 
 __all__ = ["ASSUME_RULE", "POLICIES", "POLICY_ENV", "already_asked", "gate", "policy",
-           "writer_rule"]
+           "resolved_query", "writer_rule"]

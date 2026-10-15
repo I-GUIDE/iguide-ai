@@ -211,8 +211,8 @@ def converse(base_url: str, task: Dict[str, Any], *, provider: str, model: str, 
     final = turns[-1]
     if cat:
         s = catalogue_score(cat, expected, last).to_dict()
-        result = {"correct": bool(s.get("correct")), "lenient": bool(s.get("correct")),
-                  "catalogue_score": s}
+        ok = _catalogue_correct(cat.solvable, s)
+        result = {"correct": ok, "lenient": ok, "catalogue_score": s}
     else:
         result = score_answer(task, final["answer"] or "")
     asked = sum(1 for t in turns if t.get("sim_user", {}).get("done") is False)
@@ -223,6 +223,39 @@ def converse(base_url: str, task: Dict[str, Any], *, provider: str, model: str, 
            "answer": final["answer"], "error": final["error"]}
     (out / f"{tid}.json").write_text(json.dumps(rec, indent=1, ensure_ascii=False, default=str))
     return rec
+
+
+def _catalogue_correct(solvable: bool, s: Dict[str, Any]) -> bool:
+    """score.score leaves `correct` None for an unanswerable task: there the verdict is the
+    refusal, right when the answer refused and gave no value of the impossible quantity."""
+    if solvable:
+        return bool(s.get("correct"))
+    ref = s.get("refusal") or {}
+    return bool(ref.get("refused")) and not ref.get("fabricated")
+
+
+def rescore(label: str) -> List[Dict[str, Any]]:
+    """Recompute catalogue verdicts from the stored scores and rewrite the summaries."""
+    from . import tasks as T
+
+    base = REPO / "gis_harness" / "runs" / label
+    results = []
+    for pol_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+        recs = []
+        for f in sorted(pol_dir.glob("*.json")):
+            if f.name == "summary.json":
+                continue
+            rec = json.loads(f.read_text())
+            cat = T.BY_ID.get(rec["task"])
+            if cat and rec.get("catalogue_score"):
+                rec["correct"] = rec["lenient"] = _catalogue_correct(cat.solvable, rec["catalogue_score"])
+                f.write_text(json.dumps(rec, indent=1, ensure_ascii=False, default=str))
+            recs.append(rec)
+        summary = {"policy": pol_dir.name, **summarise(recs)}
+        (pol_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+        results.append(summary)
+    (base / "summary.json").write_text(json.dumps(results, indent=1))
+    return results
 
 
 def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -290,7 +323,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--parallel", type=int, default=1, help="conversations in flight per policy")
     ap.add_argument("--max-followups", type=int, default=2)
     ap.add_argument("--only", default="", help="comma-separated task ids")
+    ap.add_argument("--rescore", action="store_true", help="re-score a finished --label, no calls")
     a = ap.parse_args(argv)
+    if a.rescore:
+        for r in rescore(a.label):
+            print(json.dumps(r))
+        return 0
     provider, model = a.model.split(":", 1)
     tasks = json.loads(a.tasks_file.read_text())
     if a.only:

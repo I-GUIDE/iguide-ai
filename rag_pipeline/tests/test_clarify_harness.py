@@ -95,3 +95,11 @@ def test_summary_splits_ambiguous_and_specified():
     s = C.summarise(recs)
     assert s["all"]["correct"] == 1 and s["ambiguous"]["asked"] == 1
     assert s["specified"]["needless_asks"] == 1 and s["all"]["turns_mean"] == 2
+
+
+def test_an_unanswerable_task_is_right_when_it_refuses_without_a_value():
+    refused = {"correct": None, "refusal": {"refused": True, "fabricated": None}}
+    invented = {"correct": None, "refusal": {"refused": True, "fabricated": "12.3 degrees"}}
+    assert C._catalogue_correct(False, refused) is True
+    assert C._catalogue_correct(False, invented) is False
+    assert C._catalogue_correct(True, {"correct": True}) is True

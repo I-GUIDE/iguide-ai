@@ -6410,6 +6410,14 @@ def build_supervisor_graph(
             from agent_runtime.executor_factory import build_default_llm
 
             active = build_default_llm()
+        combined = clarify_policy.resolved_query(state.get("query") or "", state.get("thread_id"))
+        if combined:
+            # The answer to our question: work on the whole request, not the fragment.
+            emit_trace_event("node_completed",
+                             {"stage": "clarify", "message": "Continuing the question the user "
+                              "just answered", "detail": {"ask": False, "resolved": True}},
+                             node="clarify")
+            return {"clarify": {"ask": False, "resolved": True}, "query": combined}
         decision = clarify_policy.gate(state.get("query") or "", state.get("chat_history"),
                                        state.get("thread_id"), active)
         emit_trace_event("node_completed",

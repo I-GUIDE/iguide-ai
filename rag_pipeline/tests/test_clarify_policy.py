@@ -132,3 +132,26 @@ def test_the_writer_rule_reaches_the_synthesis_prompt(monkeypatch):
 
     g.default_synthesize_fn(llm=Writer())("q", [], {"summary": "s"}, None)
     assert cp.ASSUME_RULE in seen[0]
+
+
+def test_the_turn_after_a_question_works_on_the_whole_request(monkeypatch):
+    """MG05: given only "Use H3 resolution 3", the peers lost the place names."""
+    monkeypatch.setenv(cp.POLICY_ENV, "ask")
+    llm = _LLM({"ask": True, "question": "Which H3 resolution?"})
+    first = _run(_graph(llm), thread="t9")
+    sm.append_session_turn("t9", "Which grid cell contains Erl both in h3 and s2 formats?",
+                           first["final_answer"])
+    seen = []
+    graph = _graph(llm, synth=lambda q, *a, **k: seen.append(q) or "the answer")
+    out = graph.invoke({"query": "Resolution 5, level 9.", "thread_id": "t9", "actions": [],
+                        "chat_history": sm.get_session_history("t9"),
+                        "evidence": [{"doc_id": "d1", "title": "t", "contents": "c"}]})
+    assert out["final_answer"] == "the answer" and len(llm.prompts) == 1   # no second gate call
+    assert "Erl" in seen[0] and "Resolution 5, level 9." in seen[0]
+    assert "Which H3 resolution?" in seen[0]
+
+
+def test_an_ordinary_follow_up_is_left_alone(monkeypatch):
+    monkeypatch.setenv(cp.POLICY_ENV, "ask")
+    sm.append_session_turn("t10", "q1", "a normal answer")
+    assert cp.resolved_query("and the next one?", "t10") is None
