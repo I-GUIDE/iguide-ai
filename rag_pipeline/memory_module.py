@@ -541,7 +541,8 @@ def _fit_events(events: List[Any], limit: int) -> tuple:
 
 def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
                     events: List[Any], answer: Optional[str] = None,
-                    model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+                    model: Optional[str] = None, provider: Optional[str] = None,
+                    usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Store one turn's raw events. Caller must already own the conversation.
 
     Never raises: a trace is diagnostic, and losing the answer because the diagnostics could not
@@ -573,6 +574,10 @@ def save_turn_trace(memory_id: str, *, thread_id: Optional[str], query: str,
         "events": kept,
         "createdAt": _now(),
     }
+    if usage:
+        # The whole cost record, per-call rows included. An unmapped field, so
+        # fit_trace_document stores it as JSON text (see trace_mapping).
+        body["usage"] = usage
     try:
         # Fitted to the index's mapping, because a field of the wrong type rejects the WHOLE
         # document: a tool called with no arguments sent `args: {}` to a `text` field and lost
@@ -703,6 +708,7 @@ def update_memory(
     answer: str,
     elements: List[Dict],
     ratings: Optional[Dict] = None,
+    usage: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
         client = _get_opensearch_client()
@@ -721,6 +727,16 @@ def update_memory(
         }
         if ratings:
             entry["ratings"] = ratings
+        # What this turn cost, in the type-stable compact form (model_pricing.memory_summary):
+        # chat_memory maps new fields dynamically, so a value's first type is its type for good.
+        try:
+            from agent_runtime.model_pricing import memory_summary
+
+            kept_usage = memory_summary(usage)
+        except Exception:  # noqa: BLE001 - a cost record must never cost the turn
+            kept_usage = None
+        if kept_usage:
+            entry["usage"] = kept_usage
 
         chat_history.append(entry)
         # `updatedAt` is what orders the user's conversation list; without it every conversation

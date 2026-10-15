@@ -36,7 +36,7 @@ from agent_runtime.orchestrator_graph import (
     build_orchestrator_graph,
 )
 from agent_runtime.skills import SkillRegistry
-from agent_runtime.streaming_trace import is_agent_dev, trace_context
+from agent_runtime.streaming_trace import is_agent_dev, trace_context, turn_usage, usage_collection
 from rag_pipeline.search import web_utils
 
 
@@ -127,13 +127,17 @@ def run_agent_query(
         input_file_ids=input_file_ids,
     )
     web_utils.begin_turn()  # reset the per-turn open-web budget (see note in the streaming path)
-    final_state = graph.invoke(
-        {
-            "query": query,
-            "chat_history": chat_history or [],
-            "thread_id": effective_thread_id,
-        }
-    )
+    # The streaming path collects model calls inside trace_context; this one has none, so it
+    # collects them here, or a blocking /agent/chat turn would report no cost.
+    with usage_collection():
+        final_state = graph.invoke(
+            {
+                "query": query,
+                "chat_history": chat_history or [],
+                "thread_id": effective_thread_id,
+            }
+        )
+        usage = turn_usage()
     orchestration_result = _with_citation_urls(final_state.get("orchestration_result"))
     available_agent_names = final_state.get("available_agent_names") or []
     skill_registry = SkillRegistry.discover(skill_roots)
@@ -155,6 +159,8 @@ def run_agent_query(
         response["grounding_audit"] = audit
     if effective_thread_id:
         response["thread_id"] = effective_thread_id
+    if usage:
+        response["usage"] = usage
     return response
 
 
@@ -327,6 +333,11 @@ def stream_agent_query_events(
                     response["grounding_audit"] = audit
                 if effective_thread_id:
                     response["thread_id"] = effective_thread_id
+                # Every model call of the turn has ended by now (synthesis and the audit run
+                # inside graph.invoke), so this is the whole turn's cost.
+                usage = turn_usage()
+                if usage:
+                    response["usage"] = usage
                 _enqueue({"event": "completed", "data": response})
         except AgentInvocationError as exc:
             readable_trace = exc.diagnostics.get("readable_trace") if exc.diagnostics else None
