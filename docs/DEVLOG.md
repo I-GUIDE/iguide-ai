@@ -5658,3 +5658,24 @@ rather than from the previous one.
 **Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
   bound; data the user says they lack can still be substituted when invited; off by default.
 
+
+## 2026-10-15 · M8.100 · Answer validation can be turned off (architecture stage 66)
+
+**Change** `validation: false` per request, or `AGENT_VALIDATION=0` for the server, skips the
+  answer checks:
+  - the grounding audit;
+  - reconciliation;
+  - the number scan;
+  - the re-grounding pass;
+  - the agreement and reference recomputations;
+  - the artifact corrections.
+
+  The peers lose the audit tool. The verdict is `unverified` with a `validation` finding, the
+  answer ends with "Not checked: answer validation was turned off for this reply.", and the
+  result carries `validation: false`. Link sanitisation and the invariant gate stay.
+
+**Why** Chicago demo, 2026-10-15, local, Lumen deepseek: checking took 2:46 of step 1's 4:57 and
+  4:55 of step 3's 7:48.
+
+**Not fixed** No toggle in the map UI.
+

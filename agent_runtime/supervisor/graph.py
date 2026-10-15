@@ -41,6 +41,7 @@ from agent_runtime.supervisor.evidence_subgraph import (
 from agent_runtime.streaming_trace import emit_trace_event
 from agent_runtime.client_profile import CHAT_ONLY_CORRECTION, CHAT_ONLY_NOTE, chat_only
 from agent_runtime import agreement as turn_agreement
+from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enabled
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
@@ -6222,11 +6223,14 @@ def build_supervisor_graph(
             # CROSS-RUN AGREEMENT (plan step 4a): two runs that computed the same figure and
             # disagree. The writer is told before writing, so it settles the disagreement
             # instead of reporting the last value silently (T10: 309.531 then 295.06 ppm).
-            _disagreements = turn_agreement.for_log(_log)
+            # Answer validation off (client_profile.validation_enabled): no check below runs,
+            # including these two recomputations, and the verdict says the answer is unchecked.
+            _checks = validation_enabled()
+            _disagreements = turn_agreement.for_log(_log) if _checks else []
             # REFERENCE RECOMPUTATION (plan step 4b): a standard method the turn ran, recomputed
             # with a reference library from the same inputs (kriging with pykrige, Gi* and
             # Moran's I with esda, Horn slope, zonal mean).
-            _references = turn_reference.for_log(_log)
+            _references = turn_reference.for_log(_log) if _checks else []
             _reconcile = "\n\n".join(n for n in (
                 turn_agreement.reconcile_note(_disagreements),
                 turn_reference.reconcile_note(_references)) if n)
@@ -6265,12 +6269,14 @@ def build_supervisor_graph(
             # a genuinely-produced map/file/count is not flagged as hallucination.
             audit = audit_answer_grounding(
                 q, answer, evidence, llm=llm, execution_context=exec_ctx,
-            ) if (do_audit and (answer or "").strip() and has_grounding) else {}
+            ) if (do_audit and _checks and (answer or "").strip() and has_grounding) else {}
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=gate_ctx,
-                                                    prior_rows=_rows)
+            if _checks:
+                audit = _reconcile_audit_with_artifacts(audit, artifacts,
+                                                        execution_context=gate_ctx,
+                                                        prior_rows=_rows)
             # THE NUMBER SCAN (stage 44). Every stated figure that resolves to no recorded
             # number is a finding, whatever it is about: an area, a population, a road distance.
             # The producer check (stage 42) says whether some bound tool could produce it. If
@@ -6288,8 +6294,11 @@ def build_supervisor_graph(
                     if (sentences_ or qualitative) else {})
                 return _producer_memo
 
-            answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
-                answer, fact_set, _producers_for)
+            if _checks:
+                answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
+                    answer, fact_set, _producers_for)
+            else:
+                dropped, kept_unresolved = [], []
             if qualitative and not _producer_memo:
                 _producers_for([])
             _producers = _producer_memo
@@ -6403,7 +6412,12 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        if validation_enabled():
+            final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        else:
+            corrections = []
+            verdict_findings = [*verdict_findings, turn_verdict.Finding(
+                "validation", turn_verdict.UNVERIFIABLE, VALIDATION_OFF_FINDING)]
         verdict_findings = [*verdict_findings,
                             *[turn_verdict.Finding("correction", turn_verdict.PROBLEM, n)
                               for n in corrections]]

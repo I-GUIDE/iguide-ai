@@ -103,5 +103,73 @@ CHAT_ONLY_CORRECTION = (
 )
 
 
+# --------------------------------------------------------------------------- answer validation
+#
+# After the work is done, a turn checks its answer: the grounding audit (an LLM pass over the
+# answer and the turn's record), the number scan, a re-grounding pass that sends the work back to
+# a peer when a statement is unsupported, and the cross-run agreement and reference
+# recomputations. On Lumen deepseek that took 63% of the Chicago SKATER step (4 min 55 s of
+# 7 min 48 s, 2026-10-15), most of it two audits and a second analysis run for one sentence.
+#
+# The switch turns all of it off, for a client or a demo that wants the answer sooner and accepts
+# that it is unchecked. The turn then says so: its verdict is "unverified", with one finding
+# naming the reason, never "verified".
+#
+# Per request, `validation: false` in the body (`validate: false` is accepted too); otherwise
+# `AGENT_VALIDATION` (default on; 0/false/off/no turns it off for every turn).
+
+VALIDATION_ENV = "AGENT_VALIDATION"
+# A tool a peer may call to audit its own answer; it is not offered when validation is off.
+VALIDATION_TOOLS = frozenset({"audit_answer_grounding"})
+
+_VALIDATION: ContextVar[Optional[bool]] = ContextVar("agent_validation", default=None)
+
+
+def validation_default() -> bool:
+    raw = (os.getenv(VALIDATION_ENV) or "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def validation_enabled() -> bool:
+    """Whether this turn checks its answer. The request's choice, else ``AGENT_VALIDATION``."""
+    value = _VALIDATION.get()
+    return validation_default() if value is None else bool(value)
+
+
+def set_validation(on: Optional[bool]) -> Token:
+    """Bind this request's choice (None = the server default). Returns a token for reset."""
+    return _VALIDATION.set(None if on is None else bool(on))
+
+
+def reset_validation(token: Optional[Token]) -> None:
+    if token is not None:
+        try:
+            _VALIDATION.reset(token)
+        except ValueError:
+            pass
+
+
+def requested_validation(body: Optional[Mapping] = None) -> Optional[bool]:
+    """The request's `validation` / `validate` field as a bool, or None when it sets neither."""
+    body = body or {}
+    for key in ("validation", "validate"):
+        if key in body and body[key] is not None:
+            value = body[key]
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in {"0", "false", "off", "no"}:
+                return False
+            if text in {"1", "true", "on", "yes"}:
+                return True
+    return None
+
+
+VALIDATION_OFF_FINDING = ("not checked: answer validation is turned off for this turn, so no "
+                          "statement in it was compared with the turn's record")
+
+
 __all__ = ["MAP_ONLY_TOOLS", "chat_only", "set_chat_only", "reset_chat_only", "wants_chat_only",
-           "CHAT_ONLY_NOTE", "CHAT_ONLY_CORRECTION"]
+           "CHAT_ONLY_NOTE", "CHAT_ONLY_CORRECTION", "VALIDATION_ENV", "VALIDATION_TOOLS",
+           "validation_enabled", "validation_default", "set_validation", "reset_validation",
+           "requested_validation", "VALIDATION_OFF_FINDING"]
