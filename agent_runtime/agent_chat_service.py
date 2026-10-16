@@ -428,8 +428,7 @@ def _charge_turn(turn_cost: Optional[Mapping[str, Any]]) -> Optional[Mapping[str
         totals = usage_limit.record(owner, turn_cost)
         if totals is None:
             return turn_cost
-        return {**turn_cost, "today": {**totals, "limits": {"coins": usage_limit.coin_limit(),
-                                                             "usd": usage_limit.usd_limit()},
+        return {**turn_cost, "today": {**totals, "limits": usage_limit.limits_for(owner),
                                        "resets_at": usage_limit.resets_at()}}
     except Exception:  # noqa: BLE001 - accounting must never cost the turn
         logger.warning("could not charge the turn's usage", exc_info=True)
