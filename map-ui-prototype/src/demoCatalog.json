@@ -105,8 +105,8 @@
     "prompt": "Compute each zone's incident rate per 1,000 residents. Which zone has the highest rate, and what is it?"
    },
    {
-    "label": "Map the rates",
-    "prompt": "Map the rate per 1,000 residents for each zone as a choropleth."
+    "label": "Counts or rates?",
+    "prompt": "Which zone has the most incidents? Why is it not the zone with the highest rate, and how does the order of the zones change between counts and rates?"
    }
   ]
  },

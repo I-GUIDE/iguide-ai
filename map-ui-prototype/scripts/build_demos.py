@@ -80,8 +80,12 @@ CASES = [
      "steps": [{"label": "Rates by zone",
                 "prompt": "Compute each zone's incident rate per 1,000 residents. Which zone has "
                           "the highest rate, and what is it?"},
-               {"label": "Map the rates",
-                "prompt": "Map the rate per 1,000 residents for each zone as a choropleth."}]},
+               # Step 1 already draws the rates (a choropleth comes with the answer), so step 2
+               # asks the question the case is built on instead of mapping it again.
+               {"label": "Counts or rates?",
+                "prompt": "Which zone has the most incidents? Why is it not the zone with the "
+                          "highest rate, and how does the order of the zones change between "
+                          "counts and rates?"}]},
     {"id": "fastest-route", "task": "T04",
      "title": "Fastest route on a road network",
      "blurb": "A small grid of Chicago streets, each with its own speed. The shortest way between two "
