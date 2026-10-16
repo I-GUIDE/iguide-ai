@@ -76,6 +76,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 62 | [Asking the user, measured: a clarification gate and a simulated-user harness](#stage-62) | 2026-10-15 | `AGENT_CLARIFY_POLICY` (never/assume/ask, off by default) and a simulated-user harness; on 14 MultiGlobeQA tasks `ask` got 9 right against 5 for `never` and `assume` |
 | 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
+| 65 | [A finished map is not followed by a search of the turn's own files](#stage-65) | 2026-10-15 | the search peer stops re-reading the conversation's outputs; a search after a delivered map is vetoed unless retrieval was asked for; failure lines name the exception; choropleth_image reads GeoJSON |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10811,3 +10812,67 @@ Its prompt told it to do exactly that with a claim whose part of the record had 
   23,523), but the auditor did not dispute them, so they were never checked.
 - **Cost.** One more model call and one sandbox run per turn with disputed claims.
 - **The local subprocess backend lacks geopandas.** Use the Docker sandbox, as deployed.
+
+## Stage 65 — A finished map is not followed by a search of the turn's own files {#stage-65}
+
+**Why.** The Chicago demo's SKATER step (step 3) took about 8 minutes, live on Lumen deepseek,
+2026-10-15. The trace:
+- **analysis**, 14:35:33–14:38:42, 20 tool calls; the regions were on the map at 14:37:38;
+- **"Next: search"**, with no reason shown;
+- **search**, 14:38:45–14:41:58: two skills loaded, then `list_conversation_files` and about 45
+  `read_text_file` calls on the conversation's own scripts, CSVs, GeoJSONs, PNGs and weights files,
+  some twice. The prompt grew from 8k to 56k tokens. The knowledge-base search itself failed
+  (embedding server unreachable). The run ended on "2 consecutive steps added nothing";
+- **done** at 14:41:58, then about a minute of composing and auditing.
+
+Nothing the search step did could change the answer: every file it read held results the analysis
+had already recorded. Two smaller faults showed in the same trace. Every failed `execute_code`
+line read "failed — FutureWarning: …", a libpysal deprecation printed before the code ran, so the
+retries looked like the same failure and the real error was never shown. `choropleth_image` failed
+with "Parquet magic bytes not found" on a GeoJSON file.
+
+**What changed.**
+- **The search peer does not re-read the turn's work** (`langchain_file_tools._search_read_refusal`).
+  The search peer holds the file tools, which are part of the shared toolset. While
+  `turn_log.active_peer()` is `search`, `read_text_file` and `inspect_file_for_analysis`:
+  - refuse a file whose record kind is `output` (the conversation produced it), saying its results
+    are already in the turn's record;
+  - read an upload at most once;
+  - read at most `AGENT_SEARCH_FILE_READS` (default 3) files per run.
+
+  The budget is keyed by turn-log id plus run id, because run ids (`search#2`) repeat every turn.
+  The analyze and code peers are not limited.
+- **A delivered map ends the turn unless retrieval was asked for**
+  (`graph._work_delivered_without_retrieval`). The decide prompt already said to choose `done` once
+  `map_layer_delivered` holds, and the decider chose `search` anyway. It is now a veto beside "search
+  exhausted" and "no-progress repeat". It applies when a tool this turn delivered a layer and the
+  request names nothing retrieval supplies: literature, papers, sources, datasets, the knowledge base,
+  the web and the like (`_OUTSIDE_EVIDENCE_RE`). That regex is narrower than
+  `_RETRIEVAL_REQUEST_RE`, which counts "show me … map" as a request for platform maps. The trace
+  says "Stopping: the map is drawn and the request asks for nothing a search would add".
+- **The route line carries the decider's reason.** `Decision.reason` holds what the decider wrote,
+  and the visible "Next: search" line becomes "Next: search — <reason>". The reason had only gone to
+  a detail-tier event. It is shown whole: a 200-character cut stopped it mid-word live
+  ("…plus citywide and highest-").
+- **A failure line names the exception** (`streaming_trace._exception_line`). On multi-line failure
+  text it takes the last `…Error` / `…Exception` line, or after a traceback the last
+  `Name: message` line, and otherwise skips leading warnings. That line leads the row, where the
+  140-character clamp shows it, and the original text follows it for the expanded row. A one-line
+  reason is unchanged. The agent always saw the full stderr; this fixes what the person reading
+  the trace sees.
+- **`choropleth_image` reads any vector file**, through `_read_any_vector` and `_save_figure` like
+  `heatmap_image`, and names the file's columns when the requested column is missing.
+
+**Tests.** `rag_pipeline/tests/test_turn_efficiency.py` has 14 tests:
+- the search peer refuses outputs, reads an upload once and stops at the budget;
+- the budget is per run, and the analyze peer is unlimited;
+- the veto, on the SKATER request with a delivered layer, ending the turn without calling search;
+- "cite the literature" keeps search open, and the route line shows the decider's reason;
+- failure lines for a warning-led traceback, a dotted exception class and a one-line error;
+- `choropleth_image` on GeoJSON, and on a missing column.
+
+**Not done here.**
+- `list_conversation_files` is still open to the search peer: a listing costs one call.
+- The veto is lexical. A request that wants both the map and outside sources has to say so in
+  words the regex knows.
+
