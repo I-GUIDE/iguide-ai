@@ -142,16 +142,137 @@ def _prune(day: date) -> None:
         pass
 
 
+# --- per-user overrides, set by an admin ------------------------------------------------------
+#
+# An admin can give one user a different daily limit in either currency, or none, and can clear
+# that user's spending for the day. Overrides live beside the day files, keyed by the same
+# digest. A value is a number >= 0 (0 blocks that currency), or UNLIMITED; a currency with no
+# override follows the deployment default.
+
+UNLIMITED = "unlimited"
+_UNLIMITED_STORED = -1.0
+
+
+def _overrides_path() -> Path:
+    return _dir() / "overrides.json"
+
+
+def _read_overrides() -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads(_overrides_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001
+        logger.warning("usage overrides unreadable", exc_info=True)
+        return {}
+
+
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
+
+
+def override_for(owner: Optional[str]) -> Dict[str, Any]:
+    """The admin-set limits for this user, in the API's terms: ``{"coins": n | "unlimited"}``,
+    only the currencies that are overridden."""
+    if not owner:
+        return {}
+    row = _read_overrides().get(_key(owner)) or {}
+    out: Dict[str, Any] = {}
+    for cur in ("coins", "usd"):
+        if cur in row:
+            out[cur] = UNLIMITED if float(row[cur]) == _UNLIMITED_STORED else float(row[cur])
+    if row.get("set_at"):
+        out["set_at"] = row["set_at"]
+    return out
+
+
+def limits_for(owner: Optional[str]) -> Dict[str, Optional[float]]:
+    """The limits that apply to this user now. None means no limit in that currency."""
+    limits: Dict[str, Optional[float]] = {"coins": coin_limit(), "usd": usd_limit()}
+    for cur, value in override_for(owner).items():
+        if cur in limits:
+            limits[cur] = None if value == UNLIMITED else float(value)
+    return limits
+
+
+def parse_limit(value: Any) -> Any:
+    """An admin's limit value: None (back to the default), "unlimited", or a number >= 0.
+    Raises ValueError for anything else."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() == UNLIMITED:
+        return UNLIMITED
+    if isinstance(value, bool):
+        raise ValueError("a limit is a number, null or \"unlimited\"")
+    number = float(value)
+    if number != number or number < 0 or number == float("inf"):
+        raise ValueError("a limit must be a finite number >= 0, null or \"unlimited\"")
+    return number
+
+
+def set_override(owner: str, *, coins: Any = ..., usd: Any = ...,
+                 now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Set (or clear, with None) one user's limits. ``...`` leaves a currency as it is."""
+    stamp = (now or datetime.now(_tz())).isoformat()
+    with _lock:
+        data = _read_overrides()
+        row = dict(data.get(_key(owner)) or {})
+        for cur, value in (("coins", coins), ("usd", usd)):
+            if value is ...:
+                continue
+            if value is None:
+                row.pop(cur, None)
+            else:
+                row[cur] = _UNLIMITED_STORED if value == UNLIMITED else float(value)
+        if any(k in row for k in ("coins", "usd")):
+            row["set_at"] = stamp
+            data[_key(owner)] = row
+        else:
+            data.pop(_key(owner), None)
+        _write_json(_overrides_path(), data)
+    return override_for(owner)
+
+
+def reset_today(owner: str, now: Optional[datetime] = None) -> None:
+    """Forget what this user has spent today, so their next turn is allowed again."""
+    day = today(now)
+    with _lock:
+        data = _read(day)
+        if data.pop(_key(owner), None) is not None:
+            _write_json(_path(day), data)
+
+
+def history(owner: Optional[str], days: int = 7,
+            now: Optional[datetime] = None) -> list:
+    """This user's spending for the last ``days`` days, newest first, days with none left out."""
+    if not owner:
+        return []
+    out = []
+    d = today(now)
+    for i in range(max(1, days)):
+        day = d - timedelta(days=i)
+        row = _read(day).get(_key(owner))
+        if row:
+            out.append({"day": day.isoformat(), "coins": float(row.get("coins") or 0.0),
+                        "usd": float(row.get("usd") or 0.0), "turns": int(row.get("turns") or 0)})
+    return out
+
+
 def refusal(owner: Optional[str], now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """Why this user may not start a turn now, or None if they may."""
     if not owner:
         return None
     used = spent(owner, now)
+    limits = limits_for(owner)
     over = []
-    if coin_limit() is not None and used["coins"] >= coin_limit():
-        over.append(f"{used['coins']:.2f} of {coin_limit():g} Lumen coins")
-    if usd_limit() is not None and used["usd"] >= usd_limit():
-        over.append(f"${used['usd']:.2f} of ${usd_limit():g} of OpenAI usage")
+    if limits["coins"] is not None and used["coins"] >= limits["coins"]:
+        over.append(f"{used['coins']:.2f} of {limits['coins']:g} Lumen coins")
+    if limits["usd"] is not None and used["usd"] >= limits["usd"]:
+        over.append(f"${used['usd']:.2f} of ${limits['usd']:g} of OpenAI usage")
     if not over:
         return None
     when = resets_at(now)
@@ -160,9 +281,11 @@ def refusal(owner: Optional[str], now: Optional[datetime] = None) -> Optional[Di
                   + " and ".join(over) + "). It resets at midnight US Central time."),
         "reason": "daily_limit",
         "spent": used,
-        "limits": {"coins": coin_limit(), "usd": usd_limit()},
+        "limits": limits,
         "resets_at": when,
     }
 
 
-__all__ = ["coin_limit", "usd_limit", "spent", "record", "refusal", "resets_at", "today"]
+__all__ = ["coin_limit", "usd_limit", "spent", "record", "refusal", "resets_at", "today",
+           "UNLIMITED", "override_for", "limits_for", "parse_limit", "set_override",
+           "reset_today", "history"]

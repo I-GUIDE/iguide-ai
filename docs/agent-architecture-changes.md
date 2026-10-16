@@ -11373,6 +11373,42 @@ The user then set two rules:
   - both routes refuse before running a turn.
 - Stage 59's 13 tests still pass.
 
+### Stage S74.1 Admins adjust one user's limits (2026-10-16)
+
+The user asked for an endpoint so admins can adjust a specific user's usage. It is modelled on
+the platform backend's own admin routes, `PUT /api/users/:id/role` in
+`iguide-ue-backend/routes/users_v2.js` (`authenticateJWT`, then `authorizeRole(Role.SUPER_ADMIN)`,
+the user named in the path by their CILogon id and decoded with `decodeURIComponent`, the change
+in the JSON body).
+
+- **Read:** `GET /agent/admin/users/<cilogon id>/usage` returns today's spending, the limits that
+  apply, the deployment defaults, any override, the reset time and the last seven days.
+- **Change:** `PUT` on the same path takes `coinLimit` and `usdLimit`, each one of:
+  - a number ≥ 0 (0 blocks that currency);
+  - `"unlimited"`;
+  - `null`, back to the default.
+
+  It also takes `resetToday`, which forgets what the user has spent today. A bad value is a 400
+  that changes nothing.
+- **Who may call it.** Only a signed-in Admin or Super admin, platform role 2 or lower: the
+  backend's `authorizeRole(Role.ADMIN)` on the same backwards scale. Everyone else gets 403
+  `admin_required`. A service key identifies nobody, so it cannot be an admin.
+- **Where overrides are kept.** They sit beside the day files in
+  `usage_ledger/overrides.json`, keyed by the same user-id digest. `refusal` and the turn's
+  `usage.today.limits` read the user's effective limits, so a change applies to their next turn.
+  Each change is logged with the admin's id and the values.
+- **The id in the path.** A CILogon id is a URL, so the route takes it as a `<path:…>`. A
+  suspected problem, Flask merging the `//` in an unencoded id, did not reproduce on this
+  version, either encoded or not. Two tests hold that, instead of a setting nobody needed.
+- **Tests.** `test_admin_usage_limits.py`, 15 tests:
+  - roles 3, 4, 8 and none are refused;
+  - the encoded and the unencoded id;
+  - a raised limit takes effect;
+  - unlimited, 0 and back to the default;
+  - the reset;
+  - bad values;
+  - the override file holds no user id.
+
 **Not done.**
 - The map UI does not display the day's remaining budget yet.
 - The pool size is configured by hand and must follow the account if NCSA changes it.
