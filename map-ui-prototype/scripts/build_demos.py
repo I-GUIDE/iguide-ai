@@ -2,7 +2,8 @@
 
     python3 map-ui-prototype/scripts/build_demos.py --chicago-snapshot DIR
 
-Every case runs on a GIS harness task's own pinned data. Its FIRST step states the task without
+A case either runs on a GIS harness task's own pinned data, or (task None) has no upload and
+the agent fetches its own data (OpenStreetMap, USGS elevation). Its FIRST step states the task without
 describing the data (user, 2026-10-15): the agent reads the files itself, and the "Explain files"
 button asks it to describe them. `reliability` is from the scored archive, which ran the
 harness's own, longer wording. Later steps are follow-ups that put the result on the map; the
@@ -86,19 +87,31 @@ CASES = [
                 "prompt": "Which zone has the most incidents? Why is it not the zone with the "
                           "highest rate, and how does the order of the zones change between "
                           "counts and rates?"}]},
-    {"id": "fastest-route", "task": "T04",
-     "title": "Fastest route on a road network",
-     "blurb": "A small grid of Chicago streets, each with its own speed. The shortest way between two "
-              "intersections is not the fastest, and the case also asks how far you can get in two "
-              "minutes.",
-     "tags": ["network analysis", "routing"],
+    # No upload and no harness task: the agent fetches the Loop's streets from OpenStreetMap
+    # (overpass_search feature='road network', PR #139; before it, 'highway' meant motorways only
+    # and the network came back as 34 pieces). Replaces T04's synthetic 6x6 UTM grid, whose
+    # correct route followed no real street. Live 2026-10-16 (deepseek-v4-flash): 1.71 min,
+    # 1,378 m (Jackson Blvd east, Michigan Ave north); reference from the same 1,521 ways 1.713
+    # min / 1,378.4 m; step 2: 262 intersections, reference 261. Overpass is a shared public
+    # service and can be down for hours; the demo fails with it.
+    {"id": "fastest-route", "task": None,
+     "title": "Fastest drive across the Loop",
+     "blurb": "Union Station to the Art Institute by car, on the Loop's real streets. With nothing "
+              "to upload, the agent fetches the street network from OpenStreetMap, follows one-way "
+              "streets and speed limits, and finds the fastest way across downtown Chicago.",
+     "tags": ["network analysis", "routing", "OpenStreetMap", "no upload"],
      "category": "Optimisation",
-     "steps": [{"label": "Fastest travel time",
-                "prompt": "What is the fastest travel time in minutes on this road network from the"
-                          " intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, "
-                          "87.62683° W? How many intersections, counting the start, can be reached "
-                          "within 2 minutes of it?"},
-               {"label": "Show the route", "prompt": "Show the fastest route on the map."}]},
+     "steps": [{"label": "Fastest drive",
+                "prompt": "What is the fastest driving time in minutes from Canal St & Jackson Blvd"
+                          " (41.8780 N, 87.6393 W) to Michigan Ave & Adams St (41.8794 N, 87.6243 "
+                          "W) in Chicago's Loop? Use OpenStreetMap's drivable streets inside "
+                          "41.866–41.889 N, 87.645–87.618 W, follow one-way streets, and drive at "
+                          "each street's posted maxspeed, or 30 mph where none is posted. Map the "
+                          "route."},
+               {"label": "Two minutes out",
+                "prompt": "Following the same rules, how many street intersections (points where "
+                          "three or more road segments meet) can be reached within 2 minutes of the"
+                          " start? Map them."}]},
     {"id": "facility-siting", "task": "T05",
      "title": "Where to put two facilities",
      "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new "
@@ -113,17 +126,30 @@ CASES = [
                {"label": "Map the service areas",
                 "prompt": "Map the demand points coloured by the chosen site that serves each "
                           "one, and mark the two chosen sites."}]},
-    {"id": "flood", "task": "T07",
-     "title": "Land under a 5 m flood",
-     "blurb": "An elevation model of a low-lying coastal tile, with a few cells of missing data. The "
-              "case asks how much land lies at or below 5 m if the water rises that far.",
-     "tags": ["raster", "inundation"],
+    # No upload and no harness task: admin_boundary(city) -> dem_for_region(clip to the city) ->
+    # inundation_at_level. Replaces T07's synthetic tile. The city boundary is ~80% open water,
+    # which a bathtub calls flooded (asked about "the city", 98.7%); the question asks about
+    # land on purpose and leaves the water to the agent (user, 2026-10-15). Reference from the
+    # 3DEP frame the agent fetched (water <= 0 m): 110.7 km2 of 117.7 km2 land, 94.1%; 3 m 84.4%,
+    # 2 m 60.4%. Live, the land question can run long (one run chased OSM water and coastline
+    # for 14 minutes before it was stopped).
+    {"id": "flood", "task": None,
+     "title": "Galveston under a 5 m flood",
+     "blurb": "Galveston, Texas sits on a low barrier island on the Gulf of Mexico and has been "
+              "flooded by hurricane storm surges many times. With nothing to upload, the agent "
+              "fetches the city's boundary and USGS elevation itself, and asks how much of the city"
+              " lies at or below 5 m.",
+     "tags": ["elevation", "inundation", "no upload"],
      "category": "Transformation",
-     "steps": [{"label": "Flooded area",
-                "prompt": "If water rises to 5 m, how many hectares of this coast are at or below "
-                          "that level? Treat it as a simple bathtub: every cell at or below 5 m "
-                          "counts."},
-               {"label": "Show the flood", "prompt": "Show the flooded cells on the map."}]},
+     "steps": [{"label": "Land at or below 5 m",
+                "prompt": "How much land in the city of Galveston, Texas lies at or below 5 m above"
+                          " sea level? Use USGS elevation for the city boundary, count land only "
+                          "(open water is not land), and treat it as a simple bathtub: every land "
+                          "cell at or below 5 m counts. Give the area in km² and as a share of the "
+                          "city's land."},
+               {"label": "Lower water",
+                "prompt": "How do the land area and the share change if the water reaches only 2 m,"
+                          " or 3 m?"}]},
     {"id": "ndvi-change", "task": "T08",
      "title": "Vegetation change from two scenes",
      "blurb": "Two satellite scenes of the same area, from 2020 and 2024. The case measures how green "
@@ -199,7 +225,11 @@ def main() -> int:
     for case in CASES:
         dest = out_root / case["id"]
         dest.mkdir(parents=True)
-        if case["task"] == "T13":
+        if case["task"] is None:
+            # A live case: the agent fetches its own data, so there is nothing to build and
+            # every step's question is written out here.
+            names, first = [], None
+        elif case["task"] == "T13":
             names = chicago_files(a.chicago_snapshot, dest)
             first = None
         else:
@@ -218,8 +248,9 @@ def main() -> int:
             dest.rmdir()
         catalogue.append({
             "id": case["id"], "title": case["title"], "blurb": case["blurb"],
-            "tags": case["tags"], "category": case["category"], "harnessTask": case["task"],
-            "reliability": RELIABILITY[case["task"]],
+            "tags": case["tags"], "category": case["category"],
+            **({"harnessTask": case["task"], "reliability": RELIABILITY[case["task"]]}
+               if case["task"] else {}),
             "files": [{"name": n, "path": f"demos/{case['id']}/{n}",
                        "bytes": (dest / n).stat().st_size} for n in names],
             "steps": steps})

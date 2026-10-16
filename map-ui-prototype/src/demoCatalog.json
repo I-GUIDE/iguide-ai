@@ -112,30 +112,24 @@
  },
  {
   "id": "fastest-route",
-  "title": "Fastest route on a road network",
-  "blurb": "A small grid of Chicago streets, each with its own speed. The shortest way between two intersections is not the fastest, and the case also asks how far you can get in two minutes.",
+  "title": "Fastest drive across the Loop",
+  "blurb": "Union Station to the Art Institute by car, on the Loop's real streets. With nothing to upload, the agent fetches the street network from OpenStreetMap, follows one-way streets and speed limits, and finds the fastest way across downtown Chicago.",
   "tags": [
    "network analysis",
-   "routing"
+   "routing",
+   "OpenStreetMap",
+   "no upload"
   ],
   "category": "Optimisation",
-  "harnessTask": "T04",
-  "reliability": "24 of 25 harness runs",
-  "files": [
-   {
-    "name": "roads.geojson",
-    "path": "demos/fastest-route/roads.geojson",
-    "bytes": 11581
-   }
-  ],
+  "files": [],
   "steps": [
    {
-    "label": "Fastest travel time",
-    "prompt": "What is the fastest travel time in minutes on this road network from the intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, 87.62683° W? How many intersections, counting the start, can be reached within 2 minutes of it?"
+    "label": "Fastest drive",
+    "prompt": "What is the fastest driving time in minutes from Canal St & Jackson Blvd (41.8780 N, 87.6393 W) to Michigan Ave & Adams St (41.8794 N, 87.6243 W) in Chicago's Loop? Use OpenStreetMap's drivable streets inside 41.866–41.889 N, 87.645–87.618 W, follow one-way streets, and drive at each street's posted maxspeed, or 30 mph where none is posted. Map the route."
    },
    {
-    "label": "Show the route",
-    "prompt": "Show the fastest route on the map."
+    "label": "Two minutes out",
+    "prompt": "Following the same rules, how many street intersections (points where three or more road segments meet) can be reached within 2 minutes of the start? Map them."
    }
   ]
  },
@@ -175,30 +169,23 @@
  },
  {
   "id": "flood",
-  "title": "Land under a 5 m flood",
-  "blurb": "An elevation model of a low-lying coastal tile, with a few cells of missing data. The case asks how much land lies at or below 5 m if the water rises that far.",
+  "title": "Galveston under a 5 m flood",
+  "blurb": "Galveston, Texas sits on a low barrier island on the Gulf of Mexico and has been flooded by hurricane storm surges many times. With nothing to upload, the agent fetches the city's boundary and USGS elevation itself, and asks how much of the city lies at or below 5 m.",
   "tags": [
-   "raster",
-   "inundation"
+   "elevation",
+   "inundation",
+   "no upload"
   ],
   "category": "Transformation",
-  "harnessTask": "T07",
-  "reliability": "25 of 25 harness runs",
-  "files": [
-   {
-    "name": "coast_dem.tif",
-    "path": "demos/flood/coast_dem.tif",
-    "bytes": 40408
-   }
-  ],
+  "files": [],
   "steps": [
    {
-    "label": "Flooded area",
-    "prompt": "If water rises to 5 m, how many hectares of this coast are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts."
+    "label": "Land at or below 5 m",
+    "prompt": "How much land in the city of Galveston, Texas lies at or below 5 m above sea level? Use USGS elevation for the city boundary, count land only (open water is not land), and treat it as a simple bathtub: every land cell at or below 5 m counts. Give the area in km² and as a share of the city's land."
    },
    {
-    "label": "Show the flood",
-    "prompt": "Show the flooded cells on the map."
+    "label": "Lower water",
+    "prompt": "How do the land area and the share change if the water reaches only 2 m, or 3 m?"
    }
   ]
  },

@@ -14,7 +14,9 @@ for (const d of DEMOS) {
   ok(/^[a-z0-9-]+$/.test(d.id), `${d.id}: id is a url-safe slug`);
   ok(d.steps.length >= 1, `${d.id}: has steps`);
   ok((DEMO_CATEGORIES as readonly string[]).includes(d.category), `${d.id}: category "${d.category}" is one of DEMO_CATEGORIES`);
-  ok(/harness runs$/.test(d.reliability), `${d.id}: says how often step 1 has worked`);
+  if (d.harnessTask) ok(/harness runs$/.test(d.reliability ?? ''), `${d.id}: says how often step 1 has worked`);
+  // A live case fetches its own data: nothing to upload, and no harness figure to quote.
+  else ok(d.files.length === 0 && d.reliability === undefined, `${d.id}: a live case uploads nothing`);
   for (const [k, s] of d.steps.entries()) {
     ok(s.label.trim() && s.prompt.trim().length > 20, `${d.id} step ${k + 1}: label and a real question`);
   }
