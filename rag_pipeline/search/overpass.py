@@ -77,6 +77,34 @@ _FEATURE_FILTERS: Dict[str, str] = {
     "admin boundary": "boundary=administrative",
 }
 
+# The drivable road network: every class a car is routed on, as OSMnx's "drive" network keeps
+# them: motorway down to residential and living_street, with the _link ramps. Service roads
+# (driveways, parking aisles, alleys), tracks, paths and anything tagged private or closed to
+# cars are left out, as OSMnx leaves them out; `area=yes` drops pedestrian squares drawn as
+# roads. One filter of several clauses, written the way _resolve_filter passes a raw
+# `[a][b]` through: the selector wraps it in one pair of brackets.
+DRIVE_CLASSES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified",
+                 "residential", "living_street", "motorway_link", "trunk_link", "primary_link",
+                 "secondary_link", "tertiary_link")
+DRIVE_NETWORK_FILTER = (
+    'highway~"^(' + "|".join(DRIVE_CLASSES) + ')$"]'
+    '[area!~"^yes$"][access!~"^(private|no)$"]'
+    '[motor_vehicle!~"^(private|no)$"][motorcar!~"^(private|no)$"'
+)
+# Live, 2026-10-15: asked for the fastest drive across Chicago's Loop, the model called
+# overpass_search(feature='highway') and got the 34 motorway pieces, and no word could ask for
+# the whole network. These phrases can.
+for _phrase in ("road network", "roads network", "street network", "streets network",
+                "drive network", "driving network", "drivable network", "drivable roads",
+                "drivable road network", "drivable streets", "routable roads", "road graph",
+                "street graph", "all roads", "all streets"):
+    _FEATURE_FILTERS[_phrase] = DRIVE_NETWORK_FILTER
+
+# Words that map to ONE road class. "highway" means highway=motorway on purpose (in US usage a
+# highway is a major road, and the word has meant motorway since the tool was added), but a model
+# that meant the OSM key gets a fraction of the streets and no sign of it. The result says so.
+_NARROW_ROAD_WORDS = frozenset(("road", "roads", "highway", "highways", "street", "streets"))
+
 # Keys accepted bare (every feature carrying the key). Any other single word is taken as a name.
 _BARE_KEYS = frozenset((
     "amenity", "shop", "leisure", "waterway", "natural", "landuse", "highway", "railway",
@@ -98,12 +126,61 @@ _PRIMARY_TAG_KEYS = (
 _MAX_VERTICES = int(os.getenv("OVERPASS_MAX_VERTICES", "1500"))
 
 
+# One clause of a raw Overpass tag filter: `key`, `!key`, `key=v`, `key!=v`, `key~"re"`,
+# `key!~"re"`, `"key"~"re",i`. Keys and values may be quoted.
+_CLAUSE_RE = re.compile(
+    r'''^\s*(?P<neg>!\s*)?(?P<key>"[^"]+"|[A-Za-z_][\w:.\-]*)\s*'''
+    r'''(?:(?P<op>!=|!~|=|~)\s*(?P<val>"[^"]*"|[^\s"\[\]]+)(?:\s*,\s*i)?)?\s*$''')
+# `highway in (motorway, trunk, primary)`, a form models write; Overpass has no `in`.
+_IN_RE = re.compile(r"^\s*\[?\s*([A-Za-z_][\w:]*)\s+in\s*\(([^)]*)\)\s*\]?\s*$", re.I)
+
+
+def filter_clauses(osm_filter: Optional[str]) -> List[Dict[str, Any]]:
+    """The clauses of a resolved filter as ``{"neg", "key", "op", "value"}``, or [] if any
+    clause is not plain Overpass tag-filter syntax."""
+    if not osm_filter:
+        return []
+    out = []
+    for part in str(osm_filter).strip().strip("[]").split("]["):
+        m = _CLAUSE_RE.match(part)
+        if not m:
+            return []
+        out.append({"neg": bool(m.group("neg")), "key": m.group("key").strip('"'),
+                    "op": m.group("op"), "value": (m.group("val") or "").strip('"') or None})
+    return out
+
+
+def is_road_network_filter(osm_filter: Optional[str]) -> bool:
+    """Whether a filter asks for a road NETWORK: the `highway` key with more than one value
+    (bare, a regex or an exclusion), as opposed to one class such as highway=primary."""
+    clauses = filter_clauses(osm_filter)
+    return bool(clauses) and clauses[0]["key"] == "highway" and not clauses[0]["neg"] \
+        and clauses[0]["op"] != "="
+
+
 def _resolve_filter(feature: str) -> Optional[str]:
-    """Map a free-text feature word to an OSM ``key=value`` filter, or pass a raw one through."""
+    """Map a free-text feature word to an OSM tag filter, or pass a raw one through.
+
+    Raw Overpass filters pass through as written: `key=v`, `key!=v`, `key~"regex"`,
+    `key!~"regex"`, several clauses as `[a][b]`, and a bracketed `[key]` or `key=*` for every
+    value of a key. Before stage 69 only a filter containing `=` passed: `highway~"^(primary|
+    secondary)$"` became a NAME search for that string and found nothing.
+    """
     f = (feature or "").strip()
     if not f:
         return None
+    m = _IN_RE.match(f)
+    if m:
+        values = [v.strip().strip("'\"") for v in m.group(2).split(",") if v.strip().strip("'\"")]
+        if values:
+            return f'{m.group(1)}~"^(' + "|".join(_name_pattern(v) for v in values) + ')$"'
     stripped = f.strip("[]")
+    clauses = filter_clauses(stripped)
+    if clauses:
+        if len(clauses) == 1 and clauses[0]["op"] == "=" and clauses[0]["value"] == "*":
+            return clauses[0]["key"]             # key=* -> every value of the key
+        if f.startswith("[") or any(c["op"] for c in clauses):
+            return stripped                      # raw filter, e.g. amenity=school, [highway]
     if "=" in stripped:                      # raw OSM filter, e.g. amenity=school
         return stripped
     low = f.lower()
@@ -484,6 +561,10 @@ def _diagnostics(data: Optional[Dict[str, Any]], features: List[Dict[str, Any]],
     if not features and not osm_filter:
         warnings.append(f"nothing in the area has a name matching {feature!r}. Check the "
                         "spelling, the local-language name, or widen the area.")
+    if str(feature or "").strip().lower() in _NARROW_ROAD_WORDS and osm_filter:
+        warnings.append(f"{feature!r} was read as {osm_filter} only, one road class. For every "
+                        "street a car can drive, pass feature='road network'; for chosen classes "
+                        "pass a raw filter such as highway~\"^(primary|secondary|tertiary)$\".")
     incomplete = sum(1 for f in features if f.get("incomplete"))
     if incomplete:
         warnings.append(f"{incomplete} outline(s) do not close in OSM and came back as lines "

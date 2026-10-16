@@ -73,6 +73,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 | 58 | [Text2Cypher asks the model the agent runs on](#stage-58) | 2026-10-13 | the search agents' LLM call goes through `build_default_llm`, so it follows `AGENT_LLM_PROVIDER` and that builder's per-model parameters; on the VM it had called OpenAI gpt-5.6-luna with `max_tokens` and got a 400 every time |
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
+| 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10483,3 +10484,80 @@ That run is also why bridge refusals now carry each mirror's status.
 - Debug output and a raw channel exist for Overpass only. The same `_exchange` pattern fits the
   other agent-side fetchers (TIGERweb, 3DEP, the public-data fetch).
 - Nothing yet records a tool fallback as a defect report for the repair loop.
+
+## Stage 69 — A road network comes back whole, as a file {#stage-69}
+
+**Why.** Live, 2026-10-15 (local agent, deepseek-v4-flash): asked for the fastest drive across
+Chicago's Loop on OpenStreetMap streets (bbox 41.866–41.889 N, 87.645–87.618 W, one-ways
+followed, posted maxspeed else 30 mph), the agent called `overpass_search(feature='highway',
+limit=500)` and got 34 features, the motorway pieces. Two things kept the streets out of reach:
+- **No way to ask.** `_resolve_filter` maps the word 'highway' to `highway=motorway`, 'road(s)'
+  to `highway=primary` and 'street(s)' to `highway=residential`. A raw filter passed through only
+  if it held `=`, so `highway~"^(primary|secondary|...)$"` became a NAME search for that string,
+  and `highway in (motorway,trunk,primary)` did too.
+- **No room.** The model-facing tool returns at most 500 features into the model's context. A
+  network is for code to route over, not for the model to read; only the code bridge
+  (`max_features=20000`, to a file) could hold one.
+
+**What changed.**
+- **Raw filters pass through** (`rag_pipeline/search/overpass.py`, `_resolve_filter`): any
+  clause in Overpass tag-filter syntax (`key~"re"`, `key!~"re"`, `key!=v`, `"key"~"re",i`,
+  several as `[a][b]`), a bracketed `[key]` or `key=*` for every value of a key, and
+  `key in (a, b)`, rewritten to `key~"^(a|b)$"` since Overpass has no `in`. Plain words, bare
+  keys and names resolve as before.
+- **'road network' asks for the drivable network** (`DRIVE_NETWORK_FILTER`), and so do 'street
+  network', 'drivable roads', 'drive network', 'all roads' and a few more. The classes are the
+  ones OSMnx's `drive` network keeps: motorway, trunk, primary, secondary, tertiary,
+  unclassified, residential, living_street and the five `_link` ramps. Service roads (driveways,
+  parking aisles, alleys) are left out, as OSMnx leaves them out of `drive`; so are `area=yes`
+  and ways whose `access`, `motor_vehicle` or `motorcar` is `private` or `no`.
+- **'highway' still means `highway=motorway`.** It has since the tool was added (4e295af), no
+  test pins it, and in US usage a highway is a major road. Changing it would silently change
+  every "highways in X" answer. Instead `diagnostics.warnings` now says, for road/highway/street
+  words, that the result is one road class and names 'road network' and the regex form.
+- **A network goes to a file** (`agent_runtime/langchain_granular_tools.py`,
+  `_road_network_result`). When the resolved filter is the `highway` key with more than one
+  value (bare, a regex or an exclusion; `is_road_network_filter`), both `overpass_search` tools
+  (the search peer's and the analyze/code peers') fetch the whole area through the bridge's
+  tiling (`tool_bridge.fetch_osm_features`, factored out of `_overpass_handler`: pages of 5,000,
+  a full tile split in four, a failed one retried then split, no partial answer). The ways are
+  written to `osm_road_network.geojson` with every tag as a property plus `highway`, `name`,
+  `oneway`, `maxspeed` and `length_m`. Points with the same tags (signals, crossings) are left
+  out and counted. The model reads a summary instead of features: counts by class, one-way
+  ways by direction, maxspeed coverage and values, total km, the longest named streets, the
+  `file_id`, and how to route (ways meet at shared vertices; what `oneway=-1` means; maxspeed is
+  text). The map draws the file by URL (`map_layer`, id keyed on filter and bbox, so a repeat
+  replaces its own layer), and one evidence document states what was fetched. A single class
+  (`highway=primary`) is unchanged: features in the result, limit 500.
+
+**Tests.** `rag_pipeline/tests/test_overpass_road_network.py` (39), all offline
+(`requests.post` patched): filter resolution for raw clauses, `[key]`, `key=*`, `key in (...)`,
+and the unchanged words; the network phrases and what counts as a network; the regex and the
+network filter reach Overpass as tag selectors; the one-class warning; for both tools, an
+840-way grid (past the old 500) comes back as a file with every way and its tags, counts by
+class, oneway and maxspeed, under 8 KB of result; the layer reaches the map by URL; the same
+network twice is one layer; an outage is an error with no file; no location; a single class
+still returns features; the bridge gets the network filter. Existing Overpass, bridge, OSM-peer
+and map-delivery tests pass unchanged.
+
+**Measured live,** 2026-10-15 23:30 CDT, the Loop bbox through the analyze/code peers' tool:
+1,505 ways, 112.2 km, in one tile (z.overpass-api.de refused the connection,
+overpass.kumi.systems answered in 2.0 s). Secondary 1,102, tertiary 163, residential 79,
+motorway_link 42, trunk 37, motorway 34, secondary_link 20, trunk_link 17, unclassified 11; 1,124
+one-way ways, maxspeed on 183. Built into a directed graph by shared coordinates (one-ways
+followed, maxspeed else 30 mph), 3,634 of 4,435 vertices (82%) fall in one strongly connected
+component and 4,317 (97%) in one weakly connected one. Of the 801 outside the strong component,
+715 lie within about 200 m of the box edge (279 on motorway ramps): streets and ramps the box cuts
+off, which can be entered but not left inside it. The SW to NE corner drive is 5.1 min. The agent
+end to end (the model choosing 'road network') is not measured here.
+
+**Not done.**
+- **Concurrent calls.** That night the model fired three Overpass calls at once and got 429; the
+  mirrors were also failing on their own (500 from kumi.systems and private.coffee, 502 and
+  timeouts from overpass-api.de and lz4, 400 from maps.mail.ru). Calls are neither serialized
+  nor deduplicated across a turn. A per-process lock around `_exchange`, or a short memo keyed
+  on the query text like the bridge's, would stop the 429s; not done here.
+- **Walk and bike networks.** Only the drive network has a phrase; a raw filter reaches the
+  others.
+- **Node ids.** The file joins ways by identical coordinates. Overpass's `out geom` also gives
+  each way's node ids, which would join exactly; they are not carried.

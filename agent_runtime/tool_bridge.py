@@ -140,7 +140,9 @@ def overpass_search(feature, place=None, bbox=None, max_features=20000, debug=Fa
     """Every OpenStreetMap feature of a kind (e.g. "building", "highway=primary", "amenity=school")
     or with a name (e.g. "1st District of Palawan") in a place or bbox [minlon, minlat, maxlon,
     maxlat], PAGED past Overpass's 500-per-query cap by splitting the box. Boundaries come back
-    as named polygons. Returns {path (GeoJSON), count, complete, tiles, diagnostics, ...};
+    as named polygons; "road network" is every drivable road (motorway to residential, with
+    ramps; oneway and maxspeed are in each way's properties). Returns {path (GeoJSON), count,
+    complete, tiles, diagnostics, ...};
     debug=True adds the Overpass queries sent, each mirror's answer, and the raw response start."""
     return _call("overpass_search", feature=feature, place=place, bbox=bbox,
                  max_features=max_features, debug=debug)
@@ -198,7 +200,8 @@ def model_note() -> str:
         "(GeoJSON, GeoTIFF, JSON, CSV); a refusal raises iguide_bridge.BridgeError. "
         "fetch_public_data(url) = HTTPS GET from an approved host only: " + listed + ". "
         "overpass_search(feature, place=None, bbox=None) returns EVERY OSM feature, paged past "
-        "the 500-per-query cap (check `complete`), named boundaries as polygons, and "
+        "the 500-per-query cap (check `complete`), named boundaries as polygons, "
+        "feature='road network' for every drivable road (routing), and "
         "`diagnostics` (how many features are named, warnings); debug=True adds the queries sent "
         "and the raw Overpass response. overpass_query(ql) runs YOUR OWN read-only Overpass QL "
         "when overpass_search does not ask what you need or its result looks wrong: compare the "
@@ -273,14 +276,16 @@ _OVERPASS_PAGE = 5000
 _OVERPASS_RETRY_S = 5.0
 
 
-def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
-                      max_features: int = 20000, debug: bool = False) -> Dict[str, Any]:
+def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = None,
+                       max_features: int = 20000, debug: bool = False) -> Dict[str, Any]:
     """Every feature in the region: a box that comes back full is split in four and re-asked.
 
     Overpass has no offset, so "page" here means "tile". A way crossing two tiles comes back
-    from both and is kept once (by OSM type and id).
+    from both and is kept once (by OSM type and id). Returns ``{"region", "features",
+    "osm_filter", "complete", "tiles", "splits", "retries", "debug_tiles"}``; raises Refused
+    rather than return part of an area. The bridge's overpass_search writes the features to a
+    file; so does the model's overpass_search for a road network (stage 69).
     """
-    from agent_runtime.file_store import create_output_file_from_path
     from rag_pipeline.search import overpass as ov
 
     region = ov._resolve_bbox(place, bbox)
@@ -334,8 +339,22 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
             pending += [((w, s, mx, my), 0), ((mx, s, e, my), 0), ((w, my, mx, n), 0),
                         ((mx, my, e, n), 0)]
             splits += 1
-    complete = not pending and len(seen) < cap
-    feats = list(seen.values())[:cap]
+    return {"region": list(region), "features": list(seen.values())[:cap], "osm_filter": filt,
+            "complete": not pending and len(seen) < cap, "tiles": tiles, "splits": splits,
+            "retries": retries, "debug_tiles": debug_tiles}
+
+
+def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
+                      max_features: int = 20000, debug: bool = False) -> Dict[str, Any]:
+    """fetch_osm_features, written to a GeoJSON file the code reads by path."""
+    from agent_runtime.file_store import create_output_file_from_path
+    from rag_pipeline.search import overpass as ov
+
+    got = fetch_osm_features(feature, place=place, bbox=bbox, max_features=max_features,
+                             debug=debug)
+    region, feats, filt, complete = got["region"], got["features"], got["osm_filter"], got["complete"]
+    tiles, splits, retries, debug_tiles = (got["tiles"], got["splits"], got["retries"],
+                                           got["debug_tiles"])
     fc = {"type": "FeatureCollection", "features": [
         {"type": "Feature", "geometry": f.get("geometry"),
          "properties": {"osm_type": f.get("osm_type"), "osm_id": f.get("osm_id"),
