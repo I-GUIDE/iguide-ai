@@ -254,7 +254,9 @@ TASKS: List[Task] = [
                    "footprints. Counting a block as inside the zone when its internal point is, how "
                    "many residents and housing units are in the evacuation zone, and how many of the "
                    "hotels are in it? If the people in the zone walked out: use osm_streets.geojson "
-                   "as an undirected walking network in UTM zone 4N (EPSG:32604). Snap each "
+                   "as an undirected walking network in UTM zone 4N (EPSG:32604); streets meet only "
+                   "where they share a vertex, as OpenStreetMap ways do (a bridge does not meet the "
+                   "road it crosses). Snap each "
                    "populated block inside the zone (by its internal point) to its nearest street "
                    "node and find the shortest walking distance along the streets to the nearest "
                    "street node outside the zone. At 1.1 m/s, what is the population-weighted median "
@@ -263,7 +265,9 @@ TASKS: List[Task] = [
                    "sea-level-rise exposure area, how many have their centroid inside it, and how "
                    "many of the hotels are inside it?"),
         # Two walks end within 0.1 min of 10 (10.04, 10.06; see _why), so pop_over_10min is exact
-        # only under the stated method: that is the point of the check. The intersect count is 909
+        # only under the stated method: that is the point of the check. Noding every crossing
+        # (unary_union) joins bridges to the roads under them and gives 731, with the same median
+        # and maximum (run 2, 2026-10-16), hence the sentence on where streets meet. The intersect count is 909
         # in UTM 4N and 911 in WGS84; either is right.
         checks=(Check("zone_pop", kind="count"),
                 Check("zone_hu", kind="count"),
