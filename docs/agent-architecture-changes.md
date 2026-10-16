@@ -84,6 +84,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 68 | [A turn that ran tools and wrote no code is not told "the code did not run"](#stage-68) | 2026-10-16 | the analyze peer no longer stamps `executed=False` on a turn that wrote no code, so synthesis is not told "the code did not run" after tools succeeded |
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 70 | [Overpass keeps its last good answer](#stage-70) | 2026-10-16 | every good Overpass answer is kept on disk by the hash of its query text; when every mirror fails the kept copy is served, marked `cached` with its time, and the Sources line says so; identical calls in flight are sent once, at most two requests at a time |
+| 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11207,3 +11208,45 @@ from the cache at once, and still says it is a cached copy and from when.
   retry on the same mirror.
 - **The tiled fetch's sub-tiles.** When a tile fails and is split (stage 49), the sub-tiles are
   new queries with no kept copy, unless an earlier good run split the same way.
+
+
+## Stage 71 — A chat-only client gets no graph or agent-KB search {#stage-71}
+
+**Why.** The I-GUIDE platform shows the agent's results with its own frontend, which reads the
+platform's element format (`_id`/`doc_id`, `resource-type`, `thumbnail-image` and so on). Hits
+from the Neo4j graph search and from the agent's extracted KB do not fit that format: agent-KB
+rows link to `/undefined/` pages, and graph hits carry the graph's own shape. The user asked
+(2026-10-16) to block both for the chat-only interface. Stage 63 had already made chat-only the
+profile for the platform's server-to-server calls (`AGENT_CHAT_ONLY_SOURCES`).
+
+**What changed.**
+- **The tools are not bound.** `client_profile.CHAT_ONLY_BLOCKED_TOOLS` lists `neo4j_search`,
+  `neo4j_get_element_by_id`, `neo4j_explore_related_nodes`, `agent_kb_search`, `get_kb_block`,
+  `kb_method_search` and `get_method_contract`. `build_agent_executor` drops them for a
+  chat-only turn, next to the map-only tools, so no peer is offered them.
+- **The backends refuse too.** Several paths reach them without a tool: the search sweep unions
+  in an agent-KB arm and the method units, the KB join enriches other arms' hits by element id,
+  and the popularity, by-id and related-element lookups call Neo4j directly. So
+  `client_profile.graph_search_allowed()` and `agent_kb_allowed()` are checked where the work
+  happens:
+  - `_neo4j_run` in `rag_pipeline/search/neo4j.py` and `agents.py`, and
+    `get_neo4j_agent_results` (before its Text2Cypher model call), return nothing;
+  - `agent_kb_search` returns an empty result with a note; `get_kb_block` reports not found;
+    `attach_kb_to_documents` leaves the documents as they were;
+  - `kb_ablated()` is true for the turn, which switches off the sweep's KB arms and the code
+    peers' KB tools.
+- **The cached driver is left alone.** `_neo4j_driver` is created once and cached, so a
+  chat-only check there would have switched the graph off for every later turn. The check is
+  in the query runners, per turn.
+
+**Measured.** 13 offline tests (`test_chat_only_no_graph_kb.py`): the tools are not bound in
+chat-only and are in the map profile; no Cypher runs and the driver is never reached; a
+chat-only turn does not switch the graph off for the next turn; the KB search, block read,
+join and `kb_ablated` behave as above. The 17 Stage 63 tests still pass.
+
+**Not fixed.**
+- What the platform does with the remaining sources (keyword and semantic search over
+  OpenSearch, web, OpenGeoData) is unchanged; its own top-10-by-raw-score ranking is its own.
+- MCP element tools run in the mcp-server process, where this request profile does not reach.
+  None of them were bound for a platform search turn in the 2026-10-16 log.
+
