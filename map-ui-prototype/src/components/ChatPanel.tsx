@@ -377,16 +377,25 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
             </div>
           )}
           {files.length > 0 && (
-            <div className="dl">
-              <div className="dl-head">{files.length === 1 ? 'Download' : 'Downloads'}</div>
-              {files.map((f) => (
-                <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
-                   target="_blank" rel="noopener noreferrer" title={displayName(f)}>
-                  <FileIcon name={displayName(f)} />
-                  <span className="dl-name">{displayName(f)}</span>
-                </a>
-              ))}
-            </div>
+            // Folded by default (user, 2026-10-16): a turn can return a dozen files (scripts,
+            // tables, layers), and the full list pushed the sources and the next turn off screen.
+            // The header says how many there are; one click opens the list.
+            <details className="dl">
+              <summary className="dl-head">
+                {files.length === 1 ? 'Download' : 'Downloads'}
+                <span className="dl-count">{files.length} {files.length === 1 ? 'file' : 'files'}</span>
+                <span className="chev">▾</span>
+              </summary>
+              <div className="dl-list">
+                {files.map((f) => (
+                  <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
+                     target="_blank" rel="noopener noreferrer" title={displayName(f)}>
+                    <FileIcon name={displayName(f)} />
+                    <span className="dl-name">{displayName(f)}</span>
+                  </a>
+                ))}
+              </div>
+            </details>
           )}
           {m.response && <Sources response={m.response} />}
         </div>
