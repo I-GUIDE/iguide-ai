@@ -1968,6 +1968,11 @@ def build_agent_executor(
 
     if chat_only():
         tools = [tool for tool in tools if getattr(tool, "name", "") not in MAP_ONLY_TOOLS]
+    # With answer validation off, a peer is not offered the audit tool either.
+    from agent_runtime.client_profile import VALIDATION_TOOLS, validation_enabled
+
+    if not validation_enabled():
+        tools = [tool for tool in tools if getattr(tool, "name", "") not in VALIDATION_TOOLS]
     active_llm = llm or build_default_llm()
 
     system_prompt = system_prompt_override or DEFAULT_AGENT_PROMPT

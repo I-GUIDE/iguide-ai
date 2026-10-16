@@ -75,6 +75,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
 | 62 | [Asking the user, measured: a clarification gate and a simulated-user harness](#stage-62) | 2026-10-15 | `AGENT_CLARIFY_POLICY` (never/assume/ask, off by default) and a simulated-user harness; on 14 MultiGlobeQA tasks `ask` got 9 right against 5 for `never` and `assume` |
 | 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
+| 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified"; the map UI has an "Answer validation" setting |
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 65 | [A finished map is not followed by a search of the turn's own files](#stage-65) | 2026-10-15 | the search peer stops re-reading the conversation's outputs; a search after a delivered map is vetoed unless retrieval was asked for; failure lines name the exception; choropleth_image reads GeoJSON |
 
@@ -10519,6 +10520,75 @@ prototype (no `client_profile`). They cover:
 - Knowledge-base hits still carry `resource_type` where the backend reads `resource-type` or
   `element_type`, which is one way its cards end up linking to `/undefined/`.
 - Node's `fetch` gives up after 300 s of a silent stream, and the agent sends no heartbeat.
+
+
+## Stage 66 — Answer validation can be turned off {#stage-66}
+
+**Why.** Once a turn's work is done, it checks the answer. On Lumen deepseek that checking
+outlasts the work. The Chicago demo, run locally on 2026-10-15:
+- **Step 1** (rates): 2 min 46 s of 4 min 57 s.
+- **Step 3** (SKATER): 4 min 55 s of 7 min 48 s. That was two grounding audits (48 s and 63 s), a
+  claim check (34 s), and a re-grounding pass that re-ran the whole analysis (62 s) because the
+  audit could not place one sentence ("79% of the total variance").
+
+The tools themselves took well under a second (`regionalize` 0.2 s, `add_map_layer` 0.3 s). A
+demo, or a client that wants the answer sooner and accepts that it is unchecked, had no way to
+skip the checks: `do_audit` was a graph-build parameter, and nothing reached the number scan or
+the re-grounding pass.
+
+**What changed** (`agent_runtime/client_profile.py`, beside the chat-only profile). The switch is
+a ContextVar bound per request, as `chatOnly` is:
+- `validation: false` (or `validate: false`) in the request body turns it off for that turn;
+- otherwise `AGENT_VALIDATION` decides: on by default, and `0`/`false`/`off`/`no` turns it off
+  for every turn;
+- a request's `validation: true` wins over a server default of off.
+
+With validation off, `synthesize` skips:
+- the grounding audit;
+- the reconciliation of the audit with the artifacts and the code gate's scoping;
+- the number scan, so no statement is cut;
+- the re-grounding pass;
+- the cross-run agreement and reference recomputations;
+- the artifact corrections.
+
+The peers are not offered the `audit_answer_grounding` tool either. Link sanitisation still runs:
+it stops fabricated download links and internal paths, so it is safety, not checking. So does the
+in-sandbox invariant gate, which enforces library contracts while the code runs and has its own
+switch, `AGENT_INVARIANT_GATE`.
+
+**An unchecked answer is marked in the payload, not in the text.** Its verdict has one finding,
+`validation` / unverifiable, so the status is `unverified`, never `verified`, and the API result
+carries `validation: false`. The answer text carries nothing about it. A first version ended the
+answer with "Not checked: answer validation was turned off for this reply."; the user asked for it
+to go, because whoever turned validation off chose it.
+
+The number scan's quiet line ("N statements … were left out") is now written as `*text*`. Written
+as `_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises
+only asterisks. The live check below found it.
+
+**The map UI setting.** Settings has an "Answer validation" select: Server default, "On: check
+each answer", or "Off: answer sooner, unchecked". It persists with the other settings
+(`AgentCfg.validation`) and is sent as `validation: true/false` only when chosen, so "Server
+default" sends nothing and the deployment's `AGENT_VALIDATION` decides.
+
+**Live check** (local demo, Lumen deepseek, `AGENT_VALIDATION=0`, 2026-10-15). Chicago step 1
+took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
+against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02).
+
+A second run, with the agent's default left on and the UI setting at Off, took 2 min 00 s. The
+server logged that the request turned validation off, and the answer carried no line about it.
+That answer gave the citywide rate as "≈ 30.4", but 80,353 ÷ 2,647,621 × 1,000 = 30.349, which
+rounds to 30.3. The number scan exists to catch a figure no tool produced, so this shows what
+turning validation off gives up.
+
+**Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
+- the default, the server switch, the request field and its precedence;
+- the result flag;
+- the audit tool unbound when off and bound when on;
+- a whole turn with validation off: no audit, one analysis run, the unrecorded figure kept,
+  nothing appended, status `unverified`;
+- the same turn with validation on, as a control, is audited and has no `validation` finding;
+- an unchecked verdict renders no text.
 
 ## Stage 60 — A named boundary comes back as one polygon with its area {#stage-60}
 

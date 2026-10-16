@@ -17,7 +17,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
-from agent_runtime.client_profile import reset_chat_only, set_chat_only
+from agent_runtime.client_profile import (requested_validation, reset_chat_only, reset_validation,
+                                          set_chat_only, set_validation)
 from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
                                         PersistentMemoryDisabled, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
@@ -527,6 +528,11 @@ def _format_agent_chat_result(payload: dict) -> dict:
     if chat_only():
         # Says which profile answered, so a caller can tell a chat-only turn from a map one.
         formatted["chatOnly"] = True
+    from agent_runtime.client_profile import validation_enabled
+
+    if not validation_enabled():
+        # An unchecked answer says it is unchecked, wherever the caller reads it.
+        formatted["validation"] = False
     usage = payload.get("usage")
     if usage:
         # What the turn's model calls cost: per call, per model and in total. cost_usd is None
@@ -2325,6 +2331,7 @@ def agent_chat():
         _session_token = set_file_store_session(normalized.get("thread_id"))
         _user_token = identity.set_user(_request_user)
         _chat_only_token = set_chat_only(_request_chat_only(data))
+        _validation_token = set_validation(requested_validation(data))
         try:
             # Checked INSIDE the identity binding: assert_owner reads the caller from the same
             # ContextVar everything else does, so before this line it would see nobody and wave
@@ -2369,6 +2376,7 @@ def agent_chat():
             reset_file_store_session(_session_token)
             identity.reset_user(_user_token)
             reset_chat_only(_chat_only_token)
+            reset_validation(_validation_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -2863,6 +2871,9 @@ def agent_chat_stream():
         _stream_chat_only = _request_chat_only(data)
         if _stream_chat_only:
             logger.info("Chat-only turn: map tools and map_layer events are off")
+        _stream_validation = requested_validation(data)
+        if _stream_validation is False:
+            logger.info("Validation off for this turn: the answer will not be checked")
 
         @stream_with_context
         def generate():
@@ -2870,6 +2881,7 @@ def agent_chat_stream():
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
             stream_chat_only_token = set_chat_only(_stream_chat_only)
+            stream_validation_token = set_validation(_stream_validation)
             try:
                 try:
                     _assert_chat_memory_owner(normalized)
@@ -3096,6 +3108,7 @@ def agent_chat_stream():
                 reset_file_store_session(stream_session_token)
                 identity.reset_user(stream_user_token)
                 reset_chat_only(stream_chat_only_token)
+                reset_validation(stream_validation_token)
         return Response(
             generate(),
             mimetype="text/event-stream",
