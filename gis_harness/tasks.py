@@ -200,8 +200,9 @@ TASKS: List[Task] = [
                    "has the most, with how many? Run Getis-Ord Gi* on the counts with binary queen "
                    "contiguity, each hexagon in its own neighbourhood, and analytical z-scores: how "
                    "many hexagons are hot spots (z > 1.96), and which hexagon has the highest z, and "
-                   "what is it? Using the street recorded with each crash, which three streets have "
-                   "the most crashes inside the hot-spot hexagons, and how many each? What share of "
+                   "what is it? Using the street recorded with each crash (its street name; W and E "
+                   "Madison St are one street), which three streets have the most crashes inside "
+                   "the hot-spot hexagons, and how many each? What share of "
                    "all the crashes in the file happened at night, between 10 p.m. and 4 a.m.? And "
                    "how many crashes per year were there on average in 2020–2022 and in 2023–2024?"),
         checks=(Check("crashes_in_grid", kind="count"),
