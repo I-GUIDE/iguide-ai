@@ -2,7 +2,7 @@
  {
   "id": "chicago-crime",
   "title": "Chicago violent crime: rates, clusters and regions",
-  "blurb": "2024 violent crime by community area: rates per 1,000, Moran's I and LISA clusters, then 6 contiguous SKATER regions.",
+  "blurb": "Chicago recorded about 80,000 violent crimes in 2024, and they are far from evenly spread. This case compares the rate across the city's 77 community areas, asks whether high-rate areas sit next to each other, and groups the city into regions with similar rates.",
   "tags": [
    "spatial join",
    "rates",
@@ -48,7 +48,7 @@
  {
   "id": "schools-buffer",
   "title": "Schools within a mile of a site",
-  "blurb": "Buffer a site in the Chicago Loop by 1 mile, select the schools inside it and find the nearest one.",
+  "blurb": "A development site in the Chicago Loop and the schools around it. The case asks which schools are within a mile of the site and which one is closest.",
   "tags": [
    "buffer",
    "spatial selection",
@@ -78,7 +78,7 @@
  {
   "id": "zone-rates",
   "title": "Incidents per 1,000 residents by zone",
-  "blurb": "Point-in-polygon counts turned into rates: the zone with the most incidents is not the one with the highest rate.",
+  "blurb": "Incidents recorded across nine zones with very different populations. The zone with the most incidents is not the one where an incident is most likely per resident.",
   "tags": [
    "spatial join",
    "rates",
@@ -113,7 +113,7 @@
  {
   "id": "fastest-route",
   "title": "Fastest route on a road network",
-  "blurb": "Travel time from length and speed on every edge: the shortest route is not the fastest one.",
+  "blurb": "A small grid of Chicago streets, each with its own speed. The shortest way between two intersections is not the fastest, and the case also asks how far you can get in two minutes.",
   "tags": [
    "network analysis",
    "routing"
@@ -142,7 +142,7 @@
  {
   "id": "facility-siting",
   "title": "Where to put two facilities",
-  "blurb": "A 2-median location-allocation: pick the 2 of 8 sites that minimise population-weighted distance.",
+  "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new facilities. The case finds the pair of sites that keeps people closest to a facility overall.",
   "tags": [
    "location-allocation",
    "optimisation"
@@ -176,7 +176,7 @@
  {
   "id": "flood",
   "title": "Land under a 5 m flood",
-  "blurb": "A bathtub inundation model on an elevation raster, with NoData kept out of the flooded area.",
+  "blurb": "An elevation model of a low-lying coastal tile, with a few cells of missing data. The case asks how much land lies at or below 5 m if the water rises that far.",
   "tags": [
    "raster",
    "inundation"
@@ -205,7 +205,7 @@
  {
   "id": "ndvi-change",
   "title": "Vegetation change from two scenes",
-  "blurb": "NDVI from red and near-infrared on two dates, and the area that lost vegetation.",
+  "blurb": "Two satellite scenes of the same area, from 2020 and 2024. The case measures how green the area was on each date and how much of it lost vegetation in between.",
   "tags": [
    "raster",
    "remote sensing",
@@ -240,7 +240,7 @@
  {
   "id": "suitability",
   "title": "Site suitability from three layers",
-  "blurb": "A weighted overlay of slope and road distance, with water and wetland excluded.",
+  "blurb": "Three aligned layers for one area: slope, distance to the nearest road, and land cover. The case finds the land that is flat, near a road and not water or wetland, and the single best spot.",
   "tags": [
    "raster",
    "multi-criteria"
@@ -279,7 +279,7 @@
  {
   "id": "aftershocks",
   "title": "Aftershocks of the 2019 Ridgecrest earthquake",
-  "blurb": "A space-time filter on a USGS catalogue: events within 7 days and 25 km of the mainshock.",
+  "blurb": "In July 2019 a magnitude 7.1 earthquake struck near Ridgecrest, California, followed by thousands of aftershocks. The case counts those in the following week within 25 km and maps them by magnitude.",
   "tags": [
    "spatio-temporal",
    "point data"
@@ -308,7 +308,7 @@
  {
   "id": "measure",
   "title": "Measuring area and distance correctly",
-  "blurb": "No upload: the agent fetches the county boundary itself, measures it on an equal-area projection, and gives a great-circle distance.",
+  "blurb": "Two measurements with nothing to upload: the area of Champaign County, Illinois, whose boundary the agent fetches itself, and the distance from Trafalgar Square in London to Notre-Dame in Paris.",
   "tags": [
    "live data",
    "projections",

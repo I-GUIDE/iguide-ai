@@ -17,6 +17,8 @@ interface Props {
 
 type Phase = 'idle' | 'loading' | 'ready' | 'error';
 
+const EXPLAIN_FILES = 'Inspect and explain the files uploaded.';
+
 // The Demos tab: pick a case, start it (a fresh conversation with the case's files attached),
 // then ask its steps in order. A step is a real question to the agent, sent exactly as written;
 // "edit" puts it in the composer instead. It sits above the composer like the rs-embed panel.
@@ -96,15 +98,18 @@ export function DemoPanel(p: Props) {
                 title="Fold the demos to a rail so the conversation has the room">Hide</button>
       </div>
       <p className="demoblurb">{open.blurb}</p>
-      <div className="demotags">
-        {open.tags.map((t) => <span key={t} className="demotag">{t}</span>)}
-        {/* `reliability` ("N of N harness runs") stays in the catalogue for the demo check,
-            but is not shown: it is a test statistic, not something a visitor needs. */}
-      </div>
       {open.files.length > 0 && (
-        <p className="demofiles">
-          Data: {open.files.map((f) => `${f.name} (${formatBytes(f.bytes)})`).join(', ')}
-        </p>
+        <div className="demofilesrow">
+          <p className="demofiles">
+            Data: {open.files.map((f) => `${f.name} (${formatBytes(f.bytes)})`).join(', ')}
+          </p>
+          {/* Once the files are in the conversation, the agent can be asked what they are
+              before any step: the steps no longer describe the data themselves. */}
+          {phase === 'ready' && (
+            <button type="button" className="rsbtn demoexplain" disabled={p.busy}
+                    title={EXPLAIN_FILES} onClick={() => p.onRun(EXPLAIN_FILES)}>Explain files</button>
+          )}
+        </div>
       )}
       {phase !== 'ready' && (
         <div className="demostart">
@@ -139,6 +144,11 @@ export function DemoPanel(p: Props) {
           );
         })}
       </ol>
+      <div className="demotags">
+        {open.tags.map((t) => <span key={t} className="demotag">{t}</span>)}
+        {/* `reliability` ("N of N harness runs") stays in the catalogue for the demo check,
+            but is not shown: it is a test statistic, not something a visitor needs. */}
+      </div>
     </div>
   );
 }
