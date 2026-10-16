@@ -73,12 +73,16 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 57 | [A cited source links to its platform page](#stage-57) | 2026-10-13 | graph hits take their type from the node label; a typed duplicate wins dedup; agent-KB hits resolve their 8-character parent to the platform id; every source carries its thumbnail as `thumbnail_image` |
 | 58 | [Text2Cypher asks the model the agent runs on](#stage-58) | 2026-10-13 | the search agents' LLM call goes through `build_default_llm`, so it follows `AGENT_LLM_PROVIDER` and that builder's per-model parameters; on the VM it had called OpenAI gpt-5.6-luna with `max_tokens` and got a 400 every time |
 | 59 | [Every turn reports what it cost, and keeps it](#stage-59) | 2026-10-14 | each model call is priced as it ends; the turn's total is returned with the answer, kept on the conversation's history entry and stored whole on its trace |
+| 60 | [A named boundary comes back as one polygon with its area](#stage-60) | 2026-10-15 | `overpass_search` rebuilds boundary and multipolygon relations into polygons with an ellipsoidal `area_km2`; name searches ask for relations first; a timeout remark fails over to the next mirror |
+| 61 | [The agent can see why a tool answered as it did, and ask the service itself](#stage-61) | 2026-10-15 | `overpass_search` returns `diagnostics` (and on `debug=True` the QL, every mirror attempt and the raw response); the code bridge gains a capped, read-only `overpass_query` |
 | 62 | [Asking the user, measured: a clarification gate and a simulated-user harness](#stage-62) | 2026-10-15 | `AGENT_CLARIFY_POLICY` (never/assume/ask, off by default) and a simulated-user harness; on 14 MultiGlobeQA tasks `ask` got 9 right against 5 for `never` and `assume` |
 | 63 | [A chat-only client gets no map machinery](#stage-63) | 2026-10-15 | `chatOnly`, a listed key or a listed source turns off the map tools, map_layer events, the map retry and map wording for the platform's server-to-server calls; the map UI is unchanged |
-| 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified"; the map UI has an "Answer validation" setting |
-| 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
+| 64 | [Disputed claims are checked by code against the turn's data](#stage-64) | 2026-10-15 | a claim the auditor disputes is checked by code against the turn's own files (`agent_runtime/claim_checker`); off unless `AGENT_CLAIM_CHECK=1` |
 | 65 | [A finished map is not followed by a search of the turn's own files](#stage-65) | 2026-10-15 | the search peer stops re-reading the conversation's outputs; a search after a delivered map is vetoed unless retrieval was asked for; failure lines name the exception; choropleth_image reads GeoJSON |
+| 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified"; the map UI has an "Answer validation" setting |
 | 67 | [One map layer per source file](#stage-67) | 2026-10-15 | a layer's id is the content key of the file it shows, applied where every descriptor becomes a `map_layer` event; drawing a file again restyles and renames its layer in place |
+| 68 | [A turn that ran tools and wrote no code is not told "the code did not run"](#stage-68) | 2026-10-16 | the analyze peer no longer stamps `executed=False` on a turn that wrote no code, so synthesis is not told "the code did not run" after tools succeeded |
+| 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 70 | [Overpass keeps its last good answer](#stage-70) | 2026-10-16 | every good Overpass answer is kept on disk by the hash of its query text; when every mirror fails the kept copy is served, marked `cached` with its time, and the Sources line says so; identical calls in flight are sent once, at most two requests at a time |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -10363,6 +10367,136 @@ prototype (no `model_pricing`). They cover:
 - the trace record, and the API forwarding `usage`.
 
 
+## Stage 60 — A named boundary comes back as one polygon with its area {#stage-60}
+
+**Why.** MultiGlobeQA (arXiv 2608.03882) asks "Is Basco larger in area than 1st District of
+Palawan?". Run through the harness on 2026-10-14 (Lumen deepseek-v4-flash), the agent got the
+right answer for the wrong reason. `overpass_search` asked Overpass for nodes and ways only. A
+boundary in OSM is a **relation**, and usually only the relation carries the name; its member
+ways carry the outline in unnamed pieces. So "boundary=administrative in Palawan" returned 158
+unnamed line segments, Basco 17, and the district could not be found at all. The agent then spent
+7 calls on the knowledge base and 4 on the web, and answered "thousands of km²" from Wikipedia,
+with no area computed.
+
+Two older faults surfaced while fixing it:
+- **A one-word feature was always a tag key.** `feature="Basco"` queried the key `[basco]` and
+  found nothing, silently.
+- **A timed-out query read as an empty answer.** Overpass reports a query that ran out of time
+  as HTTP 200 with a `remark` and an empty or partial element list. Live, a province-sized name
+  search returned one element that way.
+
+**What changed** (`rag_pipeline/search/overpass.py`):
+- **Relations are queried, first and on their own `out`**, so a page of ways cannot crowd them
+  out. Nodes and ways follow, minus the member ways of the relations just returned.
+- **A relation is rebuilt into geometry.** Multipolygon and boundary relations become
+  (multi)polygons from their outer and inner members. Other relations (rivers, routes) become
+  the lines of their members. An outline whose outer members do not close stays as lines,
+  marked `incomplete`, with no area.
+- **`area_km2`** is measured on the WGS84 ellipsoid (pyproj `Geod`) from the full outline. A
+  boundary's area carries `area_note`: OSM boundaries can run out to sea. Basco's OSM outline is
+  690 km² against 33.67 km² of land.
+- **Large outlines are simplified for what the model and the map read** (`simplify_for_display`,
+  `OVERPASS_MAX_VERTICES`, default 1,500). `simplified` says so; `area_km2` is from the full
+  outline. The analyze/code peers' GeoJSON file and the code bridge keep every vertex.
+- **A name search asks for relations alone first** and stops on an exact name. Over the Palawan
+  box, relations alone answered in 21 s, while relations, ways and nodes together timed out. The
+  exact name sorts first among regex matches.
+- **Only real OSM keys are accepted bare** (`_BARE_KEYS`, or a token with `_` or `:`). Any other
+  single word is a name.
+- **A `remark` reporting an error or a timeout fails that mirror**, and the next one is tried.
+  The old loop also kept such a response as `data` when every mirror failed this way.
+- The tool's evidence documents state the area, and both tool descriptions say how to ask for one
+  named boundary. The descriptions no longer say OSM returns boundaries as fragments.
+
+**Measured** (live, default 30 s timeout, called as the agent calls it):
+
+| call | before | after |
+|---|---|---|
+| `Basco` @ Basco, Batanes | 0 features (queried key `[basco]`) | relation, Polygon, 690.45 km², 16 s |
+| `1st District of Palawan` @ Palawan | not found | relation (`boundary=political`), MultiPolygon, 10,920.49 km², 29 s |
+| `boundary=administrative` @ Basco | 17 unnamed ways | 8 named polygons with areas, 15 s |
+| `boundary=administrative` @ Palawan | 158 ways, 1 named | relations first, member ways removed |
+
+**Tests.** `rag_pipeline/tests/test_overpass_boundaries.py` (11): a split outline with an enclave
+becomes one polygon with a hole and the ellipsoidal area, a gap stays lines with no area, a river
+relation stays lines, the query shape, a timeout remark fails over to the next mirror and fails
+the call when every mirror times out, relations first for names, the bare-key rule, regex
+escaping, display simplification, and the area in the evidence text. The 143 tests in the other
+Overpass-touching files pass unchanged.
+
+**Not fixed.**
+- **Area is of the mapped outline**, sea included where OSM draws it; no land-only area is
+  computed.
+- **A province-sized name search runs close to the 30 s timeout** on a loaded mirror.
+- **For `boundary=administrative` over a large area, the `limit` relations returned are chosen by
+  Overpass's id order**, not by size or level.
+
+
+## Stage 61 — The agent can see why a tool answered as it did, and ask the service itself {#stage-61}
+
+**Why.** In the MultiGlobeQA Basco/Palawan turn (stage 60), the boundary query returned 158
+features and no error, all but one of them unnamed pieces of outlines. The agent noticed it was
+not getting what it needed, but could neither see why nor check another way: its tools are
+fixed code, the sandbox has no network, and the bridge offered only the same `overpass_search`.
+So it routed around the tool to Wikipedia. The three faults stage 60 fixed were found by running
+the tool live, reading the raw responses and testing hypotheses against the service directly,
+none of which the agent could do. Self-correction works when there is outside evidence to check
+against (CRITIC, arXiv 2305.11738); diagnosing a tool needs evidence that does not come from the
+tool under suspicion.
+
+**What changed.**
+- **`overpass_search` always returns `diagnostics`** (`rag_pipeline/search/overpass.py`):
+  elements by OSM type, features, how many are named, geometry types, the service's `remark`,
+  and `warnings` when a result looks wrong. Examples: no feature has a name (with the likely
+  reason: pieces of a relation), a name search matched nothing, outlines that did not close.
+- **`debug=True`** on `overpass_search` adds, per request: the Overpass QL actually sent, every
+  mirror attempt (endpoint, HTTP status, seconds, error, the service's remark) and the first
+  2,000 characters of the raw response. It reaches the model through both `overpass_search`
+  tools, and sandboxed code through the bridge's `overpass_search(debug=True)` (the first three
+  tiles, and on failure each mirror's status in the refusal).
+- **The bridge gains `overpass_query(ql)`** (`agent_runtime/tool_bridge.py`): the code's own
+  read-only Overpass QL, sent by the agent to the configured mirrors only. The raw JSON answer
+  goes to a file the code reads; the result carries the evidence (the query as sent, which
+  mirror answered, every attempt, elements by type, any remark). The model note tells the code
+  to use it when `overpass_search` does not ask what it needs or looks wrong, and to compare the
+  two before trusting either.
+- **The HTTP exchange is one function, `_exchange`**, which records every attempt; `_post` wraps
+  it.
+
+**Threat model for `overpass_query`.** Overpass QL cannot write, so the risks are cost and
+leakage, not changes:
+- **Leakage.** The query text reaches a public server, so its length is capped
+  (`OVERPASS_RAW_MAX_CHARS`, 4,000), as fetched URLs are (`MAX_URL_CHARS`). It goes only to
+  `OVERPASS_ENDPOINTS`; the code cannot name a host.
+- **Cost.** Output is forced to `[out:json]`; `[timeout:]` is capped at 90 s and `[maxsize:]` at
+  256 MB, written in front of the query because Overpass reads settings only from the first
+  statement. An answer over `AGENT_CODE_BRIDGE_RAW_MAX_MB` (50) fails that mirror. Each run may
+  send `AGENT_CODE_BRIDGE_MAX_RAW_QUERIES` (10), within the bridge's overall call cap.
+- **Record.** Every call is a tool call of the turn, streamed and in the lineage like the other
+  bridge calls.
+
+The bridge as a whole stays off unless `AGENT_CODE_BRIDGE=1`.
+
+**Tests.** `rag_pipeline/tests/test_tool_debug_raw_query.py` (18): diagnostics on unnamed pieces
+and on a name that matches nothing; debug's query, attempts (a timeout remark, then the mirror
+that answered) and raw excerpt, on success and on failure; the model tool passes `debug`; the raw
+query rules (JSON forced, timeout and memory capped and placed first, XML/CSV, empty, too long and
+malformed settings refused); the HTTP wait covers the server timeout; an oversized answer fails a
+mirror; through the bridge, the raw answer as a file with the evidence, refusals, the per-run cap,
+a refusal that names every mirror's status, `debug` and `diagnostics` from the bridge's
+`overpass_search`, and the client and model note. The existing bridge and Overpass tests pass
+unchanged.
+
+**Measured live.** Not yet: on 2026-10-15 every Overpass mirror but one returned 500, 502, 504 or
+timed out, and the end-to-end run through the local executor failed on that outage after 155 s.
+That run is also why bridge refusals now carry each mirror's status.
+
+**Not done.**
+- Debug output and a raw channel exist for Overpass only. The same `_exchange` pattern fits the
+  other agent-side fetchers (TIGERweb, 3DEP, the public-data fetch).
+- Nothing yet records a tool fallback as a defect report for the repair loop.
+
+
 ## Stage 62 — Asking the user, measured: a clarification gate and a simulated-user harness {#stage-62}
 
 **Why.** In MultiGlobeQA runs (2026-10-14), several wrong answers were wrong for want of
@@ -10453,6 +10587,7 @@ Rerun `clarify-1-fix`, with the follow-up fix, on the 7 tasks where `ask` had as
 - **No screenshots** of multi-turn conversations yet: the replay renders one turn per record.
 - **The policy is off by default**, and nothing is deployed.
 
+
 ## Stage 63 — A chat-only client gets no map machinery {#stage-63}
 
 **Why.** The agent has two entrances.
@@ -10523,279 +10658,6 @@ prototype (no `client_profile`). They cover:
   `element_type`, which is one way its cards end up linking to `/undefined/`.
 - Node's `fetch` gives up after 300 s of a silent stream, and the agent sends no heartbeat.
 
-
-## Stage 66 — Answer validation can be turned off {#stage-66}
-
-**Why.** Once a turn's work is done, it checks the answer. On Lumen deepseek that checking
-outlasts the work. The Chicago demo, run locally on 2026-10-15:
-- **Step 1** (rates): 2 min 46 s of 4 min 57 s.
-- **Step 3** (SKATER): 4 min 55 s of 7 min 48 s. That was two grounding audits (48 s and 63 s), a
-  claim check (34 s), and a re-grounding pass that re-ran the whole analysis (62 s) because the
-  audit could not place one sentence ("79% of the total variance").
-
-The tools themselves took well under a second (`regionalize` 0.2 s, `add_map_layer` 0.3 s). A
-demo, or a client that wants the answer sooner and accepts that it is unchecked, had no way to
-skip the checks: `do_audit` was a graph-build parameter, and nothing reached the number scan or
-the re-grounding pass.
-
-**What changed** (`agent_runtime/client_profile.py`, beside the chat-only profile). The switch is
-a ContextVar bound per request, as `chatOnly` is:
-- `validation: false` (or `validate: false`) in the request body turns it off for that turn;
-- otherwise `AGENT_VALIDATION` decides: on by default, and `0`/`false`/`off`/`no` turns it off
-  for every turn;
-- a request's `validation: true` wins over a server default of off.
-
-With validation off, `synthesize` skips:
-- the grounding audit;
-- the reconciliation of the audit with the artifacts and the code gate's scoping;
-- the number scan, so no statement is cut;
-- the re-grounding pass;
-- the cross-run agreement and reference recomputations;
-- the artifact corrections.
-
-The peers are not offered the `audit_answer_grounding` tool either. Link sanitisation still runs:
-it stops fabricated download links and internal paths, so it is safety, not checking. So does the
-in-sandbox invariant gate, which enforces library contracts while the code runs and has its own
-switch, `AGENT_INVARIANT_GATE`.
-
-**An unchecked answer is marked in the payload, not in the text.** Its verdict has one finding,
-`validation` / unverifiable, so the status is `unverified`, never `verified`, and the API result
-carries `validation: false`. The answer text carries nothing about it. A first version ended the
-answer with "Not checked: answer validation was turned off for this reply."; the user asked for it
-to go, because whoever turned validation off chose it.
-
-The number scan's quiet line ("N statements … were left out") is now written as `*text*`. Written
-as `_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises
-only asterisks. The live check below found it.
-
-**The map UI setting.** Settings has an "Answer validation" select: Server default, "On: check
-each answer", or "Off: answer sooner, unchecked". It persists with the other settings
-(`AgentCfg.validation`) and is sent as `validation: true/false` only when chosen, so "Server
-default" sends nothing and the deployment's `AGENT_VALIDATION` decides.
-
-**Live check** (local demo, Lumen deepseek, `AGENT_VALIDATION=0`, 2026-10-15). Chicago step 1
-took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
-against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02).
-
-A second run, with the agent's default left on and the UI setting at Off, took 2 min 00 s. The
-server logged that the request turned validation off, and the answer carried no line about it.
-That answer gave the citywide rate as "≈ 30.4", but 80,353 ÷ 2,647,621 × 1,000 = 30.349, which
-rounds to 30.3. The number scan exists to catch a figure no tool produced, so this shows what
-turning validation off gives up.
-
-**Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
-- the default, the server switch, the request field and its precedence;
-- the result flag;
-- the audit tool unbound when off and bound when on;
-- a whole turn with validation off: no audit, one analysis run, the unrecorded figure kept,
-  nothing appended, status `unverified`;
-- the same turn with validation on, as a control, is audited and has no `validation` finding;
-- an unchecked verdict renders no text.
-
-## Stage 60 — A named boundary comes back as one polygon with its area {#stage-60}
-
-**Why.** MultiGlobeQA (arXiv 2608.03882) asks "Is Basco larger in area than 1st District of
-Palawan?". Run through the harness on 2026-10-14 (Lumen deepseek-v4-flash), the agent got the
-right answer for the wrong reason. `overpass_search` asked Overpass for nodes and ways only. A
-boundary in OSM is a **relation**, and usually only the relation carries the name; its member
-ways carry the outline in unnamed pieces. So "boundary=administrative in Palawan" returned 158
-unnamed line segments, Basco 17, and the district could not be found at all. The agent then spent
-7 calls on the knowledge base and 4 on the web, and answered "thousands of km²" from Wikipedia,
-with no area computed.
-
-Two older faults surfaced while fixing it:
-- **A one-word feature was always a tag key.** `feature="Basco"` queried the key `[basco]` and
-  found nothing, silently.
-- **A timed-out query read as an empty answer.** Overpass reports a query that ran out of time
-  as HTTP 200 with a `remark` and an empty or partial element list. Live, a province-sized name
-  search returned one element that way.
-
-**What changed** (`rag_pipeline/search/overpass.py`):
-- **Relations are queried, first and on their own `out`**, so a page of ways cannot crowd them
-  out. Nodes and ways follow, minus the member ways of the relations just returned.
-- **A relation is rebuilt into geometry.** Multipolygon and boundary relations become
-  (multi)polygons from their outer and inner members. Other relations (rivers, routes) become
-  the lines of their members. An outline whose outer members do not close stays as lines,
-  marked `incomplete`, with no area.
-- **`area_km2`** is measured on the WGS84 ellipsoid (pyproj `Geod`) from the full outline. A
-  boundary's area carries `area_note`: OSM boundaries can run out to sea. Basco's OSM outline is
-  690 km² against 33.67 km² of land.
-- **Large outlines are simplified for what the model and the map read** (`simplify_for_display`,
-  `OVERPASS_MAX_VERTICES`, default 1,500). `simplified` says so; `area_km2` is from the full
-  outline. The analyze/code peers' GeoJSON file and the code bridge keep every vertex.
-- **A name search asks for relations alone first** and stops on an exact name. Over the Palawan
-  box, relations alone answered in 21 s, while relations, ways and nodes together timed out. The
-  exact name sorts first among regex matches.
-- **Only real OSM keys are accepted bare** (`_BARE_KEYS`, or a token with `_` or `:`). Any other
-  single word is a name.
-- **A `remark` reporting an error or a timeout fails that mirror**, and the next one is tried.
-  The old loop also kept such a response as `data` when every mirror failed this way.
-- The tool's evidence documents state the area, and both tool descriptions say how to ask for one
-  named boundary. The descriptions no longer say OSM returns boundaries as fragments.
-
-**Measured** (live, default 30 s timeout, called as the agent calls it):
-
-| call | before | after |
-|---|---|---|
-| `Basco` @ Basco, Batanes | 0 features (queried key `[basco]`) | relation, Polygon, 690.45 km², 16 s |
-| `1st District of Palawan` @ Palawan | not found | relation (`boundary=political`), MultiPolygon, 10,920.49 km², 29 s |
-| `boundary=administrative` @ Basco | 17 unnamed ways | 8 named polygons with areas, 15 s |
-| `boundary=administrative` @ Palawan | 158 ways, 1 named | relations first, member ways removed |
-
-**Tests.** `rag_pipeline/tests/test_overpass_boundaries.py` (11): a split outline with an enclave
-becomes one polygon with a hole and the ellipsoidal area, a gap stays lines with no area, a river
-relation stays lines, the query shape, a timeout remark fails over to the next mirror and fails
-the call when every mirror times out, relations first for names, the bare-key rule, regex
-escaping, display simplification, and the area in the evidence text. The 143 tests in the other
-Overpass-touching files pass unchanged.
-
-**Not fixed.**
-- **Area is of the mapped outline**, sea included where OSM draws it; no land-only area is
-  computed.
-- **A province-sized name search runs close to the 30 s timeout** on a loaded mirror.
-- **For `boundary=administrative` over a large area, the `limit` relations returned are chosen by
-  Overpass's id order**, not by size or level.
-
-## Stage 61 — The agent can see why a tool answered as it did, and ask the service itself {#stage-61}
-
-**Why.** In the MultiGlobeQA Basco/Palawan turn (stage 60), the boundary query returned 158
-features and no error, all but one of them unnamed pieces of outlines. The agent noticed it was
-not getting what it needed, but could neither see why nor check another way: its tools are
-fixed code, the sandbox has no network, and the bridge offered only the same `overpass_search`.
-So it routed around the tool to Wikipedia. The three faults stage 60 fixed were found by running
-the tool live, reading the raw responses and testing hypotheses against the service directly,
-none of which the agent could do. Self-correction works when there is outside evidence to check
-against (CRITIC, arXiv 2305.11738); diagnosing a tool needs evidence that does not come from the
-tool under suspicion.
-
-**What changed.**
-- **`overpass_search` always returns `diagnostics`** (`rag_pipeline/search/overpass.py`):
-  elements by OSM type, features, how many are named, geometry types, the service's `remark`,
-  and `warnings` when a result looks wrong. Examples: no feature has a name (with the likely
-  reason: pieces of a relation), a name search matched nothing, outlines that did not close.
-- **`debug=True`** on `overpass_search` adds, per request: the Overpass QL actually sent, every
-  mirror attempt (endpoint, HTTP status, seconds, error, the service's remark) and the first
-  2,000 characters of the raw response. It reaches the model through both `overpass_search`
-  tools, and sandboxed code through the bridge's `overpass_search(debug=True)` (the first three
-  tiles, and on failure each mirror's status in the refusal).
-- **The bridge gains `overpass_query(ql)`** (`agent_runtime/tool_bridge.py`): the code's own
-  read-only Overpass QL, sent by the agent to the configured mirrors only. The raw JSON answer
-  goes to a file the code reads; the result carries the evidence (the query as sent, which
-  mirror answered, every attempt, elements by type, any remark). The model note tells the code
-  to use it when `overpass_search` does not ask what it needs or looks wrong, and to compare the
-  two before trusting either.
-- **The HTTP exchange is one function, `_exchange`**, which records every attempt; `_post` wraps
-  it.
-
-**Threat model for `overpass_query`.** Overpass QL cannot write, so the risks are cost and
-leakage, not changes:
-- **Leakage.** The query text reaches a public server, so its length is capped
-  (`OVERPASS_RAW_MAX_CHARS`, 4,000), as fetched URLs are (`MAX_URL_CHARS`). It goes only to
-  `OVERPASS_ENDPOINTS`; the code cannot name a host.
-- **Cost.** Output is forced to `[out:json]`; `[timeout:]` is capped at 90 s and `[maxsize:]` at
-  256 MB, written in front of the query because Overpass reads settings only from the first
-  statement. An answer over `AGENT_CODE_BRIDGE_RAW_MAX_MB` (50) fails that mirror. Each run may
-  send `AGENT_CODE_BRIDGE_MAX_RAW_QUERIES` (10), within the bridge's overall call cap.
-- **Record.** Every call is a tool call of the turn, streamed and in the lineage like the other
-  bridge calls.
-
-The bridge as a whole stays off unless `AGENT_CODE_BRIDGE=1`.
-
-**Tests.** `rag_pipeline/tests/test_tool_debug_raw_query.py` (18): diagnostics on unnamed pieces
-and on a name that matches nothing; debug's query, attempts (a timeout remark, then the mirror
-that answered) and raw excerpt, on success and on failure; the model tool passes `debug`; the raw
-query rules (JSON forced, timeout and memory capped and placed first, XML/CSV, empty, too long and
-malformed settings refused); the HTTP wait covers the server timeout; an oversized answer fails a
-mirror; through the bridge, the raw answer as a file with the evidence, refusals, the per-run cap,
-a refusal that names every mirror's status, `debug` and `diagnostics` from the bridge's
-`overpass_search`, and the client and model note. The existing bridge and Overpass tests pass
-unchanged.
-
-**Measured live.** Not yet: on 2026-10-15 every Overpass mirror but one returned 500, 502, 504 or
-timed out, and the end-to-end run through the local executor failed on that outage after 155 s.
-That run is also why bridge refusals now carry each mirror's status.
-
-**Not done.**
-- Debug output and a raw channel exist for Overpass only. The same `_exchange` pattern fits the
-  other agent-side fetchers (TIGERweb, 3DEP, the public-data fetch).
-- Nothing yet records a tool fallback as a defect report for the repair loop.
-
-## Stage 69 — A road network comes back whole, as a file {#stage-69}
-
-**Why.** Live, 2026-10-15 (local agent, deepseek-v4-flash): asked for the fastest drive across
-Chicago's Loop on OpenStreetMap streets (bbox 41.866–41.889 N, 87.645–87.618 W, one-ways
-followed, posted maxspeed else 30 mph), the agent called `overpass_search(feature='highway',
-limit=500)` and got 34 features, the motorway pieces. Two things kept the streets out of reach:
-- **No way to ask.** `_resolve_filter` maps the word 'highway' to `highway=motorway`, 'road(s)'
-  to `highway=primary` and 'street(s)' to `highway=residential`. A raw filter passed through only
-  if it held `=`, so `highway~"^(primary|secondary|...)$"` became a NAME search for that string,
-  and `highway in (motorway,trunk,primary)` did too.
-- **No room.** The model-facing tool returns at most 500 features into the model's context. A
-  network is for code to route over, not for the model to read; only the code bridge
-  (`max_features=20000`, to a file) could hold one.
-
-**What changed.**
-- **Raw filters pass through** (`rag_pipeline/search/overpass.py`, `_resolve_filter`): any
-  clause in Overpass tag-filter syntax (`key~"re"`, `key!~"re"`, `key!=v`, `"key"~"re",i`,
-  several as `[a][b]`), a bracketed `[key]` or `key=*` for every value of a key, and
-  `key in (a, b)`, rewritten to `key~"^(a|b)$"` since Overpass has no `in`. Plain words, bare
-  keys and names resolve as before.
-- **'road network' asks for the drivable network** (`DRIVE_NETWORK_FILTER`), and so do 'street
-  network', 'drivable roads', 'drive network', 'all roads' and a few more. The classes are the
-  ones OSMnx's `drive` network keeps: motorway, trunk, primary, secondary, tertiary,
-  unclassified, residential, living_street and the five `_link` ramps. Service roads (driveways,
-  parking aisles, alleys) are left out, as OSMnx leaves them out of `drive`; so are `area=yes`
-  and ways whose `access`, `motor_vehicle` or `motorcar` is `private` or `no`.
-- **'highway' still means `highway=motorway`.** It has since the tool was added (4e295af), no
-  test pins it, and in US usage a highway is a major road. Changing it would silently change
-  every "highways in X" answer. Instead `diagnostics.warnings` now says, for road/highway/street
-  words, that the result is one road class and names 'road network' and the regex form.
-- **A network goes to a file** (`agent_runtime/langchain_granular_tools.py`,
-  `_road_network_result`). When the resolved filter is the `highway` key with more than one
-  value (bare, a regex or an exclusion; `is_road_network_filter`), both `overpass_search` tools
-  (the search peer's and the analyze/code peers') fetch the whole area through the bridge's
-  tiling (`tool_bridge.fetch_osm_features`, factored out of `_overpass_handler`: pages of 5,000,
-  a full tile split in four, a failed one retried then split, no partial answer). The ways are
-  written to `osm_road_network.geojson` with every tag as a property plus `highway`, `name`,
-  `oneway`, `maxspeed` and `length_m`. Points with the same tags (signals, crossings) are left
-  out and counted. The model reads a summary instead of features: counts by class, one-way
-  ways by direction, maxspeed coverage and values, total km, the longest named streets, the
-  `file_id`, and how to route (ways meet at shared vertices; what `oneway=-1` means; maxspeed is
-  text). The map draws the file by URL (`map_layer`, id keyed on filter and bbox, so a repeat
-  replaces its own layer), and one evidence document states what was fetched. A single class
-  (`highway=primary`) is unchanged: features in the result, limit 500.
-
-**Tests.** `rag_pipeline/tests/test_overpass_road_network.py` (39), all offline
-(`requests.post` patched): filter resolution for raw clauses, `[key]`, `key=*`, `key in (...)`,
-and the unchanged words; the network phrases and what counts as a network; the regex and the
-network filter reach Overpass as tag selectors; the one-class warning; for both tools, an
-840-way grid (past the old 500) comes back as a file with every way and its tags, counts by
-class, oneway and maxspeed, under 8 KB of result; the layer reaches the map by URL; the same
-network twice is one layer; an outage is an error with no file; no location; a single class
-still returns features; the bridge gets the network filter. Existing Overpass, bridge, OSM-peer
-and map-delivery tests pass unchanged.
-
-**Measured live,** 2026-10-15 23:30 CDT, the Loop bbox through the analyze/code peers' tool:
-1,505 ways, 112.2 km, in one tile (z.overpass-api.de refused the connection,
-overpass.kumi.systems answered in 2.0 s). Secondary 1,102, tertiary 163, residential 79,
-motorway_link 42, trunk 37, motorway 34, secondary_link 20, trunk_link 17, unclassified 11; 1,124
-one-way ways, maxspeed on 183. Built into a directed graph by shared coordinates (one-ways
-followed, maxspeed else 30 mph), 3,634 of 4,435 vertices (82%) fall in one strongly connected
-component and 4,317 (97%) in one weakly connected one. Of the 801 outside the strong component,
-715 lie within about 200 m of the box edge (279 on motorway ramps): streets and ramps the box cuts
-off, which can be entered but not left inside it. The SW to NE corner drive is 5.1 min. The agent
-end to end (the model choosing 'road network') is not measured here.
-
-**Not done.**
-- **Concurrent calls.** That night the model fired three Overpass calls at once and got 429; the
-  mirrors were also failing on their own (500 from kumi.systems and private.coffee, 502 and
-  timeouts from overpass-api.de and lz4, 400 from maps.mail.ru). Calls are neither serialized
-  nor deduplicated across a turn. A per-process lock around `_exchange`, or a short memo keyed
-  on the query text like the bridge's, would stop the 429s; not done here.
-- **Walk and bike networks.** Only the drive network has a phrase; a raw filter reaches the
-  others.
-- **Node ids.** The file joins ways by identical coordinates. Overpass's `out geom` also gives
-  each way's node ids, which would join exactly; they are not carried.
 
 ## Stage 64 — Disputed claims are checked by code against the turn's data {#stage-64}
 
@@ -10885,6 +10747,7 @@ Its prompt told it to do exactly that with a claim whose part of the record had 
 - **Cost.** One more model call and one sandbox run per turn with disputed claims.
 - **The local subprocess backend lacks geopandas.** Use the Docker sandbox, as deployed.
 
+
 ## Stage 65 — A finished map is not followed by a search of the turn's own files {#stage-65}
 
 **Why.** The Chicago demo's SKATER step (step 3) took about 8 minutes, live on Lumen deepseek,
@@ -10947,6 +10810,77 @@ with "Parquet magic bytes not found" on a GeoJSON file.
 - `list_conversation_files` is still open to the search peer: a listing costs one call.
 - The veto is lexical. A request that wants both the map and outside sources has to say so in
   words the regex knows.
+
+
+## Stage 66 — Answer validation can be turned off {#stage-66}
+
+**Why.** Once a turn's work is done, it checks the answer. On Lumen deepseek that checking
+outlasts the work. The Chicago demo, run locally on 2026-10-15:
+- **Step 1** (rates): 2 min 46 s of 4 min 57 s.
+- **Step 3** (SKATER): 4 min 55 s of 7 min 48 s. That was two grounding audits (48 s and 63 s), a
+  claim check (34 s), and a re-grounding pass that re-ran the whole analysis (62 s) because the
+  audit could not place one sentence ("79% of the total variance").
+
+The tools themselves took well under a second (`regionalize` 0.2 s, `add_map_layer` 0.3 s). A
+demo, or a client that wants the answer sooner and accepts that it is unchecked, had no way to
+skip the checks: `do_audit` was a graph-build parameter, and nothing reached the number scan or
+the re-grounding pass.
+
+**What changed** (`agent_runtime/client_profile.py`, beside the chat-only profile). The switch is
+a ContextVar bound per request, as `chatOnly` is:
+- `validation: false` (or `validate: false`) in the request body turns it off for that turn;
+- otherwise `AGENT_VALIDATION` decides: on by default, and `0`/`false`/`off`/`no` turns it off
+  for every turn;
+- a request's `validation: true` wins over a server default of off.
+
+With validation off, `synthesize` skips:
+- the grounding audit;
+- the reconciliation of the audit with the artifacts and the code gate's scoping;
+- the number scan, so no statement is cut;
+- the re-grounding pass;
+- the cross-run agreement and reference recomputations;
+- the artifact corrections.
+
+The peers are not offered the `audit_answer_grounding` tool either. Link sanitisation still runs:
+it stops fabricated download links and internal paths, so it is safety, not checking. So does the
+in-sandbox invariant gate, which enforces library contracts while the code runs and has its own
+switch, `AGENT_INVARIANT_GATE`.
+
+**An unchecked answer is marked in the payload, not in the text.** Its verdict has one finding,
+`validation` / unverifiable, so the status is `unverified`, never `verified`, and the API result
+carries `validation: false`. The answer text carries nothing about it. A first version ended the
+answer with "Not checked: answer validation was turned off for this reply."; the user asked for it
+to go, because whoever turned validation off chose it.
+
+The number scan's quiet line ("N statements … were left out") is now written as `*text*`. Written
+as `_text_`, the map UI showed the underscores, because its renderer (`markdown.ts`) italicises
+only asterisks. The live check below found it.
+
+**The map UI setting.** Settings has an "Answer validation" select: Server default, "On: check
+each answer", or "Off: answer sooner, unchecked". It persists with the other settings
+(`AgentCfg.validation`) and is sent as `validation: true/false` only when chosen, so "Server
+default" sends nothing and the deployment's `AGENT_VALIDATION` decides.
+
+**Live check** (local demo, Lumen deepseek, `AGENT_VALIDATION=0`, 2026-10-15). Chicago step 1
+took 2 min 09 s, against 4 min 57 s with validation on an hour earlier. The answer phase took 7 s,
+against 2 min 46 s. The answer matched the pinned values (citywide 30.35, Fuller Park 118.02).
+
+A second run, with the agent's default left on and the UI setting at Off, took 2 min 00 s. The
+server logged that the request turned validation off, and the answer carried no line about it.
+That answer gave the citywide rate as "≈ 30.4", but 80,353 ÷ 2,647,621 × 1,000 = 30.349, which
+rounds to 30.3. The number scan exists to catch a figure no tool produced, so this shows what
+turning validation off gives up.
+
+**Tests.** `rag_pipeline/tests/test_validation_switch.py` has 21 tests:
+- the default, the server switch, the request field and its precedence;
+- the result flag;
+- the audit tool unbound when off and bound when on;
+- a whole turn with validation off: no audit, one analysis run, the unrecorded figure kept,
+  nothing appended, status `unverified`;
+- the same turn with validation on, as a control, is audited and has no `validation` finding;
+- an unchecked verdict renders no text.
+
+
 ## Stage 67 — One map layer per source file {#stage-67}
 
 **Why.** Live, Chicago demo step 3 (SKATER), 2026-10-15:
@@ -11095,6 +11029,86 @@ answer, which is the defect, and now asserts the key is absent.
   facts note carries the numbers separately.
 - With validation off, nothing checks an answer that denies delivered layers. Stage 66 leaves
   that out by design.
+
+
+## Stage 69 — A road network comes back whole, as a file {#stage-69}
+
+**Why.** Live, 2026-10-15 (local agent, deepseek-v4-flash): asked for the fastest drive across
+Chicago's Loop on OpenStreetMap streets (bbox 41.866–41.889 N, 87.645–87.618 W, one-ways
+followed, posted maxspeed else 30 mph), the agent called `overpass_search(feature='highway',
+limit=500)` and got 34 features, the motorway pieces. Two things kept the streets out of reach:
+- **No way to ask.** `_resolve_filter` maps the word 'highway' to `highway=motorway`, 'road(s)'
+  to `highway=primary` and 'street(s)' to `highway=residential`. A raw filter passed through only
+  if it held `=`, so `highway~"^(primary|secondary|...)$"` became a NAME search for that string,
+  and `highway in (motorway,trunk,primary)` did too.
+- **No room.** The model-facing tool returns at most 500 features into the model's context. A
+  network is for code to route over, not for the model to read; only the code bridge
+  (`max_features=20000`, to a file) could hold one.
+
+**What changed.**
+- **Raw filters pass through** (`rag_pipeline/search/overpass.py`, `_resolve_filter`): any
+  clause in Overpass tag-filter syntax (`key~"re"`, `key!~"re"`, `key!=v`, `"key"~"re",i`,
+  several as `[a][b]`), a bracketed `[key]` or `key=*` for every value of a key, and
+  `key in (a, b)`, rewritten to `key~"^(a|b)$"` since Overpass has no `in`. Plain words, bare
+  keys and names resolve as before.
+- **'road network' asks for the drivable network** (`DRIVE_NETWORK_FILTER`), and so do 'street
+  network', 'drivable roads', 'drive network', 'all roads' and a few more. The classes are the
+  ones OSMnx's `drive` network keeps: motorway, trunk, primary, secondary, tertiary,
+  unclassified, residential, living_street and the five `_link` ramps. Service roads (driveways,
+  parking aisles, alleys) are left out, as OSMnx leaves them out of `drive`; so are `area=yes`
+  and ways whose `access`, `motor_vehicle` or `motorcar` is `private` or `no`.
+- **'highway' still means `highway=motorway`.** It has since the tool was added (4e295af), no
+  test pins it, and in US usage a highway is a major road. Changing it would silently change
+  every "highways in X" answer. Instead `diagnostics.warnings` now says, for road/highway/street
+  words, that the result is one road class and names 'road network' and the regex form.
+- **A network goes to a file** (`agent_runtime/langchain_granular_tools.py`,
+  `_road_network_result`). When the resolved filter is the `highway` key with more than one
+  value (bare, a regex or an exclusion; `is_road_network_filter`), both `overpass_search` tools
+  (the search peer's and the analyze/code peers') fetch the whole area through the bridge's
+  tiling (`tool_bridge.fetch_osm_features`, factored out of `_overpass_handler`: pages of 5,000,
+  a full tile split in four, a failed one retried then split, no partial answer). The ways are
+  written to `osm_road_network.geojson` with every tag as a property plus `highway`, `name`,
+  `oneway`, `maxspeed` and `length_m`. Points with the same tags (signals, crossings) are left
+  out and counted. The model reads a summary instead of features: counts by class, one-way
+  ways by direction, maxspeed coverage and values, total km, the longest named streets, the
+  `file_id`, and how to route (ways meet at shared vertices; what `oneway=-1` means; maxspeed is
+  text). The map draws the file by URL (`map_layer`, id keyed on filter and bbox, so a repeat
+  replaces its own layer), and one evidence document states what was fetched. A single class
+  (`highway=primary`) is unchanged: features in the result, limit 500.
+
+**Tests.** `rag_pipeline/tests/test_overpass_road_network.py` (39), all offline
+(`requests.post` patched): filter resolution for raw clauses, `[key]`, `key=*`, `key in (...)`,
+and the unchanged words; the network phrases and what counts as a network; the regex and the
+network filter reach Overpass as tag selectors; the one-class warning; for both tools, an
+840-way grid (past the old 500) comes back as a file with every way and its tags, counts by
+class, oneway and maxspeed, under 8 KB of result; the layer reaches the map by URL; the same
+network twice is one layer; an outage is an error with no file; no location; a single class
+still returns features; the bridge gets the network filter. Existing Overpass, bridge, OSM-peer
+and map-delivery tests pass unchanged.
+
+**Measured live,** 2026-10-15 23:30 CDT, the Loop bbox through the analyze/code peers' tool:
+1,505 ways, 112.2 km, in one tile (z.overpass-api.de refused the connection,
+overpass.kumi.systems answered in 2.0 s). Secondary 1,102, tertiary 163, residential 79,
+motorway_link 42, trunk 37, motorway 34, secondary_link 20, trunk_link 17, unclassified 11; 1,124
+one-way ways, maxspeed on 183. Built into a directed graph by shared coordinates (one-ways
+followed, maxspeed else 30 mph), 3,634 of 4,435 vertices (82%) fall in one strongly connected
+component and 4,317 (97%) in one weakly connected one. Of the 801 outside the strong component,
+715 lie within about 200 m of the box edge (279 on motorway ramps): streets and ramps the box cuts
+off, which can be entered but not left inside it. The SW to NE corner drive is 5.1 min. The agent
+end to end (the model choosing 'road network') is not measured here.
+
+**Not done.**
+- **Concurrent calls.** That night the model fired three Overpass calls at once and got 429; the
+  mirrors were also failing on their own (500 from kumi.systems and private.coffee, 502 and
+  timeouts from overpass-api.de and lz4, 400 from maps.mail.ru). Calls are neither serialized
+  nor deduplicated across a turn. A per-process lock around `_exchange`, or a short memo keyed
+  on the query text like the bridge's, would stop the 429s; not done here.
+- **Walk and bike networks.** Only the drive network has a phrase; a raw filter reaches the
+  others.
+- **Node ids.** The file joins ways by identical coordinates. Overpass's `out geom` also gives
+  each way's node ids, which would join exactly; they are not carried.
+
+
 ## Stage 70 — Overpass keeps its last good answer {#stage-70}
 
 **Why.** From 2026-10-15 22:55 to 10-16 07:45 CDT all six public mirrors in `_DEFAULT_ENDPOINTS`
