@@ -5658,3 +5658,56 @@ rather than from the previous one.
 **Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
   bound; data the user says they lack can still be substituted when invited; off by default.
 
+## 2026-10-15 · M8.95 · A named boundary comes back as one polygon with its area (architecture stage 60)
+
+**Change** `overpass_search` queries OSM relations, rebuilds boundary and multipolygon relations
+  into polygons with `area_km2` (ellipsoidal, from the full outline), drops the member ways of
+  relations it returns, and simplifies large outlines only for what the model and map read.
+  A name search asks for relations alone first. Only real OSM keys are accepted bare. A
+  timeout `remark` in a 200 response fails over to the next mirror.
+
+**Why** MultiGlobeQA's "Is Basco larger in area than 1st District of Palawan?" got 17 and 158
+  unnamed boundary segments and no polygon, so the agent answered from Wikipedia with no area.
+  `feature="Basco"` was being sent as the tag key `[basco]`.
+
+**Measured** Live: Basco 690.45 km² (OSM outline, sea included), the district 10,920.49 km²,
+  8 named polygons around Basco where there were 17 unnamed ways.
+
+**Not fixed** No land-only area; province-sized name searches run near the 30 s timeout; the
+  relations kept under `limit` follow Overpass's id order.
+
+
+## 2026-10-15 · M8.96 · The agent can see why a tool answered as it did, and ask the service itself (architecture stage 61)
+
+**Change** `overpass_search` always returns `diagnostics` (types, named count, remark, warnings),
+  and on `debug=True` the Overpass QL sent, every mirror attempt and the raw response start, for
+  the model and through the bridge. The bridge gains `overpass_query(ql)`: the code's own
+  read-only query, JSON only, timeout/memory/length capped, configured mirrors only, 10 per run.
+
+**Why** The Basco/Palawan turn got 157 unnamed boundary pieces with no error and could not check
+  them another way, so it answered from Wikipedia. A tool can only be diagnosed with evidence that
+  does not come from the tool.
+
+**Measured** 18 offline tests. Live end-to-end blocked: Overpass mirrors returned 500/502/504 on
+  2026-10-15; bridge refusals now carry each mirror's status because of it.
+
+**Not fixed** Overpass only; no defect report for the repair loop yet.
+
+## 2026-10-15 · M8.103 · A road network comes back whole, as a file (architecture stage 69)
+
+**Change** `overpass_search` passes raw Overpass filters through (`~`, `!~`, `!=`, `[key]`,
+  `key=*`, `key in (...)`); 'road network' (and 'street network', 'drivable roads', ...) asks for
+  the OSMnx `drive` classes with ramps, no service or private roads. A `highway` filter with more
+  than one value is fetched whole through the bridge's tiling, written to a GeoJSON file, drawn
+  on the map by URL, and the model reads counts and a summary. 'highway' still means motorway,
+  with a warning that it is one class.
+
+**Why** The Loop routing turn asked for 'highway' and routed over 34 motorway pieces; a regex
+  filter became a name search, and the tool returned at most 500 features into context.
+
+**Measured** 39 offline tests. Live: the Loop bbox gave 1,505 ways / 112.2 km in one tile;
+  82% of vertices in one strongly connected component (most of the rest within 200 m of the
+  box edge); SW to NE corner 5.1 min. The model choosing 'road network' end to end: not run.
+
+**Not fixed** Concurrent Overpass calls are neither serialized nor deduplicated (429 at three at
+  once); no walk/bike phrase; ways join by coordinates, not node ids.
