@@ -1020,7 +1020,7 @@ export default function App() {
   const startDemo = useCallback(async (c: DemoCase) => {
     resetConversation();
     setMapVisible(true);
-    pushMsg({ role: 'agent', text: `Demo: ${c.title}. ${c.blurb}` });
+    pushMsg({ role: 'agent', text: `${c.title}. ${c.blurb}` });
     if (c.files.length) {
       const files = await loadDemoFiles(c);
       await onUpload(files);
@@ -1106,7 +1106,7 @@ export default function App() {
         {/* The Demos tab's steps live in their own column on the LEFT, not above the composer:
             there they took half the chat column and crowded the answers they produce. */}
         {tab === 'demos' && (
-          <aside className={`demoside${demoOpen ? '' : ' closed'}`} aria-label="Demo cases">
+          <aside className={`demoside${demoOpen ? '' : ' closed'}`} aria-label="Spatial analysis examples">
             {/* Hidden, not unmounted, when folded: the open case and the steps already asked
                 are the panel's own state, and folding must not throw them away. */}
             <div hidden={!demoOpen}>
@@ -1118,8 +1118,8 @@ export default function App() {
             </div>
             {!demoOpen && (
               <button type="button" className="demorail" onClick={() => setDemoOpen(true)}
-                      title="Show the demo cases" aria-label="Show the demo cases">
-                <span>Demos</span>
+                      title="Show the spatial analysis examples" aria-label="Show the spatial analysis examples">
+                <span>Spatial Analysis</span>
               </button>
             )}
           </aside>
