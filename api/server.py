@@ -514,6 +514,26 @@ def _keep_platform_elements(formatted: dict) -> None:
             **orch, "evidence": platform_elements_only(orch["evidence"])}}
 
 
+def _daily_limit_refusal(user: Any) -> Optional[dict]:
+    """The refusal for a signed-in user who has spent today's limit, or None.
+
+    Lumen coins and OpenAI dollars are limited separately (agent_runtime/usage_limit.py). A
+    caller identified by nobody (the service key, dev and local modes) is never limited."""
+    owner = getattr(user, "id", None) if user is not None else None
+    if not owner:
+        return None
+    try:
+        from agent_runtime import usage_limit
+
+        refusal = usage_limit.refusal(owner)
+    except Exception:  # noqa: BLE001 - a broken ledger must not lock everyone out
+        logger.warning("daily usage check failed; letting the turn run", exc_info=True)
+        return None
+    if refusal:
+        logger.info("Chat refused: daily usage limit reached (%s)", refusal["spent"])
+    return refusal
+
+
 def _format_agent_chat_result(payload: dict) -> dict:
     """Align output shape to the legacy Node /llm/search result object."""
     answer = payload.get("answer") or ""
@@ -2355,6 +2375,10 @@ def agent_chat():
         if not user_query:
             return jsonify({"error": "Missing userQuery in request body."}), 400
 
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            return jsonify(_limit_refusal), 429
+
         logger.info(f"Processing agent chat: {user_query[:100]}...")
         # Bind the conversation for the whole turn, so every file a tool writes records who
         # wrote it and every lookup sees this conversation's files first. Set at the EDGE
@@ -2895,6 +2919,18 @@ def agent_chat_stream():
                 yield _sse_event("error", {"error": "Missing userQuery in request body."})
             return Response(
                 stream_with_context(_single_error()),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            )
+
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            # An SSE error event like the missing-query case above, so the chat shows the message
+            # in place of an answer instead of a raw HTTP failure.
+            def _limit_error():
+                yield _sse_event("error", _limit_refusal)
+            return Response(
+                stream_with_context(_limit_error()),
                 mimetype="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
             )

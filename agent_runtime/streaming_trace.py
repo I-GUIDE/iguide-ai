@@ -568,15 +568,24 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def __init__(self) -> None:
         super().__init__()
         self._models: Dict[str, str] = {}
+        # Each run's endpoint, so a call can be recognized as Lumen's by WHERE it went: a model id
+        # like gpt-4o can exist on Lumen and on OpenAI, billing different accounts in different
+        # currencies. Only the base URL is kept; serialized kwargs also carry the API key slot.
+        self._bases: Dict[str, str] = {}
         self._lock = Lock()
         # Every call of the turn, priced, so the turn can report what it cost
         # (model_pricing.summarize). One handler per turn, so this never mixes turns.
         self.calls: List[Dict[str, Any]] = []
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
+        params = kwargs.get("invocation_params") or {}
+        base = (((serialized or {}).get("kwargs") or {}).get("openai_api_base")
+                or params.get("base_url") or params.get("openai_api_base"))
         with self._lock:
-            self._models[str(kwargs.get("run_id"))] = StreamingTraceCallbackHandler._model_label(
-                serialized, kwargs)
+            run = str(kwargs.get("run_id"))
+            self._models[run] = StreamingTraceCallbackHandler._model_label(serialized, kwargs)
+            if isinstance(base, str) and base:
+                self._bases[run] = base
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
         self.on_chat_model_start(serialized, prompts, **kwargs)
@@ -584,6 +593,7 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         with self._lock:
             model = self._models.pop(str(kwargs.get("run_id")), None)
+            base = self._bases.pop(str(kwargs.get("run_id")), None)
         usage: Dict[str, Any] = {}
         for group in getattr(response, "generations", None) or []:
             for generation in group or []:
@@ -614,13 +624,25 @@ class UsageCallbackHandler(BaseCallbackHandler):
             payload["usage"] = "absent"
         if usage:
             # What this call cost, priced as it ends, so each step of the turn carries its own
-            # cost and not only the total. None when the model has no per-token price.
+            # cost and not only the total. A Lumen call is billed in coins at Lumen's published
+            # rate (lumen_coins) and never at an OpenAI dollar rate for the same model id.
+            lumen = False
+            try:
+                from agent_runtime import lumen_coins
+
+                lumen = lumen_coins.is_lumen(base)
+                if lumen:
+                    payload["provider"] = "lumen"
+                    payload["cost_coins"] = lumen_coins.call_coins(
+                        model, payload.get("input_tokens"), payload.get("output_tokens"))
+            except Exception:  # noqa: BLE001 - pricing must never break a model call
+                payload["cost_coins"] = None
             try:
                 from agent_runtime.model_pricing import call_cost
 
-                payload["cost_usd"] = call_cost(model, payload.get("input_tokens"),
-                                                payload.get("output_tokens"),
-                                                payload.get("cached_input_tokens"))
+                payload["cost_usd"] = None if lumen else call_cost(
+                    model, payload.get("input_tokens"), payload.get("output_tokens"),
+                    payload.get("cached_input_tokens"))
             except Exception:  # noqa: BLE001 - pricing must never break a model call
                 payload["cost_usd"] = None
         agent = _TRACE_AGENT.get()
@@ -631,6 +653,7 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         with self._lock:
             self._models.pop(str(kwargs.get("run_id")), None)
+            self._bases.pop(str(kwargs.get("run_id")), None)
 
 
 _USAGE_HANDLER: ContextVar[Optional[UsageCallbackHandler]] = ContextVar(
@@ -673,7 +696,19 @@ def turn_usage() -> Optional[Dict[str, Any]]:
 
         with handler._lock:
             calls = list(handler.calls)
-        return summarize(calls)
+        balance = None
+        if any(c.get("provider") == "lumen" for c in calls):
+            # Once per turn, at its end: what the Lumen account has left after this turn.
+            from agent_runtime import lumen_coins
+
+            balance = lumen_coins.coins_available()
+            try:
+                from agent_runtime import lumen_failover
+
+                lumen_failover.observe(balance)
+            except Exception:  # noqa: BLE001 - the failover check must never break a turn
+                logger.warning("Lumen failover observe failed", exc_info=True)
+        return summarize(calls, coins_available=balance)
     except Exception:  # noqa: BLE001 - a cost summary must never break a turn
         logger.warning("turn usage summary failed", exc_info=True)
         return None

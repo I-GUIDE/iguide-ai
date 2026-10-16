@@ -293,6 +293,11 @@ def build_default_llm() -> Any:
     lumen = _lumen_settings()
     if lumen:
         return ChatOpenAI(temperature=0.0, **lumen)     # no max_tokens: see build_llm's branch
+    fb = _lumen_fallback()
+    if fb:
+        # The Lumen pool is running low (lumen_failover): the default moves to the fallback
+        # until a refill brings usage back under the return threshold.
+        return build_llm(provider=fb["provider"], model=fb["model"])
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -376,6 +381,17 @@ def _lumen_base_url() -> str:
     return normalize_openai_base_url(os.getenv("LUMEN_URL") or LUMEN_DEFAULT_URL)
 
 
+def _lumen_fallback() -> Optional[Dict[str, str]]:
+    """The fallback model while Lumen's pool is low, or None (agent_runtime/lumen_failover.py)."""
+    try:
+        from agent_runtime import lumen_failover
+
+        return lumen_failover.fallback() if lumen_failover.failed_over() else None
+    except Exception:  # noqa: BLE001 - a failover check must never stop the default building
+        logger.warning("Lumen failover check failed; staying on Lumen", exc_info=True)
+        return None
+
+
 def _lumen_settings() -> Optional[Dict[str, Any]]:
     """NCSA Lumen as the PROCESS default, or None. Selected by AGENT_LLM_PROVIDER=lumen.
 
@@ -386,6 +402,8 @@ def _lumen_settings() -> Optional[Dict[str, Any]]:
     default, as with AnvilGPT.
     """
     if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "lumen":
+        return None
+    if _lumen_fallback():
         return None
     key = os.getenv("LUMEN_API_KEY")
     if not key:
@@ -816,6 +834,9 @@ def active_llm_description() -> Dict[str, Any]:
     if lumen:
         return {"provider": "lumen", "model": lumen["model"],
                 "base_url": lumen["base_url"], "max_tokens": "unset (server default)"}
+    fb = _lumen_fallback()
+    if fb:
+        return {**fb, "reason": "Lumen pool low: failed over (lumen_failover)"}
     if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
         return {"provider": "vllm",
                 "model": os.getenv("VLLM_MODEL"),
