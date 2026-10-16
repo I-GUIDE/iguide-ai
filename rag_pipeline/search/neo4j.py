@@ -72,6 +72,11 @@ def _neo4j_db() -> Optional[str]:
 
 
 def _neo4j_run(cypher: str, params: Dict[str, Any], driver: Optional[Any] = None) -> List[Dict[str, Any]]:
+    from agent_runtime.client_profile import graph_search_allowed
+
+    # Per turn, not in _neo4j_driver: that is cached, so a check there would stick (chat-only).
+    if not graph_search_allowed():
+        return []
     db_driver = driver or _neo4j_driver()
     if db_driver is None:
         return []

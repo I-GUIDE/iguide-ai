@@ -42,12 +42,32 @@ from typing import Iterable, Mapping, Optional
 # admin_boundary, analysis tools) also writes a downloadable file, so it stays.
 MAP_ONLY_TOOLS = frozenset({"add_map_layer", "add_raster_layer"})
 
+# Search sources a chat-only client does not get (user, 2026-10-16): the platform's frontend reads
+# its own element format, and hits from the Neo4j graph search and the agent's extracted KB do not
+# fit it. The tools are not offered, and the backends refuse during a chat-only turn too, because
+# deterministic paths (the search sweep, the KB join, popularity and by-id lookups) call them
+# without any tool.
+CHAT_ONLY_BLOCKED_TOOLS = frozenset({
+    "neo4j_search", "neo4j_get_element_by_id", "neo4j_explore_related_nodes",
+    "agent_kb_search", "get_kb_block", "kb_method_search", "get_method_contract",
+})
+
 _CHAT_ONLY: ContextVar[bool] = ContextVar("agent_chat_only", default=False)
 
 
 def chat_only() -> bool:
     """True when the current turn is for a client with no map."""
     return bool(_CHAT_ONLY.get())
+
+
+def graph_search_allowed() -> bool:
+    """False during a chat-only turn: no Neo4j query runs (see CHAT_ONLY_BLOCKED_TOOLS)."""
+    return not chat_only()
+
+
+def agent_kb_allowed() -> bool:
+    """False during a chat-only turn: the agent KB is not searched, read or joined."""
+    return not chat_only()
 
 
 def set_chat_only(on: bool) -> Token:
@@ -169,7 +189,8 @@ VALIDATION_OFF_FINDING = ("not checked: answer validation is turned off for this
                           "statement in it was compared with the turn's record")
 
 
-__all__ = ["MAP_ONLY_TOOLS", "chat_only", "set_chat_only", "reset_chat_only", "wants_chat_only",
+__all__ = ["MAP_ONLY_TOOLS", "CHAT_ONLY_BLOCKED_TOOLS", "graph_search_allowed",
+           "agent_kb_allowed", "chat_only", "set_chat_only", "reset_chat_only", "wants_chat_only",
            "CHAT_ONLY_NOTE", "CHAT_ONLY_CORRECTION", "VALIDATION_ENV", "VALIDATION_TOOLS",
            "validation_enabled", "validation_default", "set_validation", "reset_validation",
            "requested_validation", "VALIDATION_OFF_FINDING"]

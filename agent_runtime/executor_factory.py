@@ -1964,10 +1964,12 @@ def build_agent_executor(
             tools = filtered
     # A chat-only client has no map, so the tools whose only output is a map layer are not
     # offered at all (client_profile). Every peer is built here, so this is the one place to do it.
-    from agent_runtime.client_profile import MAP_ONLY_TOOLS, chat_only
+    from agent_runtime.client_profile import CHAT_ONLY_BLOCKED_TOOLS, MAP_ONLY_TOOLS, chat_only
 
     if chat_only():
-        tools = [tool for tool in tools if getattr(tool, "name", "") not in MAP_ONLY_TOOLS]
+        # Nor graph or agent-KB search: their hits do not fit the platform frontend's elements.
+        tools = [tool for tool in tools
+                 if getattr(tool, "name", "") not in MAP_ONLY_TOOLS | CHAT_ONLY_BLOCKED_TOOLS]
     # With answer validation off, a peer is not offered the audit tool either.
     from agent_runtime.client_profile import VALIDATION_TOOLS, validation_enabled
 

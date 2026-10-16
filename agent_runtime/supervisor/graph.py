@@ -3763,7 +3763,11 @@ def kb_ablated() -> bool:
     """
     import os
 
-    return (os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+    from agent_runtime.client_profile import agent_kb_allowed
+
+    # A chat-only client gets no KB either (client_profile.CHAT_ONLY_BLOCKED_TOOLS).
+    return ((os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+            or not agent_kb_allowed())
 
 
 def _peer_kb_tools() -> set:

@@ -202,6 +202,11 @@ def _neo4j_db() -> Optional[str]:
 
 
 def _neo4j_run(cypher: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from agent_runtime.client_profile import graph_search_allowed
+
+    # Per turn, not in _neo4j_driver: that is cached, so a check there would stick (chat-only).
+    if not graph_search_allowed():
+        return []
     database = _neo4j_db()
     driver = _neo4j_driver()
     with (driver.session(database=database) if database else driver.session()) as session:
@@ -679,6 +684,11 @@ def get_neo4j_agent_results(user_query: str, limit: int = 12) -> List[Dict[str, 
 
     Returns hits in the standard _source shape used throughout the pipeline.
     """
+    from agent_runtime.client_profile import graph_search_allowed
+
+    if not graph_search_allowed():   # chat-only: skip the Text2Cypher model call as well
+        return []
+
     query = (user_query or "").strip()
     if not query:
         return []

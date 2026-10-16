@@ -5830,3 +5830,17 @@ rather than from the previous one.
 **Next** For the Hawaii demos, run each demo turn once beforehand and set
   `OVERPASS_CACHE_TTL_S` to cover the event. Not deployed. Not done: an early exit before every
   mirror has failed; a 429 back-off; sharing slots across processes.
+
+## 2026-10-16 · M8.105 · A chat-only client gets no graph or agent-KB search (architecture stage 71)
+
+**Change** For a chat-only turn (the platform), the Neo4j and agent-KB tools are not bound, and the
+  Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse.
+  `kb_ablated()` is true for the turn. The check is per turn, not in the cached driver.
+
+**Why** The platform frontend reads its own element format; graph and agent-KB hits do not fit it
+  (agent-KB rows link to `/undefined/`). User request.
+
+**Measured** 13 offline tests; the Stage 63 tests still pass.
+
+**Not fixed** MCP element tools run in another process; the platform's own ranking is unchanged.
+
