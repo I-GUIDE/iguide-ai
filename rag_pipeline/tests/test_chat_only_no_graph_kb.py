@@ -45,14 +45,15 @@ def _bound_tools(monkeypatch, names):
     return set(seen["tools"])
 
 
-def test_the_blocked_list_is_the_graph_and_kb_tools():
-    assert set(BLOCKED) == set(cp.CHAT_ONLY_BLOCKED_TOOLS)
+def test_the_graph_and_kb_tools_are_on_the_blocked_list():
+    # The list grew (web and Overpass, test_chat_only_platform_sources); these stay on it.
+    assert set(BLOCKED) <= set(cp.CHAT_ONLY_BLOCKED_TOOLS)
 
 
 def test_graph_and_kb_tools_are_not_bound_chat_only(monkeypatch, chat_only):
-    bound = _bound_tools(monkeypatch, BLOCKED + ["keyword_search", "web_search"])
+    bound = _bound_tools(monkeypatch, BLOCKED + ["keyword_search", "spatial_search"])
     assert not bound & set(BLOCKED)
-    assert {"keyword_search", "web_search"} <= bound
+    assert {"keyword_search", "spatial_search"} <= bound
 
 
 def test_the_map_profile_keeps_them(monkeypatch):

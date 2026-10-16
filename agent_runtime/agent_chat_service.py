@@ -196,9 +196,11 @@ def _normalize_enabled_search_methods(enabled_search_methods: Optional[Sequence[
     Shares agent_runtime.search_methods with the API layer so a name is validated the same way on
     every entry point; an unknown name raises ValueError rather than silently disabling retrieval.
     """
+    from agent_runtime.client_profile import chat_only_search_methods
     from agent_runtime.search_methods import normalize_search_methods
 
-    return normalize_search_methods(enabled_search_methods)
+    # A chat-only client (the platform) searches only what it can show (client_profile).
+    return chat_only_search_methods(normalize_search_methods(enabled_search_methods))
 
 
 

@@ -498,6 +498,22 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     }
 
 
+def _keep_platform_elements(formatted: dict) -> None:
+    """Narrow a chat-only result's `elements` and `agent_result.orchestration_result.evidence` to
+    the platform's own element types. Copies on the way down: the payload is also what the turn's
+    trace and history were built from."""
+    from agent_runtime.client_profile import platform_elements_only
+
+    if isinstance(formatted.get("elements"), list):
+        formatted["elements"] = platform_elements_only(formatted["elements"])
+        formatted["count"] = len(formatted["elements"])
+    agent_result = formatted.get("agent_result")
+    orch = agent_result.get("orchestration_result") if isinstance(agent_result, dict) else None
+    if isinstance(orch, dict) and isinstance(orch.get("evidence"), list):
+        formatted["agent_result"] = {**agent_result, "orchestration_result": {
+            **orch, "evidence": platform_elements_only(orch["evidence"])}}
+
+
 def _format_agent_chat_result(payload: dict) -> dict:
     """Align output shape to the legacy Node /llm/search result object."""
     answer = payload.get("answer") or ""
@@ -528,6 +544,10 @@ def _format_agent_chat_result(payload: dict) -> dict:
     if chat_only():
         # Says which profile answered, so a caller can tell a chat-only turn from a map one.
         formatted["chatOnly"] = True
+        # The platform draws every evidence document as one of its knowledge elements; anything
+        # else (web pages, OpenGeoData records) became an "undefined" card with no thumbnail.
+        # OpenGeoData is already in `opengeodata_results`, extracted before this.
+        _keep_platform_elements(formatted)
     from agent_runtime.client_profile import validation_enabled
 
     if not validation_enabled():
