@@ -5806,3 +5806,27 @@ rather than from the previous one.
 
 **Not fixed** The 2,000-character cut of the serialized analysis result in the writer's prompt.
 
+## 2026-10-16 · M8.104 · Overpass keeps its last good answer (architecture stage 70)
+
+**Change** `rag_pipeline/search/overpass.py` `_exchange` keeps every good answer on disk, as
+  gzip JSON keyed by the sha256 of the exact query text (no endpoint in the key). The folder is
+  `OVERPASS_CACHE_DIR`, else `<AGENT_FILE_STORAGE_ROOT>/overpass_cache`, else
+  `~/.cache/iguide-agent/overpass`, never inside a git checkout. When every mirror fails, the
+  kept copy is served with `cached`, `cached_at`, `cache_age_s`, `cache_reason` and
+  `cache_note`. `overpass_search`, the road-network file, the bridge's feature fetch and raw
+  query, the evidence documents, the map layer label and the Sources line all say "cached copy
+  from <time> UTC". `OVERPASS_CACHE_TTL_S` (default off) serves a recent copy without asking. At
+  most `OVERPASS_MAX_CONCURRENT` (2) requests are in flight, and an identical query already in
+  flight is not sent again.
+
+**Why** 2026-10-15 22:55 → 10-16 07:45 CDT all six mirrors failed for hours (502 at capacity,
+  timeouts, 500, 504/400), and three calls at once got a 429. A Loop road-network turn took
+  148 s, on the fifth mirror. The team demos live; a failed fetch on stage is the risk.
+
+**Measured** 21 offline tests in `test_overpass_cache.py`, and one boundary test adjusted (it
+  asked one query twice). Mutations: never serving the cache fails 8 of them, no single-flight
+  fails 1. Not measured live: the mirrors were the outage.
+
+**Next** For the Hawaii demos, run each demo turn once beforehand and set
+  `OVERPASS_CACHE_TTL_S` to cover the event. Not deployed. Not done: an early exit before every
+  mirror has failed; a 429 back-off; sharing slots across processes.

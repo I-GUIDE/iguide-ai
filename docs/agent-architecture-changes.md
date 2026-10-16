@@ -79,6 +79,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 65 | [A finished map is not followed by a search of the turn's own files](#stage-65) | 2026-10-15 | the search peer stops re-reading the conversation's outputs; a search after a delivered map is vetoed unless retrieval was asked for; failure lines name the exception; choropleth_image reads GeoJSON |
 | 67 | [One map layer per source file](#stage-67) | 2026-10-15 | a layer's id is the content key of the file it shows, applied where every descriptor becomes a `map_layer` event; drawing a file again restyles and renames its layer in place |
+| 70 | [Overpass keeps its last good answer](#stage-70) | 2026-10-16 | every good Overpass answer is kept on disk by the hash of its query text; when every mirror fails the kept copy is served, marked `cached` with its time, and the Sources line says so; identical calls in flight are sent once, at most two requests at a time |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11094,3 +11095,101 @@ answer, which is the defect, and now asserts the key is absent.
   facts note carries the numbers separately.
 - With validation off, nothing checks an answer that denies delivered layers. Stage 66 leaves
   that out by design.
+## Stage 70 — Overpass keeps its last good answer {#stage-70}
+
+**Why.** From 2026-10-15 22:55 to 10-16 07:45 CDT all six public mirrors in `_DEFAULT_ENDPOINTS`
+failed for hours. overpass-api.de answered 502 "currently at capacity. All query workers are busy
+and the request queue is full". z. and lz4. timed out, kumi.systems and private.coffee answered
+500 at once, and maps.mail.ru 504 or 400. A one-node test query failed on every mirror, so the
+cause was load, not this client. One live Loop road-network turn succeeded only after 148 s, on
+the fifth mirror. The model's three simultaneous `overpass_search` calls got a 429. The team
+demos live (Galveston elevation, Chicago Loop fastest drive), and a failed fetch on stage is the
+risk. Until now every Overpass call depended on a public mirror answering at that moment.
+
+**What changed** (`rag_pipeline/search/overpass.py`). Every Overpass request goes through
+`_exchange`, the mirror loop since stage 61, now `_exchange_live`. The cache sits there, so all
+the paths below get it without changes of their own.
+- **Every good answer is kept.** The key is the sha256 of the query text exactly as sent. The
+  endpoint is not in it: a mirror is a copy of the same database, so any mirror's answer will do.
+  The entry is a gzip JSON file `<key>.json.gz` holding the query, the answering mirror,
+  `cached_at` (UTC ISO) and the data. It is written atomically (temp file, then `os.replace`), and
+  a cache that cannot be written only logs. Entries over `OVERPASS_CACHE_MAX_ENTRY_MB` (64) are
+  not kept. The folder is pruned oldest-first past `OVERPASS_CACHE_MAX_MB` (1024).
+- **Where.** `OVERPASS_CACHE_DIR`, else `overpass_cache/` under an absolute
+  `AGENT_FILE_STORAGE_ROOT`, the agent's data volume (`/app/agent_chat_files` in compose), else
+  `~/.cache/iguide-agent/overpass`. Never inside a git checkout: a relative storage root resolves
+  into the repo, so it falls through to the home cache. The image has no `.git`
+  (`.dockerignore`), so the container's volume counts as outside. `OVERPASS_CACHE=0` turns the
+  cache off.
+- **When every mirror fails, the kept copy is served, marked.** `_exchange` returns it with
+  `cached: true`, `cached_at`, `cache_age_s`, `cache_reason` (`mirrors_failed` or `fresh`) and
+  `cache_note`. `live_error` holds the last mirror's failure, and `attempts` ends with a
+  `{"cache": "hit", ...}` entry after the failed mirrors. `OVERPASS_CACHE_MAX_AGE_S` (0 = any
+  age) refuses older copies. A damaged entry, or one whose stored query differs, counts as no
+  entry.
+- **A recent copy without asking.** `OVERPASS_CACHE_TTL_S` (default 0, off) serves a copy
+  younger than that and sends nothing. It is marked the same way, with reason `fresh`.
+- **Concurrency.** Each HTTP attempt takes one of `OVERPASS_MAX_CONCURRENT` slots (default 2;
+  0 = no limit). A public mirror gives one address about two slots, which is why the third
+  simultaneous call got the 429. While an identical query (same text and size cap) is in flight,
+  a second caller waits for its result (`shared: true`) and sends nothing. If the first caller
+  died, or its wait runs out, the second asks for itself.
+
+**Never silently.** The mark travels with the data to everything that reads it:
+- `overpass_search` (the module) copies the cache fields to the top level. `cache_note` comes
+  first in `diagnostics.warnings`: "CACHED COPY, not a live fetch: every Overpass mirror failed
+  just now, so this is OpenStreetMap data the same query returned at <time> UTC, <age> old. Say
+  in the answer ...". Both model tools return it.
+- The analyze/code peers' tool (`osm_features_tool`) also adds "Cached copy from <time> UTC, not
+  a live fetch" to `source_statement` and to every evidence document's contents.
+- **Road network** (`tool_bridge.fetch_osm_features`, stage 69). The tiles' marks are combined:
+  `cached_tiles` counts them, and `cached_at` is the oldest tile's time. `_road_network_result`
+  adds the note to the `summary` and the evidence document, puts "— cached <time> UTC" on the map
+  layer's label, and puts the note first among the warnings. The bridge's `overpass_search`
+  (`_overpass_handler`) carries the same fields.
+- **Raw query** (`tool_bridge._overpass_query_handler`, stage 61) carries `cached`, `cached_at`
+  and `cache_note`. The sandbox stubs' docstrings say what `cached=True` means.
+- **Sources line** (`agent_runtime/source_catalog.py`). A result with `cached` and `cached_at`
+  has its source named as "OpenStreetMap (via Overpass), ... [a cached copy from <time> UTC,
+  not a live fetch]". This includes data a code run fetched through the bridge. The line is
+  rendered from the tool record (stage 45), so the user learns it whatever the prose says.
+  `overpass_query` is now in the catalogue entry's tools, so a raw query's result names OSM too.
+
+**Tests.** `rag_pipeline/tests/test_overpass_cache.py` (21), offline (`requests.post` patched).
+They cover:
+- an answer kept under the hash of its query;
+- an outage served from the cache with the note first and a cache-hit attempt, and an outage
+  with no copy failing as before;
+- the key leaving the mirror out, and a different bbox or feature getting nothing;
+- by default the mirrors still asked; a TTL serving a fresh copy with nothing sent; a copy past
+  the TTL not used; the age stated; a max age refusing older copies;
+- the cache turned off; a damaged entry ignored; oldest-first pruning;
+- the cache folder's resolution, including never inside the checkout;
+- three identical in-flight calls sending one request, and five different ones peaking at two;
+- the raw query, the bridge feature fetch, the road network through both tools (file, summary,
+  evidence, layer label, warnings, `source_statement`), and a feature list's evidence;
+- the Sources line, including through a code run's bridge call.
+
+The conftest gives every test its own `OVERPASS_CACHE_DIR`, so one test's answer cannot rescue
+another's simulated outage, and a fake answer cannot land in the developer's home cache.
+`test_overpass_boundaries.py::test_a_timed_out_query_reported_as_200...` had asked one query
+twice. Its second half now runs with the cache off, plus an assertion that with the cache on the
+copy is served marked, not empty. Two mutations were checked: never serving the cache fails 8
+tests, and no single-flight fails 1.
+
+**For a live demo.** A cached copy only helps if the query ran once while the mirrors were up,
+and during an outage it arrives after every mirror has failed. Each mirror can take
+`OVERPASS_TIMEOUT_SEC + 5` s, so that can be minutes. To make a demo not depend on the mirrors
+at all, run each demo turn once beforehand (same bbox and feature: the key is the exact query
+text) and set `OVERPASS_CACHE_TTL_S` to cover the event (e.g. `604800`). The demo then answers
+from the cache at once, and still says it is a cached copy and from when.
+
+**Not done.**
+- **No early exit.** A cached copy is used only after every mirror has failed. There is no
+  "try one mirror, then fall back"; the TTL is the way to skip the mirrors.
+- **Per process.** The slots and the in-flight table live in one process. The agent runs one
+  gunicorn worker, so that is the whole agent; any other process has its own.
+- **No 429 back-off.** A 429 moves on to the next mirror like any failure. There is no wait and
+  retry on the same mirror.
+- **The tiled fetch's sub-tiles.** When a tile fails and is split (stage 49), the sub-tiles are
+  new queries with no kept copy, unless an earlier good run split the same way.
