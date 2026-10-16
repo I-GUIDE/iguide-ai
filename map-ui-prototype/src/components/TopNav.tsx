@@ -21,8 +21,8 @@ export interface TopNavProps {
 
 const TABS: { id: AppTab; label: string; title: string }[] = [
   { id: 'chat', label: 'Chat', title: 'Ask anything — the map opens when an answer needs it' },
-  { id: 'rs', label: 'rs-embed demo', title: 'Draw a region and run satellite-embedding operations on it' },
-  { id: 'demos', label: 'Demos', title: 'Step-by-step demo cases: start one, then ask its steps' },
+  { id: 'rs', label: 'rs-embed', title: 'Draw a region and run satellite-embedding operations on it' },
+  { id: 'demos', label: 'Spatial Analysis', title: 'Step-by-step spatial analysis examples: start one, then ask its steps' },
 ];
 
 // The header for the rs-embed deployment (issue #20). This used to mirror the I-GUIDE platform
@@ -35,7 +35,7 @@ const TABS: { id: AppTab; label: string; title: string }[] = [
 // placeholders that did nothing here.
 function TopNavRsEmbed(p: TopNavProps) {
   // One travelling lens rather than a background that blinks from one button to the other. The
-  // two labels are very different widths — "Chat" against "rs-embed demo" — so the lens resizes
+  // two labels are very different widths — "Chat" against "Spatial Analysis" — so the lens resizes
   // as it moves, which is where most of the liquid character comes from; it also stretches along
   // the way and settles, the way a drop of glass would.
   const navRef = useRef<HTMLElement>(null);

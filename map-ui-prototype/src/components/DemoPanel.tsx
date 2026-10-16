@@ -56,14 +56,14 @@ export function DemoPanel(p: Props) {
 
   if (!open) {
     return (
-      <div className="demopanel" aria-label="Demo cases">
+      <div className="demopanel" aria-label="Spatial analysis examples">
         <div className="demohead">
-          <strong className="demotitle">Demos</strong>
+          <strong className="demotitle">Spatial Analysis</strong>
           <button type="button" className="demoback fold" onClick={p.onHide}
-                  title="Fold the demos to a rail so the conversation has the room">Hide</button>
+                  title="Fold the examples to a rail so the conversation has the room">Hide</button>
         </div>
         <p className="demohint">
-          Pick a case. Each one starts a new conversation with its data attached, then you ask
+          Pick an example. Each one starts a new conversation with its data attached, then you ask
           its steps in order. {p.live ? '' : 'Connect to the live agent first: the offline demo cannot run these.'}
         </p>
         {demosByCategory().map((g) => (
@@ -90,11 +90,11 @@ export function DemoPanel(p: Props) {
 
   const next = nextStep(open, done);
   return (
-    <div className="demopanel" aria-label={`Demo: ${open.title}`}>
+    <div className="demopanel" aria-label={`Spatial analysis example: ${open.title}`}>
       <div className="demonav">
-        <button type="button" className="demoback" onClick={() => choose(null)}>← All demos</button>
+        <button type="button" className="demoback" onClick={() => choose(null)}>← All examples</button>
         <button type="button" className="demoback fold" onClick={p.onHide}
-                title="Fold the demos to a rail so the conversation has the room">Hide</button>
+                title="Fold the examples to a rail so the conversation has the room">Hide</button>
       </div>
       <p className="demoeyebrow">{open.category}</p>
       <h2 className="democasetitle">{open.title}</h2>
