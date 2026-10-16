@@ -203,7 +203,8 @@ TASKS: List[Task] = [
                    "what is it? Using the street recorded with each crash (its street name; W and E "
                    "Madison St are one street), which three streets have the most crashes inside "
                    "the hot-spot hexagons, and how many each? What share of "
-                   "all the crashes in the file happened at night, between 10 p.m. and 4 a.m.? And "
+                   "all the crashes in the file happened at night, from 10 p.m. to 4 a.m. (crash_hour "
+                   "22, 23, 0, 1, 2 or 3)? And "
                    "over all the crashes in the file, how many were there per year on average in "
                    "2020–2022 and in 2023–2024?"),
         checks=(Check("crashes_in_grid", kind="count"),
