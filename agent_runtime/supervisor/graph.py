@@ -5832,12 +5832,13 @@ def build_supervisor_graph(
         # sentence AND their own event, so folding the routing ladder cannot hide them.
         # The decider's own reason, when this route is the decider's. It was emitted only as a
         # detail-tier event, so the visible trace read "Next: search" with no hint why a turn
-        # whose map was already drawn went looking for documents.
-        _said = (getattr(decided, "reason", "") or "") if why == "decision" else ""
+        # whose map was already drawn went looking for documents. Shown whole: a 200-character
+        # cut stopped it mid-word ("…plus citywide and highest-").
+        _said = (getattr(decided, "reason", "") or "").strip() if why == "decision" else ""
         emit_trace_event(
             "node_completed",
             {"stage": "supervisor", "route": nxt,
-             "message": f"Next: {nxt}" + (f" — {_said[:200]}" if _said else "")},
+             "message": f"Next: {nxt}" + (f" — {_said}" if _said else "")},
             node="supervisor",
         )
         _reason = _decision_sentence(nxt, why)

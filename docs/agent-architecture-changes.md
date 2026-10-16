@@ -10559,7 +10559,8 @@ with "Parquet magic bytes not found" on a GeoJSON file.
   says "Stopping: the map is drawn and the request asks for nothing a search would add".
 - **The route line carries the decider's reason.** `Decision.reason` holds what the decider wrote,
   and the visible "Next: search" line becomes "Next: search — <reason>". The reason had only gone to
-  a detail-tier event.
+  a detail-tier event. It is shown whole: a 200-character cut stopped it mid-word live
+  ("…plus citywide and highest-").
 - **A failure line names the exception** (`streaming_trace._exception_line`). On multi-line failure
   text it takes the last `…Error` / `…Exception` line, or after a traceback the last
   `Name: message` line, and otherwise skips leading warnings. That line leads the row, where the

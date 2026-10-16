@@ -5665,7 +5665,7 @@ rather than from the previous one.
 - In the search peer, `read_text_file` / `inspect_file_for_analysis` refuse the conversation's
   outputs and read uploads at most once, `AGENT_SEARCH_FILE_READS` (3) per run.
 - A search after a delivered map is vetoed unless the request asks for retrieval.
-- "Next: X" shows the decider's reason.
+- "Next: X" shows the decider's whole reason (no 200-character cut).
 - Failure lines name the exception, not a leading warning.
 - `choropleth_image` reads GeoJSON.
 

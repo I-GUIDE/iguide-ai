@@ -129,7 +129,7 @@ def test_no_map_no_veto():
     assert not sg._work_delivered_without_retrieval({"query": SKATER})
 
 
-def _run_turn(query, monkeypatch):
+def _run_turn(query, monkeypatch, reason="check the literature for regionalization"):
     """A whole supervisor turn whose analysis already delivered the map and whose decider
     then asks for search, as the live decider did. Returns (searched?, trace events)."""
     events, searched = [], []
@@ -138,7 +138,7 @@ def _run_turn(query, monkeypatch):
         if _state.get("actions"):
             return "done"
         d = sg.Decision("search")
-        d.reason = "check the literature for regionalization"
+        d.reason = reason
         return d
 
     monkeypatch.setattr(sg, "emit_trace_event",
@@ -163,6 +163,19 @@ def test_the_visible_route_line_carries_the_deciders_reason(monkeypatch):
     lines = [p["message"] for k, p in events if k == "node_completed"
              and p.get("stage") == "supervisor"]
     assert "Next: search — check the literature for regionalization" in lines
+
+
+def test_the_route_line_shows_the_whole_reason(monkeypatch):
+    """User, 2026-10-15: the line stopped mid-sentence at 200 characters ("…plus citywide and
+    highest-"). The reason is the decider's whole account of its choice; show all of it."""
+    why = ("The task requires inspecting three uploaded files, joining crime counts to community "
+           "area geometries and ACS population data, computing rates, and producing a choropleth "
+           "map plus citywide and highest-rate figures, and the literature on SKATER is asked for.")
+    assert len(why) > 200
+    _, events = _run_turn(SKATER + " Cite the literature.", monkeypatch, reason=why)
+    lines = [p["message"] for k, p in events if k == "node_completed"
+             and p.get("stage") == "supervisor"]
+    assert f"Next: search — {why}" in lines
 
 
 # --- 3. a failure names its exception -----------------------------------------------------
