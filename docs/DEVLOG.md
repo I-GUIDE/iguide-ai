@@ -5844,3 +5844,15 @@ rather than from the previous one.
 
 **Not fixed** MCP element tools run in another process; the platform's own ranking is unchanged.
 
+## 2026-10-16 · M8.106 · The platform searches only what it can show (architecture stage 72)
+
+**Change** Chat-only search = keyword, semantic, spatial (platform OpenSearch index) and
+  OpenGeoData. Web, web fetch, Overpass and the search agents (Text2Cypher, the OpenSearch query
+  agent) are off; the agent KB stays off. The response's `elements` and evidence keep only the
+  platform's element types; OpenGeoData stays in `opengeodata_results`.
+
+**Why** The platform drew web pages and DataCite records as "undefined" knowledge-element cards
+  (live, 14:44 UTC). User request.
+
+**Measured** 14 offline tests; Stage 63/71 tests updated.
+

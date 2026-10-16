@@ -76,10 +76,12 @@ def test_the_map_only_tools_are_not_bound(monkeypatch, chat_only):
 
     monkeypatch.setattr(la, "create_agent", fake_create_agent)
     ef.build_agent_executor(llm=object(), preloaded_tools=[
-        _tool("add_map_layer"), _tool("add_raster_layer"), _tool("overpass_search"),
+        _tool("add_map_layer"), _tool("add_raster_layer"), _tool("admin_boundary"),
         _tool("execute_code")])
     assert "add_map_layer" not in seen["tools"] and "add_raster_layer" not in seen["tools"]
-    assert {"overpass_search", "execute_code"} <= set(seen["tools"])
+    # (Overpass was the kept example here; since 2026-10-16 a chat-only turn gets no Overpass
+    # either: test_chat_only_platform_sources.)
+    assert {"admin_boundary", "execute_code"} <= set(seen["tools"])
 
 
 def test_the_map_profile_still_binds_them(monkeypatch):

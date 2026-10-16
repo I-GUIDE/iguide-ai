@@ -686,7 +686,9 @@ def get_neo4j_agent_results(user_query: str, limit: int = 12) -> List[Dict[str, 
     """
     from agent_runtime.client_profile import graph_search_allowed
 
-    if not graph_search_allowed():   # chat-only: skip the Text2Cypher model call as well
+    from agent_runtime.client_profile import search_agents_allowed
+
+    if not graph_search_allowed() or not search_agents_allowed():   # chat-only: no Text2Cypher
         return []
 
     query = (user_query or "").strip()
@@ -887,6 +889,11 @@ def get_opensearch_agent_results(user_query: str, limit: int = 12) -> List[Dict[
     LLM-powered OpenSearch query for spatial/temporal queries.
     Falls back to keyword search on failure.
     """
+    from agent_runtime.client_profile import search_agents_allowed
+
+    if not search_agents_allowed():   # chat-only: no LLM-written OpenSearch query either
+        return []
+
     query = (user_query or "").strip()
     if not query:
         return []

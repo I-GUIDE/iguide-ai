@@ -85,6 +85,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 70 | [Overpass keeps its last good answer](#stage-70) | 2026-10-16 | every good Overpass answer is kept on disk by the hash of its query text; when every mirror fails the kept copy is served, marked `cached` with its time, and the Sources line says so; identical calls in flight are sent once, at most two requests at a time |
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
+| 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11249,4 +11250,41 @@ join and `kb_ablated` behave as above. The 17 Stage 63 tests still pass.
   OpenSearch, web, OpenGeoData) is unchanged; its own top-10-by-raw-score ranking is its own.
 - MCP element tools run in the mcp-server process, where this request profile does not reach.
   None of them were bound for a platform search turn in the 2026-10-16 log.
+
+
+## Stage 72 — The platform searches only what it can show {#stage-72}
+
+**Why.** After Stage 71 a live platform search (2026-10-16 14:44 UTC) still drew "undefined" cards
+with a broken thumbnail under "Related Knowledge Elements". The platform renders EVERY document
+in `agent_result.orchestration_result.evidence` as one of its knowledge elements, and that turn's
+evidence held web search and web fetch pages (GitHub) and OpenGeoData records (DataCite) next to
+the platform's own elements. The user asked to keep only keyword, semantic and spatial search
+(they query the platform's OpenSearch index) and OpenGeoData, and to block the search agents and
+the agent KB.
+
+**What changed.**
+- **Search methods.** `client_profile.CHAT_ONLY_SEARCH_METHODS` = keyword, semantic, spatial,
+  OpenGeoData. `_normalize_enabled_search_methods` narrows a chat-only request to them (to all
+  four when none of the requested ones remain). That one list governs the search peer's tools,
+  the deterministic sweep, and the web fallback, which needs `web_search` in it.
+- **Tools.** `CHAT_ONLY_BLOCKED_TOOLS` gains `web_search`, `web_fetch` and `overpass_search`, so
+  the analysis and code peers are not offered them either.
+- **Search agents.** `client_profile.search_agents_allowed()`: `get_opensearch_agent_results` (the
+  LLM-written OpenSearch query) and `get_neo4j_agent_results` (Text2Cypher) return nothing for
+  the turn. The agent KB stays off as in Stage 71.
+- **What the platform is sent.** `_format_agent_chat_result` (the JSON reply and the stream's
+  `result` event) keeps only the platform's element types in `elements` and in the evidence:
+  notebook, dataset, publication, oer, documentation, map, code, collection. OpenGeoData still
+  arrives in `opengeodata_results`, which is extracted before the filter. The turn's own payload
+  (trace, history) is not narrowed.
+
+**Measured.** 14 offline tests (`test_chat_only_platform_sources.py`): the method narrowing, the
+web fallback not firing, the tools, the element filter on both fields with OpenGeoData kept and
+the payload untouched, the sweep still calling keyword, semantic and spatial search, and both
+search agents refused. Stage 63/71 tests updated: Overpass and web are no longer kept examples.
+
+**Not fixed.**
+- An answer's prose may still cite a page the cards no longer show; with web search off a
+  chat-only answer has none to cite.
+- `opengeodata_results` is shown however the platform shows it; unchanged here.
 
