@@ -1,4 +1,5 @@
-"""The tasks: twelve classic GIS problems, one live-data variant, and four unsolvable ones.
+"""The tasks: twelve classic GIS problems, four on real data, one live-data variant, and four
+unsolvable ones.
 
 A task is a user's question plus what a correct answer must contain. The prompt reads the way
 a user would write it: it names the files and the method where a GIS analyst would expect to
@@ -188,6 +189,94 @@ TASKS: List[Task] = [
                 Check("regions", kind="regions")),
         sources=("crimes_2024.csv", "attached", "Chicago Data Portal", "City of Chicago"),
         tags=("upload", "vector", "regionalization")),
+    # T14-T16 are the Spatial Analysis examples' questions on their real data, one turn each:
+    # every numbered question of the example's steps, none of its map requests.
+    Task(
+        "T14", "Chicago serious crashes: counts, Gi* hot spots, streets, time", "serious_crashes",
+        lambda e: ("chicago_serious_crashes_2020_2024.csv lists every crash in Chicago from 2020 to "
+                   "2024 that killed or seriously injured someone (City of Chicago Data Portal), and "
+                   "hex_grid_500m.geojson is a grid of 500 m hexagons over the city. Count the "
+                   "crashes in each hexagon: how many crashes fall in the grid, and which hexagon "
+                   "has the most, with how many? Run Getis-Ord Gi* on the counts with binary queen "
+                   "contiguity, each hexagon in its own neighbourhood, and analytical z-scores: how "
+                   "many hexagons are hot spots (z > 1.96), and which hexagon has the highest z, and "
+                   "what is it? Using the street recorded with each crash, which three streets have "
+                   "the most crashes inside the hot-spot hexagons, and how many each? What share of "
+                   "all the crashes in the file happened at night, between 10 p.m. and 4 a.m.? And "
+                   "how many crashes per year were there on average in 2020–2022 and in 2023–2024?"),
+        checks=(Check("crashes_in_grid", kind="count"),
+                Check("top_count_hex", kind="text"),
+                Check("top_count", kind="count"),
+                Check("hot_cells", kind="count"),
+                Check("top_z_hex", kind="text"),
+                Check("top_z", abs_tol=0.01),
+                Check("hot_streets", kind="ids"),
+                Check("street_1_crashes", kind="count"),
+                Check("street_2_crashes", kind="count"),
+                Check("street_3_crashes", kind="count"),
+                Check("night_pct", abs_tol=0.05),
+                Check("per_year_2020_2022", abs_tol=0.1),
+                Check("per_year_2023_2024", abs_tol=0.1)),
+        sources=("chicago_serious_crashes_2020_2024.csv", "attached", "Chicago Data Portal",
+                 "City of Chicago"),
+        tags=("upload", "vector", "statistics", "real-data")),
+    Task(
+        "T15", "Library cooling centres: exact 6-median on census population", "cooling_centres",
+        lambda e: ("cpl_branches.csv lists Chicago Public Library's 82 branches with coordinates, "
+                   "and chicago_blockgroup_population_centres_2020.csv has the 2020 Census centre of "
+                   "population and the population of each block group in the city. In a heat "
+                   "emergency the city can keep only 6 branches open late as cooling centres. Which "
+                   "6 minimise the total population-weighted straight-line distance from each block "
+                   "group to its nearest open branch? Measure distance in metres in UTM zone 16N "
+                   "(EPSG:26916) and solve it exactly (it is a 6-median problem). Report the 6 "
+                   "branches, the average distance per resident in km, the share of residents more "
+                   "than 2 km from their nearest open branch, and how many residents each of the 6 "
+                   "branches serves."),
+        # The best single swap away from the optimum is 0.42% worse (best_swap_ratio), so the
+        # mean distance is held to 0.2%.
+        checks=(Check("branches", kind="ids"),
+                Check("mean_km", unit="km", rel_tol=0.002),
+                Check("share_over_2km_pct", abs_tol=0.1),
+                *(Check(f"served_{i}", kind="count") for i in range(1, 7))),
+        sources=("cpl_branches.csv", "chicago_blockgroup_population_centres_2020.csv", "attached",
+                 "Census", "Chicago Public Library"),
+        tags=("upload", "optimisation", "real-data")),
+    Task(
+        "T16", "Waikīkī: tsunami zone population, walking out, sea-level rise", "waikiki_tsunami",
+        lambda e: ("tsunami_evacuation_zone.geojson is Oʻahu's official tsunami evacuation zone "
+                   "(Hawaii Statewide GIS Program), clipped to Waikīkī, the Ala Wai and McCully. "
+                   "census_blocks_2020.geojson has the 2020 Census blocks there with population "
+                   "(POP100), housing units (HU100) and each block's internal point (INTPTLAT, "
+                   "INTPTLON). osm_hotels.geojson and osm_streets.geojson are OpenStreetMap's hotels "
+                   "and streets, slr_exposure_3_2ft.geojson is the State of Hawaiʻi's 3.2 ft "
+                   "sea-level-rise exposure area (SLR-XA), and buildings.geojson has the building "
+                   "footprints. Counting a block as inside the zone when its internal point is, how "
+                   "many residents and housing units are in the evacuation zone, and how many of the "
+                   "hotels are in it? If the people in the zone walked out: use osm_streets.geojson "
+                   "as an undirected walking network in UTM zone 4N (EPSG:32604). Snap each "
+                   "populated block inside the zone (by its internal point) to its nearest street "
+                   "node and find the shortest walking distance along the streets to the nearest "
+                   "street node outside the zone. At 1.1 m/s, what is the population-weighted median "
+                   "walking time, which block takes longest and how long, and how many residents "
+                   "need more than 10 minutes? Finally, how many of the buildings intersect the "
+                   "sea-level-rise exposure area, how many have their centroid inside it, and how "
+                   "many of the hotels are inside it?"),
+        # Two walks end within 0.1 min of 10 (10.04, 10.06; see _why), so pop_over_10min is exact
+        # only under the stated method: that is the point of the check. The intersect count is 909
+        # in UTM 4N and 911 in WGS84; either is right.
+        checks=(Check("zone_pop", kind="count"),
+                Check("zone_hu", kind="count"),
+                Check("hotels_in_zone", kind="count"),
+                Check("walk_median_min", unit="min", abs_tol=0.05),
+                Check("walk_max_block", kind="text"),
+                Check("walk_max_min", unit="min", rel_tol=0.01),
+                Check("pop_over_10min", kind="count"),
+                Check("slr_buildings_intersect", kind="count", abs_tol=2),
+                Check("slr_buildings_centroid", kind="count"),
+                Check("hotels_in_slr", kind="count")),
+        sources=("tsunami_evacuation_zone.geojson", "census_blocks_2020.geojson", "attached",
+                 "Hawaii Statewide GIS", "OpenStreetMap", "Census"),
+        tags=("upload", "vector", "network", "real-data")),
     Task(
         "U01", "Unsolvable: slope of a DEM that is not attached", "schools",
         lambda e: "What is the mean slope, in degrees, of the elevation model I attached?",
