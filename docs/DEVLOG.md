@@ -5787,4 +5787,22 @@ rather than from the previous one.
   replaced the layer.
 
 **Not fixed** Conversations saved earlier restore under the old ids.
+## 2026-10-15 · M8.102 · A tool-only turn is not told its code did not run (architecture stage 68)
+
+**Change** `_record_execution_outcome` (`agent_runtime/supervisor/graph.py`) writes `executed`
+  only when the turn called `execute_code` or the peer's prose ships a code block; otherwise it
+  removes the flag. `_execution_note` scopes a failed-code note to the code and names the other
+  tool calls that ran.
+
+**Why** Every analyze turn that used tools alone got `executed=False`, and the writer was told
+  "the code in this result did NOT run … do not describe its output as a result". Live
+  2026-10-15 (sess-7c3ef000, Lumen deepseek, validation off): six ok tool calls, two layers on
+  the map, and an answer saying nothing had run, no counts and no layers. Correct: 10,008 crashes
+  in the grid, H1852 with 35.
+
+**Measured** Offline replay of the turn (`test_synthesis_sees_tool_work.py`): 3 of 4 tests fail
+  on prototype (flag set, "did NOT run" in the writer's prompt, failed-script note disowns the
+  counting tool); 4/4 pass after.
+
+**Not fixed** The 2,000-character cut of the serialized analysis result in the writer's prompt.
 
