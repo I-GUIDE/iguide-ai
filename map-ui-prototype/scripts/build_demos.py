@@ -2,10 +2,11 @@
 
     python3 map-ui-prototype/scripts/build_demos.py --chicago-snapshot DIR
 
-Every case's FIRST step is a GIS harness task's own question, run on that task's own pinned data,
-so a demo shows exactly what the harness measures and says how often it works (`reliability`,
-from the scored archive). Later steps are follow-ups that put the result on the map; the harness
-does not score those.
+Every case runs on a GIS harness task's own pinned data. Its FIRST step states the task without
+describing the data (user, 2026-10-15): the agent reads the files itself, and the "Explain files"
+button asks it to describe them. `reliability` is from the scored archive, which ran the
+harness's own, longer wording. Later steps are follow-ups that put the result on the map; the
+harness does not score those.
 
 Writes public/demos/<case>/<files> and src/demoCatalog.json. The data is regenerated, not edited:
 the builders in gis_harness/datasets.py are deterministic (fixed seeds), so rerunning this gives
@@ -47,13 +48,9 @@ CASES = [
      "category": "Hypothesis testing",
      "steps": [
          {"label": "Rates by community area",
-          "prompt": "The attached files are Chicago's 2024 violent crimes with coordinates "
-                    "(crimes_2024_violent.csv: homicide, assault, battery, robbery and criminal "
-                    "sexual assault), the 77 community areas (community_areas.geojson) and ACS "
-                    "2023 population by community area (acs_2023_community_areas.csv). Count the "
-                    "crimes in each community area by each incident's coordinates, compute the "
-                    "rate per 1,000 residents and map it as a choropleth. What is the citywide "
-                    "rate, and which community area has the highest rate?"},
+          "prompt": "Count the 2024 violent crimes in each Chicago community area, compute the rate"
+                    " per 1,000 residents and map it as a choropleth. What is the citywide rate, "
+                    "and which community area has the highest rate?"},
          {"label": "Are the rates clustered?",
           "prompt": "Test whether those rates are spatially clustered with global Moran's I "
                     "(queen contiguity, row-standardised weights), then map the local (LISA) "
@@ -69,7 +66,9 @@ CASES = [
               "schools are within a mile of the site and which one is closest.",
      "tags": ["buffer", "spatial selection", "distance"],
      "category": "Query and selection",
-     "steps": [{"label": "Count and nearest", "prompt": None},
+     "steps": [{"label": "Count and nearest",
+                "prompt": "How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? "
+                          "Which one is nearest, and how far is it in metres?"},
                {"label": "Show it on the map",
                 "prompt": "Show the site, its 1-mile buffer and the schools inside it on the map."}]},
     {"id": "zone-rates", "task": "T03",
@@ -78,7 +77,9 @@ CASES = [
               "most incidents is not the one where an incident is most likely per resident.",
      "tags": ["spatial join", "rates", "choropleth"],
      "category": "Transformation",
-     "steps": [{"label": "Rates by zone", "prompt": None},
+     "steps": [{"label": "Rates by zone",
+                "prompt": "Compute each zone's incident rate per 1,000 residents. Which zone has "
+                          "the highest rate, and what is it?"},
                {"label": "Map the rates",
                 "prompt": "Map the rate per 1,000 residents for each zone as a choropleth."}]},
     {"id": "fastest-route", "task": "T04",
@@ -88,7 +89,11 @@ CASES = [
               "minutes.",
      "tags": ["network analysis", "routing"],
      "category": "Optimisation",
-     "steps": [{"label": "Fastest travel time", "prompt": None},
+     "steps": [{"label": "Fastest travel time",
+                "prompt": "What is the fastest travel time in minutes on this road network from the"
+                          " intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, "
+                          "87.62683° W? How many intersections, counting the start, can be reached "
+                          "within 2 minutes of it?"},
                {"label": "Show the route", "prompt": "Show the fastest route on the map."}]},
     {"id": "facility-siting", "task": "T05",
      "title": "Where to put two facilities",
@@ -97,7 +102,10 @@ CASES = [
               "overall.",
      "tags": ["location-allocation", "optimisation"],
      "category": "Optimisation",
-     "steps": [{"label": "Choose the sites", "prompt": None},
+     "steps": [{"label": "Choose the sites",
+                "prompt": "Choose the 2 candidate sites that minimise the total population-weighted"
+                          " straight-line distance from each demand point to its nearest chosen "
+                          "site. Which two sites, and what is that total in person-kilometres?"},
                {"label": "Map the service areas",
                 "prompt": "Map the demand points coloured by the chosen site that serves each "
                           "one, and mark the two chosen sites."}]},
@@ -107,7 +115,10 @@ CASES = [
               "case asks how much land lies at or below 5 m if the water rises that far.",
      "tags": ["raster", "inundation"],
      "category": "Transformation",
-     "steps": [{"label": "Flooded area", "prompt": None},
+     "steps": [{"label": "Flooded area",
+                "prompt": "If water rises to 5 m, how many hectares of this coast are at or below "
+                          "that level? Treat it as a simple bathtub: every cell at or below 5 m "
+                          "counts."},
                {"label": "Show the flood", "prompt": "Show the flooded cells on the map."}]},
     {"id": "ndvi-change", "task": "T08",
      "title": "Vegetation change from two scenes",
@@ -115,7 +126,9 @@ CASES = [
               "the area was on each date and how much of it lost vegetation in between.",
      "tags": ["raster", "remote sensing", "change detection"],
      "category": "Transformation",
-     "steps": [{"label": "NDVI and loss", "prompt": None},
+     "steps": [{"label": "NDVI and loss",
+                "prompt": "Compute NDVI for 2020 and 2024. What is the mean NDVI on each date, and "
+                          "how many hectares lost more than 0.2 NDVI between them?"},
                {"label": "Map the loss",
                 "prompt": "Map where NDVI fell by more than 0.2 between the two dates."}]},
     {"id": "suitability", "task": "T11",
@@ -125,7 +138,12 @@ CASES = [
               "single best spot.",
      "tags": ["raster", "multi-criteria"],
      "category": "Transformation",
-     "steps": [{"label": "Score the cells", "prompt": None},
+     "steps": [{"label": "Score the cells",
+                "prompt": "A cell is suitable if its slope is under 8 degrees, its road distance is"
+                          " at most 500 m, and its land cover is not water or wetland. Score each "
+                          "suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the"
+                          " total suitable area in hectares, and what are the centre coordinates of"
+                          " the highest-scoring cell?"},
                {"label": "Map the score", "prompt": "Map the suitability score."}]},
     {"id": "aftershocks", "task": "T12",
      "title": "Aftershocks of the 2019 Ridgecrest earthquake",
@@ -134,7 +152,10 @@ CASES = [
               "maps them by magnitude.",
      "tags": ["spatio-temporal", "point data"],
      "category": "Query and selection",
-     "steps": [{"label": "Count the aftershocks", "prompt": None},
+     "steps": [{"label": "Count the aftershocks",
+                "prompt": "What was the magnitude of the largest event in the July 2019 Ridgecrest "
+                          "sequence? How many events occurred within 7 days after it and within 25 "
+                          "km of its epicentre, and how many of those were magnitude 4 or greater?"},
                {"label": "Map them",
                 "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with "
                           "the mainshock marked."}]},

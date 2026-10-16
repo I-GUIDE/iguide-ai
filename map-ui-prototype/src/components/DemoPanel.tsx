@@ -91,26 +91,35 @@ export function DemoPanel(p: Props) {
   const next = nextStep(open, done);
   return (
     <div className="demopanel" aria-label={`Demo: ${open.title}`}>
-      <div className="demohead">
+      <div className="demonav">
         <button type="button" className="demoback" onClick={() => choose(null)}>← All demos</button>
-        <strong className="demotitle">{open.title}</strong>
         <button type="button" className="demoback fold" onClick={p.onHide}
                 title="Fold the demos to a rail so the conversation has the room">Hide</button>
       </div>
-      <p className="demoblurb">{open.blurb}</p>
+      <p className="demoeyebrow">{open.category}</p>
+      <h2 className="democasetitle">{open.title}</h2>
+      <p className="demoblurb democaseblurb">{open.blurb}</p>
+
       {open.files.length > 0 && (
-        <div className="demofilesrow">
-          <p className="demofiles">
-            Data: {open.files.map((f) => `${f.name} (${formatBytes(f.bytes)})`).join(', ')}
-          </p>
-          {/* Once the files are in the conversation, the agent can be asked what they are
-              before any step: the steps no longer describe the data themselves. */}
-          {phase === 'ready' && (
-            <button type="button" className="rsbtn demoexplain" disabled={p.busy}
-                    title={EXPLAIN_FILES} onClick={() => p.onRun(EXPLAIN_FILES)}>Explain files</button>
-          )}
-        </div>
+        <section className="demosection" aria-label="Example data">
+          <div className="demosectionhead">
+            <h3>Data</h3>
+            {/* Once the files are in the conversation, the agent can be asked what they are
+                before any step: the steps no longer describe the data themselves. */}
+            {phase === 'ready' && (
+              <button type="button" className="demoexplain" disabled={p.busy}
+                      title={EXPLAIN_FILES} onClick={() => p.onRun(EXPLAIN_FILES)}>Explain files</button>
+            )}
+          </div>
+          <ul className="demofilelist">
+            {open.files.map((f) => (
+              <li key={f.name}><span className="demofname" title={f.name}>{f.name}</span>
+                <span className="demofsize">{formatBytes(f.bytes)}</span></li>
+            ))}
+          </ul>
+        </section>
       )}
+
       {phase !== 'ready' && (
         <div className="demostart">
           <button type="button" className="rsbtn on" disabled={p.busy || phase === 'loading' || !p.live}
@@ -120,35 +129,45 @@ export function DemoPanel(p: Props) {
           {phase === 'error' && <span className="rswarn" role="alert">Could not start: {error}</span>}
         </div>
       )}
-      <ol className="demosteps">
-        {open.steps.map((s, k) => {
-          const state = done.has(k) ? 'done' : k === next ? 'next' : '';
-          const locked = phase !== 'ready' || p.busy;
-          // Only the next step spells out its question; the rest show it on hover, so a
-          // three-step case fits without pushing the conversation off the screen.
-          const showPrompt = k === next;
-          return (
-            <li key={k} className={state}>
-              <div className="demosteprow">
-                <span className="demosteplabel">{s.label}</span>
-                <button type="button" className="rsbtn" disabled={locked}
-                        aria-label={`${done.has(k) ? 'Send again' : 'Send'} step ${k + 1}: ${s.label}`}
-                        title={phase !== 'ready' ? 'Start the demo first' : s.prompt}
-                        onClick={() => run(k, s.prompt)}>{done.has(k) ? 'Send again' : 'Send'}</button>
-                <button type="button" className="demoedit" disabled={locked}
-                        aria-label={`Edit step ${k + 1} before asking`}
-                        onClick={() => p.onStage(s.prompt)}>edit</button>
-              </div>
-              {showPrompt && <div className="demoprompt">{s.prompt}</div>}
-            </li>
-          );
-        })}
-      </ol>
-      <div className="demotags">
-        {open.tags.map((t) => <span key={t} className="demotag">{t}</span>)}
-        {/* `reliability` ("N of N harness runs") stays in the catalogue for the demo check,
-            but is not shown: it is a test statistic, not something a visitor needs. */}
-      </div>
+
+      <section className="demosection" aria-label="Steps">
+        <div className="demosectionhead"><h3>Steps</h3></div>
+        <ol className="demosteps">
+          {open.steps.map((s, k) => {
+            const state = done.has(k) ? 'done' : k === next ? 'next' : '';
+            const locked = phase !== 'ready' || p.busy;
+            // Only the next step spells out its question; the rest show it on hover, so a
+            // four-step case fits without pushing the conversation off the screen.
+            const showPrompt = k === next;
+            return (
+              <li key={k} className={state}>
+                <div className="demosteprow">
+                  <span className="demosteplabel" title={s.prompt}>{s.label}</span>
+                  <button type="button" className="demoedit" disabled={locked}
+                          aria-label={`Edit step ${k + 1} before asking`}
+                          onClick={() => p.onStage(s.prompt)}>edit</button>
+                  <button type="button" className="demosend" disabled={locked}
+                          aria-label={`${done.has(k) ? 'Send again' : 'Send'} step ${k + 1}: ${s.label}`}
+                          title={phase !== 'ready' ? 'Start the demo first' : s.prompt}
+                          onClick={() => run(k, s.prompt)}>{done.has(k) ? 'Send again' : 'Send'}</button>
+                </div>
+                {showPrompt && <p className="demoprompt">{s.prompt}</p>}
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+
+      {open.tags.length > 0 && (
+        <section className="demosection" aria-label="Topics">
+          <div className="demosectionhead"><h3>Topics</h3></div>
+          <div className="demotags">
+            {open.tags.map((t) => <span key={t} className="demotag">{t}</span>)}
+            {/* `reliability` ("N of N harness runs") stays in the catalogue for the demo check,
+                but is not shown: it is a test statistic, not something a visitor needs. */}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

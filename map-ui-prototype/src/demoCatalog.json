@@ -33,7 +33,7 @@
   "steps": [
    {
     "label": "Rates by community area",
-    "prompt": "The attached files are Chicago's 2024 violent crimes with coordinates (crimes_2024_violent.csv: homicide, assault, battery, robbery and criminal sexual assault), the 77 community areas (community_areas.geojson) and ACS 2023 population by community area (acs_2023_community_areas.csv). Count the crimes in each community area by each incident's coordinates, compute the rate per 1,000 residents and map it as a choropleth. What is the citywide rate, and which community area has the highest rate?"
+    "prompt": "Count the 2024 violent crimes in each Chicago community area, compute the rate per 1,000 residents and map it as a choropleth. What is the citywide rate, and which community area has the highest rate?"
    },
    {
     "label": "Are the rates clustered?",
@@ -67,7 +67,7 @@
   "steps": [
    {
     "label": "Count and nearest",
-    "prompt": "The attached schools.geojson has school locations. How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?"
+    "prompt": "How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? Which one is nearest, and how far is it in metres?"
    },
    {
     "label": "Show it on the map",
@@ -102,7 +102,7 @@
   "steps": [
    {
     "label": "Rates by zone",
-    "prompt": "zones.geojson holds 9 zones with a population field, and incidents.csv holds incident locations (lat/lon). Count the incidents in each zone and compute the rate per 1,000 residents. Which zone has the highest rate, and what is it?"
+    "prompt": "Compute each zone's incident rate per 1,000 residents. Which zone has the highest rate, and what is it?"
    },
    {
     "label": "Map the rates",
@@ -131,7 +131,7 @@
   "steps": [
    {
     "label": "Fastest travel time",
-    "prompt": "roads.geojson is a road network: each line is an edge between two intersections, with a speed_kph attribute. Travel time on an edge is its length divided by its speed. What is the fastest travel time in minutes from the intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, 87.62683° W? How many intersections, counting the start, can be reached within 2 minutes of it?"
+    "prompt": "What is the fastest travel time in minutes on this road network from the intersection at 41.87408° N, 87.65075° W to the one at 41.89222° N, 87.62683° W? How many intersections, counting the start, can be reached within 2 minutes of it?"
    },
    {
     "label": "Show the route",
@@ -165,7 +165,7 @@
   "steps": [
    {
     "label": "Choose the sites",
-    "prompt": "demand.csv has 40 demand points with populations, and candidates.csv has 8 candidate facility sites. Choose the 2 sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?"
+    "prompt": "Choose the 2 candidate sites that minimise the total population-weighted straight-line distance from each demand point to its nearest chosen site. Which two sites, and what is that total in person-kilometres?"
    },
    {
     "label": "Map the service areas",
@@ -194,7 +194,7 @@
   "steps": [
    {
     "label": "Flooded area",
-    "prompt": "coast_dem.tif is an elevation model in metres, with the sea along its southern edge. If water rises to 5 m, how many hectares are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts."
+    "prompt": "If water rises to 5 m, how many hectares of this coast are at or below that level? Treat it as a simple bathtub: every cell at or below 5 m counts."
    },
    {
     "label": "Show the flood",
@@ -229,7 +229,7 @@
   "steps": [
    {
     "label": "NDVI and loss",
-    "prompt": "scene_2020.tif and scene_2024.tif cover the same area on two dates; band 1 is red and band 2 is near-infrared. Compute NDVI for each date. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?"
+    "prompt": "Compute NDVI for 2020 and 2024. What is the mean NDVI on each date, and how many hectares lost more than 0.2 NDVI between them?"
    },
    {
     "label": "Map the loss",
@@ -252,7 +252,7 @@
    {
     "name": "landcover.tif",
     "path": "demos/suitability/landcover.tif",
-    "bytes": 14768
+    "bytes": 15508
    },
    {
     "name": "road_distance_m.tif",
@@ -268,7 +268,7 @@
   "steps": [
    {
     "label": "Score the cells",
-    "prompt": "slope_deg.tif, road_distance_m.tif and landcover.tif are aligned 10 m rasters. A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not 1 (water) or 2 (wetland). Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?"
+    "prompt": "A cell is suitable if its slope is under 8 degrees, its road distance is at most 500 m, and its land cover is not water or wetland. Score each suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the total suitable area in hectares, and what are the centre coordinates of the highest-scoring cell?"
    },
    {
     "label": "Map the score",
@@ -297,7 +297,7 @@
   "steps": [
    {
     "label": "Count the aftershocks",
-    "prompt": "usgs_comcat_ridgecrest_2019-07.csv is a USGS earthquake catalog. What was the largest event's magnitude? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?"
+    "prompt": "What was the magnitude of the largest event in the July 2019 Ridgecrest sequence? How many events occurred within 7 days after it and within 25 km of its epicentre, and how many of those were magnitude 4 or greater?"
    },
    {
     "label": "Map them",

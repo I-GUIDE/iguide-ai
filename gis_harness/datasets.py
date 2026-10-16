@@ -68,7 +68,7 @@ def _utm_square(x0, y0, size) -> List[List[float]]:
 
 
 def _write_tif(path: Path, bands: List[np.ndarray], *, x0: float, y0_top: float, cell: float,
-               crs: str = UTM16N, nodata=None, descriptions=None) -> None:
+               crs: str = UTM16N, nodata=None, descriptions=None, tags=None) -> None:
     import rasterio
     from rasterio.transform import from_origin
 
@@ -82,6 +82,8 @@ def _write_tif(path: Path, bands: List[np.ndarray], *, x0: float, y0_top: float,
         dst.write(arr)
         for i, d in enumerate(descriptions or [], start=1):
             dst.set_band_description(i, d)
+        if tags:
+            dst.update_tags(**tags)
 
 
 # --------------------------------------------------------------------------- T01
@@ -561,6 +563,9 @@ def _fetch_pinned(url: str, sha256: str, dest: Path) -> Path:
 # --------------------------------------------------------------------------- T11
 
 
+LANDCOVER_CLASSES = {1: "water", 2: "wetland", 3: "grassland", 4: "cropland", 5: "forest"}
+
+
 def suitability(out: Path, seed: int = 11) -> Tuple[Dict[str, Path], Dict[str, Any]]:
     """Weighted overlay of slope, road distance and land cover; suitable area and best cell.
 
@@ -589,7 +594,13 @@ def suitability(out: Path, seed: int = 11) -> Tuple[Dict[str, Path], Dict[str, A
              "landcover.tif": out / "landcover.tif"}
     _write_tif(paths["slope_deg.tif"], [slope], x0=DEM_X0, y0_top=DEM_YTOP, cell=cell)
     _write_tif(paths["road_distance_m.tif"], [dist], x0=DEM_X0, y0_top=DEM_YTOP, cell=cell)
-    _write_tif(paths["landcover.tif"], [lc], x0=DEM_X0, y0_top=DEM_YTOP, cell=cell)
+    # The legend travels with the raster (band description + one tag per class): a demo that
+    # does not spell out the codes in its question still lets the agent find which are water
+    # and wetland. Without it (2026-10-15) the agent had to guess, and guessed 4 and 5.
+    _write_tif(paths["landcover.tif"], [lc], x0=DEM_X0, y0_top=DEM_YTOP, cell=cell,
+               descriptions=["land cover class: " + ", ".join(f"{k} = {v}" for k, v in
+                                                             LANDCOVER_CLASSES.items())],
+               tags={f"CLASS_{k}": v for k, v in LANDCOVER_CLASSES.items()})
     s, d = slope.astype("float64"), dist.astype("float64")
     ok = (s < 8) & (d <= 500) & (lc != 1) & (lc != 2)
     score = np.where(ok, 0.5 * (1 - s / 8) + 0.5 * (1 - d / 500), -np.inf)

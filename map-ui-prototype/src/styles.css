@@ -607,26 +607,46 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .demohead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .demoback { font-size: 12px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
             background: #fff; cursor: pointer; }
-.demotags { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.demotags { display: flex; flex-wrap: wrap; gap: 5px; }
 .demotag { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #eef1f4; color: #3b4046; }
-.demofiles { font-size: 11.5px; color: #6b7280; margin: 0 0 8px; overflow-wrap: anywhere; }
-.demofilesrow { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; }
-.demofilesrow .demofiles { flex: 1; min-width: 0; margin: 0; }
-.demoexplain { flex: none; }
-.demostart { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; flex-wrap: wrap; }
+.demostart { display: flex; flex-direction: column; align-items: stretch; gap: 6px; margin: 14px 0 4px; }
+.demostart .rsbtn { font-size: 13px; padding: 8px 14px; line-height: 1.3; }
 .demosteps { list-style: none; margin: 0; padding: 0; counter-reset: demostep; display: grid; gap: 8px; }
-.demosteps li { counter-increment: demostep; border-left: 3px solid #d7dbe0; padding: 4px 0 4px 10px; }
+.demosteps li { counter-increment: demostep; border-left: 3px solid #d7dbe0; padding: 3px 0 3px 10px; }
 .demosteps li.next { border-left-color: var(--brand); }
 .demosteps li.done { border-left-color: #12805c; }
-.demosteprow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.demosteplabel { font-size: 13px; font-weight: 600; color: var(--ink); }
+.demosteprow { display: flex; align-items: center; gap: 10px; }
+.demosteplabel { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.35; }
 .demosteplabel::before { content: counter(demostep) '. '; color: #8a9097; }
 .demosteps li.done .demosteplabel::before { content: '✓ '; color: #12805c; }
 .demoedit { font-size: 11.5px; background: none; border: none; color: #6b7280; text-decoration: underline;
             cursor: pointer; padding: 0 2px; }
 .demoedit:disabled { opacity: .5; cursor: default; }
-.demoprompt { font-size: 12px; color: #5b6168; margin-top: 3px; line-height: 1.4; }
+.demoprompt { font-size: 12px; color: #5b6168; margin: 4px 0 2px; line-height: 1.45; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .democard, :root:not([data-theme="light"]) .demoback { background: transparent; }
 }
 .demoback.fold { margin-left: auto; }
+
+/* An open demo case: nav row, then title, description, and labelled sections. */
+.demonav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.demoeyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+               color: #8a9097; margin: 0 0 3px; }
+.democasetitle { font-size: 16px; font-weight: 700; line-height: 1.3; color: var(--ink); margin: 0 0 6px;
+                 text-wrap: balance; }
+.democaseblurb { font-size: 12.5px; line-height: 1.5; }
+.demosection { margin-top: 16px; }
+.demosectionhead { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                   margin-bottom: 6px; min-height: 22px; }
+.demosectionhead h3 { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+                      color: #8a9097; margin: 0; }
+.demofilelist { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.demofilelist li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: #3b4046; }
+.demofname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.demofsize { flex: none; color: #8a9097; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.demoexplain, .demosend { flex: none; font-size: 12px; font-weight: 600; padding: 3px 12px; border-radius: 999px;
+                          border: 1px solid #e3c27a; background: #fff8e8; color: #8a5d05; cursor: pointer; }
+.demoexplain:hover:not(:disabled), .demosend:hover:not(:disabled) { background: #fdeec9; border-color: #c98a1a; }
+.demoexplain:disabled, .demosend:disabled { opacity: .45; cursor: default; }
+.demoexplain:focus-visible, .demosend:focus-visible { outline: 2px solid #c98a1a; outline-offset: 2px; }

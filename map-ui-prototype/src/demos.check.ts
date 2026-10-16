@@ -22,8 +22,10 @@ for (const d of DEMOS) {
     const p = join('public', f.path);
     ok(existsSync(p), `${d.id}: ${f.path} exists`);
     if (existsSync(p)) ok(statSync(p).size === f.bytes, `${d.id}: ${f.name} is ${f.bytes} bytes as catalogued`);
-    // The first question names its files, so the agent knows what it was given.
-    ok(d.steps[0].prompt.includes(f.name), `${d.id}: step 1 names ${f.name}`);
+    // Step 1 states the task only (user, 2026-10-15): the agent reads the files itself, and
+    // "Explain files" asks it to describe them. Short prompts: 11 of 12 demos still correct;
+    // the one miss was a legend that existed only in the prompt, now in the data.
+    ok(!d.steps[0].prompt.includes(f.name), `${d.id}: step 1 does not describe ${f.name}`);
   }
   ok(demoBytes(d) < 10 * 1024 * 1024, `${d.id}: under 10 MB (${formatBytes(demoBytes(d))})`);
 }
