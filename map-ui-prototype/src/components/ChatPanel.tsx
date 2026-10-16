@@ -164,6 +164,10 @@ interface Props {
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
+  /** A question handed in from outside the composer (the Demos sidebar): put in the composer,
+   *  or sent as if typed when `send` is set. `n` changes on every hand-off, so the same question
+   *  twice is two hand-offs. */
+  seed?: { text: string; n: number; send: boolean } | null;
 }
 
 const GROUP_LABEL: Record<SourceGroup, string> = {
@@ -570,6 +574,16 @@ export function ChatPanel(p: Props) {
     p.onSend(v);
   };
 
+  // The Demos sidebar asks through here, so a step is exactly a typed question: same trimming,
+  // same busy check, same scroll pinning.
+  useEffect(() => {
+    if (!p.seed) return;
+    if (p.seed.send) send(p.seed.text);
+    else { setText(p.seed.text); taRef.current?.focus(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.seed?.n]);
+
+
   return (
     <section className="chat">
       {p.showSettings && (
@@ -756,7 +770,7 @@ export function ChatPanel(p: Props) {
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
-      {p.messages.length <= 1 && (
+      {p.messages.length <= 1 && p.tab !== 'demos' && (
         <div className="suggest">
           {(p.tab === 'rs' ? RS_SUGGESTIONS : SUGGESTIONS).map((s) => (
             <button key={s} className="chip" onClick={() => send(s)}>{s}</button>
