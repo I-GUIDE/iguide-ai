@@ -306,7 +306,7 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
         return None
     from agent_runtime.file_store import create_output_file_from_path
     from agent_runtime.map_layers import content_layer_id
-    from agent_runtime.tool_bridge import Refused, fetch_osm_features
+    from agent_runtime.tool_bridge import Refused, cache_fields, fetch_osm_features
 
     try:
         got = fetch_osm_features(feature, place=place or None, bbox=bbox or None,
@@ -367,6 +367,9 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
                + ", ".join(f"{c} {n}" for c, n in sorted(by_class.items(), key=lambda kv: -kv[1]))
                + f". One-way: {oneway.get('forward', 0) + oneway.get('reverse', 0)} ways; "
                f"posted maxspeed on {tagged} of {len(rows)}.")
+    if got.get("cached"):
+        # Stage 70: the summary is what the evidence document and the model both read first.
+        summary += " " + got["cache_note"]
     result: Dict[str, Any] = {
         "query": query,
         "network": True,
@@ -411,6 +414,11 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
         "citation_ids": ["osm:road_network"],
     }
     warnings = []
+    if got.get("cached"):
+        result.update(cache_fields(got))
+        when = str(got["cached_at"])[:16].replace("T", " ")
+        result["map_layer"]["label"] += f" — cached {when} UTC"
+        warnings.append(got["cache_note"])
     if not got["complete"]:
         warnings.append(f"NOT the whole network: stopped at {len(rows)} ways / {got['tiles']} "
                         "tiles (caps). Narrow the area or say the network is partial.")
@@ -422,6 +430,16 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
     if debug:
         result["debug"] = {"tiles": got.get("debug_tiles") or []}
     return result
+
+
+def _cached_clause(payload: Mapping[str, Any]) -> str:
+    """' Cached copy from <UTC time>, not a live fetch.' for a stage-70 cached answer, else ''."""
+    if not payload.get("cached"):
+        return ""
+    when = str(payload.get("cached_at") or "")[:16].replace("T", " ")
+    return f" Cached copy from {when} UTC, not a live fetch (every Overpass mirror was down)." \
+        if payload.get("cache_reason") == "mirrors_failed" else \
+        f" Cached copy from {when} UTC, not a live fetch."
 
 
 def _for_display(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -468,7 +486,7 @@ def _overpass_payload(feature: str, place: str = "", bbox: str = "", limit: int 
         documents.append({
             "doc_id": f"osm:{osm_ref}",
             "title": name,
-            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}){area}.",
+            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}){area}.{_cached_clause(result)}",
             "source": "overpass",
             "element_type": "osm_feature",
             "url": f"https://www.openstreetmap.org/{osm_ref}" if feat.get("osm_id") else "",
@@ -643,7 +661,7 @@ def osm_features_tool(feature: str, place: str = "", bbox: str = "",
                 f"OpenStreetMap roads tagged {network['query']['osm_filter']} in "
                 f"{network['query'].get('place') or 'bbox ' + str(network['query']['bbox'])}, as "
                 "mapped by OSM contributors: not an official road inventory, and a way's oneway "
-                "or maxspeed tag can be missing or out of date.")
+                "or maxspeed tag can be missing or out of date." + _cached_clause(network))
         return json.dumps(network, ensure_ascii=True, default=str)
     full = _overpass_payload(feature, place=place, bbox=bbox,
                              limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500),
@@ -654,7 +672,7 @@ def osm_features_tool(feature: str, place: str = "", bbox: str = "",
     # payload the model reads gets the simplified outlines.
     features = full.get("features") or []
     payload = _for_display(full)
-    payload["source_statement"] = _osm_source_statement(payload, feature)
+    payload["source_statement"] = _osm_source_statement(payload, feature) + _cached_clause(payload)
     if features:
         from agent_runtime.file_store import create_output_file_from_path
 

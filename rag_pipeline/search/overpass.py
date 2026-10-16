@@ -12,11 +12,16 @@ uses -- the agent process has network; the code-exec sandbox does not.
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -423,6 +428,187 @@ def _bad_remark(data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# The last good answer, kept on disk (stage 70)
+# --------------------------------------------------------------------------- #
+# 2026-10-15 22:55 to 10-16 07:45 CDT every mirror above failed for hours: overpass-api.de 502
+# "at capacity ... the request queue is full", z. and lz4. timeouts, kumi.systems and
+# private.coffee 500 at once, maps.mail.ru 504/400. A one-node query failed on all six, so it was
+# load, not this client. One Loop road-network turn got through after 148 s, on the fifth mirror.
+# A demo that fetches OSM live fails on stage when that happens.
+#
+# So every good answer is kept, keyed by the exact query text (a mirror is a copy of the same
+# database, so the key leaves the endpoint out). When every mirror fails, the kept copy is
+# served, marked `cached: true` with `cached_at`, and every tool that passes it on says so. With
+# OVERPASS_CACHE_TTL_S > 0 a copy younger than that is served without asking at all, marked the
+# same way. OVERPASS_CACHE=0 turns the whole thing off.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _env_on(name: str, default: str) -> bool:
+    return str(os.getenv(name, default)).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _in_checkout(path: Path) -> bool:
+    """True when *path* lies in this source tree AND the tree is a git checkout. An image has
+    no .git (.dockerignore), so the container's /app/agent_chat_files volume is fine; a
+    developer's checkout is not, even where the folder is git-ignored."""
+    if not (_REPO_ROOT / ".git").exists():
+        return False
+    try:
+        path.resolve().relative_to(_REPO_ROOT)
+        return True
+    except ValueError:
+        return False
+
+
+def cache_dir() -> Optional[Path]:
+    """Where answers are kept: OVERPASS_CACHE_DIR, else ``overpass_cache`` under
+    AGENT_FILE_STORAGE_ROOT (the agent's data volume), else ~/.cache/iguide-agent/overpass.
+    Never inside a git checkout: a relative storage root resolves into the repo, so it falls
+    through to the home cache. None when the cache is off."""
+    if not _env_on("OVERPASS_CACHE", "1"):
+        return None
+    explicit = os.getenv("OVERPASS_CACHE_DIR")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    root = os.getenv("AGENT_FILE_STORAGE_ROOT")
+    if root:
+        p = Path(root).expanduser()
+        if p.is_absolute() and not _in_checkout(p):
+            return p.resolve() / "overpass_cache"
+    return Path.home() / ".cache" / "iguide-agent" / "overpass"
+
+
+def query_key(query: str) -> str:
+    """The cache key: sha256 of the query text exactly as sent. No endpoint in it."""
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def _cache_path(key: str) -> Optional[Path]:
+    d = cache_dir()
+    return None if d is None else d / f"{key}.json.gz"
+
+
+def _prune(directory: Path, max_bytes: int) -> None:
+    """Oldest entries out until the folder is under *max_bytes*."""
+    try:
+        entries = [(f.stat().st_mtime, f.stat().st_size, f) for f in directory.glob("*.json.gz")]
+    except OSError:
+        return
+    total = sum(size for _, size, _ in entries)
+    for _, size, f in sorted(entries, key=lambda e: e[0]):
+        if total <= max_bytes:
+            break
+        try:
+            f.unlink()
+            total -= size
+        except OSError:
+            pass
+
+
+def _cache_write(query: str, data: Dict[str, Any], endpoint: str) -> None:
+    """Keep *data* as the last good answer to *query*. Never raises: a cache that cannot be
+    written costs the next outage, not this answer."""
+    path = _cache_path(query_key(query))
+    if path is None:
+        return
+    try:
+        blob = gzip.compress(json.dumps({
+            "v": 1, "query": query, "endpoint": endpoint,
+            "cached_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "data": data}, separators=(",", ":")).encode("utf-8"), compresslevel=5)
+        if len(blob) > _env_float("OVERPASS_CACHE_MAX_ENTRY_MB", 64) * 1024 * 1024:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, path)                       # a reader never sees half a file
+        _prune(path.parent, int(_env_float("OVERPASS_CACHE_MAX_MB", 1024) * 1024 * 1024))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("overpass: could not keep the answer in the cache (%s)", exc)
+
+
+def _cache_read(query: str, max_age_s: float = 0.0) -> Optional[Dict[str, Any]]:
+    """The kept answer to exactly *query* (``{"data", "endpoint", "cached_at", "age_s"}``), or
+    None. ``max_age_s`` > 0 refuses older copies."""
+    path = _cache_path(query_key(query))
+    if path is None or not path.is_file():
+        return None
+    try:
+        rec = json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+        if rec.get("query") != query or not isinstance(rec.get("data"), dict):
+            return None
+        at = datetime.fromisoformat(str(rec["cached_at"]))
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+    except Exception as exc:  # noqa: BLE001 - a damaged entry is no entry
+        logger.warning("overpass: unreadable cache entry %s (%s)", path.name, exc)
+        return None
+    if max_age_s and age > max_age_s:
+        return None
+    return {"data": rec["data"], "endpoint": rec.get("endpoint"),
+            "cached_at": rec["cached_at"], "age_s": round(age, 1)}
+
+
+def _age_text(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{max(1, round(seconds / 60))} min"
+    if seconds < 2 * 86400:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.0f} days"
+
+
+def cache_note(cached_at: str, reason: str, age_s: Optional[float] = None) -> str:
+    """The sentence every tool passes on with a cached answer, so the answer says so."""
+    when = str(cached_at).replace("T", " ").replace("+00:00", " UTC")
+    age = f", {_age_text(age_s)} old" if age_s is not None else ""
+    why = ("every Overpass mirror failed just now" if reason == "mirrors_failed"
+           else "a copy this recent is reused instead of asking again (OVERPASS_CACHE_TTL_S)")
+    return (f"CACHED COPY, not a live fetch: {why}, so this is OpenStreetMap data the same query "
+            f"returned at {when}{age}. Say in the answer that the OSM data is a cached copy "
+            "from that time.")
+
+
+def _from_cache(hit: Dict[str, Any], reason: str, attempts: List[Dict[str, Any]],
+                live_error: Optional[str]) -> Dict[str, Any]:
+    data = hit["data"]
+    raw = json.dumps(data)
+    attempts = attempts + [{"cache": "hit", "reason": reason, "cached_at": hit["cached_at"],
+                            "age_s": hit["age_s"], "endpoint": hit.get("endpoint")}]
+    if hit.get("endpoint"):
+        _record_source(str(hit["endpoint"]))
+    return {"data": data, "error": None, "endpoint": hit.get("endpoint"), "attempts": attempts,
+            "raw_excerpt": raw[:RAW_EXCERPT_CHARS], "bytes": len(raw),
+            "cached": True, "cached_at": hit["cached_at"], "cache_age_s": hit["age_s"],
+            "cache_reason": reason, "cache_note": cache_note(hit["cached_at"], reason, hit["age_s"]),
+            "live_error": live_error}
+
+
+# Concurrency. That night three overpass_search calls fired at once and one got 429: a public
+# mirror gives one address two slots. So at most OVERPASS_MAX_CONCURRENT requests are in flight
+# from this process (0 = no limit), and an identical query already in flight is not sent again:
+# the second caller waits for the first one's answer.
+_SLOTS_LOCK = threading.Lock()
+_SLOTS: Dict[int, threading.BoundedSemaphore] = {}
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: Dict[Tuple[str, Optional[int]], Dict[str, Any]] = {}
+
+
+def _slots() -> Optional[threading.BoundedSemaphore]:
+    n = int(_env_float("OVERPASS_MAX_CONCURRENT", 2))
+    if n <= 0:
+        return None
+    with _SLOTS_LOCK:
+        return _SLOTS.setdefault(n, threading.BoundedSemaphore(n))
+
+
 def _exchange(query: str, *, stream_cap: Optional[int] = None,
               http_timeout: Optional[float] = None) -> Dict[str, Any]:
     """Send ``query`` to the first mirror that answers well, and keep the evidence.
@@ -431,15 +617,67 @@ def _exchange(query: str, *, stream_cap: Optional[int] = None,
     attempt is listed with its mirror, HTTP status, seconds and failure, so a caller (or the
     model, through ``debug``) can see WHY a result is what it is: which mirror answered, which
     ones timed out, and what the service itself said.
+
+    A good answer is kept on disk (stage 70). When every mirror fails and a kept answer to the
+    same text exists, that is returned instead, with ``cached: true``, ``cached_at``,
+    ``cache_age_s``, ``cache_reason`` and ``cache_note``; ``live_error`` holds the last mirror's
+    failure. ``shared: true`` marks an answer a concurrent identical call fetched.
     """
+    ttl = _env_float("OVERPASS_CACHE_TTL_S", 0)
+    if ttl > 0:
+        hit = _cache_read(query, max_age_s=ttl)
+        if hit is not None:
+            return _from_cache(hit, "fresh", [], None)
+    flight = (query, stream_cap)
+    with _INFLIGHT_LOCK:
+        slot = _INFLIGHT.get(flight)
+        leader = slot is None
+        if leader:
+            slot = _INFLIGHT[flight] = {"done": threading.Event()}
+    if not leader:
+        wait = len(OVERPASS_ENDPOINTS) * (float(http_timeout or _TIMEOUT + 5) + 1) + 5
+        if slot["done"].wait(wait) and slot.get("result") is not None:
+            res = slot["result"]
+            return {**res, "attempts": list(res["attempts"]), "shared": True}
+        # The first caller is still at it (or died): ask for ourselves.
+    result: Optional[Dict[str, Any]] = None
+    try:
+        result = _exchange_live(query, stream_cap=stream_cap, http_timeout=http_timeout)
+        if result["data"] is not None:
+            _cache_write(query, result["data"], str(result["endpoint"]))
+        else:
+            hit = _cache_read(query, max_age_s=_env_float("OVERPASS_CACHE_MAX_AGE_S", 0))
+            if hit is not None:
+                logger.warning("overpass: every mirror failed; serving the copy from %s",
+                               hit["cached_at"])
+                result = _from_cache(hit, "mirrors_failed", result["attempts"], result["error"])
+        return result
+    finally:
+        if leader:
+            slot["result"] = result
+            with _INFLIGHT_LOCK:
+                _INFLIGHT.pop(flight, None)
+            slot["done"].set()
+
+
+def _exchange_live(query: str, *, stream_cap: Optional[int] = None,
+                   http_timeout: Optional[float] = None) -> Dict[str, Any]:
+    """The mirrors, in order, with no cache: ``_exchange``'s network half."""
     attempts: List[Dict[str, Any]] = []
     last_error: Optional[str] = None
     for endpoint in OVERPASS_ENDPOINTS:
         started = time.monotonic()
         attempt: Dict[str, Any] = {"endpoint": endpoint}
+        slots = _slots()
         try:
-            resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS,
-                                 timeout=http_timeout or _TIMEOUT + 5)
+            if slots is not None:
+                slots.acquire()
+            try:
+                resp = requests.post(endpoint, data={"data": query}, headers=_HEADERS,
+                                     timeout=http_timeout or _TIMEOUT + 5)
+            finally:
+                if slots is not None:
+                    slots.release()
             attempt["status"] = getattr(resp, "status_code", None)
             resp.raise_for_status()
             text = getattr(resp, "text", None)
@@ -586,7 +824,10 @@ def overpass_search(
 
     Returns ``{"query", "count", "features": [{name, lat, lon, feature_type, tags,
     geometry}], "diagnostics"}``. On a missing location or a transport failure, returns an
-    ``{"error", "message", "features": [], "count": 0}`` payload instead of raising.
+    ``{"error", "message", "features": [], "count": 0}`` payload instead of raising. When every
+    mirror failed and the same query's last good answer was kept (stage 70), that answer comes
+    back with ``cached: true``, ``cached_at``, ``cache_age_s``, ``cache_reason`` and
+    ``cache_note``, and the note leads ``diagnostics.warnings``.
 
     ``debug=True`` adds ``debug``: the Overpass QL actually sent, every mirror attempt (status,
     seconds, error, the service's remark), and the start of the raw response. It is how a caller
@@ -624,6 +865,7 @@ def overpass_search(
              f".rest out geom {limit};")
 
     data = None
+    used: Dict[str, Any] = {}
     exchanges: List[Tuple[str, Dict[str, Any]]] = []
     if not osm_filter:
         # A name is usually a place, and a place's outline is a relation. Ask for relations
@@ -637,12 +879,12 @@ def overpass_search(
         want = str(feature).strip().casefold()
         if first and any(str((el.get("tags") or {}).get("name") or "").casefold() == want
                          for el in first.get("elements", [])):
-            data = first
+            data, used = first, ex
     last_error: Optional[str] = None
     if data is None:
         ex = _exchange(query)
         exchanges.append((query, ex))
-        data, last_error = ex["data"], ex["error"]
+        data, last_error, used = ex["data"], ex["error"], ex
     debug_block = None
     if debug:
         debug_block = {"exchanges": [
@@ -673,6 +915,12 @@ def overpass_search(
         "features": features,
         "diagnostics": _diagnostics(data, features, osm_filter, feature),
     }
+    if used.get("cached"):
+        # Stage 70: every mirror failed (or a recent copy was reused), and this is the kept
+        # answer. Said at the top level and among the warnings, never left to the caller.
+        out.update({k: used[k] for k in ("cached", "cached_at", "cache_age_s", "cache_reason",
+                                         "cache_note")})
+        out["diagnostics"].setdefault("warnings", []).insert(0, used["cache_note"])
     if debug_block:
         out["debug"] = debug_block
     return out

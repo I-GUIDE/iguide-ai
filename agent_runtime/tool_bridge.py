@@ -143,7 +143,9 @@ def overpass_search(feature, place=None, bbox=None, max_features=20000, debug=Fa
     as named polygons; "road network" is every drivable road (motorway to residential, with
     ramps; oneway and maxspeed are in each way's properties). Returns {path (GeoJSON), count,
     complete, tiles, diagnostics, ...};
-    debug=True adds the Overpass queries sent, each mirror's answer, and the raw response start."""
+    debug=True adds the Overpass queries sent, each mirror's answer, and the raw response start.
+    When every mirror is down, a kept copy of the same query's earlier answer comes back with
+    cached=True and cached_at (UTC): say the OSM data is a cached copy from that time."""
     return _call("overpass_search", feature=feature, place=place, bbox=bbox,
                  max_features=max_features, debug=debug)
 
@@ -152,7 +154,8 @@ def overpass_query(query):
     """Run YOUR OWN Overpass QL query (read-only) when overpass_search does not ask what you
     need, or to check what it returned. Output is JSON; [timeout:] and [maxsize:] are capped and
     the text is limited in length. Returns {path (the raw Overpass JSON), elements,
-    elements_by_type, remark, endpoint, attempts, query (as sent)}."""
+    elements_by_type, remark, endpoint, attempts, query (as sent)}, plus cached=True and
+    cached_at when every mirror failed and this is the kept copy of an earlier answer."""
     return _call("overpass_query", query=query)
 
 
@@ -282,8 +285,10 @@ def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = No
 
     Overpass has no offset, so "page" here means "tile". A way crossing two tiles comes back
     from both and is kept once (by OSM type and id). Returns ``{"region", "features",
-    "osm_filter", "complete", "tiles", "splits", "retries", "debug_tiles"}``; raises Refused
-    rather than return part of an area. The bridge's overpass_search writes the features to a
+    "osm_filter", "complete", "tiles", "splits", "retries", "debug_tiles"}``, plus the cache
+    marks (``cached``, ``cached_tiles``, ``cached_at``, ``cache_note``, ...) when any tile was
+    the kept copy of an earlier answer (stage 70); raises Refused rather than return part of an
+    area. The bridge's overpass_search writes the features to a
     file; so does the model's overpass_search for a road network (stage 69).
     """
     from rag_pipeline.search import overpass as ov
@@ -299,6 +304,7 @@ def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = No
     tiles = splits = retries = 0
     filt = None
     debug_tiles: List[Dict[str, Any]] = []
+    cached: List[Dict[str, Any]] = []       # tiles answered from the kept copy (stage 70)
     while pending and tiles < max_tiles and len(seen) < cap:
         box, failures = pending.pop(0)
         res = ov.overpass_search(feature, bbox=list(box), limit=_OVERPASS_PAGE,
@@ -331,6 +337,8 @@ def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = No
                 splits += 1
             continue
         filt = (res.get("query") or {}).get("osm_filter")
+        if res.get("cached"):
+            cached.append(res)
         for f in res.get("features") or []:
             seen.setdefault((str(f.get("osm_type")), f.get("osm_id")), f)
         if int(res.get("count") or 0) >= _OVERPASS_PAGE:
@@ -339,9 +347,24 @@ def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = No
             pending += [((w, s, mx, my), 0), ((mx, s, e, my), 0), ((w, my, mx, n), 0),
                         ((mx, my, e, n), 0)]
             splits += 1
-    return {"region": list(region), "features": list(seen.values())[:cap], "osm_filter": filt,
-            "complete": not pending and len(seen) < cap, "tiles": tiles, "splits": splits,
-            "retries": retries, "debug_tiles": debug_tiles}
+    out = {"region": list(region), "features": list(seen.values())[:cap], "osm_filter": filt,
+           "complete": not pending and len(seen) < cap, "tiles": tiles, "splits": splits,
+           "retries": retries, "debug_tiles": debug_tiles}
+    if cached:
+        oldest = min(cached, key=lambda r: str(r.get("cached_at")))
+        out.update({"cached": True, "cached_tiles": len(cached), "cached_at": oldest["cached_at"],
+                    "cache_age_s": oldest.get("cache_age_s"),
+                    "cache_reason": oldest.get("cache_reason"),
+                    "cache_note": oldest.get("cache_note") + (
+                        f" ({len(cached)} of {tiles} tiles came from the cache; the oldest "
+                        "time is given.)" if tiles > 1 else "")})
+    return out
+
+
+def cache_fields(got: Dict[str, Any]) -> Dict[str, Any]:
+    """The stage-70 cache marks of a fetch, to copy into what a tool returns."""
+    return {k: got[k] for k in ("cached", "cached_tiles", "cached_at", "cache_age_s",
+                                "cache_reason", "cache_note") if k in got}
 
 
 def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
@@ -378,6 +401,9 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
                           "(caps). Narrow the area or say the count is a lower bound.")
     out["diagnostics"] = ov._diagnostics(None, feats, filt, feature)
     out["diagnostics"].pop("elements_by_type", None)
+    if got.get("cached"):
+        out.update(cache_fields(got))
+        out["diagnostics"].setdefault("warnings", []).insert(0, got["cache_note"])
     if debug:
         out["debug"] = {"tiles_shown": len(debug_tiles), "tiles": debug_tiles}
     return out
@@ -425,6 +451,9 @@ def _overpass_query_handler(query: str) -> Dict[str, Any]:
            "file_id": rec.get("file_id"), "filename": rec.get("filename")}
     if data.get("remark"):
         out["remark"] = str(data["remark"])[:300]
+    if ex.get("cached"):
+        out.update({k: ex[k] for k in ("cached", "cached_at", "cache_age_s", "cache_reason",
+                                       "cache_note")})
     return out
 
 

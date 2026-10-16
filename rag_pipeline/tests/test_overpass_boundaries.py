@@ -102,6 +102,12 @@ def test_a_timed_out_query_reported_as_200_is_a_failure_not_an_empty_answer(monk
     res = ov.overpass_search("boundary", bbox="0,0,1,1")
     assert len(sent) == 2 and res["count"] == 1               # the second mirror answered
 
+    # Stage 70 keeps the answer above and serves it when every mirror fails: marked, not empty.
+    _patch(monkeypatch, [_Resp(timeout), _Resp(timeout)])
+    res = ov.overpass_search("boundary", bbox="0,0,1,1")
+    assert res["cached"] is True and res["count"] == 1
+
+    monkeypatch.setenv("OVERPASS_CACHE", "0")
     _patch(monkeypatch, [_Resp(timeout), _Resp(timeout)])
     res = ov.overpass_search("boundary", bbox="0,0,1,1")
     assert res["error"] == "overpass_failed" and "timed out" in res["message"]
