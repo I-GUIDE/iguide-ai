@@ -5119,11 +5119,12 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
         turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
         reran = True
 
-    _record_execution_outcome(result, turn)
+    _record_execution_outcome(result, turn, prose_key=prose_key, any_fence=any_fence)
     return reran
 
 
-def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> bool:
+def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any], *,
+                              prose_key: str = "answer", any_fence: bool = True) -> bool:
     """Write ``executed`` and ``execution_error`` from what the turn's tool results show.
 
     The pair must be written TOGETHER, and the CLEAR is the half that gets forgotten. This
@@ -5132,8 +5133,20 @@ def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> b
     failure it had just fixed and the grounding auditor read a working run as a broken one.
     One function, so the two cannot drift apart again.
 
+    ``executed`` is a statement about CODE, so it is written only when there is code to speak
+    of: an execute_code call, or a code block in the peer's prose. A peer that answered with
+    tools alone wrote no code, and ``executed=False`` on its result told synthesis "the code in
+    this result did NOT run … do not describe its output as a result". Live, 2026-10-15
+    (sess-7c3ef000): six ok tool calls, two layers on the map, and an answer saying nothing
+    had run (stage 68).
+
     Returns whether a run is recorded.
     """
+    if not (_has_execution_record(turn)
+            or _ships_unrun_code(result.get(prose_key) or "", any_fence=any_fence)):
+        result.pop("executed", None)
+        result.pop("execution_error", None)
+        return False
     ran, error = _execution_outcome(turn)
     result["executed"] = bool(ran)
     # Only when a run actually failed: an absent run is already said by executed=False, and a
@@ -5524,7 +5537,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
                 result["tool_results"] = list(_session.turn_artifacts["tool_results"])
                 turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
-                ran = _record_execution_outcome(result, turn)
+                ran = _record_execution_outcome(result, turn, prose_key="answer")
                 caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)
@@ -5612,8 +5625,18 @@ def _execution_note(result: Any) -> str:
         return "EXECUTION: the code in this result RAN and its output is real."
     error = str(result.get("execution_error") or "").strip()
     tail = f" The failure was: {error[:200]}" if error else ""
-    return ("EXECUTION: the code in this result did NOT run." + tail
-            + " Do not present it as executed, and do not describe its output as a result.")
+    note = ("EXECUTION: the code in this result did NOT run." + tail
+            + " Do not present that code as executed, and do not report any output of that "
+              "code as a result.")
+    # The flag is about the CODE. Unscoped, it read as a verdict on the whole result, and the
+    # writer disowned the tool calls beside it that had run (stage 68).
+    ran = list(dict.fromkeys(str(r.get("tool")) for r in _ledger_rows(result)
+                             if r.get("tool") and r.get("tool") != "execute_code"
+                             and not r.get("failed")))
+    if ran:
+        note += (" This concerns the code only: these other tool calls in this result DID run "
+                 "and their results are real: " + ", ".join(ran[:12]) + ".")
+    return note
 
 
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:

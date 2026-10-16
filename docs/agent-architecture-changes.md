@@ -10518,3 +10518,69 @@ prototype (no `client_profile`). They cover:
   `element_type`, which is one way its cards end up linking to `/undefined/`.
 - Node's `fetch` gives up after 300 s of a silent stream, and the agent sends no heartbeat.
 
+
+
+## Stage 68 — A turn that ran tools and wrote no code is not told "the code did not run" {#stage-68}
+
+**Why.** Live, 2026-10-15 ~22:54 CDT (local agent, Lumen deepseek-v4-flash, validation off,
+thread `sess-7c3ef000-…`). The request: count Chicago's serious crashes 2020–2024 in each 500 m
+hexagon, map the counts, and say how many fall in the grid and which hexagon has the most. The
+analyze peer ran six tools, all ok, none of them `execute_code`:
+- `inspect_file_for_analysis` and `inspect_vector`;
+- `count_points_in_areas`, 3,028 hexagons, a choropleth delivered to the map;
+- `summary_statistics`;
+- `select_by_attribute`, one feature, a second layer delivered;
+- `read_text_file`.
+
+The ledger recorded all six rows, and the decider said the results were available. The answer
+said the execution record showed the code did not run, so there were no counts, no map layers
+and no output files. The correct answer was 10,008 crashes in the grid, busiest hexagon H1852
+with 35.
+
+The cause was a flag, not a failed row. `_apply_execution_honesty` runs on the analyze peer too
+(execute_code is bound there), and `_record_execution_outcome` wrote `executed = False` whenever
+the turn had no successful `execute_code` run, including a turn that never wrote code.
+`_execution_note` then gave the answer writer its own line:
+
+> EXECUTION: the code in this result did NOT run. … do not describe its output as a result.
+
+That line is stated outside the truncated JSON dump on purpose (commit 4fcd4743), so it reached
+the writer every time. Every analyze turn that worked with tools alone carried it. A model that
+weighs it over the summary disowns the whole turn. Answer validation was off in the live turn,
+so `_artifact_corrections`, which would have corrected the "no map layers" claim, did not run
+and the denial reached the user unchanged.
+
+The ledger's `FAILED … DID NOT RUN` rendering was not involved: a row is failed only on an
+explicit `ok: false`, non-zero exit or timeout, and none of the six had one.
+
+**What changed** (`agent_runtime/supervisor/graph.py`).
+- `_record_execution_outcome` writes `executed` / `execution_error` only when there is code to
+  speak of: an `execute_code` call in the turn, or a code block in the peer's prose (the same
+  `_ships_unrun_code` test, with the peer's own `any_fence` setting). Otherwise it removes both
+  keys. The code peer's dead-end branch passes its prose key too, so both call sites still go
+  through the one helper.
+- `_execution_note` scopes a failed-code note to the code. It says "do not report any output of
+  that code" rather than "its output", and when other tool calls in the same result ran, it
+  names them and says their results are real. A turn whose script failed beside a counting tool
+  that succeeded no longer disowns the count.
+
+Unchanged: a code block handed back with no run still gets the one challenge and
+`executed = False`, and a failed run still states its error.
+
+**Tests.** `rag_pipeline/tests/test_synthesis_sees_tool_work.py` replays the live turn's six
+tool calls through the real analyze peer (code execution available, as in production) and then
+through `run_supervisor` with the default writer. Three of its four tests fail on prototype:
+- the peer result carried `executed: False`;
+- the writer's prompt contained the "did NOT run" line;
+- a failed script's note did not name the tool that ran.
+
+The fourth, unrun code is still challenged and flagged, passes on both.
+`test_an_answer_with_no_code_block_is_left_alone` asserted `executed is False` for a prose-only
+answer, which is the defect, and now asserts the key is absent.
+
+**Not done here.**
+- `default_synthesize_fn` still serializes `analysis_results` and cuts it at 2,000 characters.
+  The summary is the first key, so it survives, but tool results after it can be cut. The typed
+  facts note carries the numbers separately.
+- With validation off, nothing checks an answer that denies delivered layers. Stage 66 leaves
+  that out by design.
