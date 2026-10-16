@@ -299,10 +299,17 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    The pills it replaces sat flush against the last paragraph and read as part of the prose —
    and truncating the names to keep them pill-sized is what made four different artifacts
    indistinguishable. A row each, the full name, and a divider that says where the answer ends. */
-.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
-      display: flex; flex-direction: column; gap: 6px; }
+.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+/* The header is the fold's <summary>: it must look and behave like a control (as .reason). */
 .dl-head { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
-           color: var(--muted); font-weight: 600; }
+           color: var(--muted); font-weight: 600; list-style: none; cursor: pointer;
+           display: flex; align-items: center; gap: 8px; }
+.dl-head::-webkit-details-marker { display: none; }
+.dl-head:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+.dl-count { font-weight: 500; letter-spacing: normal; text-transform: none; color: #8a9099; font-size: 12px; }
+.dl .chev { margin-left: auto; color: #9aa0a6; transition: transform .15s ease; }
+.dl[open] .chev { transform: rotate(180deg); }
+.dl-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .dl-item { display: flex; align-items: center; gap: 9px; background: #eef6f0;
            border: 1px solid #d6e7db; color: var(--link); text-decoration: none;
            border-radius: 10px; padding: 8px 12px; font-size: 13px; }
