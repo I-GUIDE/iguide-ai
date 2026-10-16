@@ -10,9 +10,11 @@ unpriced. ``gis_harness/run.py`` reads this module too, so the harness and the s
 disagree about what a run cost.
 
 A model with no per-token dollar price reports ``cost_usd: None``, never ``0``. NCSA Lumen spends
-the key owner's coins, which have no published dollar rate, and AnvilGPT is Purdue's allocation;
-calling either "free" would make a turn on them look cheaper than a priced one when nobody knows
-that it is. An operator who has a rate can supply it with ``AGENT_MODEL_PRICES``.
+the key owner's coins instead, which have no dollar rate; its calls are priced in coins
+(``cost_coins``) at the rate Lumen publishes per model (``agent_runtime/lumen_coins.py``).
+AnvilGPT is Purdue's allocation and has neither. Calling an unpriced model "free" would make a
+turn on it look cheaper than a priced one when nobody knows that it is. An operator who has a
+dollar rate can supply it with ``AGENT_MODEL_PRICES``.
 """
 from __future__ import annotations
 
@@ -101,14 +103,17 @@ def call_cost(model: Optional[str], input_tokens: Any, output_tokens: Any,
     return round(cost, 6)
 
 
-def summarize(calls: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
-    """One turn's cost from its ``llm_usage`` payloads.
+def summarize(calls: Iterable[Mapping[str, Any]],
+              coins_available: Optional[float] = None) -> Dict[str, Any]:
+    """One turn's cost from its ``llm_usage`` payloads, in dollars and in Lumen coins.
 
-    ``cost_usd`` sums the priced calls and is None only when NO call was priced. A turn that
-    mixed priced and unpriced models therefore reports a cost that covers only part of it, which
-    is why ``priced_calls`` and ``unpriced_models`` sit beside it: read together they say how
-    much of the turn the number covers. ``usage_absent`` counts calls whose provider sent no
-    token counts at all, a different fact from a call that used none.
+    Two currencies, kept apart because they are different money: ``cost_usd`` sums the calls
+    with a dollar price (OpenAI), ``cost_coins`` the calls to NCSA Lumen, priced at Lumen's own
+    published per-model coin rate (``lumen_coins``). Each is None only when NO call was priced
+    in it, and ``priced_calls`` / ``coin_priced_calls`` say how many calls each covers. A model
+    with neither price is listed in ``unpriced_models``. ``usage_absent`` counts calls whose
+    provider sent no token counts at all, a different fact from a call that used none.
+    ``coins_available``, when given, is the Lumen account's balance after the turn.
     """
     table = prices()
     rows: List[Dict[str, Any]] = []
@@ -116,6 +121,7 @@ def summarize(calls: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
               "reasoning_tokens": 0}
     by_model: Dict[str, Dict[str, Any]] = {}
     cost, priced, absent = 0.0, 0, 0
+    coins, coin_priced = 0.0, 0
     unpriced: set = set()
     for call in calls or []:
         if not isinstance(call, Mapping):
@@ -126,26 +132,35 @@ def summarize(calls: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         tin, tout = _int(call.get("input_tokens")), _int(call.get("output_tokens"))
         tcached, treason = _int(call.get("cached_input_tokens")), _int(call.get("reasoning_tokens"))
         c = call.get("cost_usd")
-        if c is None and call.get("usage") != "absent":
+        if c is None and call.get("usage") != "absent" and call.get("provider") != "lumen":
+            # A Lumen call is billed in coins, never at an OpenAI dollar rate for the same id.
             c = call_cost(model, tin, tout, tcached, table)
+        cc = call.get("cost_coins")
         for key, value in (("input_tokens", tin), ("cached_input_tokens", tcached),
                            ("output_tokens", tout), ("reasoning_tokens", treason)):
             totals[key] += value
         m = by_model.setdefault(model, {"model": model, "calls": 0, "input_tokens": 0,
-                                        "output_tokens": 0, "cost_usd": None})
+                                        "output_tokens": 0, "cost_usd": None, "cost_coins": None})
         m["calls"] += 1
         m["input_tokens"] += tin
         m["output_tokens"] += tout
-        if c is None:
-            if call.get("usage") != "absent":
-                unpriced.add(model)
-        else:
+        if c is not None:
             priced += 1
             cost += float(c)
             m["cost_usd"] = round((m["cost_usd"] or 0.0) + float(c), 6)
+        if cc is not None:
+            coin_priced += 1
+            coins += float(cc)
+            m["cost_coins"] = round((m["cost_coins"] or 0.0) + float(cc), 8)
+        if c is None and cc is None and call.get("usage") != "absent":
+            unpriced.add(model)
         if len(rows) < MAX_LISTED_CALLS:
             row = {"model": model, "input_tokens": tin, "output_tokens": tout,
                    "cost_usd": None if c is None else round(float(c), 6)}
+            if call.get("provider"):
+                row["provider"] = call["provider"]
+            if cc is not None:
+                row["cost_coins"] = round(float(cc), 8)
             if tcached:
                 row["cached_input_tokens"] = tcached
             if treason:
@@ -160,12 +175,14 @@ def summarize(calls: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         **totals,
         "cost_usd": round(cost, 6) if priced else None,
         "priced_calls": priced,
+        "cost_coins": round(coins, 8) if coin_priced else None,
+        "coin_priced_calls": coin_priced,
         "unpriced_models": sorted(unpriced),
         "usage_absent": absent,
         "by_model": sorted(by_model.values(), key=lambda m: -m["calls"]),
         "calls": rows,
         "calls_truncated": max(0, n - len(rows)),
-        "currency": "USD",
+        **({"coins_available": float(coins_available)} if coins_available is not None else {}),
     }
 
 
@@ -180,9 +197,10 @@ def memory_summary(usage: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any
         return None
     out: Dict[str, Any] = {k: _int(usage.get(k)) for k in
                            ("llm_calls", "input_tokens", "cached_input_tokens", "output_tokens",
-                            "reasoning_tokens", "priced_calls")}
-    if usage.get("cost_usd") is not None:
-        out["cost_usd"] = float(usage["cost_usd"])
+                            "reasoning_tokens", "priced_calls", "coin_priced_calls")}
+    for key in ("cost_usd", "cost_coins", "coins_available"):
+        if usage.get(key) is not None:
+            out[key] = float(usage[key])
     out["models"] = [str(m.get("model")) for m in usage.get("by_model") or [] if m.get("model")]
     out["unpriced_models"] = [str(m) for m in usage.get("unpriced_models") or []]
     return out
