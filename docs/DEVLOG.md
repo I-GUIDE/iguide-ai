@@ -5771,4 +5771,20 @@ rather than from the previous one.
   (prompt 8k → 56k tokens) and added nothing.
 
 **Not fixed** `list_conversation_files` stays open to search; the veto is lexical.
+## 2026-10-15 · M8.101 · One map layer per source file (architecture stage 67)
+
+**Change** A layer's id is `agent-<content key of the file it shows>`, set in `build_map_layer`
+  for every descriptor whose url serves an agent file. Four producers that draw a copy name their
+  source with `source_key`: `add_map_layer`, `add_raster_layer`, `embed_zones`' outline, and
+  `_raster_layer`. Drawing a file again restyles and renames its layer in place.
+
+**Why** Chicago step 3, live: `regionalize` drew the regions, then `add_map_layer` of the same
+  file drew them again under a new name, and two identical layers were listed. User: one layer
+  per source file.
+
+  Uploads return `layer_id`, so the UI's own upload preview carries the same id and an agent
+  layer of the upload replaces it. add_map_layer / add_raster_layer tell the model a redraw
+  replaced the layer.
+
+**Not fixed** Conversations saved earlier restore under the old ids.
 

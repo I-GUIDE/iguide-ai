@@ -994,8 +994,17 @@ export default function App() {
           recs.forEach((r, i) => {
             const id = previews[i];
             if (!id || !r.download_url) return;
-            setLayers((prev) => prev.map((l) => (
-              l.id === id && l.kind === 'geojson' ? { ...l, sourceUrl: r.download_url } : l)));
+            // The preview also takes the id the agent's layer of this file will carry (one
+            // layer per source file), so the agent drawing the same upload restyles the preview
+            // instead of drawing the same polygons a second time.
+            const nextId = r.layer_id || id;
+            // A layer already holding that id (the same file uploaded again, or already drawn by
+            // the agent) gives way, so ids stay unique.
+            setLayers((prev) => prev
+              .filter((l) => l.id === id || l.id !== nextId)
+              .map((l) => (
+                l.id === id && l.kind === 'geojson'
+                  ? { ...l, id: nextId, sourceUrl: r.download_url } : l)));
           });
         }
         pushMsg({ role: 'agent', text: `Uploaded ${recs.length} file(s) to the agent: ${recs.map((r) => r.filename).join(', ')}. They're attached to this conversation — ask me about them.` });

@@ -396,6 +396,14 @@ def _raster_layer(rec: Dict[str, Any], bbox: List[float], label: str,
            "bounds": bbox, "opacity": opacity, "source": "analysis"}
     if layer_id:
         out["id"] = layer_id
+        # The picture is a new PNG each time, but the layer stands for the content the id
+        # digests (region, model, period, package): that is its source under the one-layer-per-
+        # source rule (map_layers.source_layer_id), so a re-render, or the shared-PCA recolour
+        # that supersedes it, replaces it rather than stacking.
+        # The bare content key, without the "embed-" namespace: it is the key the producer
+        # records on the file it fetched (terrain's GeoTIFF), so add_raster_layer of that file
+        # lands on this layer.
+        out["source_key"] = layer_id[len("embed-"):] if layer_id.startswith("embed-") else layer_id
     if embedding:
         out["embedding"] = embedding
     return out
@@ -1836,6 +1844,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         # builds, and its fallback branch does not re-import everything. map_layers has no
         # optional dependency, so putting this there left the name UNBOUND on exactly the path
         # the fallback takes — the layer then failed with "zones computed but not mapped".
+        from agent_runtime.file_store import file_content_key
         from agent_runtime.map_layers import boundary_layer_id
         try:
             import numpy as np
@@ -1997,6 +2006,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # to tell apart, k is always 1, and the layer is the input polygon
                              # with three attributes added.
                              "id": boundary_layer_id(file_id),
+                             # It writes a NEW file (the polygon plus the embedding columns) but
+                             # stands for the input boundary, whose layer it replaces.
+                             "source_key": file_content_key(file_id),
                              # Through _layer_label so it gets the same de-duplication: the
                              # model names these layers itself and usually puts the model in
                              # the name, which would otherwise read "… — gse — … — gse embedded".

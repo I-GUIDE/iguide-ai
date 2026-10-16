@@ -597,7 +597,7 @@ def test_the_boundary_layer_carries_that_id():
         "id": boundary_layer_id("file_poly1"), "source": "analysis",
         "count": 1, "outline": True}})
     assert built is not None
-    assert built["id"] == "boundary-file_poly1"
+    assert built["id"] == "agent-file_poly1"
     assert built["outline"] is True
 
 

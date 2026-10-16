@@ -1565,6 +1565,18 @@ def upload_agent_files():
         _session_token = set_file_store_session(thread_id)
         try:
             uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+            # The id the agent's layer of this file will carry (one layer per source file,
+            # map_layers.file_layer_id). The map UI draws its own preview of an upload, so it
+            # takes this id for it; an agent layer of the same upload then replaces the preview
+            # in place instead of drawing the same polygons twice.
+            from agent_runtime.map_layers import file_layer_id
+
+            for record in uploaded:
+                if isinstance(record, dict) and record.get("file_id"):
+                    try:
+                        record["layer_id"] = file_layer_id(record["file_id"])
+                    except Exception:  # noqa: BLE001 - the preview keeps its own id
+                        pass
         finally:
             reset_file_store_session(_session_token)
             identity.reset_user(_upload_token)

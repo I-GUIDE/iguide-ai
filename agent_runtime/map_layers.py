@@ -115,6 +115,51 @@ def drawn_layer_key(input_key: str, render: str, *, column: Any = None,
                        sample=sample)
 
 
+# --- one layer per source file (2026-10-15) ------------------------------------------------
+# A layer's id is the content key of the file it SHOWS, and nothing else. Until this date the
+# view was part of the key too (drawn_layer_key: render, column, sampling), and each tool built
+# its own id with its own prefix ("agent-", "embed-", "boundary-"). So the same file drawn twice
+# became two layers. Live, Chicago demo step 3: regionalize drew the six regions, then the code
+# peer called add_map_layer on regionalize's own output file to rename it, and the map listed
+# two identical SKATER layers. The user's call: one layer per source file. Drawing a file again,
+# in any style, now restyles and renames its layer in place (the client replaces a layer whose
+# id matches, at the same position).
+#
+# build_map_layer applies the rule to every descriptor whose url serves an agent file, so no
+# producer can opt out by building its own id. A producer that draws a DIFFERENT file from the
+# one it stands for (add_map_layer writes a styled copy; embed_zones writes the boundary plus its
+# embedding columns) names the source with ``source_key``.
+
+_AGENT_FILE_URL = re.compile(r"/agent/files/(file_[0-9a-f]+)/download")
+
+
+def source_layer_id(source_key: str) -> str:
+    """The id of the one layer that shows the source whose content key is ``source_key``."""
+    return f"agent-{source_key}"
+
+
+def file_layer_id(file_ref: Any) -> str:
+    """The id of the one layer that shows ``file_ref`` (a file_id or a path)."""
+    from agent_runtime.file_store import file_content_key
+
+    return source_layer_id(file_content_key(file_ref))
+
+
+def _layer_source_id(ml: Dict[str, Any]) -> Optional[str]:
+    """The id a descriptor must carry under the one-layer-per-source rule, or None when it shows
+    no agent file (inline GeoJSON, an external tile URL), which keeps the id the tool gave it."""
+    explicit = str(ml.get("source_key") or "").strip()
+    if explicit:
+        return source_layer_id(explicit)
+    match = _AGENT_FILE_URL.search(str(ml.get("url") or ""))
+    if not match:
+        return None
+    try:
+        return file_layer_id(match.group(1))
+    except Exception:  # noqa: BLE001 - an unreadable record keeps the tool's id
+        return None
+
+
 def boundary_layer_id(file_id: str) -> str:
     """The id of the map layer that SHOWS a polygon file, keyed on what the file HOLDS.
 
@@ -133,9 +178,8 @@ def boundary_layer_id(file_id: str) -> str:
     it resolved (its level and GEOIDs) on the file it writes. The repeat therefore lands on the
     same id, and embed_zones, handed either file, rebuilds that id from it.
     """
-    from agent_runtime.file_store import file_content_key
-
-    return f"boundary-{file_content_key(file_id)}"
+    # Now simply the file's own layer id (one layer per source file, above).
+    return file_layer_id(file_id)
 
 
 def _coerce_obj(output: Any) -> Optional[Any]:
@@ -202,8 +246,8 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
     second copy, and two different results written under one name merged into one layer. A
     peer's inputs are invisible from here, which leaves the file as the only record of what
     the layer shows. Two runs that wrote byte-identical files therefore share a layer, and
-    their layers would draw identically anyway. The key is drawn_layer_key's, so a later
-    add_map_layer of the same file with the same view lands on the same layer too.
+    their layers would draw identically anyway. The id is the file's own layer id
+    (source_layer_id), so a later add_map_layer of the same file lands on the same layer.
     """
     from agent_runtime.file_store import file_content_key
 
@@ -233,7 +277,7 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
         render = ("heatmap" if (is_point and features > 2000)
                   else ("points" if is_point else "shapes"))
         out.append({
-            "id": f"agent-{drawn_layer_key(file_content_key(str(path)), render)}",
+            "id": source_layer_id(file_content_key(str(path))),
             "url": url,
             "label": Path(name).stem.replace("_", " ").strip() or name,
             "render": render,
@@ -292,7 +336,8 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
             slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")
             out = {
                 "kind": "map_layer",
-                "id": ml.get("id") or f"agent-{_slug_id(slug, render)}",
+                "id": (_layer_source_id(ml) or ml.get("id")
+                       or f"agent-{_slug_id(slug, render)}"),
                 "source": ml.get("source") or "analysis",
                 "label": ml.get("label") or render,
                 "url": url,

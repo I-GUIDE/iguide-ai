@@ -78,6 +78,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 66 | [Answer validation can be turned off](#stage-66) | 2026-10-15 | `validation: false` per request or `AGENT_VALIDATION=0` skips the audit, number scan, re-grounding pass, agreement/reference recomputation and artifact corrections; the verdict says "unverified"; the map UI has an "Answer validation" setting |
 | 69 | [A road network comes back whole, as a file](#stage-69) | 2026-10-15 | raw Overpass filters (`~`, `!=`, `[key]`, `key in (...)`) pass through; 'road network' asks for every drivable class; a network is written to a GeoJSON file and drawn from it, and the model reads counts |
 | 65 | [A finished map is not followed by a search of the turn's own files](#stage-65) | 2026-10-15 | the search peer stops re-reading the conversation's outputs; a search after a delivered map is vetoed unless retrieval was asked for; failure lines name the exception; choropleth_image reads GeoJSON |
+| 67 | [One map layer per source file](#stage-67) | 2026-10-15 | a layer's id is the content key of the file it shows, applied where every descriptor becomes a `map_layer` event; drawing a file again restyles and renames its layer in place |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -10945,4 +10946,86 @@ with "Parquet magic bytes not found" on a GeoJSON file.
 - `list_conversation_files` is still open to the search peer: a listing costs one call.
 - The veto is lexical. A request that wants both the map and outside sources has to say so in
   words the regex knows.
+## Stage 67 — One map layer per source file {#stage-67}
+
+**Why.** Live, Chicago demo step 3 (SKATER), 2026-10-15:
+1. The code peer's `regionalize` drew the six regions as a layer from its output file.
+2. The peer then called `add_map_layer` on that same file to rename it. The first try, a
+   choropleth over the non-numeric `region` column, was refused; the retry as categories was
+   drawn as a second layer.
+3. A re-grounding pass ran `regionalize` again.
+
+The map listed two identical SKATER layers. Every producer built its own layer id, with its own
+prefix (`agent-`, `embed-`, `boundary-`, `raster-`), and `add_map_layer` keyed on the view (render,
+column, sampling) as well as the file: `drawn_layer_key`, deliberately, "the same data drawn as a
+heatmap and as points stays two layers". So the same file drawn twice became two layers. The user
+asked for one layer per source file.
+
+**What changed** (`agent_runtime/map_layers.py`). A layer's id is `source_layer_id(key)` =
+`agent-<key>`, where the key is the content key of the source it shows. `build_map_layer` applies
+this to every descriptor, which is where each one becomes a `map_layer` event, so no producer can
+opt out by building its own id. The source is:
+- the descriptor's `source_key` when it names one;
+- otherwise the file its `url` serves (`/agent/files/<file_id>/download`), through
+  `file_content_key`: the key the producer recorded on the file, or its bytes.
+
+A descriptor that shows no agent file (inline GeoJSON, an external tile URL) keeps the id its tool
+gave it. Four producers draw a different file from the one they stand for, so they name the
+source:
+- `add_map_layer` writes a styled copy and names its input (`source_content_key`, which digests a
+  shapefile's parts);
+- `add_raster_layer` names its input file;
+- `embed_zones`' single-zone outline writes the boundary plus its embedding columns and names the
+  boundary file it redraws;
+- `_raster_layer` (the embedding and terrain rasters) names the bare content key its id digests.
+  That is the key terrain records on its GeoTIFF, so `add_raster_layer` of the DEM lands on the
+  DEM's layer. It also keeps the shared-PCA recolour superseding the raster it recolours, and
+  keeps two embedding periods two layers.
+
+`boundary_layer_id(file_id)` is now simply that file's layer id. `layers_for_artifacts` (a
+toolless code peer's files) keys on the file alone. The tools that recorded their input key on
+their output file (the analysis, temporal and terrain tools) already used `agent-<that key>`, so
+their ids do not move. The map UI needed no change: it already replaced a layer whose id matched,
+at the same position, with the new name, style and legend.
+
+**Uploads.** The map UI draws an upload itself as a preview ("Upload: …"), under an id of its
+own, so the agent drawing that same upload added a second layer. Live, the agent drew
+community_areas.geojson as "Region boundaries" beside "Upload: community_areas". Each record
+`/agent/files/upload` returns now carries `layer_id`, the file's own layer id. The UI gives the
+preview that id once the upload lands, and drops any layer already holding it (the same file
+uploaded again), so an agent layer of the upload restyles the preview in place.
+
+**The model is told.** It cannot see the map, so `add_map_layer` and `add_raster_layer` return
+`layer_identity` (`LAYER_IDENTITY_NOTE`): a layer already drawn from the same file was replaced in
+place, and there is no second copy. Their descriptions say the same. The live check found it:
+before the note, the agent answered that "the earlier 'skater 6 regions violent rate' layer … is
+still on the map too" after its redraw had replaced that layer.
+
+**Live check** (local demo, Lumen deepseek, 2026-10-15). Chicago steps 1 and 3, then "Redraw the
+SKATER regions layer from the same file with add_map_layer, coloured by region, and name it 'Six
+crime regions'". The agent repeated the original sequence: `add_map_layer` on regionalize's own
+output, a refused choropleth, then categories. The map still listed three layers, and the regions
+layer was renamed in place from "skater 6 regions violent rate" to "Six crime regions". After the
+upload fix, a new conversation started the demo (one layer: "Upload: community_areas") and asked
+for the uploaded community_areas.geojson drawn as outlines named "Community areas". The map then
+listed one layer, "Community areas", in the preview's place.
+
+**What it costs.** The same data drawn two ways is one layer now: a heatmap and then a points view
+of one file leave only the second. A different file is still a different layer, and so is a
+re-run with different inputs, which writes a file with a different key.
+
+**Tests.**
+- `rag_pipeline/tests/test_one_layer_per_source.py` has 5 tests:
+  - `regionalize` and then `add_map_layer` of its output is one layer, under the new name;
+  - a restyle is the same layer, and another file is another layer;
+  - a code peer's file and `add_map_layer` of it are one layer;
+  - a tool's own id cannot split a file into two layers;
+  - inline and external layers keep their ids.
+- `test_layer_identity_by_inputs.py`: its "different views stay apart" test now asserts the
+  opposite, and two tests that pinned the `boundary-` prefix were updated.
+- `test_predict_from_package.py`: one test that pinned the `boundary-` prefix was updated.
+
+**Not done here.**
+- A conversation saved before this change restores its layers under their old ids, so the first
+  redraw after a restore can add one more layer.
 
