@@ -22,6 +22,8 @@ import hashlib
 import itertools
 import json
 import math
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -658,6 +660,126 @@ def single_band_red(out: Path, seed: int = 21) -> Tuple[Dict[str, Path], Dict[st
     return {"scene_red_only.tif": path}, {}
 
 
+# --------------------------------------------------------------------------- Chicago crime (T13)
+# A SNAPSHOT of three City of Chicago Data Portal datasets, pinned by SHA-256. The portal revises
+# crime records daily, so a fresh download is a different input: the snapshot, not the URL, is the
+# task's data. It is not in the repository (35 MB); `python -m gis_harness.datasets --snapshot
+# chicago_crime` writes it under gis_harness/.cache/, and a copy lives in the git-excluded archive
+# (gis_harness_runs_archive/datasets/). A download whose hash differs is refused, never used.
+CHICAGO_DIR = "chicago_crime_2024"
+CHICAGO_SNAPSHOT_AT = "2026-10-15T17:39:28Z"
+CHICAGO_FILES = {
+    "crimes_2024.csv": (
+        "https://data.cityofchicago.org/resource/ijzp-q8t2.csv?$select=id,date,primary_type,"
+        "description,location_description,arrest,domestic,community_area,latitude,longitude"
+        "&$where=year=2024&$order=id&$limit=300000",
+        "4691433aff6efea28aa631238ae470470b4aca381b7dd06904bf45b3ecd51478"),
+    "community_areas.geojson": (
+        "https://data.cityofchicago.org/api/geospatial/igwz-8jzy?method=export&format=GeoJSON",
+        "0921a90f21ee433da800194c62044dbc6fc208f3a6828e2e358b382082ecd719"),
+    "acs_2023_community_areas.csv": (
+        "https://data.cityofchicago.org/resource/t68z-cikk.csv?$limit=100",
+        "bfd610973f837019b1684d394378ab69fd8e8045d82fdd5ee80ff85f44e5b34f"),
+}
+CHICAGO_VIOLENT = ("HOMICIDE", "ASSAULT", "BATTERY", "ROBBERY", "CRIMINAL SEXUAL ASSAULT")
+CHICAGO_REGIONS = 6
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _chicago_snapshot(cache: Path) -> Path:
+    """The pinned snapshot directory: the cache, else the archive copy; every file hash-checked."""
+    candidates = [cache / CHICAGO_DIR]
+    archive = os.environ.get("GIS_HARNESS_SNAPSHOTS")
+    if archive:
+        candidates.append(Path(archive) / CHICAGO_DIR)
+    for d in candidates:
+        if all((d / name).exists() for name in CHICAGO_FILES):
+            bad = [n for n, (_, sha) in CHICAGO_FILES.items() if _sha256(d / n) != sha]
+            if bad:
+                raise RuntimeError(f"{d}: {bad} do not match the pinned SHA-256; this is not the "
+                                   "task's data (see CHICAGO_FILES)")
+            return d
+    raise FileNotFoundError(
+        "the Chicago crime snapshot is missing: copy it from the archive "
+        "(gis_harness_runs_archive/datasets/chicago_crime_2024, or set GIS_HARNESS_SNAPSHOTS), or "
+        "run `python -m gis_harness.datasets --snapshot chicago_crime` and accept that the "
+        "portal's current data will not match the pinned hashes")
+
+
+def chicago_expected(crimes: Path, areas: Path, acs: Path) -> Dict[str, Any]:
+    """Violent crime per community area, independently of the agent: point-in-polygon on each
+    incident's coordinates, ACS 2023 population, queen row-standardised Moran's I."""
+    import geopandas as gpd
+    import pandas as pd
+    from esda.moran import Moran
+    from libpysal.weights import Queen
+
+    cr = pd.read_csv(crimes)
+    v = cr[cr["primary_type"].isin(CHICAGO_VIOLENT)]
+    no_xy = int(v["latitude"].isna().sum())
+    v = v.dropna(subset=["latitude", "longitude"])
+    pts = gpd.GeoDataFrame(v, geometry=gpd.points_from_xy(v["longitude"], v["latitude"]), crs=4326)
+    ca = gpd.read_file(areas)
+    ca["name"] = ca["community"].str.upper().str.strip()
+    joined = gpd.sjoin(pts, ca[["name", "geometry"]], predicate="within", how="inner")
+    counts = joined.groupby("name").size()
+    pop = pd.read_csv(acs)
+    pop["name"] = pop["community_area"].str.upper().str.strip()
+    d = ca[["name", "geometry"]].merge(pop[["name", "total_population"]], on="name")
+    d["violent"] = d["name"].map(counts).fillna(0).astype(int)
+    d["rate"] = d["violent"] / d["total_population"] * 1000.0
+    w = Queen.from_dataframe(d, use_index=True)
+    w.transform = "r"
+    moran = Moran(d["rate"].values, w, permutations=0)
+    top = d.sort_values("rate", ascending=False).iloc[0]
+    return {
+        "citywide_rate": round(float(d["violent"].sum() / d["total_population"].sum() * 1000), 3),
+        "top_area": str(top["name"]).title(),
+        "top_rate": round(float(top["rate"]), 2),
+        "morans_i": round(float(moran.I), 4),
+        "regions": {"n_regions": CHICAGO_REGIONS, "n_areas": int(len(d))},
+        "_why": (f"{len(cr)} incidents; {len(v) + no_xy} violent, {no_xy} without coordinates, "
+                 f"{len(pts) - len(joined)} outside every community area, {len(joined)} counted; "
+                 f"population {int(d['total_population'].sum())} (ACS 2023); snapshot "
+                 f"{CHICAGO_SNAPSHOT_AT}"),
+    }
+
+
+def chicago_crime(out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
+    snap = _chicago_snapshot(cache)
+    files = {}
+    for name in CHICAGO_FILES:
+        dest = out / name
+        shutil.copyfile(snap / name, dest)
+        files[name] = dest
+    return files, chicago_expected(files["crimes_2024.csv"], files["community_areas.geojson"],
+                                   files["acs_2023_community_areas.csv"])
+
+
+def snapshot_chicago(cache: Path) -> Path:
+    """Download the three files now. Their hashes will differ from the pinned ones once the
+    portal revises a record; the task then needs new hashes and a re-check of its expected values."""
+    import requests
+
+    d = cache / CHICAGO_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    for name, (url, sha) in CHICAGO_FILES.items():
+        r = requests.get(url, headers={"User-Agent": "iguide-agent/1.0 (gis_harness snapshot)"},
+                         timeout=300)
+        r.raise_for_status()
+        (d / name).write_bytes(r.content)
+        got = _sha256(d / name)
+        print(f"{name}: {got} {'(pinned)' if got == sha else '(DIFFERS from the pinned hash)'}")
+    return d
+
+
 BUILDERS = {
     "area_distance": area_distance,
     "schools": schools,
@@ -672,10 +794,21 @@ BUILDERS = {
     "suitability": suitability,
     "earthquakes": earthquakes,
     "single_band_red": single_band_red,
+    "chicago_crime": chicago_crime,
 }
 
 
 def build(name: str, out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
     out.mkdir(parents=True, exist_ok=True)
     fn = BUILDERS[name]
-    return fn(out, cache) if name == "meuse" else fn(out)
+    return fn(out, cache) if name in ("meuse", "chicago_crime") else fn(out)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Build or snapshot a harness dataset.")
+    ap.add_argument("--snapshot", choices=["chicago_crime"], required=True)
+    a = ap.parse_args()
+    print(snapshot_chicago(Path(__file__).resolve().parent / ".cache"))
+

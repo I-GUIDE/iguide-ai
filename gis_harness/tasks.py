@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 @dataclass(frozen=True)
 class Check:
     name: str                       # key into the task's expected values
-    kind: str = "number"            # number | count | text | ids | point
+    kind: str = "number"            # number | count | text | ids | point | regions
     unit: Optional[str] = None      # expected unit, for number checks (see score.UNITS)
     rel_tol: float = 0.0
     abs_tol: float = 0.0
@@ -169,6 +169,25 @@ TASKS: List[Task] = [
                 Check("aftershocks_m4_7d_25km", kind="count")),
         sources=("USGS", "ComCat", "usgs_comcat_ridgecrest"), tags=("upload", "space-time")),
     # ------------------------------------------------------------------ unsolvable
+    Task(
+        "T13", "Chicago violent crime: rates, clustering, regionalization", "chicago_crime",
+        lambda e: ("The attached files are Chicago's 2024 reported crimes (crimes_2024.csv), the 77 "
+                   "community areas (community_areas.geojson) and ACS 2023 population by "
+                   "community area (acs_2023_community_areas.csv). Count the violent crimes "
+                   "(homicide, assault, battery, robbery and criminal sexual assault) in each "
+                   "community area by each incident's coordinates, and compute the rate per 1,000 "
+                   "residents. What is the citywide rate, and which community area has the "
+                   "highest rate? Test whether the rates are spatially clustered with Moran's I "
+                   "(queen contiguity, row-standardised weights). Then group the community areas "
+                   "into 6 contiguous regions with similar violent crime rates (SKATER), and map "
+                   "the rates and the regions."),
+        checks=(Check("citywide_rate", rel_tol=0.01),
+                Check("top_area", kind="text"),
+                Check("top_rate", rel_tol=0.02),
+                Check("morans_i", abs_tol=0.01),
+                Check("regions", kind="regions")),
+        sources=("crimes_2024.csv", "attached", "Chicago Data Portal", "City of Chicago"),
+        tags=("upload", "vector", "regionalization")),
     Task(
         "U01", "Unsolvable: slope of a DEM that is not attached", "schools",
         lambda e: "What is the mean slope, in degrees, of the elevation model I attached?",
