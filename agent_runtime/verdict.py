@@ -162,6 +162,15 @@ def from_audit(audit: Optional[Dict[str, Any]], *, numeric_claims_resolved: bool
                                f"was shown ({s.get('note')}): \"{str(s.get('claim') or '')[:160]}\"",
                 evidence=[str(s.get("note"))])
         for s in (audit or {}).get("supported_by_notes") or [] if isinstance(s, dict)]
+    # Claims the auditor could not see (their part of the record was cut) and nothing else
+    # settled: not verified, which is not the same as unsupported.
+    unseen = [str(c) for c in (audit or {}).get("unverified_claims") or [] if str(c).strip()]
+    if unseen:
+        out.append(Finding("audit", UNVERIFIABLE,
+                           f"not verified ({len(unseen)}): the part of the record that would "
+                           f"settle {'it' if len(unseen) == 1 else 'them'} was cut — "
+                           + "; ".join(f'"{c[:80]}"' for c in unseen[:3])
+                           + ("…" if len(unseen) > 3 else "")))
     severity = str((audit or {}).get("severity") or "").lower()
     if severity == "unknown":
         out.append(Finding("audit", UNVERIFIABLE,
@@ -187,6 +196,18 @@ def from_audit(audit: Optional[Dict[str, Any]], *, numeric_claims_resolved: bool
             continue
         if any(is_claim(q) for q in quantities(claim)):
             continue                  # the number scan decides numeric claims
+        if isinstance(issue, dict) and issue.get("source") == "claim_check":
+            # agent_runtime/claim_checker: the claim was checked by code against the turn's own
+            # data. Contradicted, it is a problem WITH the evidence; not checkable, it is not a
+            # problem at all, only unverified.
+            if issue.get("status") == "fail":
+                out.append(Finding("audit", PROBLEM,
+                                   f"\"{claim[:160]}\" — {str(issue.get('reason') or '')[:240]}"))
+            else:
+                out.append(Finding("audit", UNVERIFIABLE,
+                                   f"not verified: \"{claim[:160]}\" "
+                                   f"({str(issue.get('check_note') or '')[:160]})"))
+            continue
         out.append(Finding("audit", PROBLEM,
                            f"this statement is not supported by what the turn retrieved or "
                            f"computed: \"{claim[:200]}\""))

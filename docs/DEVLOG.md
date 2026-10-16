@@ -5711,3 +5711,26 @@ rather than from the previous one.
 
 **Not fixed** Concurrent Overpass calls are neither serialized nor deduplicated (429 at three at
   once); no walk/bike phrase; ways join by coordinates, not node ids.
+
+## 2026-10-15 · M8.98 · Disputed claims are checked by code against the turn's data (architecture stage 64)
+
+**Change** `agent_runtime/claim_checker.py`, behind `AGENT_CLAIM_CHECK=1`: the auditor's claims
+  that reconciliation could not settle are checked by code a model writes against the turn's own
+  files, run in the sandbox. Supported claims are withdrawn; contradicted ones carry the computed
+  evidence; uncheckable ones are "not verified", not a problem.
+
+**Why** "Highest-rate community area: Fuller Park" (right) was flagged because a ranking has no
+  number for the rules to find; 21 wrong "Region k includes X" memberships could not be told from
+  the 56 right ones by any rule that reads the record.
+
+**Measured** Recorded Chicago turns: the ranking supported in 6/6 runs; memberships 77/77 on the
+  three runs after the fixes. Live step 3: three wrong memberships named with evidence.
+
+**Also** The auditor's view of the current turn grows from 8,000 to 32,000 characters, and a claim
+  whose part of the record was cut is "unseen" (not verified, sent to the checker), never "minor
+  over-reach". Live: the LISA step's cluster counts went from "unsupported due to the truncated
+  execution record" to supported.
+
+**Not fixed** Claims the auditor does not dispute are not checked (live step 3's wrong regional
+  populations); off by default.
+

@@ -10723,3 +10723,91 @@ end to end (the model choosing 'road network') is not measured here.
   others.
 - **Node ids.** The file joins ways by identical coordinates. Overpass's `out geom` also gives
   each way's node ids, which would join exactly; they are not carried.
+
+## Stage 64 — Disputed claims are checked by code against the turn's data {#stage-64}
+
+**Why.** The grounding auditor (an LLM) reads the answer beside an excerpt of the turn's record.
+Reconciliation (rule-based) then withdraws what it can prove from that record: numbers in it,
+files and maps that were produced, notes the turn was shown. Whatever survives both is shown to
+the user as a problem. Two kinds of claim survived wrongly, in opposite directions, on the
+Chicago demo (2026-10-15):
+- **A ranking.** "Highest-rate community area: Fuller Park" was right: Fuller Park is the
+  maximum of all 77 rates. The auditor saw only the top five printed, and no rule handles a
+  claim without a number, so a correct answer carried a warning.
+- **A membership.** "Region 1 includes Austin" and 76 more named real areas, but 21 were in the
+  wrong region. The regions layer had no names, and the agent rebuilt them in code. A rule that
+  cleared any claim whose names appear in the record would have passed them.
+
+Neither can be settled by reading; both can by computing. Self-correction works when the model
+gets outside evidence (CRITIC, arXiv 2305.11738).
+
+**What changed** (`agent_runtime/claim_checker.py`, `AGENT_CLAIM_CHECK=1`, off by default):
+1. **The turn's files.** The checker collects the tabular and vector files the turn produced
+   (file ids named in its results) or was given (the conversation's uploads).
+2. **Writing the checks.** A model is shown each file's columns, types and first rows, plus the
+   disputed claims. It writes one small check per claim: Python that sets `ok` and `detail`,
+   with shared helpers in a setup block. Rules in the prompt: rankings are checked over all rows,
+   and names are compared after normalising (O'Hare is OHARE in the Chicago boundaries).
+3. **Running them.** All checks run in one sandbox run, with no network, like any code the agent
+   writes. Results come back one line per claim, so output clipping costs at most the tail.
+4. **Applying the verdicts:**
+   - a **supported** claim is withdrawn;
+   - a **contradicted** claim stays a problem, with the computed evidence in the banner;
+   - a claim that **cannot be checked** (no file holds the data, or the check failed) is shown as
+     "not verified" (`verdict.from_audit` → UNVERIFIABLE), not as "a check found a problem".
+
+**Measured.**
+- **The recorded turns** (archive `claim_check/`), Lumen deepseek writing the checks, Docker
+  running them:
+
+  | | Turn A, 1 ranking claim | Turn B, 77 membership claims | Time |
+  |---|---|---|---|
+  | Run 1 | supported | 76/77 (O'Hare spelling) | 7 s + 63 s |
+  | Run 2 | supported | 0/77 decided: one result line clipped (fixed: per-claim lines) | 10 s + 75 s |
+  | Run 3 (normalised names) | supported | 77/77 | 7 s + 66 s |
+  | Runs 4–6 (both fixes) | supported | 77/77 each (56 cleared, 21 caught) | 7–8 s + 51–62 s |
+
+- **Live, through the Demos tab.** A local agent with `AGENT_CLAIM_CHECK=1` ran the Chicago
+  demo:
+  - **Step 1:** the auditor flagged nothing, so the checker did not run and no banner was shown.
+  - **Step 3:** the banner named three wrong memberships with evidence ("Region 6 includes East
+    Garfield Park, West Englewood — Missing: ['East Garfield Park', 'West Englewood']"). All
+    three are wrong against the turn's own regions layer.
+
+**Tests.** `rag_pipeline/tests/test_claim_checker.py` (12):
+- rankings and memberships decided by running code;
+- what cannot be checked is unverified;
+- a broken setup, and no files;
+- clipped output;
+- `apply` and the banner mapping;
+- off by default;
+- file collection;
+- both recorded Chicago turns, replayed from the model's saved plans against the ground truth
+  (skipped without the archive).
+
+**Follow-up in the same stage: the auditor's view of the current turn, and "unseen".** On the
+Chicago LISA step the auditor wrote that "the LISA cluster counts and specific hot/cold spot area
+details are unsupported due to the truncated execution record, constituting minor over-reach".
+Its prompt told it to do exactly that with a claim whose part of the record had been cut.
+- **A larger budget for the current turn.** Its tool and code results get 32,000 characters
+  (`AGENT_AUDIT_TURN_RECORD_CHARS`); earlier turns keep 8,000. Bulk arrays (coordinates,
+  embeddings) are still elided first, so the room goes to names, counts, tables and stdout.
+- **A new ledger status, "unseen".** A claim whose part of the record was cut is marked "unseen",
+  not "absent". It is not an issue, not an over-reach, and the summary says it could not be
+  checked. An "absent" row whose quote blames the cut is treated the same.
+- **Where unseen claims go.** They are listed as `unverified_claims`, which the claim checker
+  takes like any disputed claim: supported ones are dropped, contradicted ones become problems
+  with evidence, and the rest are shown as "not verified … the part of the record that would
+  settle it was cut".
+- **Live, the same LISA step afterwards:** the auditor reported "all substantive claims … are
+  directly supported by the execution record, including … LISA class counts, named hot-spot
+  communities". There was no "over-reach" and no banner.
+- **Tests.** `test_audit_unseen.py` (6), and `test_audit_sees.py` updated to the new
+  instruction.
+
+**Not fixed.**
+- **Only disputed claims are checked.** In live step 3 the answer's regional populations
+  (126,437 / 62,993 / 44,215) contradict the agent's own summary table (143,567 / 66,555 /
+  23,523), but the auditor did not dispute them, so they were never checked.
+- **Cost.** One more model call and one sandbox run per turn with disputed claims.
+- **The local subprocess backend lacks geopandas.** Use the Docker sandbox, as deployed.

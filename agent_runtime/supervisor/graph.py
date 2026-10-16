@@ -2714,6 +2714,37 @@ def _ungated_record(execution_context: Optional[Any]) -> str:
     return json.dumps(rows, default=str).replace(",", "")
 
 
+def _check_disputed_claims(audit: Optional[Dict[str, Any]], analysis_results: Any,
+                           code_result: Any, thread_id: Optional[str], llm: Any) -> Optional[Dict[str, Any]]:
+    """The auditor's surviving claims, checked by code against the turn's files. Never raises."""
+    from agent_runtime import claim_checker
+
+    if not claim_checker.enabled():
+        return audit
+    claims = claim_checker.claims_to_check(audit)
+    if not claims:
+        return audit
+    try:
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        files = claim_checker.turn_files([analysis_results, code_result], thread_id)
+        verdicts = claim_checker.check_claims(claims, files, active)
+        emit_trace_event("node_completed", {
+            "stage": "claim_check",
+            "message": (f"Checked {len(verdicts)} disputed claim(s) against the turn's data: "
+                        + ", ".join(f"{sum(v['verdict'] == k for v in verdicts)} {k}"
+                                    for k in ("supported", "contradicted", "unverified"))),
+            "detail": {"verdicts": verdicts[:40], "files": [f["name"] for f in files]}},
+            node="synthesize")
+        return claim_checker.apply(audit, verdicts)
+    except Exception as exc:  # noqa: BLE001 - a broken check leaves the audit as it was
+        logger.warning("claim check failed: %s", exc, exc_info=True)
+        return audit
+
+
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
                                     execution_context: Optional[Dict[str, Any]] = None,
@@ -6271,6 +6302,10 @@ def build_supervisor_graph(
             # map/file or a number/method it actually computed.
             audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=gate_ctx,
                                                     prior_rows=_rows)
+            # What reconciliation could not settle by rule, code can: each disputed claim is
+            # checked against the turn's own files (agent_runtime/claim_checker). Off unless
+            # AGENT_CLAIM_CHECK=1.
+            audit = _check_disputed_claims(audit, ar, cr, state.get("thread_id"), llm)
             # THE NUMBER SCAN (stage 44). Every stated figure that resolves to no recorded
             # number is a finding, whatever it is about: an area, a population, a road distance.
             # The producer check (stage 42) says whether some bound tool could produce it. If

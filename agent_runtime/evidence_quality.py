@@ -311,7 +311,7 @@ _AUDIT_PROMPT = (
     '  {{"claim": "<short quote of the claim>",\n'
     '    "evidence_quote": "<[doc_id] + a VERBATIM span of 5-25 words copied from the evidence or\n'
     '      execution record that carries this claim>",\n'
-    '    "status": "supported" | "contradicted" | "absent"}}\n'
+    '    "status": "supported" | "contradicted" | "absent" | "unseen"}}\n'
     'How to fill a row:\n'
     '* You must actually COPY a real span. If you cannot copy one from the text you were given,\n'
     '  the status is not "supported".\n'
@@ -329,8 +329,8 @@ _AUDIT_PROMPT = (
     'was cut to fit, NOT withheld: what it held is unknown to you, so its absence is not\n'
     'evidence that a claim is unsupported. When a claim is on the SUBJECT of an elided section -\n'
     'the same tool, the same list, the same file - and you can find no span for it, mark it\n'
-    '"absent" but say in the reason that the record was TRUNCATED rather than that the subject\n'
-    'never occurs, and treat it as a minor over-reach rather than an invented specific.\n'
+    '"unseen", NOT "absent". An unseen claim is not an issue and not an over-reach: you could\n'
+    'not see the part of the record that would settle it, and it will be checked another way.\n'
     '\n'
     'STEP 2 - VERDICT, DERIVED ONLY FROM THE LEDGER.\n'
     '* issues = exactly the rows whose status is "contradicted" or "absent", one issue each.\n'
@@ -422,6 +422,12 @@ _PRIOR_ACTIONS_MAX_CHARS = 8000
 # pair or an embedding component; claims cite names, counts, statistics and stdout. Eliding bulk
 # numeric arrays turns that 87,648 into a few thousand chars with every name intact.
 _EXEC_RECORD_MAX_CHARS = 8000
+# The CURRENT turn's record gets more: it is the one an answer quotes, and an 8,000-char cut of
+# a LISA run (77 areas' clusters and the layers) left the auditor calling the cluster counts
+# "unsupported due to the truncated execution record, constituting minor over-reach" on the
+# Chicago demo (2026-10-15). Bulk numeric arrays are still elided before this cap applies, so the
+# extra room goes to names, counts, tables and stdout. Earlier turns keep the smaller budget.
+_TURN_RECORD_MAX_CHARS = int(float(os.getenv("AGENT_AUDIT_TURN_RECORD_CHARS", "32000") or 32000))
 # A coordinate ring or an embedding vector, versus a short numeric field an answer might quote
 # (a bbox is 4 numbers, an rgb triple 3, a small distance list a handful).
 _MAX_INLINE_NUMBERS = 32
@@ -556,10 +562,10 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
                          "claim about what was asked for, and a line beginning FAILED means "
                          "that tool produced NOTHING, so a claim resting on it is "
                          "contradicted, not merely absent):\n"
-                         + _elided(rendered_turn, max(max_chars, _EXEC_RECORD_MAX_CHARS)))
-        # The execution record gets the SAME budget as prior_actions: the auditor should not
-        # see less of the turn it is auditing than of earlier ones.
-        record_cap = max(max_chars, _EXEC_RECORD_MAX_CHARS)
+                         + _elided(rendered_turn, max(max_chars, _TURN_RECORD_MAX_CHARS)))
+        # The execution record is this turn's too: at least the budget earlier turns get, and
+        # the larger current-turn budget (see _TURN_RECORD_MAX_CHARS).
+        record_cap = max(max_chars, _TURN_RECORD_MAX_CHARS)
         for key in ("analysis_results", "code_result"):
             val = execution_context.get(key)
             if val:
@@ -694,6 +700,9 @@ def _is_rollup_claim(claim: str) -> bool:
     return any(q in text for q in _ROLLUP_QUANTIFIERS)
 
 
+_TRUNCATION_RE = re.compile(r"truncat|elided|cut off|was cut|not (?:fully )?(?:shown|visible)", re.I)
+
+
 def _recompute_verdict(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Recompute hallucination_detected / severity / issues from the claim ledger.
 
@@ -734,6 +743,17 @@ def _recompute_verdict(parsed: Dict[str, Any]) -> Dict[str, Any]:
             )
             reclassified.append(claim)
 
+    # UNSEEN: the claim's part of the record was cut before the auditor saw it. Not an issue: it
+    # is reported as not verified and handed to the claim checker. An "absent" row whose quote
+    # blames the cut is the same thing filed under the old instruction.
+    for row in rows:
+        if (str(row.get("status", "")).lower() == "absent"
+                and _TRUNCATION_RE.search(str(row.get("evidence_quote") or ""))):
+            row["status"] = "unseen"
+    unseen = [str(r.get("claim") or "") for r in rows
+              if str(r.get("status", "")).lower() == "unseen" and str(r.get("claim") or "").strip()]
+    if unseen:
+        parsed["unverified_claims"] = unseen
     bad = [r for r in rows if str(r.get("status", "")).lower() in {"absent", "contradicted"}]
     parsed["claim_ledger"] = rows
     parsed["hallucination_detected"] = bool(bad)
@@ -748,6 +768,10 @@ def _recompute_verdict(parsed: Dict[str, Any]) -> Dict[str, Any]:
         parsed["severity"] = "none"
         if reclassified:
             parsed["summary"] = "All claims are supported by the retrieved evidence."
+        if unseen:
+            # The model's own sentence may still call these an over-reach; it is not one.
+            parsed["summary"] = (f"No claim is contradicted or unsupported; {len(unseen)} could not "
+                                 "be checked because their part of the record was cut.")
     elif str(parsed.get("severity", "")).lower() in {"none", ""}:
         # The model said clean while leaving unsupported rows: trust the ledger, not the label.
         parsed["severity"] = "high"
