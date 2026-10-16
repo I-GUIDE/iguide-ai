@@ -110,7 +110,7 @@ export function DemoPanel(p: Props) {
         <div className="demostart">
           <button type="button" className="rsbtn on" disabled={p.busy || phase === 'loading' || !p.live}
                   onClick={() => start(open)}>
-            {phase === 'loading' ? 'Starting…' : open.files.length ? 'Start: new conversation + attach data' : 'Start: new conversation'}
+            {phase === 'loading' ? 'Starting…' : open.files.length ? 'Upload the example data and start a new conversation' : 'Start a new conversation'}
           </button>
           {phase === 'error' && <span className="rswarn" role="alert">Could not start: {error}</span>}
         </div>
@@ -127,9 +127,9 @@ export function DemoPanel(p: Props) {
               <div className="demosteprow">
                 <span className="demosteplabel">{s.label}</span>
                 <button type="button" className="rsbtn" disabled={locked}
-                        aria-label={`${done.has(k) ? 'Ask again' : 'Ask'} step ${k + 1}: ${s.label}`}
+                        aria-label={`${done.has(k) ? 'Send again' : 'Send'} step ${k + 1}: ${s.label}`}
                         title={phase !== 'ready' ? 'Start the demo first' : s.prompt}
-                        onClick={() => run(k, s.prompt)}>{done.has(k) ? 'Ask again' : 'Ask'}</button>
+                        onClick={() => run(k, s.prompt)}>{done.has(k) ? 'Send again' : 'Send'}</button>
                 <button type="button" className="demoedit" disabled={locked}
                         aria-label={`Edit step ${k + 1} before asking`}
                         onClick={() => p.onStage(s.prompt)}>edit</button>
