@@ -1850,7 +1850,10 @@ def _run_peer(name: str, call, state: SupervisorState):
                    "fatal": _is_fatal_peer_error(exc), "at": len(state.get("actions") or [])}
         try:
             import logging
-            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
+            # With the traceback: the message alone named a TypeError (GIS harness T16,
+            # 2026-10-16) and nothing said which line raised it, so it took a reproduction.
+            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"],
+                                                exc_info=exc)
         except Exception:
             pass
         emit_trace_event(
