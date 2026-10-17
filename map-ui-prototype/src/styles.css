@@ -299,10 +299,17 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
    The pills it replaces sat flush against the last paragraph and read as part of the prose —
    and truncating the names to keep them pill-sized is what made four different artifacts
    indistinguishable. A row each, the full name, and a divider that says where the answer ends. */
-.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
-      display: flex; flex-direction: column; gap: 6px; }
+.dl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+/* The header is the fold's <summary>: it must look and behave like a control (as .reason). */
 .dl-head { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
-           color: var(--muted); font-weight: 600; }
+           color: var(--muted); font-weight: 600; list-style: none; cursor: pointer;
+           display: flex; align-items: center; gap: 8px; }
+.dl-head::-webkit-details-marker { display: none; }
+.dl-head:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+.dl-count { font-weight: 500; letter-spacing: normal; text-transform: none; color: #8a9099; font-size: 12px; }
+.dl .chev { margin-left: auto; color: #9aa0a6; transition: transform .15s ease; }
+.dl[open] .chev { transform: rotate(180deg); }
+.dl-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .dl-item { display: flex; align-items: center; gap: 9px; background: #eef6f0;
            border: 1px solid #d6e7db; color: var(--link); text-decoration: none;
            border-radius: 10px; padding: 8px 12px; font-size: 13px; }
@@ -576,3 +583,102 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .replay-strip { background: #1f2937; color: #f9fafb; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 6px 16px; }
 .replay-strip.bad { background: #7f1d1d; }
 .replay-strip .replay-line { padding-left: 1.5em; }
+
+/* ---- the Demos tab, above the composer --------------------------------------------------- */
+.demoside { flex: 0 0 320px; height: 100%; overflow-y: auto; background: var(--bg);
+            border-right: 1px solid var(--line); min-width: 0; }
+.demoside.closed { flex-basis: 40px; overflow: hidden; }
+.demorail { width: 100%; height: 100%; border: none; background: transparent; cursor: pointer;
+            display: flex; justify-content: center; padding-top: 18px; color: #3b4046; }
+.demorail span { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 13px; font-weight: 650;
+                 letter-spacing: .04em; }
+.demorail:hover, .demorail:focus-visible { background: var(--soft); }
+@media (max-width: 1180px) { .demoside { flex-basis: 270px; } }
+/* Narrow: a drawer over the chat rather than a column that crushes it. */
+@media (max-width: 760px) {
+  .demoside:not(.closed) { position: absolute; inset: 0 auto 0 0; width: min(330px, 88vw); z-index: 9;
+                           box-shadow: 0 0 24px rgba(0, 0, 0, .18); }
+}
+.demopanel { padding: 14px 16px 18px; }
+.demohint { font-size: 12.5px; color: #5b6168; margin: 0 0 8px; }
+.democards { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.demogroup { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.demogrouphead { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); margin: 4px 0 0; }
+.democard { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px 12px;
+            border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; }
+.democard:hover, .democard:focus-visible { border-color: #c98a1a; background: var(--soft); }
+.demotitle { font-size: 13.5px; font-weight: 650; color: var(--ink); }
+.demoblurb { font-size: 12px; color: #5b6168; line-height: 1.4; margin: 0; }
+.demometa { font-size: 11.5px; color: #8a9097; margin-top: 2px; }
+.demohead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.demoback { font-size: 12px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
+            background: #fff; cursor: pointer; }
+.demotags { display: flex; flex-wrap: wrap; gap: 5px; }
+.demotag { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #eef1f4; color: #3b4046; }
+.demostart { display: flex; flex-direction: column; align-items: stretch; gap: 6px; margin: 14px 0 4px; }
+.demostart .rsbtn { font-size: 13px; padding: 8px 14px; line-height: 1.3; }
+.demosteps { list-style: none; margin: 0; padding: 0; counter-reset: demostep; display: grid; gap: 8px; }
+.demosteps li { counter-increment: demostep; border-left: 3px solid #d7dbe0; padding: 3px 0 3px 10px; }
+.demosteps li.next { border-left-color: var(--brand); }
+.demosteps li.done { border-left-color: #12805c; }
+.demosteprow { display: flex; align-items: center; gap: 10px; }
+.demosteplabel { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.35; }
+.demosteplabel::before { content: counter(demostep) '. '; color: #8a9097; }
+.demosteps li.done .demosteplabel::before { content: '✓ '; color: #12805c; }
+.demoedit { font-size: 11.5px; background: none; border: none; color: #6b7280; text-decoration: underline;
+            cursor: pointer; padding: 0 2px; }
+.demoedit:disabled { opacity: .5; cursor: default; }
+.demoprompt { font-size: 12px; color: #5b6168; margin: 4px 0 2px; line-height: 1.45; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .democard, :root:not([data-theme="light"]) .demoback { background: transparent; }
+}
+.demoback.fold { margin-left: auto; }
+
+/* An open demo case: nav row, then title, description, and labelled sections. */
+.demonav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.demoeyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+               color: #8a9097; margin: 0 0 3px; }
+.democasetitle { font-size: 16px; font-weight: 700; line-height: 1.3; color: var(--ink); margin: 0 0 6px;
+                 text-wrap: balance; }
+.democaseblurb { font-size: 12.5px; line-height: 1.5; }
+.demosection { margin-top: 16px; }
+.demosectionhead { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                   margin-bottom: 6px; min-height: 22px; }
+.demosectionhead h3 { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+                      color: #8a9097; margin: 0; }
+.demofilelist { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.demofilelist li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: #3b4046; }
+.demofname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.demofsize { flex: none; color: #8a9097; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.demoexplain, .demosend { flex: none; font-size: 12px; font-weight: 600; padding: 3px 12px; border-radius: 999px;
+                          border: 1px solid #e3c27a; background: #fff8e8; color: #8a5d05; cursor: pointer; }
+.demoexplain:hover:not(:disabled), .demosend:hover:not(:disabled) { background: #fdeec9; border-color: #c98a1a; }
+.demoexplain:disabled, .demosend:disabled { opacity: .45; cursor: default; }
+.demoexplain:focus-visible, .demosend:focus-visible { outline: 2px solid #c98a1a; outline-offset: 2px; }
+
+/* A sandbox run in progress (CodeRunBar): its clock against its limit, the review's state, and
+   after 90 s a Stop of its own. Quiet until it needs attention. */
+.coderun { margin: 6px 0 4px; padding: 8px 10px; border: 1px solid var(--line, rgba(127,127,127,.25));
+  border-radius: 8px; font-size: 12.5px; display: grid; gap: 6px; }
+.coderun-line { display: flex; justify-content: space-between; gap: 12px; }
+.coderun-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coderun-time { font-variant-numeric: tabular-nums; opacity: .8; flex: none; }
+.coderun-track { height: 3px; border-radius: 2px; background: rgba(127,127,127,.2); overflow: hidden; }
+.coderun-fill { height: 100%; background: currentColor; opacity: .55; transition: width 1s linear; }
+.coderun-review { opacity: .75; }
+.coderun-nudge { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.coderun-stop { font: inherit; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid currentColor; background: transparent; color: inherit; }
+.coderun-stop:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .coderun-fill { transition: none; } }
+
+/* The model's own reason for the calls that follow it (tool_plan), and the detailed/debug switch. */
+.ln.plan { font-style: italic; opacity: .85; margin-top: 4px; }
+.trace-mode { display: block; position: relative; z-index: 1; font: inherit; font-size: 11px;
+  padding: 1px 8px; margin: 0 0 6px auto;
+  border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit;
+  opacity: .7; cursor: pointer; }
+.trace-mode:hover, .trace-mode[aria-pressed="true"] { opacity: 1; }
+.trace-mode:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

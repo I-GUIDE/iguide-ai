@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { loadDemoFiles, type DemoCase } from './demos';
+import { DemoPanel } from './components/DemoPanel';
 import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
@@ -13,7 +15,7 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  streamChat, cancelTurn, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   fetchAgentFile,
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
@@ -21,6 +23,7 @@ import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation, deleteConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { describeToolCall } from './toolPhrases';
 import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
@@ -119,6 +122,14 @@ export default function App() {
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [tab, setTab] = useState<AppTab>('chat');
+  // A demo step on its way to the composer (see ChatPanel's `seed`).
+  const [demoSeed, setDemoSeed] = useState<{ text: string; n: number; send: boolean } | null>(null);
+  // The Demos sidebar can fold to a rail. On a narrow window it is a drawer over the chat, so it
+  // folds itself once a case starts or a step is asked: the answer is what you came to see.
+  const [demoOpen, setDemoOpen] = useState(true);
+  const foldIfNarrow = useCallback(() => {
+    if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) setDemoOpen(false);
+  }, []);
   // Where the RS-Embed Demo tab lands you. The demo is about this pair of cities, and a map
   // opened over the whole country asks the visitor to go and find the subject first.
   const CHAMPAIGN_URBANA: [number, number, number, number] = [-88.32, 40.05, -88.14, 40.16];
@@ -146,6 +157,10 @@ export default function App() {
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
   const abortRef = useRef<AbortController | null>(null);
+  // The running turn's server id (the stream's first event), so Stop can end it there too.
+  const turnIdRef = useRef<string | null>(null);
+  // file_id → filename, so a trace row says "Inspecting buildings.geojson", not the id.
+  const fileNames = useRef(new Map<string, string>());
 
   // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
   // the same single record as everything else. It has to be in BOTH the payload and the deps: in
@@ -179,6 +194,14 @@ export default function App() {
     ? { ...cfg, apiKey: '', uploadEndpoint: '/agent/files/upload',
         endpoint: `/agent/chat/stream?replay=${encodeURIComponent(REPLAY_KEY)}` }
     : { ...cfg }), [cfg]);
+  // Stop ends the turn on the server as well as here: the sandbox run is killed and the agent
+  // stops at its next step. Aborting the fetch alone left both running for minutes. The abort
+  // does not wait for the cancel call, so Stop is instant whatever the server answers.
+  const stopTurn = useCallback(() => {
+    const id = turnIdRef.current;
+    if (id) void cancelTurn(asAgentConfig(), id);
+    abortRef.current?.abort();
+  }, [asAgentConfig]);
   // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
   // so a link can be handed to an audience without also handing them a credential to paste.
   // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
@@ -691,14 +714,20 @@ export default function App() {
       }, asAgentConfig(), {
         onTrace: (l) => addTrace(l),
         onToolCall: (name, args) => {
-          addTrace({ text: `${name}(${short(args)})`, kind: 'tool' });
+          // What the call does, in words (toolPhrases); the raw call stays on the row for
+          // debug mode.
+          addTrace({ text: describeToolCall(name, args, (id) => fileNames.current.get(id)),
+                     raw: `${name}(${short(args)})`, kind: 'tool' });
           drawFromToolArgs(name, args);
         },
         onToolResult: (name, parsed) => {
           const fc = extractFeatures(parsed);
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
-        onFile: (files) => patch({ artifacts: files }),
+        onFile: (files) => {
+          for (const r of files) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
+          patch({ artifacts: files });
+        },
         onMapLayer: tracked(async (layer) => {
           mapLayerDelivered.current = true;
           if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
@@ -742,12 +771,17 @@ export default function App() {
           // collapsing it to 'geojson' sends a class-NAME style column down the numeric
           // choropleth ramp, which yields NaN for every feature and one flat fill.
           const categorical = layer.render === 'categories' && !!layer.legend?.length;
+          // A road network and a route on it keep their render: toDeckLayer draws them the way a
+          // navigation app does, and AgentMap stacks the network under everything, the route on top.
+          const lineRole = layer.render === 'network' || layer.render === 'route' ? layer.render : null;
           putLayer({
             kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
             data: fc, fitBounds: true, sourceUrl: layer.url,
-            render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
+            render: heat ? 'heatmap' : categorical ? 'categories' : lineRole ?? 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // The colour the user asked for, set by the agent; it wins over every default.
+            color: layer.color,
             // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
             // Dropped here once already: the flag reached the client and died in this call,
             // so the zone came back as a violet slab over its own pixel image.
@@ -769,6 +803,8 @@ export default function App() {
                             return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
         }),
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
+        onTurn: (id) => { turnIdRef.current = id; },
+        onCodeProgress: (cp) => patch({ progress: cp.stage === 'finished' ? undefined : { ...cp, at: Date.now() } }),
       });
       pendingFileIds.current = []; // attached to the thread server-side now
       // Reconcile with authoritative terminal result.
@@ -779,7 +815,7 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, markdown: res.error ? undefined : res.answer || undefined,
-              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
+              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false, progress: undefined });
       // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
       // rather than being awaited here. The await put the fallback's layers before `finally` ended
       // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
@@ -803,8 +839,8 @@ export default function App() {
       // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
       // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
       patch(isAuth
-        ? { html: renderMarkdown(text, resolveUrl), streaming: false }
-        : { text, streaming: false });
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false, progress: undefined }
+        : { text, streaming: false, progress: undefined });
     } finally {
       // The turn ends when its layers are drawn, so the snapshot this counter triggers includes
       // them, and `busy` keeps the composer from starting the next turn until then. A second save
@@ -816,7 +852,7 @@ export default function App() {
         addTrace({ text: `map: a layer was still downloading ${LAYER_WAIT_MS / 1000} s after the reply; `
           + 'the turn was saved without it', kind: 'warn' });
       }
-      setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1);
+      setBusy(false); abortRef.current = null; turnIdRef.current = null; setTurnsEnded((n) => n + 1);
     }
     // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
     // `snapshotSession` was first missing from these deps, and that single omission was the
@@ -960,6 +996,7 @@ export default function App() {
     if (mode === 'live') {
       try {
         const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
+        for (const r of recs) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could
@@ -984,8 +1021,17 @@ export default function App() {
           recs.forEach((r, i) => {
             const id = previews[i];
             if (!id || !r.download_url) return;
-            setLayers((prev) => prev.map((l) => (
-              l.id === id && l.kind === 'geojson' ? { ...l, sourceUrl: r.download_url } : l)));
+            // The preview also takes the id the agent's layer of this file will carry (one
+            // layer per source file), so the agent drawing the same upload restyles the preview
+            // instead of drawing the same polygons a second time.
+            const nextId = r.layer_id || id;
+            // A layer already holding that id (the same file uploaded again, or already drawn by
+            // the agent) gives way, so ids stay unique.
+            setLayers((prev) => prev
+              .filter((l) => l.id === id || l.id !== nextId)
+              .map((l) => (
+                l.id === id && l.kind === 'geojson'
+                  ? { ...l, id: nextId, sourceUrl: r.download_url } : l)));
           });
         }
         pushMsg({ role: 'agent', text: `Uploaded ${recs.length} file(s) to the agent: ${recs.map((r) => r.filename).join(', ')}. They're attached to this conversation — ask me about them.` });
@@ -994,6 +1040,19 @@ export default function App() {
       pushMsg({ role: 'agent', text: `Loaded ${files.length} file(s) onto the map.` });
     }
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
+
+  // The Demos tab: a case runs in a NEW conversation, so an earlier question's files and layers
+  // cannot leak into it, with its data attached through the same upload path as a file the
+  // visitor picked by hand. The map opens because every case ends on it.
+  const startDemo = useCallback(async (c: DemoCase) => {
+    resetConversation();
+    setMapVisible(true);
+    pushMsg({ role: 'agent', text: `${c.title}. ${c.blurb}` });
+    if (c.files.length) {
+      const files = await loadDemoFiles(c);
+      await onUpload(files);
+    }
+  }, [resetConversation, pushMsg, onUpload]);
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}${REPLAY_KEY ? ' replay-capture' : ''}`}>
@@ -1071,6 +1130,27 @@ export default function App() {
         </div>
       )}
       <div className="workspace" style={{ '--chat-w': `${chatW}px` } as CSSProperties}>
+        {/* The Demos tab's steps live in their own column on the LEFT, not above the composer:
+            there they took half the chat column and crowded the answers they produce. */}
+        {tab === 'demos' && (
+          <aside className={`demoside${demoOpen ? '' : ' closed'}`} aria-label="Spatial analysis examples">
+            {/* Hidden, not unmounted, when folded: the open case and the steps already asked
+                are the panel's own state, and folding must not throw them away. */}
+            <div hidden={!demoOpen}>
+              <DemoPanel busy={busy} live={mode === 'live'}
+                onStart={async (c) => { await startDemo(c); foldIfNarrow(); }}
+                onRun={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: true })); foldIfNarrow(); }}
+                onStage={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: false })); foldIfNarrow(); }}
+                onHide={() => setDemoOpen(false)} />
+            </div>
+            {!demoOpen && (
+              <button type="button" className="demorail" onClick={() => setDemoOpen(true)}
+                      title="Show the spatial analysis examples" aria-label="Show the spatial analysis examples">
+                <span>Spatial Analysis</span>
+              </button>
+            )}
+          </aside>
+        )}
         {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
             at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
             canvas painted nothing (observed 400x300 inside an 820x646 container). */}
@@ -1131,11 +1211,12 @@ export default function App() {
           models={models}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode && !tokenMode} resolveUrl={resolveUrl}
           onSend={runAgent}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stopTurn}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
           onSetSpatial={setSpatial}
+          seed={demoSeed}
         />
       </div>
     </div>

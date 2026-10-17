@@ -371,6 +371,10 @@ def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embe
     touches the real OpenSearch; set AGENT_KB_BACKEND=opensearch (or inject a client)
     to use the cluster. Never raises (agent tools must return, not throw)."""
     base = {"source": "agent_kb", "count": 0, "documents": [], "citation_ids": [], "elements": {}}
+    from agent_runtime.client_profile import agent_kb_allowed
+
+    if not agent_kb_allowed():
+        return {**base, "note": "agent KB is not searched for this client (chat-only)"}
     try:
         # Imported inside the try so a missing/unpackaged `extractors` degrades to a
         # benign note instead of crashing the agent turn.
@@ -540,6 +544,12 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
     Postgres first when ``AGENT_KB_DB`` is set and no client is injected — the precedence
     ``agent_kb_search`` uses, so every id a search returns can be fetched: blocks, units
     (``{element}::unit::{symbol}::{sha}``) and method specs (``{element}::methodspec``)."""
+    from agent_runtime.client_profile import agent_kb_allowed
+
+    if not agent_kb_allowed():
+        return {"doc_id": doc_id, "found": False,
+                "note": "the agent KB is not available to this client (chat-only)"}
+
     kb_db = _kb_db(client)
     if kb_db is not None:
         return _get_kb_block_db(kb_db, doc_id)
@@ -752,6 +762,11 @@ def attach_kb_to_documents(documents, *, client=None) -> Dict[str, Any]:
     import lines across everything attached — the things the agent can actually run, as opposed to
     read.
     """
+    from agent_runtime.client_profile import agent_kb_allowed
+
+    if not agent_kb_allowed():   # chat-only: no KB rows joined into the platform's results
+        return {"documents": list(documents or []), "attached": 0, "folded": 0, "actionable": []}
+
     docs = [d for d in (documents or []) if isinstance(d, dict)]
     if not docs:
         return {"documents": [], "attached": 0, "folded": 0, "actionable": []}

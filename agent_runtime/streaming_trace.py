@@ -8,6 +8,7 @@ LangChain callbacks, MCP tool wrappers, and that queue.
 from __future__ import annotations
 
 import json
+import re
 import time
 import logging
 import os
@@ -18,6 +19,8 @@ from threading import Lock
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
+
+from agent_runtime import turn_control
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,13 @@ _STATUS_TIER_EVENTS = frozenset(
         # Plottable geometry from geo tools (e.g. overpass_search). Status-tier so a
         # map client receives it even when detail-tier tracing (agent_dev) is off.
         "map_layer",
+        # A code run's heartbeat (elapsed time, the concurrent review's state) and that review's
+        # verdict. Status tier: someone waiting on a three-minute run needs to see it is alive
+        # whether or not they asked for the detailed trace.
+        "code_progress",
+        "code_review",
+        "turn",
+        "cancelled",
     }
 )
 
@@ -93,6 +103,41 @@ _TEXT_LIMIT = int(os.environ.get("AGENT_TRACE_TEXT_LIMIT") or 1200)
 _JSON_LIMIT = int(os.environ.get("AGENT_TRACE_JSON_LIMIT") or 3000)
 
 
+_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\.)?[A-Z]\w*(?:Error|Exception|Exit|Interrupt|Fault)\b\s*(?::.*)?$")
+_RAISED_LINE = re.compile(r"^[A-Za-z_][\w.]*(?::\s.*)?$")
+_WARNING_LINE = re.compile(r"\b[A-Z]\w*Warning\b")
+
+
+def _exception_line(text: str) -> Optional[str]:
+    """The line of a failure's text that names the error, or None.
+
+    stderr is read top-down, but a Python failure names its error on the LAST line, after the
+    traceback — and whatever printed first is often a library warning. On 2026-10-15 every
+    failed execute_code in the Chicago SKATER step showed "failed — FutureWarning: …" (a
+    libpysal deprecation printed before the code even ran), so the agent's retries were read
+    as the same warning again and the error that mattered was never visible.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    for ln in reversed(lines):
+        if _EXCEPTION_LINE.match(ln):
+            return ln
+    # After a traceback, the last `Name: message` line is the error whatever it is called
+    # (pyarrow's ArrowInvalid, a library's own class).
+    if any(ln.startswith("Traceback (most recent call last)") for ln in lines):
+        for ln in reversed(lines):
+            if _RAISED_LINE.match(ln) and not _WARNING_LINE.search(ln):
+                return ln
+    if _WARNING_LINE.search(lines[0]):
+        rest = [ln for ln in lines if not _WARNING_LINE.search(ln) and not ln.startswith(
+            ("warnings.warn", "File \"", "^"))]
+        if rest:
+            return rest[-1]
+    return None
+
+
 def _outcome(output: Any) -> Optional[str]:
     """What a tool RETURNED, in a few words, or None when it cannot be said briefly.
 
@@ -136,7 +181,12 @@ def _outcome(output: Any) -> Optional[str]:
         # 600, not 140: the row CLAMPS at 140 in the transcript and expands on click, so the
         # cap here decides what there is to expand INTO. At 140 a python traceback lost the
         # last frame — the one naming the error — which is the only part worth reading.
-        return f"failed — {_short_text(reason or 'failed', limit=600)}"
+        text = reason if isinstance(reason, str) else _short_text(reason or "failed", limit=600)
+        exc = _exception_line(text)
+        if exc:
+            # The error first, where the clamped row shows it; the rest after it, for the expand.
+            return f"failed — {_short_text(exc + ' · ' + text, limit=600)}"
+        return f"failed — {_short_text(text or 'failed', limit=600)}"
 
     # `count` is what every search tool's _build_payload already reports.
     for key in ("count", "feature_count", "zones_with_pixels", "row_count"):
@@ -209,7 +259,16 @@ def _normalize_tool_args(raw: Any) -> Any:
         try:
             return _json_safe(json.loads(stripped))
         except Exception:
-            return stripped
+            pass
+        # str() of a dict is a Python literal, not JSON; read it as one before giving up.
+        try:
+            import ast
+            value = ast.literal_eval(stripped)
+            if isinstance(value, (dict, list)):
+                return _json_safe(value)
+        except Exception:
+            pass
+        return stripped
     return _json_safe(raw)
 
 
@@ -338,6 +397,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         return (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         name = self._model_label(serialized, kwargs)
         message_count = sum(len(group or []) for group in messages or []) if isinstance(messages, list) else None
         self._emit(
@@ -351,6 +411,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         name = self._model_label(serialized, kwargs)
         self._emit(
             "llm_start",
@@ -371,9 +432,19 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 content = _message_content(message) if message is not None else str(getattr(generation, "text", "") or "")
                 raw_tool_calls = getattr(message, "tool_calls", None) if message is not None else None
                 if isinstance(raw_tool_calls, list) and raw_tool_calls:
-                    # Tool decisions are surfaced once, as `tool_call` events from
-                    # ``on_tool_start``. Emitting them here too made every decision
-                    # appear twice in the stream — skip the redundant copy.
+                    # The calls themselves are surfaced once, as `tool_call` events from
+                    # ``on_tool_start``. The TEXT beside them is the model saying what it is
+                    # about to do and why ("I'll inspect both files to understand their
+                    # structure…"): deepseek wrote one in 6 of 6 probes, 2026-10-17. It was
+                    # dropped here with the duplicate calls, so the trace showed bare function
+                    # calls with no reason. It is the step's purpose, emitted before its calls.
+                    plan = content.strip()
+                    if plan:
+                        names = [str((c or {}).get("name") or "") for c in raw_tool_calls
+                                 if isinstance(c, dict)]
+                        self._emit("tool_plan", {"kind": "tool_plan", "label": "Plan",
+                                                 "message": _short_text(plan, limit=400),
+                                                 "tools": [n for n in names if n]})
                     continue
                 if content.strip():
                     self._emit(
@@ -397,8 +468,13 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_tool_start(self, serialized: Dict[str, Any], input_str: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         tool_name = str((serialized or {}).get("name") or kwargs.get("name") or "unknown_tool")
-        args = _normalize_tool_args(input_str)
+        # `inputs` is the call's own argument dict. `input_str` is str() of it, a Python repr
+        # ("{'file_id': …}") that JSON cannot read, so the client received the arguments as
+        # one opaque string and could not say which file a call was about.
+        inputs = kwargs.get("inputs")
+        args = _normalize_tool_args(inputs if isinstance(inputs, dict) else input_str)
         run_key = self._tool_run_key(kwargs.get("run_id"))
         with self._lock:
             self._tool_runs[run_key] = {"name": tool_name, "args": args,
@@ -480,9 +556,11 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         # `map_layer` event so a map client can plot them live; the `content` above is
         # truncated and not reliably parseable.
         try:
+            from agent_runtime.client_profile import chat_only
             from agent_runtime.map_layers import build_map_layers
 
-            for layer in build_map_layers(tool_name, output):
+            # A chat-only client draws nothing, so no layer is sent to it (client_profile).
+            for layer in ([] if chat_only() else build_map_layers(tool_name, output)):
                 self._emit("map_layer", layer)
         except Exception:  # pragma: no cover - never let map extraction break the stream
             logger.debug("map_layer extraction failed for %s", tool_name, exc_info=True)
@@ -525,15 +603,24 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def __init__(self) -> None:
         super().__init__()
         self._models: Dict[str, str] = {}
+        # Each run's endpoint, so a call can be recognized as Lumen's by WHERE it went: a model id
+        # like gpt-4o can exist on Lumen and on OpenAI, billing different accounts in different
+        # currencies. Only the base URL is kept; serialized kwargs also carry the API key slot.
+        self._bases: Dict[str, str] = {}
         self._lock = Lock()
         # Every call of the turn, priced, so the turn can report what it cost
         # (model_pricing.summarize). One handler per turn, so this never mixes turns.
         self.calls: List[Dict[str, Any]] = []
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
+        params = kwargs.get("invocation_params") or {}
+        base = (((serialized or {}).get("kwargs") or {}).get("openai_api_base")
+                or params.get("base_url") or params.get("openai_api_base"))
         with self._lock:
-            self._models[str(kwargs.get("run_id"))] = StreamingTraceCallbackHandler._model_label(
-                serialized, kwargs)
+            run = str(kwargs.get("run_id"))
+            self._models[run] = StreamingTraceCallbackHandler._model_label(serialized, kwargs)
+            if isinstance(base, str) and base:
+                self._bases[run] = base
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
         self.on_chat_model_start(serialized, prompts, **kwargs)
@@ -541,6 +628,7 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         with self._lock:
             model = self._models.pop(str(kwargs.get("run_id")), None)
+            base = self._bases.pop(str(kwargs.get("run_id")), None)
         usage: Dict[str, Any] = {}
         for group in getattr(response, "generations", None) or []:
             for generation in group or []:
@@ -571,13 +659,25 @@ class UsageCallbackHandler(BaseCallbackHandler):
             payload["usage"] = "absent"
         if usage:
             # What this call cost, priced as it ends, so each step of the turn carries its own
-            # cost and not only the total. None when the model has no per-token price.
+            # cost and not only the total. A Lumen call is billed in coins at Lumen's published
+            # rate (lumen_coins) and never at an OpenAI dollar rate for the same model id.
+            lumen = False
+            try:
+                from agent_runtime import lumen_coins
+
+                lumen = lumen_coins.is_lumen(base)
+                if lumen:
+                    payload["provider"] = "lumen"
+                    payload["cost_coins"] = lumen_coins.call_coins(
+                        model, payload.get("input_tokens"), payload.get("output_tokens"))
+            except Exception:  # noqa: BLE001 - pricing must never break a model call
+                payload["cost_coins"] = None
             try:
                 from agent_runtime.model_pricing import call_cost
 
-                payload["cost_usd"] = call_cost(model, payload.get("input_tokens"),
-                                                payload.get("output_tokens"),
-                                                payload.get("cached_input_tokens"))
+                payload["cost_usd"] = None if lumen else call_cost(
+                    model, payload.get("input_tokens"), payload.get("output_tokens"),
+                    payload.get("cached_input_tokens"))
             except Exception:  # noqa: BLE001 - pricing must never break a model call
                 payload["cost_usd"] = None
         agent = _TRACE_AGENT.get()
@@ -588,6 +688,7 @@ class UsageCallbackHandler(BaseCallbackHandler):
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         with self._lock:
             self._models.pop(str(kwargs.get("run_id")), None)
+            self._bases.pop(str(kwargs.get("run_id")), None)
 
 
 _USAGE_HANDLER: ContextVar[Optional[UsageCallbackHandler]] = ContextVar(
@@ -630,7 +731,19 @@ def turn_usage() -> Optional[Dict[str, Any]]:
 
         with handler._lock:
             calls = list(handler.calls)
-        return summarize(calls)
+        balance = None
+        if any(c.get("provider") == "lumen" for c in calls):
+            # Once per turn, at its end: what the Lumen account has left after this turn.
+            from agent_runtime import lumen_coins
+
+            balance = lumen_coins.coins_available()
+            try:
+                from agent_runtime import lumen_failover
+
+                lumen_failover.observe(balance)
+            except Exception:  # noqa: BLE001 - the failover check must never break a turn
+                logger.warning("Lumen failover observe failed", exc_info=True)
+        return summarize(calls, coins_available=balance)
     except Exception:  # noqa: BLE001 - a cost summary must never break a turn
         logger.warning("turn usage summary failed", exc_info=True)
         return None

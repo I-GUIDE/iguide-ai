@@ -68,16 +68,16 @@ CATALOG: Tuple[Source, ...] = (
            excludes="whatever volunteers have not mapped; completeness varies by place, and "
                     "attributes are uneven",
            extent="global", licence="ODbL (© OpenStreetMap contributors)",
-           tools=("overpass_search",), hosts=("overpass-api.de", "overpass.kumi.systems",
-                                              "overpass.private.coffee", "maps.mail.ru",
-                                              "z.overpass-api.de", "lz4.overpass-api.de"),
+           tools=("overpass_search", "overpass_query"),
+           hosts=("overpass-api.de", "overpass.kumi.systems", "overpass.private.coffee",
+                  "maps.mail.ru", "z.overpass-api.de", "lz4.overpass-api.de"),
            aliases=("OpenStreetMap", "OSM", "Overpass")),
     Source("osm_nominatim", "OpenStreetMap Nominatim", "geocoding",
-           covers="coordinates for place names and addresses",
+           covers="coordinates for place names and addresses, and the place named at coordinates",
            excludes="exact building positions for many addresses; ambiguous names resolve to "
                     "one candidate",
            extent="global", licence="ODbL (© OpenStreetMap contributors)",
-           tools=("geocode_places",), hosts=("nominatim.openstreetmap.org",),
+           tools=("geocode_places", "reverse_geocode"), hosts=("nominatim.openstreetmap.org",),
            aliases=("Nominatim", "OpenStreetMap")),
     Source("usgs_3dep", "USGS 3DEP", "elevation",
            covers="bare-earth elevation, 1 m to 30 m depending on place",
@@ -205,6 +205,16 @@ def _statement(src: Source) -> str:
             + (f"; {src.values}" if src.values else "") + f" ({src.licence})")
 
 
+def _cached_suffix(payload: Dict[str, Any]) -> str:
+    """How the Sources line says a result was a kept copy, not a live answer (stage 70: the
+    Overpass cache serves the last good answer when every mirror fails). The line is rendered
+    from the record, so the user learns it whatever the answer's prose says."""
+    if not payload.get("cached") or not payload.get("cached_at"):
+        return ""
+    when = str(payload["cached_at"])[:16].replace("T", " ")
+    return f" [a cached copy from {when} UTC, not a live fetch]"
+
+
 def _payload(content: Any) -> Dict[str, Any]:
     if isinstance(content, dict):
         return content
@@ -285,9 +295,9 @@ def source_of(tool: str, args: Any, content: Any) -> List[Tuple[str, List[str]]]
     args = _args(args)
     out: List[Tuple[str, List[str]]] = []
     src = _BY_TOOL.get(tool)
-    if src is not None:
-        out.append((_statement(src), [src.name, *src.aliases]))
     payload = _payload(content)
+    if src is not None:
+        out.append((_statement(src) + _cached_suffix(payload), [src.name, *src.aliases]))
     urls = [str(v) for k, v in {**args, **payload}.items()
             if k in ("url", "source", "origin") and isinstance(v, str) and v.startswith("http")]
     for url in urls:

@@ -5641,3 +5641,278 @@ rather than from the previous one.
 
 **Not fixed** A per-request model pick does not reach the search; the fallback is still silent
   in the answer; the tier now spends Lumen coins.
+
+
+## 2026-10-15 · M8.97 · Asking the user, measured (architecture stage 62)
+
+**Change** `AGENT_CLARIFY_POLICY` = never (default, as before) | assume (the writer names its
+  assumption and the answers under alternatives) | ask (plus a gate before any work that returns
+  one question when something the answer depends on is open, at most once per conversation;
+  the next turn works on the original request plus the answer). `gis_harness.clarify` runs
+  conversations with a simulated user that answers from what the task's user knows.
+
+**Measured** 14 tasks, Lumen deepseek, one trial: correct 5 / 5 / 9 (never / assume / ask);
+  on the 10 open tasks 3 / 3 / 7; 0 needless questions on the 4 specified ones; +0.57 turns
+  and about +64 s per conversation for ask. assume changed no score.
+
+**Not fixed** One trial; the gate's decisions vary between runs; the simulated user is an upper
+  bound; data the user says they lack can still be substituted when invited; off by default.
+
+
+## 2026-10-15 · M8.100 · Answer validation can be turned off (architecture stage 66)
+
+**Change** `validation: false` per request, or `AGENT_VALIDATION=0` for the server, skips the
+  answer checks:
+  - the grounding audit;
+  - reconciliation;
+  - the number scan;
+  - the re-grounding pass;
+  - the agreement and reference recomputations;
+  - the artifact corrections.
+
+  The peers lose the audit tool. The verdict is `unverified` with a `validation` finding and the
+  result carries `validation: false`; the answer text carries nothing about it. The map UI has an
+  "Answer validation" setting (Server default / On / Off). Link sanitisation and the invariant
+  gate stay.
+
+**Why** Chicago demo, 2026-10-15, local, Lumen deepseek: checking took 2:46 of step 1's 4:57 and
+  4:55 of step 3's 7:48.
+
+**Not fixed** Nothing in the UI marks an unchecked answer once it is shown.
+
+## 2026-10-15 · M8.95 · A named boundary comes back as one polygon with its area (architecture stage 60)
+
+**Change** `overpass_search` queries OSM relations, rebuilds boundary and multipolygon relations
+  into polygons with `area_km2` (ellipsoidal, from the full outline), drops the member ways of
+  relations it returns, and simplifies large outlines only for what the model and map read.
+  A name search asks for relations alone first. Only real OSM keys are accepted bare. A
+  timeout `remark` in a 200 response fails over to the next mirror.
+
+**Why** MultiGlobeQA's "Is Basco larger in area than 1st District of Palawan?" got 17 and 158
+  unnamed boundary segments and no polygon, so the agent answered from Wikipedia with no area.
+  `feature="Basco"` was being sent as the tag key `[basco]`.
+
+**Measured** Live: Basco 690.45 km² (OSM outline, sea included), the district 10,920.49 km²,
+  8 named polygons around Basco where there were 17 unnamed ways.
+
+**Not fixed** No land-only area; province-sized name searches run near the 30 s timeout; the
+  relations kept under `limit` follow Overpass's id order.
+
+
+## 2026-10-15 · M8.96 · The agent can see why a tool answered as it did, and ask the service itself (architecture stage 61)
+
+**Change** `overpass_search` always returns `diagnostics` (types, named count, remark, warnings),
+  and on `debug=True` the Overpass QL sent, every mirror attempt and the raw response start, for
+  the model and through the bridge. The bridge gains `overpass_query(ql)`: the code's own
+  read-only query, JSON only, timeout/memory/length capped, configured mirrors only, 10 per run.
+
+**Why** The Basco/Palawan turn got 157 unnamed boundary pieces with no error and could not check
+  them another way, so it answered from Wikipedia. A tool can only be diagnosed with evidence that
+  does not come from the tool.
+
+**Measured** 18 offline tests. Live end-to-end blocked: Overpass mirrors returned 500/502/504 on
+  2026-10-15; bridge refusals now carry each mirror's status because of it.
+
+**Not fixed** Overpass only; no defect report for the repair loop yet.
+
+## 2026-10-15 · M8.103 · A road network comes back whole, as a file (architecture stage 69)
+
+**Change** `overpass_search` passes raw Overpass filters through (`~`, `!~`, `!=`, `[key]`,
+  `key=*`, `key in (...)`); 'road network' (and 'street network', 'drivable roads', ...) asks for
+  the OSMnx `drive` classes with ramps, no service or private roads. A `highway` filter with more
+  than one value is fetched whole through the bridge's tiling, written to a GeoJSON file, drawn
+  on the map by URL, and the model reads counts and a summary. 'highway' still means motorway,
+  with a warning that it is one class.
+
+**Why** The Loop routing turn asked for 'highway' and routed over 34 motorway pieces; a regex
+  filter became a name search, and the tool returned at most 500 features into context.
+
+**Measured** 39 offline tests. Live: the Loop bbox gave 1,505 ways / 112.2 km in one tile;
+  82% of vertices in one strongly connected component (most of the rest within 200 m of the
+  box edge); SW to NE corner 5.1 min. The model choosing 'road network' end to end: not run.
+
+**Not fixed** Concurrent Overpass calls are neither serialized nor deduplicated (429 at three at
+  once); no walk/bike phrase; ways join by coordinates, not node ids.
+
+## 2026-10-15 · M8.98 · Disputed claims are checked by code against the turn's data (architecture stage 64)
+
+**Change** `agent_runtime/claim_checker.py`, behind `AGENT_CLAIM_CHECK=1`: the auditor's claims
+  that reconciliation could not settle are checked by code a model writes against the turn's own
+  files, run in the sandbox. Supported claims are withdrawn; contradicted ones carry the computed
+  evidence; uncheckable ones are "not verified", not a problem.
+
+**Why** "Highest-rate community area: Fuller Park" (right) was flagged because a ranking has no
+  number for the rules to find; 21 wrong "Region k includes X" memberships could not be told from
+  the 56 right ones by any rule that reads the record.
+
+**Measured** Recorded Chicago turns: the ranking supported in 6/6 runs; memberships 77/77 on the
+  three runs after the fixes. Live step 3: three wrong memberships named with evidence.
+
+**Also** The auditor's view of the current turn grows from 8,000 to 32,000 characters, and a claim
+  whose part of the record was cut is "unseen" (not verified, sent to the checker), never "minor
+  over-reach". Live: the LISA step's cluster counts went from "unsupported due to the truncated
+  execution record" to supported.
+
+**Not fixed** Claims the auditor does not dispute are not checked (live step 3's wrong regional
+  populations); off by default.
+
+## 2026-10-15 · M8.99 · A finished map is not followed by a search of the turn's own files (architecture stage 65)
+
+**Change**
+- In the search peer, `read_text_file` / `inspect_file_for_analysis` refuse the conversation's
+  outputs and read uploads at most once, `AGENT_SEARCH_FILE_READS` (3) per run.
+- A search after a delivered map is vetoed unless the request asks for retrieval.
+- "Next: X" shows the decider's whole reason (no 200-character cut).
+- Failure lines name the exception, not a leading warning.
+- `choropleth_image` reads GeoJSON.
+
+**Why** Chicago step 3 (SKATER), live 2026-10-15: the regions were on the map at 14:37:38. The
+  supervisor then chose search, which read about 45 of the turn's own files over 3 min 16 s
+  (prompt 8k → 56k tokens) and added nothing.
+
+**Not fixed** `list_conversation_files` stays open to search; the veto is lexical.
+## 2026-10-15 · M8.101 · One map layer per source file (architecture stage 67)
+
+**Change** A layer's id is `agent-<content key of the file it shows>`, set in `build_map_layer`
+  for every descriptor whose url serves an agent file. Four producers that draw a copy name their
+  source with `source_key`: `add_map_layer`, `add_raster_layer`, `embed_zones`' outline, and
+  `_raster_layer`. Drawing a file again restyles and renames its layer in place.
+
+**Why** Chicago step 3, live: `regionalize` drew the regions, then `add_map_layer` of the same
+  file drew them again under a new name, and two identical layers were listed. User: one layer
+  per source file.
+
+  Uploads return `layer_id`, so the UI's own upload preview carries the same id and an agent
+  layer of the upload replaces it. add_map_layer / add_raster_layer tell the model a redraw
+  replaced the layer.
+
+**Not fixed** Conversations saved earlier restore under the old ids.
+## 2026-10-15 · M8.102 · A tool-only turn is not told its code did not run (architecture stage 68)
+
+**Change** `_record_execution_outcome` (`agent_runtime/supervisor/graph.py`) writes `executed`
+  only when the turn called `execute_code` or the peer's prose ships a code block; otherwise it
+  removes the flag. `_execution_note` scopes a failed-code note to the code and names the other
+  tool calls that ran.
+
+**Why** Every analyze turn that used tools alone got `executed=False`, and the writer was told
+  "the code in this result did NOT run … do not describe its output as a result". Live
+  2026-10-15 (sess-7c3ef000, Lumen deepseek, validation off): six ok tool calls, two layers on
+  the map, and an answer saying nothing had run, no counts and no layers. Correct: 10,008 crashes
+  in the grid, H1852 with 35.
+
+**Measured** Offline replay of the turn (`test_synthesis_sees_tool_work.py`): 3 of 4 tests fail
+  on prototype (flag set, "did NOT run" in the writer's prompt, failed-script note disowns the
+  counting tool); 4/4 pass after.
+
+**Not fixed** The 2,000-character cut of the serialized analysis result in the writer's prompt.
+
+## 2026-10-16 · M8.104 · Overpass keeps its last good answer (architecture stage 70)
+
+**Change** `rag_pipeline/search/overpass.py` `_exchange` keeps every good answer on disk, as
+  gzip JSON keyed by the sha256 of the exact query text (no endpoint in the key). The folder is
+  `OVERPASS_CACHE_DIR`, else `<AGENT_FILE_STORAGE_ROOT>/overpass_cache`, else
+  `~/.cache/iguide-agent/overpass`, never inside a git checkout. When every mirror fails, the
+  kept copy is served with `cached`, `cached_at`, `cache_age_s`, `cache_reason` and
+  `cache_note`. `overpass_search`, the road-network file, the bridge's feature fetch and raw
+  query, the evidence documents, the map layer label and the Sources line all say "cached copy
+  from <time> UTC". `OVERPASS_CACHE_TTL_S` (default off) serves a recent copy without asking. At
+  most `OVERPASS_MAX_CONCURRENT` (2) requests are in flight, and an identical query already in
+  flight is not sent again.
+
+**Why** 2026-10-15 22:55 → 10-16 07:45 CDT all six mirrors failed for hours (502 at capacity,
+  timeouts, 500, 504/400), and three calls at once got a 429. A Loop road-network turn took
+  148 s, on the fifth mirror. The team demos live; a failed fetch on stage is the risk.
+
+**Measured** 21 offline tests in `test_overpass_cache.py`, and one boundary test adjusted (it
+  asked one query twice). Mutations: never serving the cache fails 8 of them, no single-flight
+  fails 1. Not measured live: the mirrors were the outage.
+
+**Next** For the Hawaii demos, run each demo turn once beforehand and set
+  `OVERPASS_CACHE_TTL_S` to cover the event. Not deployed. Not done: an early exit before every
+  mirror has failed; a 429 back-off; sharing slots across processes.
+
+## 2026-10-16 · M8.105 · A chat-only client gets no graph or agent-KB search (architecture stage 71)
+
+**Change** For a chat-only turn (the platform), the Neo4j and agent-KB tools are not bound, and the
+  Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse.
+  `kb_ablated()` is true for the turn. The check is per turn, not in the cached driver.
+
+**Why** The platform frontend reads its own element format; graph and agent-KB hits do not fit it
+  (agent-KB rows link to `/undefined/`). User request.
+
+**Measured** 13 offline tests; the Stage 63 tests still pass.
+
+**Not fixed** MCP element tools run in another process; the platform's own ranking is unchanged.
+
+## 2026-10-16 · M8.106 · The platform searches only what it can show (architecture stage 72)
+
+**Change** Chat-only search = keyword, semantic, spatial (platform OpenSearch index) and
+  OpenGeoData. Web, web fetch, Overpass and the search agents (Text2Cypher, the OpenSearch query
+  agent) are off; the agent KB stays off. The response's `elements` and evidence keep only the
+  platform's element types; OpenGeoData stays in `opengeodata_results`.
+
+**Why** The platform drew web pages and DataCite records as "undefined" knowledge-element cards
+  (live, 14:44 UTC). User request.
+
+**Measured** 14 offline tests; Stage 63/71 tests updated.
+
+## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
+
+- **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column
+  (class names → categories, numbers → choropleth); before, 2,158 points became a heatmap. The
+  tool description now lists `categories`.
+- **Invented place names:** new `reverse_geocode` tool (Nominatim `/reverse`), plus a rule in both
+  peers and the synthesizer that a place named for a coordinate must come from a tool or the data.
+  Live, the Loop hexagon is now "in the Loop", not "around Wrigleyville".
+- **Routes:** `route` and `network` renders. The route is a cased blue line with green start and
+  red end markers on top; the network is muted slate lines beneath. The OSM road network arrives
+  as `network`.
+- **Colours:** the client owns the category palette (`palette.ts`). The agent sends a colour only
+  when the user asked (`add_map_layer` `color` / `class_colors`, names or hex) or when it means
+  something (Gi*, LISA). The tool result says which colours were set, so the answer names only
+  real ones.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
+  `npm run check:route`; `npm run check:palette`.
+
+## 2026-10-17 · M8.111 · Recolouring restyles the layer it names (architecture S76.1)
+
+- **The fault:** asked to recolour two branches, the agent copied the layer's file, added a
+  `color` column and drew the copy, so the map showed the layer twice.
+- **The fix:** `add_map_layer` now treats a file that is a recorded parent plus only colour or
+  style columns as that parent, so the redraw replaces the parent's layer. A copy that adds a
+  result column keeps its own layer.
+- **The second path:** each styled copy `add_map_layer` writes now records which layer it stands
+  for, so redrawing that copy (the second live try) restyles the same layer.
+- **What the model is told:** the tool says to recolour by redrawing the same file_id with
+  `color` / `class_colors`.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
+
+## 2026-10-17 · M8.113 · A code run can be watched, stopped and reviewed while it runs (architecture stage 78)
+
+- **The fault:** T16 on production lost three of six runs to a 60 s limit on correct but slow
+  code. The model saw only "execution timed out", and Stop left the container running.
+- **Limit:** 180 s by default, capped at 600.
+- **Supervision:** runs are supervised (heartbeat, Stop, review) instead of one blocking call.
+- **Timeouts:** a timed-out run names the line it was on, from a faulthandler stack taken before
+  the kill.
+- **Rules before the run:** slow constructs, and a stated value the code never uses.
+- **Model review during the run:** starts after 5 s, with a live stack sample and vertex
+  counts. It stops the run only on a critical verdict the code backs (the quote is on the line;
+  a performance claim is where the stack is, and waits for 30 s and a re-check; a parameter
+  claim quotes the task).
+- **Stop:** `POST /agent/chat/cancel` with the stream's `turn` id kills the container and stops
+  the agent at its next step.
+- **Map UI:** a run bar with the elapsed time and the review state, and a Stop offer after 90 s.
+- **Vertex counts:** `inspect_vector` reports them.
+- **Tests:** `rag_pipeline/tests/test_code_watch.py`, plus `test_code_execution.py` (Docker
+  timeout through the new loop).
+
+## 2026-10-17 · M8.114 · The trace says what each step does (architecture S78.1)
+
+- **The fault:** production T16's trace showed rule hints on 2-second runs, raw `execute_code({'code': …})` calls and "Code ready".
+- **Hints:** performance hints appear only for slow runs (5 s in the trace, 10 s in the result). Stated-parameter checks are shown on every run.
+- **Purpose:** the model's own sentence beside its tool calls (it was being dropped) is the step's purpose (`tool_plan`). Both peers are asked for it, and `execute_code` takes `purpose`.
+- **Actions:** each of 88 tools reads as words, with file names. The raw calls are behind "Show raw calls".
+- **Arguments:** tool-call events now carry their arguments as a dict.
+- **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
+- **Tests:** `test_code_watch.py`; `npm run check:coderun`.

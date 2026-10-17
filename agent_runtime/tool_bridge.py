@@ -4,7 +4,7 @@ The code sandbox runs ``--network none``. Code that needs public data used to ha
 get it: ask the peer to fetch a file first, then read it as an input. The bridge lets the code
 ask for itself, mid-run, without giving the container a network interface:
 
-    from iguide_bridge import fetch_public_data, overpass_search, admin_boundary, dem_for_region
+    from iguide_bridge import fetch_public_data, overpass_search, overpass_query, admin_boundary, dem_for_region
     tracts = admin_boundary("Champaign County", state="IL", subdivide="tracts")
     gdf = geopandas.read_file(tracts["path"])
 
@@ -18,7 +18,12 @@ nothing but requests.
 
 What the host enforces, per call:
 
-* only the four functions below, with JSON arguments under ``MAX_REQUEST_BYTES``;
+* only the five functions below, with JSON arguments under ``MAX_REQUEST_BYTES``;
+* ``overpass_query`` sends the code's own Overpass QL to the configured mirrors only, with JSON
+  output, ``[timeout:]``/``[maxsize:]`` capped and the text capped at
+  ``OVERPASS_RAW_MAX_CHARS`` (the text reaches a public server); per-run cap
+  ``AGENT_CODE_BRIDGE_MAX_RAW_QUERIES``. Overpass cannot write, so the risks are cost and
+  leakage, and these caps are what bound them;
 * ``fetch_public_data`` goes through ``public_data_tools.fetch``: HTTPS GET to an allowlisted
   host (``bridge_hosts``), every resolved address public, redirects re-checked, a size cap, no
   proxy or ``.netrc``; URLs longer than ``MAX_URL_CHARS`` are refused (a long query string is
@@ -131,12 +136,27 @@ def fetch_public_data(url, filename=None):
     return _call("fetch_public_data", url=url, filename=filename)
 
 
-def overpass_search(feature, place=None, bbox=None, max_features=20000):
+def overpass_search(feature, place=None, bbox=None, max_features=20000, debug=False):
     """Every OpenStreetMap feature of a kind (e.g. "building", "highway=primary", "amenity=school")
-    in a place or bbox [minlon, minlat, maxlon, maxlat], PAGED past Overpass's 500-per-query cap
-    by splitting the box. Returns {path (GeoJSON), count, complete, tiles, ...}."""
+    or with a name (e.g. "1st District of Palawan") in a place or bbox [minlon, minlat, maxlon,
+    maxlat], PAGED past Overpass's 500-per-query cap by splitting the box. Boundaries come back
+    as named polygons; "road network" is every drivable road (motorway to residential, with
+    ramps; oneway and maxspeed are in each way's properties). Returns {path (GeoJSON), count,
+    complete, tiles, diagnostics, ...};
+    debug=True adds the Overpass queries sent, each mirror's answer, and the raw response start.
+    When every mirror is down, a kept copy of the same query's earlier answer comes back with
+    cached=True and cached_at (UTC): say the OSM data is a cached copy from that time."""
     return _call("overpass_search", feature=feature, place=place, bbox=bbox,
-                 max_features=max_features)
+                 max_features=max_features, debug=debug)
+
+
+def overpass_query(query):
+    """Run YOUR OWN Overpass QL query (read-only) when overpass_search does not ask what you
+    need, or to check what it returned. Output is JSON; [timeout:] and [maxsize:] are capped and
+    the text is limited in length. Returns {path (the raw Overpass JSON), elements,
+    elements_by_type, remark, endpoint, attempts, query (as sent)}, plus cached=True and
+    cached_at when every mirror failed and this is the kept copy of an earlier answer."""
+    return _call("overpass_query", query=query)
 
 
 def admin_boundary(area, state=None, level="county", subdivide=None):
@@ -178,18 +198,24 @@ def model_note() -> str:
     return (
         "TOOL BRIDGE (this deployment): the sandbox still has NO network, but code can call "
         "agent capabilities as Python functions, answered by the agent mid-run: "
-        "`from iguide_bridge import fetch_public_data, overpass_search, admin_boundary, "
-        "dem_for_region`. Each returns a dict whose `path` is a local file the code reads "
+        "`from iguide_bridge import fetch_public_data, overpass_search, overpass_query, "
+        "admin_boundary, dem_for_region`. Each returns a dict whose `path` is a local file the code reads "
         "(GeoJSON, GeoTIFF, JSON, CSV); a refusal raises iguide_bridge.BridgeError. "
         "fetch_public_data(url) = HTTPS GET from an approved host only: " + listed + ". "
         "overpass_search(feature, place=None, bbox=None) returns EVERY OSM feature, paged past "
-        "the 500-per-query cap (check `complete`). admin_boundary(area, state, level, "
+        "the 500-per-query cap (check `complete`), named boundaries as polygons, "
+        "feature='road network' for every drivable road (routing), and "
+        "`diagnostics` (how many features are named, warnings); debug=True adds the queries sent "
+        "and the raw Overpass response. overpass_query(ql) runs YOUR OWN read-only Overpass QL "
+        "when overpass_search does not ask what you need or its result looks wrong: compare the "
+        "two before trusting either. admin_boundary(area, state, level, "
         "subdivide) = Census TIGERweb boundaries/tracts. dem_for_region(bbox or lon/lat, "
         "size<=1536) = USGS 3DEP elevation. Each call is logged and named as the data's source, "
         "so get data THROUGH the bridge rather than typing figures into code. Bridge calls "
         "count against the run's timeout: pass timeout_seconds (e.g. 600) to execute_code for "
         f"runs that fetch. Limits per run: {_int_env('AGENT_CODE_BRIDGE_MAX_CALLS', 30)} calls, "
-        f"{_int_env('AGENT_CODE_BRIDGE_MAX_FETCHES', 15)} fetches. "
+        f"{_int_env('AGENT_CODE_BRIDGE_MAX_FETCHES', 15)} fetches, "
+        f"{_int_env('AGENT_CODE_BRIDGE_MAX_RAW_QUERIES', 10)} raw Overpass queries. "
     )
 
 
@@ -253,14 +279,18 @@ _OVERPASS_PAGE = 5000
 _OVERPASS_RETRY_S = 5.0
 
 
-def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
-                      max_features: int = 20000) -> Dict[str, Any]:
+def fetch_osm_features(feature: str, place: Optional[str] = None, bbox: Any = None,
+                       max_features: int = 20000, debug: bool = False) -> Dict[str, Any]:
     """Every feature in the region: a box that comes back full is split in four and re-asked.
 
     Overpass has no offset, so "page" here means "tile". A way crossing two tiles comes back
-    from both and is kept once (by OSM type and id).
+    from both and is kept once (by OSM type and id). Returns ``{"region", "features",
+    "osm_filter", "complete", "tiles", "splits", "retries", "debug_tiles"}``, plus the cache
+    marks (``cached``, ``cached_tiles``, ``cached_at``, ``cache_note``, ...) when any tile was
+    the kept copy of an earlier answer (stage 70); raises Refused rather than return part of an
+    area. The bridge's overpass_search writes the features to a
+    file; so does the model's overpass_search for a road network (stage 69).
     """
-    from agent_runtime.file_store import create_output_file_from_path
     from rag_pipeline.search import overpass as ov
 
     region = ov._resolve_bbox(place, bbox)
@@ -273,15 +303,28 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
     seen: Dict[Tuple[str, Any], Dict[str, Any]] = {}
     tiles = splits = retries = 0
     filt = None
+    debug_tiles: List[Dict[str, Any]] = []
+    cached: List[Dict[str, Any]] = []       # tiles answered from the kept copy (stage 70)
     while pending and tiles < max_tiles and len(seen) < cap:
         box, failures = pending.pop(0)
         res = ov.overpass_search(feature, bbox=list(box), limit=_OVERPASS_PAGE,
-                                 max_limit=_OVERPASS_PAGE)
+                                 max_limit=_OVERPASS_PAGE, **({"debug": True} if debug else {}))
         tiles += 1
+        if debug and res.get("debug") and len(debug_tiles) < 3:
+            debug_tiles.append({"bbox": list(box), **res["debug"]})
         if res.get("error"):
             if res.get("error") == "no_location" or failures >= 2:
+                seen_by = ""
+                if res.get("debug"):
+                    # With debug on, the refusal carries what each mirror said, so the code
+                    # can tell an outage (every mirror 5xx) from a query Overpass rejected.
+                    tried = [(str(a.get("endpoint", "")).split("/")[2:3] or ["?"])[0] + " "
+                             + str(a.get("status") or a.get("remark") or a.get("error", ""))[:60]
+                             for e in res["debug"].get("exchanges", []) for a in e.get("attempts", [])]
+                    seen_by = "; mirrors: " + "; ".join(tried)[:700]
                 raise Refused(f"Overpass failed on tile {tiles} ({res.get('error')}: "
-                              f"{str(res.get('message'))[:200]}); no partial result is returned")
+                              f"{str(res.get('message'))[:200]}); no partial result is returned"
+                              + seen_by)
             retries += 1
             if failures == 0:
                 time.sleep(_OVERPASS_RETRY_S)
@@ -294,6 +337,8 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
                 splits += 1
             continue
         filt = (res.get("query") or {}).get("osm_filter")
+        if res.get("cached"):
+            cached.append(res)
         for f in res.get("features") or []:
             seen.setdefault((str(f.get("osm_type")), f.get("osm_id")), f)
         if int(res.get("count") or 0) >= _OVERPASS_PAGE:
@@ -302,8 +347,37 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
             pending += [((w, s, mx, my), 0), ((mx, s, e, my), 0), ((w, my, mx, n), 0),
                         ((mx, my, e, n), 0)]
             splits += 1
-    complete = not pending and len(seen) < cap
-    feats = list(seen.values())[:cap]
+    out = {"region": list(region), "features": list(seen.values())[:cap], "osm_filter": filt,
+           "complete": not pending and len(seen) < cap, "tiles": tiles, "splits": splits,
+           "retries": retries, "debug_tiles": debug_tiles}
+    if cached:
+        oldest = min(cached, key=lambda r: str(r.get("cached_at")))
+        out.update({"cached": True, "cached_tiles": len(cached), "cached_at": oldest["cached_at"],
+                    "cache_age_s": oldest.get("cache_age_s"),
+                    "cache_reason": oldest.get("cache_reason"),
+                    "cache_note": oldest.get("cache_note") + (
+                        f" ({len(cached)} of {tiles} tiles came from the cache; the oldest "
+                        "time is given.)" if tiles > 1 else "")})
+    return out
+
+
+def cache_fields(got: Dict[str, Any]) -> Dict[str, Any]:
+    """The stage-70 cache marks of a fetch, to copy into what a tool returns."""
+    return {k: got[k] for k in ("cached", "cached_tiles", "cached_at", "cache_age_s",
+                                "cache_reason", "cache_note") if k in got}
+
+
+def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = None,
+                      max_features: int = 20000, debug: bool = False) -> Dict[str, Any]:
+    """fetch_osm_features, written to a GeoJSON file the code reads by path."""
+    from agent_runtime.file_store import create_output_file_from_path
+    from rag_pipeline.search import overpass as ov
+
+    got = fetch_osm_features(feature, place=place, bbox=bbox, max_features=max_features,
+                             debug=debug)
+    region, feats, filt, complete = got["region"], got["features"], got["osm_filter"], got["complete"]
+    tiles, splits, retries, debug_tiles = (got["tiles"], got["splits"], got["retries"],
+                                           got["debug_tiles"])
     fc = {"type": "FeatureCollection", "features": [
         {"type": "Feature", "geometry": f.get("geometry"),
          "properties": {"osm_type": f.get("osm_type"), "osm_id": f.get("osm_id"),
@@ -325,6 +399,61 @@ def _overpass_handler(feature: str, place: Optional[str] = None, bbox: Any = Non
     if not complete:
         out["warning"] = (f"NOT every feature: stopped at {len(feats)} features / {tiles} tiles "
                           "(caps). Narrow the area or say the count is a lower bound.")
+    out["diagnostics"] = ov._diagnostics(None, feats, filt, feature)
+    out["diagnostics"].pop("elements_by_type", None)
+    if got.get("cached"):
+        out.update(cache_fields(got))
+        out["diagnostics"].setdefault("warnings", []).insert(0, got["cache_note"])
+    if debug:
+        out["debug"] = {"tiles_shown": len(debug_tiles), "tiles": debug_tiles}
+    return out
+
+
+# Raw Overpass queries per run, and the size of one answer. A raw query is the code's own
+# experiment channel: it can ask what overpass_search does not, or check what it returned.
+_RAW_MAX_MB = 50
+
+
+def _overpass_query_handler(query: str) -> Dict[str, Any]:
+    """The code's own Overpass QL, sent by the agent to the configured mirrors only.
+
+    Overpass cannot write, so the rules are about cost and leakage (rag_pipeline.search.overpass
+    .prepare_raw_query): JSON output, capped timeout and memory, and a length cap on the text,
+    which reaches a public server. The raw answer goes to a file the code reads; what the run
+    sees in the result is the evidence: which mirror answered, which failed and why.
+    """
+    from agent_runtime.file_store import create_output_file_from_path
+    from rag_pipeline.search import overpass as ov
+
+    try:
+        ex = ov.raw_query(query, max_bytes=_int_env("AGENT_CODE_BRIDGE_RAW_MAX_MB", _RAW_MAX_MB)
+                          * 1024 * 1024)
+    except ov.RawQueryRefused as exc:
+        raise Refused(str(exc)) from None
+    attempts = ex.get("attempts") or []
+    if ex.get("data") is None:
+        raise Refused(f"no mirror answered: {str(ex.get('error'))[:300]}; attempts: "
+                      + json.dumps(attempts, default=str)[:900])
+    data = ex["data"]
+    elements = data.get("elements") or []
+    by_type: Dict[str, int] = {}
+    for el in elements:
+        by_type[str(el.get("type"))] = by_type.get(str(el.get("type")), 0) + 1
+    tmp = Path(tempfile.mkdtemp(prefix="bridge_overpass_q_")) / "overpass_query.json"
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        rec = create_output_file_from_path(str(tmp), filename=tmp.name)
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+    out = {"ok": True, "source": "OpenStreetMap (via Overpass)", "query": ex["query"],
+           "endpoint": ex.get("endpoint"), "attempts": attempts, "elements": len(elements),
+           "elements_by_type": by_type, "size_bytes": ex.get("bytes"),
+           "file_id": rec.get("file_id"), "filename": rec.get("filename")}
+    if data.get("remark"):
+        out["remark"] = str(data["remark"])[:300]
+    if ex.get("cached"):
+        out.update({k: ex[k] for k in ("cached", "cached_at", "cache_age_s", "cache_reason",
+                                       "cache_note")})
     return out
 
 
@@ -347,6 +476,7 @@ def _dem_handler(bbox: Any = None, lon: Optional[float] = None, lat: Optional[fl
 DEFAULT_HANDLERS: Dict[str, Callable[..., Dict[str, Any]]] = {
     "fetch_public_data": _fetch_handler,
     "overpass_search": _overpass_handler,
+    "overpass_query": _overpass_query_handler,
     "admin_boundary": _admin_handler,
     "dem_for_region": _dem_handler,
 }
@@ -397,6 +527,7 @@ class BridgeServer:
         self.calls: List[Dict[str, Any]] = []
         self.max_calls = _int_env("AGENT_CODE_BRIDGE_MAX_CALLS", 30)
         self.max_fetches = _int_env("AGENT_CODE_BRIDGE_MAX_FETCHES", 15)
+        self.max_raw_queries = _int_env("AGENT_CODE_BRIDGE_MAX_RAW_QUERIES", 10)
         self.max_bytes = _int_env("AGENT_CODE_BRIDGE_MAX_MB", 500) * 1024 * 1024
         self._bytes = 0
         # The execute_code call this run is (its lineage, stage 56): every bridge call is
@@ -529,6 +660,9 @@ class BridgeServer:
                 1 for c in self.calls if c["name"] == "fetch_public_data") >= self.max_fetches:
             raise Refused(f"at most {self.max_fetches} fetches per run; work with the files "
                           "already fetched")
+        if fname == "overpass_query" and sum(
+                1 for c in self.calls if c["name"] == "overpass_query") >= self.max_raw_queries:
+            raise Refused(f"at most {self.max_raw_queries} raw Overpass queries per run")
         params = inspect.signature(handler).parameters
         unknown = sorted(k for k in args if k not in params)
         if unknown:
@@ -635,7 +769,8 @@ def _summary(record: Dict[str, Any]) -> Dict[str, Any]:
     """What a run's result carries about one call: enough to name the source and the data."""
     keep = ("ok", "error", "source", "file_id", "filename", "path", "size_bytes", "count",
             "complete", "tiles", "feature_count", "region_bbox", "min", "max", "mean",
-            "ground_resolution_m", "warning", "truncated", "shape", "content_type")
+            "ground_resolution_m", "warning", "truncated", "shape", "content_type",
+            "elements", "elements_by_type", "remark", "endpoint", "diagnostics")
     return {k: record[k] for k in keep if k in record}
 
 

@@ -50,6 +50,7 @@ from agent_runtime.code_execution import (
     _clip,
     _host_user,
     _stage_inputs,
+    _timed_out_output,
     _work_root,
 )
 
@@ -315,7 +316,7 @@ def run_opencode(
             exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
             fork_safe.run(["docker", "kill", name], capture_output=True)
-            stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
+            stdout, stderr = _timed_out_output(exc)
             timed_out, error = True, f"opencode run timed out after {timeout}s"
         except FileNotFoundError:
             error = "docker executable not found"
@@ -450,7 +451,8 @@ def run_opencode_code_peer(
     # runs in the request's trace context — the same place a tool callback would — so the
     # descriptors go out here, through the same build_map_layers boundary every tool's
     # layer crosses, and get the same validation.
-    for layer in build_map_layers("opencode_run", result):
+    from agent_runtime.client_profile import chat_only as _chat_only  # no map, no layer
+    for layer in ([] if _chat_only() else build_map_layers("opencode_run", result)):
         emit_trace_event("map_layer", layer, node="code")
 
     answer = result.get("answer") or ""

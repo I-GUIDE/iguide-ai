@@ -17,6 +17,8 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
+from agent_runtime.client_profile import (requested_validation, reset_chat_only, reset_validation,
+                                          set_chat_only, set_validation)
 from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
                                         PersistentMemoryDisabled, SnapshotTooLarge,
                                         assert_owner as assert_memory_owner,
@@ -189,6 +191,18 @@ def _require_agent_chat_api_key(user: Optional[Any] = None) -> None:
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
+
+
+def _request_chat_only(data: dict) -> bool:
+    """Whether this chat request runs chat-only (agent_runtime/client_profile.py): the body's
+    ``chatOnly``, a key in ``AGENT_CHAT_ONLY_KEYS``, or a source in ``AGENT_CHAT_ONLY_SOURCES``.
+    The source is nginx's ``X-Real-IP`` (the API listens on loopback only), with the socket
+    address as a fallback for a caller that reaches the app directly."""
+    from agent_runtime.client_profile import wants_chat_only
+
+    return wants_chat_only(
+        data, presented_key=_extract_presented_api_key(),
+        source_addresses=[request.headers.get("X-Real-IP") or "", request.remote_addr or ""])
 
 
 def _service_key_presented() -> bool:
@@ -484,6 +498,42 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     }
 
 
+def _keep_platform_elements(formatted: dict) -> None:
+    """Narrow a chat-only result's `elements` and `agent_result.orchestration_result.evidence` to
+    the platform's own element types. Copies on the way down: the payload is also what the turn's
+    trace and history were built from."""
+    from agent_runtime.client_profile import platform_elements_only
+
+    if isinstance(formatted.get("elements"), list):
+        formatted["elements"] = platform_elements_only(formatted["elements"])
+        formatted["count"] = len(formatted["elements"])
+    agent_result = formatted.get("agent_result")
+    orch = agent_result.get("orchestration_result") if isinstance(agent_result, dict) else None
+    if isinstance(orch, dict) and isinstance(orch.get("evidence"), list):
+        formatted["agent_result"] = {**agent_result, "orchestration_result": {
+            **orch, "evidence": platform_elements_only(orch["evidence"])}}
+
+
+def _daily_limit_refusal(user: Any) -> Optional[dict]:
+    """The refusal for a signed-in user who has spent today's limit, or None.
+
+    Lumen coins and OpenAI dollars are limited separately (agent_runtime/usage_limit.py). A
+    caller identified by nobody (the service key, dev and local modes) is never limited."""
+    owner = getattr(user, "id", None) if user is not None else None
+    if not owner:
+        return None
+    try:
+        from agent_runtime import usage_limit
+
+        refusal = usage_limit.refusal(owner)
+    except Exception:  # noqa: BLE001 - a broken ledger must not lock everyone out
+        logger.warning("daily usage check failed; letting the turn run", exc_info=True)
+        return None
+    if refusal:
+        logger.info("Chat refused: daily usage limit reached (%s)", refusal["spent"])
+    return refusal
+
+
 def _format_agent_chat_result(payload: dict) -> dict:
     """Align output shape to the legacy Node /llm/search result object."""
     answer = payload.get("answer") or ""
@@ -509,6 +559,20 @@ def _format_agent_chat_result(payload: dict) -> dict:
         "availableSkills": payload.get("availableSkills") or payload.get("available_skills") or [],
         "opengeodata_results": payload.get("opengeodata_results") or [],
     }
+    from agent_runtime.client_profile import chat_only
+
+    if chat_only():
+        # Says which profile answered, so a caller can tell a chat-only turn from a map one.
+        formatted["chatOnly"] = True
+        # The platform draws every evidence document as one of its knowledge elements; anything
+        # else (web pages, OpenGeoData records) became an "undefined" card with no thumbnail.
+        # OpenGeoData is already in `opengeodata_results`, extracted before this.
+        _keep_platform_elements(formatted)
+    from agent_runtime.client_profile import validation_enabled
+
+    if not validation_enabled():
+        # An unchecked answer says it is unchecked, wherever the caller reads it.
+        formatted["validation"] = False
     usage = payload.get("usage")
     if usage:
         # What the turn's model calls cost: per call, per model and in total. cost_usd is None
@@ -1309,6 +1373,146 @@ def agent_conversation_delete(memory_id):
         return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
+# Admins are role 2 (Admin) or 1 (Super admin) on the platform's scale, which runs backwards: a
+# lower number is more privileged (agent_runtime/identity.py). Same rule as the platform
+# backend's authorizeRole(Role.ADMIN).
+ADMIN_ROLE = 2
+
+
+def _require_admin():
+    """``(user, None)`` for a signed-in admin, or ``(None, error_response)``."""
+    try:
+        user = _require_user()
+    except identity.IdentityError as exc:
+        return None, _identity_error_response(exc)
+    if not user or getattr(user, "role", None) is None or int(user.role) > ADMIN_ROLE:
+        # A service key identifies nobody, so it cannot be an admin either.
+        return None, (jsonify({"error": "Forbidden", "reason": "admin_required"}), 403)
+    return user, None
+
+
+def _user_usage_view(user_id: str) -> dict:
+    from agent_runtime import usage_limit
+
+    return {
+        "userId": user_id,
+        "today": usage_limit.spent(user_id),
+        "limits": usage_limit.limits_for(user_id),
+        "defaultLimits": {"coins": usage_limit.coin_limit(), "usd": usage_limit.usd_limit()},
+        "override": usage_limit.override_for(user_id),
+        "resetsAt": usage_limit.resets_at(),
+        "recent": usage_limit.history(user_id, days=7),
+    }
+
+
+# `<path:...>` because a CILogon id is a URL (`http://cilogon.org/serverE/users/1`). Encoded or
+# not, it reaches the handler intact; two tests hold that.
+@app.route('/agent/admin/users/<path:user_id>/usage', methods=['GET'])
+def agent_admin_user_usage(user_id):
+    """
+    One user's agent usage today, their daily limits, and the last seven days. Admins only.
+    ---
+    tags:
+      - admin
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: user_id
+        type: string
+        required: true
+        description: >-
+          The user's CILogon id (the platform's `openid`), URL-encoded, e.g.
+          `http%3A%2F%2Fcilogon.org%2FserverE%2Fusers%2F443511`.
+    responses:
+      200:
+        description: >-
+          `{ userId, today: {coins, usd, turns}, limits: {coins, usd}, defaultLimits, override,
+          resetsAt, recent: [{day, coins, usd, turns}] }`. A limit of `null` means unlimited.
+          Coins are NCSA Lumen coins and usd is OpenAI spending; each is limited separately.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in as an Admin or Super admin (platform role 2 or lower).
+    """
+    _admin, error = _require_admin()
+    if error:
+        return error
+    return jsonify(_user_usage_view(user_id))
+
+
+@app.route('/agent/admin/users/<path:user_id>/usage', methods=['PUT'])
+def agent_admin_user_usage_update(user_id):
+    """
+    Adjust one user's daily limits, or clear what they have spent today. Admins only.
+    ---
+    tags:
+      - admin
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: user_id
+        type: string
+        required: true
+        description: The user's CILogon id (the platform's `openid`), URL-encoded.
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          properties:
+            coinLimit:
+              description: >-
+                Daily Lumen coin limit for this user: a number >= 0 (0 blocks Lumen),
+                "unlimited", or null to return to the default. Omit to leave it unchanged.
+            usdLimit:
+              description: Daily OpenAI dollar limit for this user, same values as coinLimit.
+            resetToday:
+              type: boolean
+              description: Forget what the user has spent today, so their next turn is allowed.
+    responses:
+      200:
+        description: The user's usage after the change, in the GET response's shape.
+      400:
+        description: A limit that is not a number >= 0, null or "unlimited", or nothing to change.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in as an Admin or Super admin (platform role 2 or lower).
+    """
+    admin, error = _require_admin()
+    if error:
+        return error
+    from agent_runtime import usage_limit
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "The body must be a JSON object."}), 400
+    changes = {}
+    for cur, keys in (("coins", ("coinLimit", "coin_limit")), ("usd", ("usdLimit", "usd_limit"))):
+        key = next((k for k in keys if k in body), None)
+        if key is None:
+            continue
+        try:
+            changes[cur] = usage_limit.parse_limit(body[key])
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": f"{key}: {exc}"}), 400
+    reset = bool(body.get("resetToday") or body.get("reset_today"))
+    if not changes and not reset:
+        return jsonify({"error": "Nothing to change: send coinLimit, usdLimit or resetToday."}), 400
+    if changes:
+        usage_limit.set_override(user_id, **changes)
+    if reset:
+        usage_limit.reset_today(user_id)
+    # Who changed what, for the record. Ids and values only.
+    logger.info("Usage limits changed by admin %s for %s: %s%s", admin.id, user_id,
+                changes or "-", " (today reset)" if reset else "")
+    return jsonify(_user_usage_view(user_id))
+
+
 @app.route('/agent/conversations/<memory_id>/traces', methods=['GET'])
 def agent_conversation_traces(memory_id):
     """
@@ -1541,6 +1745,18 @@ def upload_agent_files():
         _session_token = set_file_store_session(thread_id)
         try:
             uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+            # The id the agent's layer of this file will carry (one layer per source file,
+            # map_layers.file_layer_id). The map UI draws its own preview of an upload, so it
+            # takes this id for it; an agent layer of the same upload then replaces the preview
+            # in place instead of drawing the same polygons twice.
+            from agent_runtime.map_layers import file_layer_id
+
+            for record in uploaded:
+                if isinstance(record, dict) and record.get("file_id"):
+                    try:
+                        record["layer_id"] = file_layer_id(record["file_id"])
+                    except Exception:  # noqa: BLE001 - the preview keeps its own id
+                        pass
         finally:
             reset_file_store_session(_session_token)
             identity.reset_user(_upload_token)
@@ -2299,6 +2515,10 @@ def agent_chat():
         if not user_query:
             return jsonify({"error": "Missing userQuery in request body."}), 400
 
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            return jsonify(_limit_refusal), 429
+
         logger.info(f"Processing agent chat: {user_query[:100]}...")
         # Bind the conversation for the whole turn, so every file a tool writes records who
         # wrote it and every lookup sees this conversation's files first. Set at the EDGE
@@ -2306,6 +2526,8 @@ def agent_chat():
         # from, not what it does with it.
         _session_token = set_file_store_session(normalized.get("thread_id"))
         _user_token = identity.set_user(_request_user)
+        _chat_only_token = set_chat_only(_request_chat_only(data))
+        _validation_token = set_validation(requested_validation(data))
         try:
             # Checked INSIDE the identity binding: assert_owner reads the caller from the same
             # ContextVar everything else does, so before this line it would see nobody and wave
@@ -2349,6 +2571,8 @@ def agent_chat():
         finally:
             reset_file_store_session(_session_token)
             identity.reset_user(_user_token)
+            reset_chat_only(_chat_only_token)
+            reset_validation(_validation_token)
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -2362,6 +2586,59 @@ def agent_chat():
             if diagnostic_text:
                 payload["diagnosticText"] = diagnostic_text
         return jsonify(payload), 500
+
+
+@app.route('/agent/chat/cancel', methods=['POST'])
+def agent_chat_cancel():
+    """
+    Stop a running streamed turn on the server.
+    ---
+    tags:
+      - Agent Chat
+    description: >
+      The stream's first event is `turn` with a `turn_id`. Posting that id here stops the turn:
+      a running sandbox container is killed within about a second, and the agent stops at its
+      next model call or tool call (a model call already under way finishes first). The stream
+      then sends `cancelled` and ends. Only the person who started the turn can stop it.
+      Turns live in the process that streams them, so this assumes one gunicorn worker
+      (WEB_CONCURRENCY=1, as deployed).
+    parameters:
+      - in: body
+        name: body
+        schema:
+          type: object
+          required: [turnId]
+          properties:
+            turnId:
+              type: string
+    responses:
+      200:
+        description: The turn was told to stop.
+      404:
+        description: No running turn of yours has that id (it may already have finished).
+    """
+    try:
+        _request_user = _require_user()
+    except identity.IdentityError as exc:
+        return _identity_error_response(exc)
+    try:
+        _require_agent_chat_api_key(_request_user)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except RuntimeError:
+        return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+    data = request.get_json(silent=True) or {}
+    turn_id = str(data.get("turnId") or data.get("turn_id") or "").strip()
+    from agent_runtime import turn_control
+    outcome = turn_control.request_cancel(
+        turn_id, getattr(_request_user, "id", None) if _request_user else None)
+    if outcome == "cancelled":
+        logger.info("Turn %s stopped on request", turn_id[:12])
+        return jsonify({"cancelled": True, "turnId": turn_id})
+    if outcome == "not_yours":
+        logger.info("Refused to stop turn %s: another caller's", turn_id[:12])
+    # Same answer for both: a turn that is not yours does not exist as far as you can tell.
+    return jsonify({"cancelled": False, "reason": "no_such_turn"}), 404
 
 
 @app.route('/agent/chat/stream', methods=['POST'])
@@ -2839,13 +3116,33 @@ def agent_chat_stream():
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
             )
 
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            # An SSE error event like the missing-query case above, so the chat shows the message
+            # in place of an answer instead of a raw HTTP failure.
+            def _limit_error():
+                yield _sse_event("error", _limit_refusal)
+            return Response(
+                stream_with_context(_limit_error()),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            )
+
         logger.info(f"Streaming agent chat: {user_query[:100]}...")
+        _stream_chat_only = _request_chat_only(data)
+        if _stream_chat_only:
+            logger.info("Chat-only turn: map tools and map_layer events are off")
+        _stream_validation = requested_validation(data)
+        if _stream_validation is False:
+            logger.info("Validation off for this turn: the answer will not be checked")
 
         @stream_with_context
         def generate():
             error_emitted = False
             stream_session_token = set_file_store_session(normalized.get("thread_id"))
             stream_user_token = identity.set_user(_request_user)
+            stream_chat_only_token = set_chat_only(_stream_chat_only)
+            stream_validation_token = set_validation(_stream_validation)
             try:
                 try:
                     _assert_chat_memory_owner(normalized)
@@ -2968,6 +3265,9 @@ def agent_chat_stream():
                         # observation, and it was dropped HERE, so the one repair mechanism the
                         # agent already had has never been visible to anyone watching.
                         "tool_retry",
+                        # The model's sentence beside its tool calls: what it is about to do
+                        # and why. The map UI shows it above the calls' action lines.
+                        "tool_plan",
                         "tool_recovered",
                         "tool_dead_end",
                         # Provider token counts, one per model call (streaming_trace's
@@ -2979,6 +3279,13 @@ def agent_chat_stream():
 
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name in {"turn", "code_progress", "code_review", "cancelled"}:
+                        # turn: the id Stop cancels (POST /agent/chat/cancel). code_progress: a
+                        # running sandbox's heartbeat. code_review: the concurrent reviewer's
+                        # verdict. cancelled: the turn stopped on request. Forwarded as they are.
+                        yield _sse_event(event_name, payload)
+                        continue
 
                     if event_name == "map_layer":
                         # Untruncated plottable geometry from a geo tool (overpass_search, ...).
@@ -3071,6 +3378,8 @@ def agent_chat_stream():
                 # the conversation; the next request on it would inherit the scope.
                 reset_file_store_session(stream_session_token)
                 identity.reset_user(stream_user_token)
+                reset_chat_only(stream_chat_only_token)
+                reset_validation(stream_validation_token)
         return Response(
             generate(),
             mimetype="text/event-stream",

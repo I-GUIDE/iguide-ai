@@ -156,8 +156,52 @@ def _json_preview(text: str) -> Dict[str, Any]:
     return {"format": "json", "top_level_type": type(parsed).__name__, "preview": parsed}
 
 
+# The SEARCH peer retrieves outside evidence. It also holds these file tools (they are part of
+# the shared toolset), and on 2026-10-15 (Chicago demo, SKATER step) it was routed in after the
+# analysis had already delivered the map, and spent 3 min 16 s reading 45 of the conversation's
+# own files one by one: the scripts, CSVs and layers the analysis had just written, some twice,
+# its prompt growing from 8k to 56k tokens, until "2 consecutive steps added nothing" ended it.
+# None of it could improve the answer: those results are already in the turn's record.
+# In the search peer, a file the conversation PRODUCED is refused, a user's upload may be read,
+# and at most SEARCH_READ_BUDGET distinct files per run, each once.
+SEARCH_READ_BUDGET = int(os.getenv("AGENT_SEARCH_FILE_READS", "3") or 3)
+_SEARCH_READS: Dict[str, List[str]] = {}
+
+
+def _search_read_refusal(path: str, record: Optional[Dict[str, Any]]) -> Optional[str]:
+    try:
+        from agent_runtime import turn_log
+
+        if turn_log.active_peer() != "search":
+            return None
+        log = turn_log.active()
+        # A run id ("search#2") repeats in every turn; the log id makes it this turn's.
+        run = f"{getattr(log, 'id', '')}:{turn_log.active_run() or 'search'}"
+    except Exception:  # noqa: BLE001 - outside a turn there is nothing to limit
+        return None
+    if record and str(record.get("kind") or "") == "output":
+        return ("not read: this file was produced by this conversation's own analysis, and its "
+                "results are already in the turn's record. The search step retrieves OUTSIDE "
+                "evidence (the knowledge base, catalogs, the web).")
+    key = str((record or {}).get("file_id") or path)
+    seen = _SEARCH_READS.setdefault(run, [])
+    if key in seen:
+        return "not read again: this file was already read in this search step."
+    if len(seen) >= SEARCH_READ_BUDGET:
+        return (f"not read: the search step reads at most {SEARCH_READ_BUDGET} files. "
+                "Answer from what you have, or say what is missing.")
+    seen.append(key)
+    if len(_SEARCH_READS) > 256:
+        _SEARCH_READS.pop(next(iter(_SEARCH_READS)))
+    return None
+
+
 def read_text_file_tool(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     resolved, record = _resolve_allowed_path(path, must_exist=True)
+    refusal = _search_read_refusal(path, record)
+    if refusal:
+        return json.dumps({"ok": False, "file_id": (record or {}).get("file_id"),
+                           "filename": _display_filename(resolved, record), "error": refusal})
     if not resolved.is_file():
         raise ValueError(f"path is not a file: {resolved}")
 
@@ -181,6 +225,10 @@ def inspect_file_for_analysis_tool(
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> str:
     resolved, record = _resolve_allowed_path(path, must_exist=True)
+    refusal = _search_read_refusal(path, record)
+    if refusal:
+        return json.dumps({"ok": False, "file_id": (record or {}).get("file_id"),
+                           "filename": _display_filename(resolved, record), "error": refusal})
     if not resolved.is_file():
         raise ValueError(f"path is not a file: {resolved}")
 

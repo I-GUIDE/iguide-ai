@@ -177,7 +177,10 @@ def test_an_answer_with_no_code_block_is_left_alone():
               "tool_calls": [], "tool_results": []}
     assert _apply(result, session, prose_key="summary") is False
     assert session.runs == []
-    assert result["executed"] is False
+    # No code written and none run: there is nothing for `executed` to speak about. It used to
+    # be False here, which synthesis read as "the code in this result did NOT run" and the
+    # writer as "nothing ran" (stage 68).
+    assert "executed" not in result
 
 
 def test_a_blocked_peer_is_still_challenged_on_shipped_code(monkeypatch):

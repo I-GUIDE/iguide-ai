@@ -1,3 +1,4 @@
+import { resolveLegend } from '../palette';
 import type { LayerArtifact } from '../contracts';
 
 export interface SelectedFeature {
@@ -43,7 +44,8 @@ export function LeftPanel(p: Props) {
             return (
               <li key={l.id} className={visible ? '' : 'off'}>
                 <button className="eye" title={visible ? 'Hide' : 'Show'} onClick={() => p.onToggleLayer(l.id)}>{visible ? '👁' : '⦰'}</button>
-                <span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />
+                <span className="dot" style={{ background: l.kind === 'geojson' && l.color
+                  ? `rgb(${l.color[0]},${l.color[1]},${l.color[2]})` : SOURCE_COLORS[l.source] ?? '#888' }} />
                 {/* The name is clipped to the panel width, so the title carries it in full —
                     otherwise two layers whose names differ past the ellipsis are unreadable. */}
                 <button className="lname" title={`${l.label}\nZoom to layer`}
@@ -61,9 +63,16 @@ export function LeftPanel(p: Props) {
                 )}
                 {/* A cluster map is unreadable without its key: "High-High" is a colour on the
                     map and nowhere else. Only categorical layers carry one. */}
+                {/* A route's two markers mean nothing without a key either. */}
+                {l.kind === 'geojson' && l.render === 'route' && !l.legend?.length && (
+                  <ul className="lp-legend">
+                    <li><span className="swatch" style={{ background: 'rgb(52,168,83)' }} /><span className="llabel">Start</span></li>
+                    <li><span className="swatch" style={{ background: 'rgb(234,67,53)' }} /><span className="llabel">End</span></li>
+                  </ul>
+                )}
                 {l.kind === 'geojson' && !!l.legend?.length && (
                   <ul className="lp-legend">
-                    {l.legend.map((e) => (
+                    {resolveLegend(l.legend).map((e) => (
                       <li key={e.label}>
                         <span className="swatch" style={{ background: `rgba(${e.color[0]},${e.color[1]},${e.color[2]},${e.color[3] / 255})` }} />
                         <span className="llabel" title={e.label}>{e.label}</span>

@@ -1,7 +1,7 @@
 # GIS task harness
 
-Whole-task regression runs for the agent: twelve classic GIS problems, one live-data variant,
-and four questions that cannot be answered. Every task has an exact expected value, or a check
+Whole-task regression runs for the agent: twelve classic GIS problems, four on real data, one
+live-data variant, and four questions that cannot be answered. Every task has an exact expected value, or a check
 any analyst could repeat. Each run goes through the real HTTP API of a local server and is
 scored mechanistically. There is no LLM judge.
 
@@ -123,14 +123,42 @@ records the text it matched, so a reader can check it.
 | T10 | IDW + ordinary kriging, Meuse zinc | Meuse (fetched by SHA-256) | variogram given, so the answer is a linear solve |
 | T11 | multi-criteria suitability | three aligned rasters | land cover is categorical |
 | T12 | aftershocks within 7 days and 25 km | USGS ComCat snapshot, Ridgecrest 2019 | distance in degrees; time window |
+| T13 | violent crime per 1,000 by community area, Moran's I, 6 SKATER regions | Chicago 2024 crimes (259,660 rows), 77 community areas, ACS 2023: a City of Chicago Data Portal **snapshot pinned by SHA-256** (not in the repo; see below) | Fuller Park (2,186 residents) has the highest rate; regions are scored by their constraints (6 regions, all 77 areas, each region contiguous) read from the turn's map layers, because equally valid partitions differ |
+| T14 | serious crashes per 500 m hexagon, Gi* hot spots, the streets in them, night share, crashes per year | Chicago 2020–2024 fatal and incapacitating crashes (10,076) and a 3,028-cell hexagon grid: a **snapshot pinned by SHA-256** | 40 hexagons have z within 0.06 of 1.96, so the hot-spot count (331) holds only under the stated weights; 68 crashes have no usable coordinates |
+| T15 | which 6 of 82 library branches minimise population-weighted distance (exact 6-median), and how many residents each serves | Chicago Public Library branches and 2020 Census block-group centres of population (2,158): a **snapshot pinned by SHA-256** | the best single swap is 0.42% worse, so a near-optimum from a heuristic fails the 0.2% check on mean distance |
+| T16 | residents in Waikīkī's tsunami evacuation zone, the walk out along OSM streets, buildings in the 3.2 ft sea-level-rise area | Hawaii Statewide GIS, Census 2020 blocks, OpenStreetMap, Honolulu building footprints: a **snapshot pinned by SHA-256** | a block is in the zone by its internal point (a representative point gives 20,291, not 20,294); two walks end at 10.04 and 10.06 min, so the count over 10 min (846) holds only under the stated snapping |
 | U01 | slope of a DEM that is not attached | a points file | — |
 | U02 | NDVI without a near-infrared band | a 1-band red scene | — |
 | U03 | kriging mercury, which Meuse lacks | meuse.csv | — |
 | U04 | travel time to a point 7 km off the network | roads.geojson | — |
 
 Expected values are computed in `datasets.py` from the same bytes that are uploaded, by brute
-force, a closed form, or a second library. `tests/test_gis_harness.py` holds them and checks
+force, a closed form, or a second library.
+
+T13's data is a snapshot of three live datasets that the portal revises daily, so the snapshot,
+not the URL, is the task's input. It is 35 MB and not committed. `datasets._chicago_snapshot`
+looks in `gis_harness/.cache/chicago_crime_2024/`, then in `$GIS_HARNESS_SNAPSHOTS`, and refuses
+any file whose SHA-256 differs from `CHICAGO_FILES`. A copy is kept in the git-excluded
+`gis_harness_runs_archive/datasets/`. `python -m gis_harness.datasets --snapshot chicago_crime`
+downloads the current data, which will no longer match the pinned hashes: a new snapshot means
+new hashes and re-checked expected values. `tests/test_gis_harness.py` holds them and checks
 that each trap still changes the answer.
+
+T14–T16 are the questions of three Spatial Analysis examples, on the same files, pinned the same
+way (`CRASH_FILES`, `COOLING_FILES`, `WAIKIKI_FILES`; directories of the same names under
+`datasets/` in the archive). Their files were derived (filtered, clipped, a hexagon grid built
+for T14), so no download reproduces them; `datasets.py` says what was fetched and what was done
+to it. Each asks every numbered question of its example's steps in one turn, and none of its map
+requests. Their expected values were computed twice: on 2026-10-15 by separate scripts (esda,
+networkx, a first MILP), and by `datasets.py` (shared-vertex contiguity, scipy's Dijkstra, a
+second MILP). The two agree on every value, and the tests pin them. The tests that need a
+snapshot skip where it is absent. Building T16 takes about 20 s and T15 about 40 s (the exact
+6-median).
+
+A count check reads only numbers written without a unit: T16 asks how many residents need more
+than 10 minutes and how many hotels (10) are in the sea-level-rise area, and "10 minutes" must
+not answer the second. Re-scored, the archive's 151 count checks over 427 turns keep their
+verdicts.
 
 ## How good are the checks? (`validators_bench`)
 
@@ -171,6 +199,12 @@ python3 -m gis_harness.run_notes        # writes <run>/tool_notes.json for AGENT
   AREAWATER, read 2026-10-08.
 - T02L's reference is an Overpass query made at run time. It is the one task whose expected
   value can change between runs.
+- T13–T15: City of Chicago Data Portal (its terms of use) and the US Census Bureau (public
+  domain). Not committed.
+- T16: Hawaii Statewide GIS Program (tsunami evacuation zones; the 3.2 ft SLR exposure area by
+  SOEST, UH CGG, PacIOOS and Tetra Tech), the US Census Bureau, City and County of Honolulu
+  building footprints (DPP HoLIS), and OpenStreetMap (© OpenStreetMap contributors, ODbL: any
+  published copy must say so). Not committed.
 
 ## Cost
 

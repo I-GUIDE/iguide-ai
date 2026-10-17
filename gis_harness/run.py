@@ -81,7 +81,8 @@ def code_peer_toolsets(log_path: Path, offset: int = 0) -> List[Dict[str, Any]]:
     return rows
 
 
-def start_server(port: int, log_path: Path) -> subprocess.Popen:
+def start_server(port: int, log_path: Path,
+                 extra_env: Optional[Dict[str, str]] = None) -> subprocess.Popen:
     """A local agent server that cannot write to shared infrastructure, or pay for geocoding.
 
     AGENT_MODE=local closes the conversation store and keeps KB search read-only (AGENTS.md,
@@ -105,7 +106,7 @@ def start_server(port: int, log_path: Path) -> subprocess.Popen:
            "AGENT_INVARIANT_GATE": os.environ.get("AGENT_INVARIANT_GATE", "1"),
            "AGENT_CHAT_API_KEY": "", "GOOGLE_MAPS_API_KEY": "",
            "AGENT_TRACE_JSON_LIMIT": "20000", "AGENT_TRACE_TEXT_LIMIT": "20000",
-           "AGENT_TRACE_SSE_TEXT_LIMIT": "20000"}
+           "AGENT_TRACE_SSE_TEXT_LIMIT": "20000", **(extra_env or {})}
     # Appended, not truncated: a --resume run starts a new server on the same label, and a
     # truncated log lost the main run's evidence (2026-10-08, phase 2's after-run).
     staging = probe_staging_tools(env)
@@ -178,6 +179,7 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
                     thread_id=thread, raw_log=out / f"{stem}.events.jsonl")
     # The layer files live on this server, which is gone by the time anyone replays the turn.
     layers = capture_layers(base_url, out / f"{stem}.events.jsonl")
+    turn["layer_paths"] = _layer_paths(out, stem)
     s = score(task, expected, turn)
     record = {"task": task_id, "title": task.title, "trial": trial, "provider": provider,
               "model": model, "query": query, "files": sorted(files),
@@ -191,6 +193,11 @@ def _run_one(task_id: str, provider: str, model: str, base_url: str, out: Path,
               "gate": turn.get("gate", [])}
     (out / f"{stem}.json").write_text(_scrub(json.dumps(record, indent=2, default=str)))
     return record
+
+
+def _layer_paths(out: Path, stem: str) -> List[str]:
+    """The vector layers this turn put on the map, as the harness saved them."""
+    return [str(p) for p in sorted((out / "layers").glob(f"{stem}__*.geojson"))]
 
 
 def _scrub(text: str) -> str:
@@ -219,6 +226,7 @@ def rescore(path: Path) -> Dict[str, Any]:
         ev = json.loads(line)
         _reduce(turn, ev["event"], ev["data"])
     turn["error"] = record.get("error") or turn["error"]
+    turn["layer_paths"] = _layer_paths(path.parent, path.name[: -len(".json")])
     record["score"] = score(BY_ID[record["task"]], record["expected"], turn).to_dict()
     record["usage"] = cost_usd(turn["usage"])
     record["gate"] = turn.get("gate", [])

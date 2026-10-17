@@ -44,6 +44,11 @@ def _sse_events(resp: requests.Response) -> Iterator[Tuple[str, Dict[str, Any]]]
             event, data = None, []
             continue
         if line.startswith(":"):
+            # A keep-alive comment. Surfaced so the caller can check its deadline: skipped
+            # silently, a turn stuck inside one model call (the server keeps the stream alive)
+            # never reached the timeout check. Live, 2026-10-14: two MultiGlobeQA turns hung
+            # for 10 hours with timeout_s=1200.
+            yield "_keepalive", {}
             continue
         if line.startswith("event:"):
             event = line[6:].strip()
@@ -71,6 +76,11 @@ def run_turn(base_url: str, query: str, *, provider: str, model: str,
                            timeout=(15, 600)) as resp:
             resp.raise_for_status()
             for name, data in _sse_events(resp):
+                if name == "_keepalive":
+                    if time.monotonic() - t0 > timeout_s:
+                        turn["error"] = f"harness timeout after {timeout_s:.0f}s"
+                        break
+                    continue
                 turn["events"] += 1
                 if log:
                     log.write(json.dumps({"event": name, "data": data}, default=str) + "\n")

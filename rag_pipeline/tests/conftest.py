@@ -206,8 +206,15 @@ def _restore_warnings_warn(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_generated_state(tmp_path_factory, monkeypatch):
-    """Point the method library and the local agent KB at empty per-test directories."""
+    """Point the method library, the local agent KB and the Overpass cache at empty per-test
+    directories."""
     monkeypatch.setenv("AGENT_METHOD_LIBRARY_DIR",
                        str(tmp_path_factory.mktemp("empty_method_library")))
     monkeypatch.setenv("AGENT_KB_STORE_DIR", str(tmp_path_factory.mktemp("empty_agent_kb")))
+    # Stage 70: Overpass keeps every good answer and serves it when the mirrors fail. Shared
+    # across tests, one test's answer would rescue another's simulated outage; in the home
+    # cache, a test's fake answer would be served to the developer's real agent.
+    monkeypatch.setenv("OVERPASS_CACHE_DIR", str(tmp_path_factory.mktemp("overpass_cache")))
+    monkeypatch.delenv("OVERPASS_CACHE_TTL_S", raising=False)
+    monkeypatch.delenv("OVERPASS_CACHE", raising=False)
     yield

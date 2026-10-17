@@ -10,7 +10,9 @@ export type RGBA = [number, number, number, number];
 
 export interface Legend {
   label: string;
-  color: RGBA;
+  // Set only where the colour means something (a hot spot is red) or the user asked for it;
+  // every other class takes the map's palette (palette.ts resolveLegend).
+  color?: RGBA;
 }
 
 export interface DeckStyle {
@@ -57,7 +59,10 @@ export type LayerArtifact =
       label: string;
       data: FeatureCollection;
       style?: DeckStyle;
-      render?: 'geojson' | 'heatmap' | 'points' | 'categories';
+      render?: 'geojson' | 'heatmap' | 'points' | 'categories' | 'network' | 'route';
+      // 'network' and 'route' draw a road network and a path found on it the way a navigation
+      // app does: the network as muted lines beneath everything, the route as a thick cased
+      // line on top with its start and end marked (toDeckLayer, AgentMap's layer order).
       // 'categories' shades by a CLASS NAME (LISA's High-High, a Gi* hot-spot band, a region
       // id) using `legend` as the palette, instead of ramping a number. The two cannot share a
       // path: Number('High-High') is NaN, so a categorical column on the choropleth ramp
@@ -69,6 +74,9 @@ export type LayerArtifact =
       outline?: boolean;
       partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
+      // One colour for the whole layer, set by the agent only when the user asked for it ("the
+      // crimes in red"). It wins over the source colour, the route blue and the heatmap ramp.
+      color?: RGBA;
       fitBounds?: boolean;
       visible?: boolean;
       // Where `data` was fetched from. Not used to render — it exists so a saved session can

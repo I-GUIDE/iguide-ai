@@ -235,7 +235,8 @@ def test_an_unknown_reference_is_its_own_stable_key(store):
     assert file_content_key("  file_nowhere ") == "file_nowhere"
     assert file_content_key(None) == ""
     # Pinned in test_predict_from_package: an id that resolves to nothing is unchanged.
-    assert boundary_layer_id("file_poly1") == "boundary-file_poly1"
+    # Since 2026-10-15 a boundary's layer is simply its file's layer (one per source file).
+    assert boundary_layer_id("file_poly1") == "agent-file_poly1"
 
 
 # --- admin_boundary -------------------------------------------------------------------------
@@ -249,7 +250,7 @@ def test_asking_for_the_same_place_again_replaces_its_layer(boundary):
     assert first["ok"] and again["ok"]
     assert first["file_id"] != again["file_id"]
     assert first["map_layer"]["id"] == again["map_layer"]["id"]
-    assert first["map_layer"]["id"].startswith("boundary-city-1712385-")
+    assert first["map_layer"]["id"].startswith("agent-city-1712385-")
     assert len(_on_screen(("admin_boundary", json.dumps(first)),
                           ("admin_boundary", json.dumps(again)))) == 1
 
@@ -388,8 +389,12 @@ def test_the_regrounded_turn_ends_with_two_layers_not_four(boundary, fake_qgis):
     assert list(both_passes.values())[-1] == "Champaign 2 km buffer"   # the label did update
 
 
-def test_add_map_layer_keeps_different_views_of_one_dataset_apart(boundary, store):
-    """Replacing must not over-reach: the same data drawn two ways is two layers."""
+def test_add_map_layer_draws_one_layer_per_source_file(boundary, store):
+    """One layer per SOURCE file (user, 2026-10-15). Drawing the same data again, in another
+    render or by another column, restyles its layer in place. A different file is a different
+    layer. This reverses the earlier rule that the same data drawn two ways is two layers: on
+    the Chicago demo it left two identical SKATER layers when the peer re-drew regionalize's
+    output to rename it."""
     pytest.importorskip("geopandas")
     add_map_layer = _geo_tool("add_map_layer").func
     pts = json.dumps({"type": "FeatureCollection", "features": [
@@ -406,8 +411,8 @@ def test_add_map_layer_keeps_different_views_of_one_dataset_apart(boundary, stor
 
     points = layer_id(file_id=f, render="points", name="sites")
     assert layer_id(file_id=same_again, render="points", name="the same sites") == points
-    assert layer_id(file_id=f, render="heatmap", name="sites") != points
-    assert layer_id(file_id=f, render="choropleth", column="v", name="sites") != points
+    assert layer_id(file_id=f, render="heatmap", name="sites") == points
+    assert layer_id(file_id=f, render="choropleth", column="v", name="sites") == points
     assert layer_id(file_id=boundary(area="Champaign", level="city", state="IL")["file_id"],
                     render="shapes", name="sites") != points
 

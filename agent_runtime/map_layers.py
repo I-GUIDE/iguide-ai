@@ -17,6 +17,41 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def parse_colour(value: Any, alpha: int = 255) -> Optional[List[int]]:
+    """A colour as ``[r, g, b, a]`` (0-255), or None when *value* is not one.
+
+    Accepts what a user or a tool would write: a name ("red", "darkorange"), a hex string
+    ("#d7191c", "#d7191ccc"), or 3-4 numbers. Numbers all within 0-1 are read as fractions.
+    The map client draws numbers only, so every colour is resolved here, on the server, and a
+    bad one is reported back to the model rather than guessed at.
+    """
+    if isinstance(value, (list, tuple)) and len(value) in (3, 4):
+        try:
+            nums = [float(v) for v in value]
+        except (TypeError, ValueError):
+            return None
+        if all(0.0 <= v <= 1.0 for v in nums) and any(v not in (0.0, 1.0) for v in nums):
+            nums = [v * 255.0 for v in nums]
+        if not all(0.0 <= v <= 255.0 for v in nums):
+            return None
+        rgba = [int(round(v)) for v in nums]
+        return rgba if len(rgba) == 4 else rgba + [int(alpha)]
+    if isinstance(value, str) and value.strip():
+        try:
+            from matplotlib.colors import to_rgba
+        except Exception:  # pragma: no cover - matplotlib is in the image
+            return None
+        text = value.strip().lower().replace(" ", "")
+        try:
+            r, g, b, a = to_rgba(text)
+        except ValueError:
+            return None
+        has_alpha = text.startswith("#") and len(text) in (5, 9)
+        return [int(round(r * 255)), int(round(g * 255)), int(round(b * 255)),
+                int(round(a * 255)) if has_alpha else int(alpha)]
+    return None
+
 # Cap features per emitted layer so a single event stays a sane size.
 _MAX_FEATURES = 500
 # How much of a label's slug stays readable in a layer id. Beyond this a digest of the FULL
@@ -115,6 +150,51 @@ def drawn_layer_key(input_key: str, render: str, *, column: Any = None,
                        sample=sample)
 
 
+# --- one layer per source file (2026-10-15) ------------------------------------------------
+# A layer's id is the content key of the file it SHOWS, and nothing else. Until this date the
+# view was part of the key too (drawn_layer_key: render, column, sampling), and each tool built
+# its own id with its own prefix ("agent-", "embed-", "boundary-"). So the same file drawn twice
+# became two layers. Live, Chicago demo step 3: regionalize drew the six regions, then the code
+# peer called add_map_layer on regionalize's own output file to rename it, and the map listed
+# two identical SKATER layers. The user's call: one layer per source file. Drawing a file again,
+# in any style, now restyles and renames its layer in place (the client replaces a layer whose
+# id matches, at the same position).
+#
+# build_map_layer applies the rule to every descriptor whose url serves an agent file, so no
+# producer can opt out by building its own id. A producer that draws a DIFFERENT file from the
+# one it stands for (add_map_layer writes a styled copy; embed_zones writes the boundary plus its
+# embedding columns) names the source with ``source_key``.
+
+_AGENT_FILE_URL = re.compile(r"/agent/files/(file_[0-9a-f]+)/download")
+
+
+def source_layer_id(source_key: str) -> str:
+    """The id of the one layer that shows the source whose content key is ``source_key``."""
+    return f"agent-{source_key}"
+
+
+def file_layer_id(file_ref: Any) -> str:
+    """The id of the one layer that shows ``file_ref`` (a file_id or a path)."""
+    from agent_runtime.file_store import file_content_key
+
+    return source_layer_id(file_content_key(file_ref))
+
+
+def _layer_source_id(ml: Dict[str, Any]) -> Optional[str]:
+    """The id a descriptor must carry under the one-layer-per-source rule, or None when it shows
+    no agent file (inline GeoJSON, an external tile URL), which keeps the id the tool gave it."""
+    explicit = str(ml.get("source_key") or "").strip()
+    if explicit:
+        return source_layer_id(explicit)
+    match = _AGENT_FILE_URL.search(str(ml.get("url") or ""))
+    if not match:
+        return None
+    try:
+        return file_layer_id(match.group(1))
+    except Exception:  # noqa: BLE001 - an unreadable record keeps the tool's id
+        return None
+
+
 def boundary_layer_id(file_id: str) -> str:
     """The id of the map layer that SHOWS a polygon file, keyed on what the file HOLDS.
 
@@ -133,9 +213,8 @@ def boundary_layer_id(file_id: str) -> str:
     it resolved (its level and GEOIDs) on the file it writes. The repeat therefore lands on the
     same id, and embed_zones, handed either file, rebuilds that id from it.
     """
-    from agent_runtime.file_store import file_content_key
-
-    return f"boundary-{file_content_key(file_id)}"
+    # Now simply the file's own layer id (one layer per source file, above).
+    return file_layer_id(file_id)
 
 
 def _coerce_obj(output: Any) -> Optional[Any]:
@@ -202,8 +281,8 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
     second copy, and two different results written under one name merged into one layer. A
     peer's inputs are invisible from here, which leaves the file as the only record of what
     the layer shows. Two runs that wrote byte-identical files therefore share a layer, and
-    their layers would draw identically anyway. The key is drawn_layer_key's, so a later
-    add_map_layer of the same file with the same view lands on the same layer too.
+    their layers would draw identically anyway. The id is the file's own layer id
+    (source_layer_id), so a later add_map_layer of the same file lands on the same layer.
     """
     from agent_runtime.file_store import file_content_key
 
@@ -233,7 +312,7 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
         render = ("heatmap" if (is_point and features > 2000)
                   else ("points" if is_point else "shapes"))
         out.append({
-            "id": f"agent-{drawn_layer_key(file_content_key(str(path)), render)}",
+            "id": source_layer_id(file_content_key(str(path))),
             "url": url,
             "label": Path(name).stem.replace("_", " ").strip() or name,
             "render": render,
@@ -292,7 +371,8 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
             slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")
             out = {
                 "kind": "map_layer",
-                "id": ml.get("id") or f"agent-{_slug_id(slug, render)}",
+                "id": (_layer_source_id(ml) or ml.get("id")
+                       or f"agent-{_slug_id(slug, render)}"),
                 "source": ml.get("source") or "analysis",
                 "label": ml.get("label") or render,
                 "url": url,
@@ -332,20 +412,29 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
                                         if v not in (None, "", [], {})}
                 return out
 
-            # A CATEGORICAL layer carries its own palette: the tool that assigned the classes
-            # is the only thing that knows what they mean, so the legend travels WITH the layer
-            # instead of being hardcoded per-tool in the client. Dropped when malformed rather
-            # than passed through half-valid.
+            # A CATEGORICAL layer carries its classes; a colour per class only where the colour
+            # MEANS something (a hot spot is red, a cold spot blue) or the user asked for one.
+            # Every other class is coloured by the map client's own palette (map-ui-prototype
+            # palette.ts), so the look of a map is decided in one place. An entry without a
+            # label is dropped; a colour that is not one is dropped and the class kept.
             legend = ml.get("legend")
             if isinstance(legend, list):
-                entries = [
-                    {"label": str(e.get("label")), "color": [int(v) for v in e.get("color")]}
-                    for e in legend
-                    if isinstance(e, dict) and e.get("label") is not None
-                    and isinstance(e.get("color"), (list, tuple)) and len(e["color"]) == 4
-                ]
+                entries = []
+                for e in legend:
+                    if not isinstance(e, dict) or e.get("label") is None:
+                        continue
+                    entry: Dict[str, Any] = {"label": str(e.get("label"))}
+                    rgba = parse_colour(e.get("color")) if e.get("color") is not None else None
+                    if rgba:
+                        entry["color"] = rgba
+                    entries.append(entry)
                 if entries:
                     out["legend"] = entries
+            # One colour for the whole layer, set only when the user asked for it ("the crimes in
+            # red"); without it the client colours the layer by its source.
+            colour = parse_colour(ml.get("color")) if ml.get("color") is not None else None
+            if colour:
+                out["color"] = colour
 
             # INVARIANT: a 'categories' render is meaningless without its palette. The client
             # maps class NAMES through the legend; with no legend it falls back to the NUMERIC

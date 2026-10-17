@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -119,8 +120,12 @@ def _within(v: float, e: float, rel: float, abs_: float) -> bool:
 
 
 def match_number(text: str, expected: float, unit: Optional[str], rel: float,
-                 abs_: float) -> Optional[str]:
+                 abs_: float, unitless: bool = False) -> Optional[str]:
+    """The first number within tolerance, after unit conversion. *unitless* (counts): a number
+    written with a unit is a quantity, not a count, so "10 minutes" does not answer "10 hotels"."""
     for n in numbers(text):
+        if unitless and n.unit:
+            continue
         v = n.value
         if unit and n.unit and n.unit in UNITS and unit in UNITS:
             dim_e, f_e = UNITS[unit]
@@ -173,7 +178,8 @@ def check_value(check: Check, expected: Dict[str, Any], answer: str) -> Dict[str
     exp = expected.get(check.name)
     found: Optional[str] = None
     if check.kind in ("number", "count"):
-        found = match_number(text, float(exp), check.unit, check.rel_tol, check.abs_tol)
+        found = match_number(text, float(exp), check.unit, check.rel_tol, check.abs_tol,
+                             unitless=check.kind == "count")
     elif check.kind == "text":
         for p in _text_variants(str(exp)):
             m = p.search(text)
@@ -324,6 +330,56 @@ class TaskScore:
         return d
 
 
+def check_regions(expected: Dict[str, Any], layer_paths: Sequence[str]) -> Dict[str, Any]:
+    """A regionalization is checked by its constraints, not against one partition.
+
+    SKATER, REDCAP and max-p can return different partitions that are equally valid, so there
+    is no single right answer to compare with. What must hold, read from the turn's own map
+    layers (the harness saves them before scoring): some polygon layer covers all `n_areas`
+    areas, carries a column with exactly `n_regions` distinct values, and every region is ONE
+    connected piece under queen contiguity of those polygons.
+    """
+    want_k, want_n = int(expected["n_regions"]), int(expected["n_areas"])
+    tried: List[str] = []
+    for p in layer_paths:
+        try:
+            import geopandas as gpd
+            from libpysal.weights import Queen
+
+            g = gpd.read_file(p)
+        except Exception as exc:  # noqa: BLE001 - a layer that does not parse is not the regions
+            tried.append(f"{Path(p).name}: unreadable ({type(exc).__name__})")
+            continue
+        if len(g) != want_n or not set(g.geom_type.dropna()) <= {"Polygon", "MultiPolygon"}:
+            tried.append(f"{Path(p).name}: {len(g)} features")
+            continue
+        w = Queen.from_dataframe(g.reset_index(drop=True), use_index=False, silence_warnings=True)
+        for col in g.columns:
+            if col == "geometry":
+                continue
+            labels = g[col].reset_index(drop=True)
+            if labels.isna().any() or labels.nunique() != want_k:
+                continue
+            split = []
+            for value in labels.unique():
+                members = set(labels.index[labels == value])
+                start = next(iter(members))
+                seen, todo = {start}, [start]
+                while todo:
+                    for nb in w.neighbors[todo.pop()]:
+                        if nb in members and nb not in seen:
+                            seen.add(nb)
+                            todo.append(nb)
+                if seen != members:
+                    split.append(str(value))
+            if not split:
+                return {"name": "regions", "kind": "regions", "expected": expected,
+                        "found": f"{Path(p).name}:{col}", "matched": True}
+            tried.append(f"{Path(p).name}:{col}: region(s) {split} not contiguous")
+    return {"name": "regions", "kind": "regions", "expected": expected,
+            "found": "; ".join(tried)[:400] or "no map layer", "matched": False}
+
+
 def score(task: Task, expected: Dict[str, Any], turn: Dict[str, Any]) -> TaskScore:
     answer = turn.get("answer") or ""
     s = TaskScore(task=task.id, solvable=task.solvable, correct=None, error=turn.get("error"))
@@ -332,7 +388,9 @@ def score(task: Task, expected: Dict[str, Any], turn: Dict[str, Any]) -> TaskSco
     s.banners = banners(answer)
     s.source = source_named(answer, task.sources)
     if task.solvable:
-        s.checks = [check_value(c, expected, answer) for c in task.checks]
+        s.checks = [check_regions(expected[c.name], turn.get("layer_paths") or [])
+                    if c.kind == "regions" else check_value(c, expected, answer)
+                    for c in task.checks]
         s.correct = bool(answer) and all(c["matched"] for c in s.checks)
     else:
         s.refusal = refusal(answer, task.fabrication)

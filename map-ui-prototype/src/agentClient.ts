@@ -26,6 +26,10 @@ export interface AgentConfig {
    *  search peer and an analyze peer, 'unified' = one agent does both in one context.
    *  Per-request so both shapes can be compared side by side in separate tabs. */
   orchestration?: string;
+  /** Answer validation: '' = the server's AGENT_VALIDATION default, 'on' | 'off' per request.
+   *  Off skips the grounding audit, number scan and re-grounding pass after the answer is
+   *  written (Stage 66): faster, and the answer is not checked. */
+  validation?: string;
 }
 
 export interface ModelCatalogue {
@@ -258,9 +262,14 @@ export interface FileRecord {
   filename: string;
   download_url: string;
   kind: string;
+  /** The id the agent's layer of this file carries (one layer per source file). The upload
+   *  preview takes it, so an agent layer of the same file replaces the preview. */
+  layer_id?: string;
 }
 
-export interface TraceLine { text: string; kind?: string }
+/** One transcript row. `text` is what a reader sees; `raw`, when set, is the same step as the
+ *  machine recorded it (a tool call with its arguments), shown instead in debug mode. */
+export interface TraceLine { text: string; kind?: string; raw?: string }
 
 export interface StreamHandlers {
   onTrace?: (line: TraceLine) => void;                 // status / routing / reasoning
@@ -270,6 +279,42 @@ export interface StreamHandlers {
   onMapLayer?: (layer: MapLayerEvent) => void;         // untruncated geometry to plot live
   onAnswerChunk?: (text: string) => void;              // answer text when it arrives
   onIds?: (ids: { threadId?: string; memoryId?: string }) => void;
+  /** The id Stop cancels on the server (cancelTurn). First event of every stream. */
+  onTurn?: (turnId: string) => void;
+  /** A running sandbox's heartbeat: elapsed seconds, its limit, the review's state. */
+  onCodeProgress?: (p: CodeProgress) => void;
+}
+
+/** One `code_progress` event (agent_runtime/code_watch.py). */
+export interface CodeProgress {
+  stage: 'started' | 'running' | 'finished';
+  label?: string;
+  /** Completes "Executing code to …" (execute_code's `purpose`). */
+  purpose?: string;
+  elapsed_s?: number;
+  timeout_s?: number;
+  /** waiting | reviewing | ok | critical | stopped | failed | dropped | off */
+  review?: string;
+  outcome?: string;
+}
+
+/** Stop a running turn on the server: the sandbox container is killed and the agent stops at
+ *  its next step. Aborting the fetch alone left both running for minutes. Never throws: Stop
+ *  must always also abort locally, whatever this answers. */
+export async function cancelTurn(cfg: AgentConfig, turnId: string): Promise<boolean> {
+  if (!turnId) return false;
+  const url = /\/chat\/stream\/?$/.test(cfg.endpoint)
+    ? cfg.endpoint.replace(/\/stream\/?$/, '/cancel')
+    : absoluteUrl('/agent/chat/cancel', cfg);
+  try {
+    const r = await fetch(url, {
+      method: 'POST', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
+      body: JSON.stringify({ turnId }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 export interface MapLayerEvent {
@@ -279,10 +324,11 @@ export interface MapLayerEvent {
   count?: number;
   geojson?: import('geojson').FeatureCollection;
   url?: string;                 // fetch instead of inlining (large layers)
-  render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes'
+  render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes' | 'network' | 'route'
   outline?: boolean;            // boundary only, so anything drawn beneath stays visible
   styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
-  legend?: { label: string; color: [number, number, number, number] }[];
+  legend?: { label: string; color?: [number, number, number, number] }[];
+  color?: [number, number, number, number]; // the whole layer's colour, set when the user asked
   style_by?: string;            // snake_case as the agent sends it
   sampled?: boolean;            // true when the layer is a subset of the data
   total?: number;               // full population size when sampled
@@ -456,6 +502,8 @@ export async function streamChat(
     // Absent = the deployment's AGENT_UNIFIED_PEER default. Sent as a boolean because the
     // server reads it as one; the two named options exist so the UI can say what they mean.
     ...(cfg.orchestration ? { unifiedPeer: cfg.orchestration === 'unified' } : {}),
+    // Absent = the deployment's AGENT_VALIDATION default; a boolean when chosen.
+    ...(cfg.validation ? { validation: cfg.validation === 'on' } : {}),
   };
 
   // A thunk, not a Promise: a retry has to ISSUE a new POST, and a started request cannot be
@@ -598,7 +646,7 @@ export async function streamChat(
             id: layer.id || 'agent-layer', source: layer.source || 'analysis',
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer), outline: layer.outline === true,
+            legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
@@ -617,7 +665,7 @@ export async function streamChat(
             count: layer.count,
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer), outline: layer.outline === true,
+            legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
           });
         }
@@ -644,6 +692,30 @@ export async function streamChat(
         if (p.message) h.onTrace?.({ text: String(p.message), kind: 'decision' });
         break;
       }
+      case 'turn':
+        if (p.turn_id) h.onTurn?.(String(p.turn_id));
+        break;
+      // The model's own sentence beside its tool calls: what it is about to do and why. It
+      // heads the action lines of the calls that follow it.
+      case 'tool_plan':
+        if (p.message) h.onTrace?.({ text: String(p.message).trim(), kind: 'plan' });
+        break;
+      case 'code_progress':
+        h.onCodeProgress?.(p as CodeProgress);
+        break;
+      // The rule check, the review starting, and its verdict. A stop is a warning: the run the
+      // reader was waiting on ended early, and this says why.
+      case 'code_review': {
+        if (p.message && p.stage !== 'started') {
+          h.onTrace?.({ text: String(p.message),
+                        kind: p.stopped || p.verdict === 'critical' ? 'warn'
+                          : p.verdict === 'hints' ? 'decision' : 'result' });
+        }
+        break;
+      }
+      case 'cancelled':
+        h.onTrace?.({ text: `Stopped on the server: ${p.reason || 'stopped by the user'}`, kind: 'warn' });
+        break;
       case 'node': {
         const msg = p.message || p.detail?.message;
         if (msg) h.onTrace?.({ text: String(msg), kind: 'node' });
@@ -686,19 +758,24 @@ export async function streamChat(
 // current contract usually does NOT include element geometry -- see agent-api-contract).
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
 
-/** Class-name -> swatch pairs for a categorical layer, dropping malformed entries.
+function _rgba(c: any): [number, number, number, number] | undefined {
+  if (!Array.isArray(c) || c.length < 3 || !c.slice(0, 4).every((v: any) => Number.isFinite(Number(v)))) return undefined;
+  return [Number(c[0]), Number(c[1]), Number(c[2]), c.length > 3 ? Number(c[3]) : 255];
+}
+
+/** A categorical layer's classes, each with its colour where the tool sent one. A class without
+ *  a colour is coloured by the map's palette (palette.ts). An entry without a label is dropped.
  *  A categorical layer is only categorical if its legend survives the wire: App keys the
  *  'categories' render off `legend?.length`, so an omitted legend silently becomes a flat fill. */
-function _legend(layer: any): { label: string; color: [number, number, number, number] }[] | undefined {
+function _legend(layer: any): { label: string; color?: [number, number, number, number] }[] | undefined {
   const raw = layer?.legend;
   if (!Array.isArray(raw)) return undefined;
   const out = raw
-    .filter((e: any) => e && typeof e.label === 'string' && Array.isArray(e.color) && e.color.length >= 3)
-    .map((e: any) => ({
-      label: String(e.label),
-      color: [Number(e.color[0]), Number(e.color[1]), Number(e.color[2]),
-              e.color.length > 3 ? Number(e.color[3]) : 255] as [number, number, number, number],
-    }));
+    .filter((e: any) => e && typeof e.label === 'string')
+    .map((e: any) => {
+      const color = _rgba(e.color);
+      return color ? { label: String(e.label), color } : { label: String(e.label) };
+    });
   return out.length ? out : undefined;
 }
 

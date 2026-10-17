@@ -396,6 +396,14 @@ def _raster_layer(rec: Dict[str, Any], bbox: List[float], label: str,
            "bounds": bbox, "opacity": opacity, "source": "analysis"}
     if layer_id:
         out["id"] = layer_id
+        # The picture is a new PNG each time, but the layer stands for the content the id
+        # digests (region, model, period, package): that is its source under the one-layer-per-
+        # source rule (map_layers.source_layer_id), so a re-render, or the shared-PCA recolour
+        # that supersedes it, replaces it rather than stacking.
+        # The bare content key, without the "embed-" namespace: it is the key the producer
+        # records on the file it fetched (terrain's GeoTIFF), so add_raster_layer of that file
+        # lands on this layer.
+        out["source_key"] = layer_id[len("embed-"):] if layer_id.startswith("embed-") else layer_id
     if embedding:
         out["embedding"] = embedding
     return out
@@ -1440,11 +1448,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
 # --- zonal embeddings: pixels inside a polygon, aggregated ----------------------
 _ZONAL_TIMEOUT_S = float(os.getenv("RS_EMBED_ZONAL_TIMEOUT_S", "900"))
-# Distinct, colour-blind-safe hues for cluster classes (Okabe-Ito, alpha added).
-_CLUSTER_COLORS = [
-    [0, 114, 178, 190], [230, 159, 0, 190], [0, 158, 115, 190], [204, 121, 167, 190],
-    [86, 180, 233, 190], [213, 94, 0, 190], [240, 228, 66, 190], [120, 120, 120, 190],
-]
+# The most look-alike groups a zone map makes: past eight, groups stop being tellable apart on
+# the map. Their colours are the map client's (palette.ts); the layer sends group names only.
+_MAX_CLUSTERS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -1836,6 +1842,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         # builds, and its fallback branch does not re-import everything. map_layers has no
         # optional dependency, so putting this there left the name UNBOUND on exactly the path
         # the fallback takes — the layer then failed with "zones computed but not mapped".
+        from agent_runtime.file_store import file_content_key
         from agent_runtime.map_layers import boundary_layer_id
         try:
             import numpy as np
@@ -1868,7 +1875,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                 "start": _iso_date(start),
                                 "end": _iso_date(end, month_end=True),
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
-                                "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                                "clusters": max(2, min(int(clusters), _MAX_CLUSTERS)),
                                 "image": True})
         if not res.get("ok"):
             # Logged, because the trace does not show tool RESULTS — only calls. A failure and
@@ -1909,7 +1916,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                         "zone_id_field": zone_id_field,
                         # What the caller ASKED for. len(present) is the count that came back,
                         # which a swallowed tile error changes without changing the request.
-                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                        "clusters": max(2, min(int(clusters), _MAX_CLUSTERS)),
                         "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
 
         # --- CSV of per-zone vectors: the artifact an ML step consumes ---
@@ -1997,6 +2004,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # to tell apart, k is always 1, and the layer is the input polygon
                              # with three attributes added.
                              "id": boundary_layer_id(file_id),
+                             # It writes a NEW file (the polygon plus the embedding columns) but
+                             # stands for the input boundary, whose layer it replaces.
+                             "source_key": file_content_key(file_id),
                              # Through _layer_label so it gets the same de-duplication: the
                              # model names these layers itself and usually puts the model in
                              # the name, which would otherwise read "… — gse — … — gse embedded".
@@ -2018,9 +2028,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                  f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
                              "source": "analysis", "count": len(keep),
-                             "legend": [{"label": g,
-                                         "color": _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)]}
-                                        for i, g in enumerate(present)]}
+                             # Group names only: a look-alike group's colour means nothing,
+                             # so the map client's palette (palette.ts) draws them.
+                             "legend": [{"label": g} for g in present]}
         except Exception as exc:  # noqa: BLE001
             cluster_note = f"zones computed but not mapped: {type(exc).__name__}: {exc}"[:200]
         if layer is None and cluster_note is None:

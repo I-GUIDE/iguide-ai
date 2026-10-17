@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
-import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
+import type { CodeProgress, FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
+import { runBarTitle } from '../codeRun';
 import { SUGGESTIONS } from '../agentBrain';
 import type { AppTab } from '../uiVariant';
 import { groupedSources, sourceHref, sourceThumb, type SourceGroup } from '../answerFormat';
@@ -18,12 +19,15 @@ export interface ChatMessage {
   layers?: { id: string; label: string; source: string }[];
   response?: any;
   streaming?: boolean;
+  /** The sandbox run in progress, from its heartbeat; `at` is when that beat arrived. */
+  progress?: CodeProgress & { at: number };
 }
 
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
                             model?: string; provider?: string; reasoningEffort?: string;
-                            codePeer?: string; codePeerModel?: string; orchestration?: string }
+                            codePeer?: string; codePeerModel?: string; orchestration?: string;
+                            validation?: string }
 
 // The satellite-embedding models the service actually offers, grouped the way the choice
 // matters: a precomputed model answers in seconds, an on-the-fly one runs the encoder. Six of
@@ -163,6 +167,10 @@ interface Props {
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
+  /** A question handed in from outside the composer (the Demos sidebar): put in the composer,
+   *  or sent as if typed when `send` is set. `n` changes on every hand-off, so the same question
+   *  twice is two hand-offs. */
+  seed?: { text: string; n: number; send: boolean } | null;
 }
 
 const GROUP_LABEL: Record<SourceGroup, string> = {
@@ -265,8 +273,10 @@ export function visibleSteps(trace: TraceLine[]): number {
 // — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
 const TRACE_CLAMP = 140;
 
-function TraceRow({ row }: { row: Row }) {
-  const { line, folded } = row;
+function TraceRow({ row, debug }: { row: Row; debug?: boolean }) {
+  const { folded } = row;
+  // Debug mode shows each step as recorded (the raw tool call); the default shows it in words.
+  const line = debug && row.line.raw ? { ...row.line, text: row.line.raw } : row.line;
   const long = line.text.length > TRACE_CLAMP;
   const run = folded?.length || 0;
   // TWO independent states, because the two things a row can hide are not the same thing.
@@ -339,7 +349,74 @@ function FileIcon({ name }: { name: string }) {
   );
 }
 
-function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
+// After this long a run is offered a Stop of its own: three minutes of a spinner reads as hung.
+const NUDGE_AFTER_S = 90;
+
+const REVIEW_STATE: Record<string, string> = {
+  waiting: 'review starts shortly',
+  reviewing: 'being reviewed',
+  ok: 'review found no critical problem',
+  critical: 'review flagged a problem',
+  stopped: 'review stopped it',
+  failed: 'review unavailable',
+};
+
+function clock(s: number): string {
+  const t = Math.max(0, Math.floor(s));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+/** The sandbox run in progress: what it is, how long it has had of its limit, and the review.
+ *  The heartbeat arrives every few seconds; the clock between beats is counted here. */
+function CodeRunBar({ progress, onStop }: { progress: CodeProgress & { at: number };
+                                            onStop?: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = (progress.elapsed_s || 0) + (now - progress.at) / 1000;
+  const limit = progress.timeout_s || 0;
+  const share = limit ? Math.min(1, elapsed / limit) : 0;
+  const review = REVIEW_STATE[progress.review || ''];
+  return (
+    <div className="coderun" role="status" aria-live="polite">
+      <div className="coderun-line">
+        <span className="coderun-what">{runBarTitle(progress)}</span>
+        <span className="coderun-time">{clock(elapsed)}{limit ? ` of ${clock(limit)}` : ''}</span>
+      </div>
+      {limit > 0 && <div className="coderun-track"><div className="coderun-fill" style={{ width: `${share * 100}%` }} /></div>}
+      {review && <div className="coderun-review">{review}</div>}
+      {elapsed >= NUDGE_AFTER_S && onStop && (
+        <div className="coderun-nudge">
+          This run is taking a while. Stopping it ends the turn; anything already on the map stays.
+          <button type="button" className="coderun-stop" onClick={onStop}>Stop</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const TRACE_DEBUG_KEY = 'iguide.trace.debug';
+
+function readTraceDebug(): boolean {
+  try { return localStorage.getItem(TRACE_DEBUG_KEY) === '1'; } catch { return false; }
+}
+
+/** Detailed (default): each step in words, with the model's reason above its calls. Debug: the
+ *  raw tool calls as recorded. A per-browser choice, kept across reloads. */
+function useTraceDebug(): [boolean, () => void] {
+  const [debug, setDebug] = useState(readTraceDebug);
+  const toggle = () => setDebug((v) => {
+    try { localStorage.setItem(TRACE_DEBUG_KEY, v ? '0' : '1'); } catch { /* private window */ }
+    return !v;
+  });
+  return [debug, toggle];
+}
+
+function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: string) => string;
+                                                onStop?: () => void }) {
+  const [debug, toggleDebug] = useTraceDebug();
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
   const hasBody = m.html || m.text;
@@ -354,9 +431,18 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
               minus the folded model ladder. Counting the collapsed rows instead called a
               fifteen-row transcript "7 steps" while fifteen rows sat under it. */}
           <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${visibleSteps(m.trace)} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
+          <div className="body">
+            {m.trace.some((t) => t.raw) && (
+              <button type="button" className="trace-mode" onClick={toggleDebug} aria-pressed={debug}
+                      title="Debug mode shows each tool call with its raw arguments">
+                {debug ? 'Show steps in words' : 'Show raw calls'}
+              </button>
+            )}
+            {foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} debug={debug} />)}
+          </div>
         </details>
       )}
+      {m.streaming && m.progress && <CodeRunBar progress={m.progress} onStop={onStop} />}
       {(hasBody || imgs.length > 0 || m.response) && (
         <div className="answer-card">
           {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
@@ -372,16 +458,25 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
             </div>
           )}
           {files.length > 0 && (
-            <div className="dl">
-              <div className="dl-head">{files.length === 1 ? 'Download' : 'Downloads'}</div>
-              {files.map((f) => (
-                <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
-                   target="_blank" rel="noopener noreferrer" title={displayName(f)}>
-                  <FileIcon name={displayName(f)} />
-                  <span className="dl-name">{displayName(f)}</span>
-                </a>
-              ))}
-            </div>
+            // Folded by default (user, 2026-10-16): a turn can return a dozen files (scripts,
+            // tables, layers), and the full list pushed the sources and the next turn off screen.
+            // The header says how many there are; one click opens the list.
+            <details className="dl">
+              <summary className="dl-head">
+                {files.length === 1 ? 'Download' : 'Downloads'}
+                <span className="dl-count">{files.length} {files.length === 1 ? 'file' : 'files'}</span>
+                <span className="chev">▾</span>
+              </summary>
+              <div className="dl-list">
+                {files.map((f) => (
+                  <a className="dl-item" key={f.file_id} href={resolveUrl(f.download_url)}
+                     target="_blank" rel="noopener noreferrer" title={displayName(f)}>
+                    <FileIcon name={displayName(f)} />
+                    <span className="dl-name">{displayName(f)}</span>
+                  </a>
+                ))}
+              </div>
+            </details>
           )}
           {m.response && <Sources response={m.response} />}
         </div>
@@ -569,6 +664,16 @@ export function ChatPanel(p: Props) {
     p.onSend(v);
   };
 
+  // The Demos sidebar asks through here, so a step is exactly a typed question: same trimming,
+  // same busy check, same scroll pinning.
+  useEffect(() => {
+    if (!p.seed) return;
+    if (p.seed.send) send(p.seed.text);
+    else { setText(p.seed.text); taRef.current?.focus(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.seed?.n]);
+
+
   return (
     <section className="chat">
       {p.showSettings && (
@@ -664,6 +769,17 @@ export function ChatPanel(p: Props) {
                 <option value="unified">Unified agent (experimental)</option>
               </select>
             </label>
+            {/* Whether the answer is checked against the turn's record once it is written
+                (grounding audit, number scan, re-grounding). Off answers sooner, unchecked. */}
+            <label>Answer validation
+              <select value={p.cfg.validation || ''}
+                      title="Off skips the checks that run after the answer is written: faster, but the answer is not checked"
+                      onChange={(e) => p.onSetCfg({ ...p.cfg, validation: e.target.value })}>
+                <option value="">Server default</option>
+                <option value="on">On: check each answer</option>
+                <option value="off">Off: answer sooner, unchecked</option>
+              </select>
+            </label>
             {/* A SECOND axis, deliberately its own control: `Model` picks what writes
                 the answer, this picks what writes the code. A peer whose sandbox image or
                 credential is missing is shown but disabled — absent from the list would
@@ -740,11 +856,11 @@ export function ChatPanel(p: Props) {
             <div className="who you">You</div>
             <div className="row right"><div className="bubble user">{m.text}</div></div>
           </div>
-        ) : <AgentTurn key={i} m={m} resolveUrl={p.resolveUrl} />)}
+        ) : <AgentTurn key={i} m={m} resolveUrl={p.resolveUrl} onStop={p.onStop} />)}
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
-      {p.messages.length <= 1 && (
+      {p.messages.length <= 1 && p.tab !== 'demos' && (
         <div className="suggest">
           {(p.tab === 'rs' ? RS_SUGGESTIONS : SUGGESTIONS).map((s) => (
             <button key={s} className="chip" onClick={() => send(s)}>{s}</button>

@@ -238,16 +238,234 @@ def opengeodata_search_tool(query: str, limit: Optional[int] = None,
     return _build_payload(hits, source="opengeodata")
 
 
-def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> str:
+def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60,
+                         debug: bool = False) -> str:
     """Query live OpenStreetMap features of a given type inside a place or bbox.
 
     Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature
     AND an evidence-shaped ``documents`` list, so the found features count as grounding
     evidence for the answer (not just as map geometry).
     """
+    network = _road_network_result(feature, place, bbox, debug=debug)
+    if network is not None:
+        return json.dumps(network, ensure_ascii=True, default=str)
+    return json.dumps(_for_display(_overpass_payload(feature, place, bbox, limit, debug=debug)),
+                      ensure_ascii=True, default=str)
+
+
+# --------------------------------------------------------------------------- #
+# A road network goes to a file (stage 69)
+# --------------------------------------------------------------------------- #
+# Live, 2026-10-15: "the fastest drive across Chicago's Loop on OpenStreetMap streets". The model
+# called overpass_search(feature='highway', limit=500) and routed over 34 motorway pieces. Two
+# things stood in the way of the streets: no word asked for them, and a network does not fit the
+# 500 features a model can read. A network is for code to route over, so it is written whole to a
+# GeoJSON file, drawn on the map from that file, and the model reads counts, not features.
+_NETWORK_MAX_FEATURES = 50000
+# What both overpass_search tools tell the model about networks.
+_ROAD_NETWORK_NOTE = (
+    "ROAD NETWORKS (routing, travel time, every street): feature='road network' returns every "
+    "drivable road, motorway down to residential and living_street with the _link ramps (no "
+    "service roads, nothing private), as OSMnx's drive network has it; a raw filter such as "
+    "'highway~\"^(primary|secondary)$\"' picks classes. A network is written WHOLE to a GeoJSON "
+    "file (`file_id`: ways with highway, name, oneway, maxspeed and length_m) and drawn on the "
+    "map; you read counts and a summary, not the features, so route over it with execute_code. "
+    "'highway' alone means highway=motorway only.")
+_NETWORK_SAMPLE_NAMES = 12
+
+
+def _line_km(geometry: Mapping[str, Any]) -> float:
+    try:
+        from pyproj import Geod
+        from shapely.geometry import shape
+
+        return Geod(ellps="WGS84").geometry_length(shape(geometry)) / 1000.0
+    except Exception:  # noqa: BLE001 - a length is a summary, never a failure
+        return 0.0
+
+
+def _oneway_kind(value: Any) -> str:
+    v = str(value or "").strip().lower()
+    if v in ("yes", "true", "1"):
+        return "forward"
+    if v in ("-1", "reverse"):
+        return "reverse"
+    if v in ("", "no", "false", "0"):
+        return "both"
+    return "other"                               # e.g. "reversible", "alternating"
+
+
+def _road_network_result(feature: str, place: str = "", bbox: str = "",
+                         debug: bool = False) -> Optional[Dict[str, Any]]:
+    """The whole road network in the area as a file plus a summary, or None when ``feature``
+    does not ask for a network (rag_pipeline.search.overpass.is_road_network_filter)."""
+    from rag_pipeline.search.overpass import _resolve_filter, is_road_network_filter
+
+    osm_filter = _resolve_filter(feature)
+    if not is_road_network_filter(osm_filter):
+        return None
+    from agent_runtime.file_store import create_output_file_from_path
+    from agent_runtime.map_layers import content_layer_id
+    from agent_runtime.tool_bridge import Refused, cache_fields, fetch_osm_features
+
+    try:
+        got = fetch_osm_features(feature, place=place or None, bbox=bbox or None,
+                                 max_features=_NETWORK_MAX_FEATURES, debug=debug)
+    except Refused as exc:
+        err = "no_location" if "give a place" in str(exc) else "overpass_failed"
+        return {"error": err, "message": str(exc), "features": [], "count": 0,
+                "source": "overpass", "query": {"feature": feature, "osm_filter": osm_filter}}
+
+    lines, points = [], 0
+    for f in got["features"]:
+        if str((f.get("geometry") or {}).get("type")) in ("LineString", "MultiLineString"):
+            lines.append(f)
+        else:
+            points += 1
+    by_class: Dict[str, int] = {}
+    oneway: Dict[str, int] = {}
+    speeds: Dict[str, int] = {}
+    names: Dict[str, float] = {}
+    rows, total_km = [], 0.0
+    for f in lines:
+        tags = f.get("tags") or {}
+        km = _line_km(f["geometry"])
+        total_km += km
+        cls = str(tags.get("highway") or "?")
+        by_class[cls] = by_class.get(cls, 0) + 1
+        kind = _oneway_kind(tags.get("oneway"))
+        oneway[kind] = oneway.get(kind, 0) + 1
+        if tags.get("maxspeed"):
+            speeds[str(tags["maxspeed"])] = speeds.get(str(tags["maxspeed"]), 0) + 1
+        if tags.get("name"):
+            names[str(tags["name"])] = names.get(str(tags["name"]), 0.0) + km
+        props = {str(k): v for k, v in tags.items() if isinstance(v, (str, int, float))}
+        props.update({"osm_type": f.get("osm_type"), "osm_id": f.get("osm_id"),
+                      "name": tags.get("name"), "highway": tags.get("highway"),
+                      "oneway": tags.get("oneway"), "maxspeed": tags.get("maxspeed"),
+                      "length_m": round(km * 1000.0, 1)})
+        rows.append({"type": "Feature", "geometry": f["geometry"], "properties": props})
+
+    region = got["region"]
+    query = {"feature": feature, "osm_filter": got.get("osm_filter") or osm_filter,
+             "place": place or None, "bbox": region}
+    if not rows:
+        return {"query": query, "count": 0, "features": [], "source": "overpass",
+                "network": True, "complete": got["complete"],
+                "diagnostics": {"warnings": ["no road lines matched in this area; check the "
+                                             "bbox order (minLon,minLat,maxLon,maxLat) and the "
+                                             "filter"]}}
+    out_dir = Path(tempfile.mkdtemp(prefix="osm_network_"))
+    path = out_dir / "osm_road_network.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": rows}), encoding="utf-8")
+    rec = create_output_file_from_path(path, filename=path.name)
+
+    top_names = sorted(names, key=lambda n: -names[n])[:_NETWORK_SAMPLE_NAMES]
+    tagged = sum(speeds.values())
+    where = place or f"bbox {region}"
+    summary = (f"{len(rows)} OpenStreetMap road ways in {where}, {total_km:.1f} km in all: "
+               + ", ".join(f"{c} {n}" for c, n in sorted(by_class.items(), key=lambda kv: -kv[1]))
+               + f". One-way: {oneway.get('forward', 0) + oneway.get('reverse', 0)} ways; "
+               f"posted maxspeed on {tagged} of {len(rows)}.")
+    if got.get("cached"):
+        # Stage 70: the summary is what the evidence document and the model both read first.
+        summary += " " + got["cache_note"]
+    result: Dict[str, Any] = {
+        "query": query,
+        "network": True,
+        "source": "overpass",
+        "count": len(rows),
+        "total_km": round(total_km, 2),
+        "by_class": dict(sorted(by_class.items(), key=lambda kv: -kv[1])),
+        "oneway": oneway,
+        "maxspeed_tagged": tagged,
+        "maxspeed_values": dict(sorted(speeds.items(), key=lambda kv: -kv[1])[:10]),
+        "named_ways": sum(1 for r in rows if r["properties"].get("name")),
+        "longest_named_streets": top_names,
+        "complete": got["complete"],
+        "tiles": got["tiles"],
+        "file_id": rec.get("file_id"),
+        "download_url": rec.get("download_url"),
+        "filename": rec.get("filename"),
+        "summary": summary,
+        "how_to_route": (
+            "The features are NOT in this result: read the file with execute_code "
+            "(input_files=[file_id]). Each feature is one OSM way, a LineString in lon/lat "
+            "(EPSG:4326) with its tags as properties (highway, name, oneway, maxspeed, lanes, "
+            "...) and length_m. Ways meet where they share a vertex (an OSM node), so split each "
+            "way at every vertex it shares with another and join on identical coordinates; a "
+            "bridge over a street shares none. oneway: yes/true/1 = only in the vertex order, "
+            "-1 = only against it, absent/no = both ways. maxspeed is text ('30 mph', '50' = "
+            "km/h, 'none', 'signals'); untagged ways need the default speed the user states, "
+            "or say which default was used."),
+        # 'network': drawn as muted context lines beneath everything else, so a route found on
+        # it reads the way a navigation app shows one (map-ui-prototype toDeckLayer).
+        "map_layer": {"url": rec.get("download_url"), "render": "network",
+                      "label": f"OSM road network ({len(rows)} ways)",
+                      "id": content_layer_id("overpass", "road_network", None,
+                                             osm_filter=query["osm_filter"], bbox=region),
+                      "source": "overpass", "count": len(rows)},
+        "documents": [{
+            "doc_id": "osm:road_network",
+            "title": "OpenStreetMap road network",
+            "contents": summary + (" Named streets include " + ", ".join(top_names[:8]) + "."
+                                   if top_names else ""),
+            "source": "overpass", "element_type": "osm_feature",
+            "url": "https://www.openstreetmap.org/",
+        }],
+        "citation_ids": ["osm:road_network"],
+    }
+    warnings = []
+    if got.get("cached"):
+        result.update(cache_fields(got))
+        when = str(got["cached_at"])[:16].replace("T", " ")
+        result["map_layer"]["label"] += f" — cached {when} UTC"
+        warnings.append(got["cache_note"])
+    if not got["complete"]:
+        warnings.append(f"NOT the whole network: stopped at {len(rows)} ways / {got['tiles']} "
+                        "tiles (caps). Narrow the area or say the network is partial.")
+    if points:
+        warnings.append(f"{points} point features with the same tags (crossings, signals, "
+                        "stops) are not in the network file.")
+    if warnings:
+        result["diagnostics"] = {"warnings": warnings}
+    if debug:
+        result["debug"] = {"tiles": got.get("debug_tiles") or []}
+    return result
+
+
+def _cached_clause(payload: Mapping[str, Any]) -> str:
+    """' Cached copy from <UTC time>, not a live fetch.' for a stage-70 cached answer, else ''."""
+    if not payload.get("cached"):
+        return ""
+    when = str(payload.get("cached_at") or "")[:16].replace("T", " ")
+    return f" Cached copy from {when} UTC, not a live fetch (every Overpass mirror was down)." \
+        if payload.get("cache_reason") == "mirrors_failed" else \
+        f" Cached copy from {when} UTC, not a live fetch."
+
+
+def _for_display(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The payload as the model and the map read it: large outlines simplified (stage 60)."""
+    from rag_pipeline.search.overpass import simplify_for_display
+
+    out = dict(payload)
+    feats = []
+    for f in payload.get("features") or []:
+        g = simplify_for_display(f)
+        if "full_geometry" in g:
+            g = {k: v for k, v in g.items() if k != "full_geometry"}
+        feats.append(g)
+    out["features"] = feats
+    return out
+
+
+def _overpass_payload(feature: str, place: str = "", bbox: str = "", limit: int = 60,
+                      debug: bool = False) -> Dict[str, Any]:
+    """overpass_search plus its evidence documents, with every geometry at full resolution."""
     from rag_pipeline.search.overpass import overpass_search
 
-    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
+    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit,
+                             **({"debug": True} if debug else {}))
 
     # Project features into evidence documents so the synthesis/grounding audit treats
     # "these features exist here" as grounded. Dedupe by name (rivers/roads come back as
@@ -264,10 +482,13 @@ def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: i
             continue
         seen_names.add(key)
         osm_ref = f"{feat.get('osm_type', 'osm')}/{feat.get('osm_id', '')}"
+        area = (f", area {feat['area_km2']} km² (geodesic, from the full OSM outline"
+                f"{'; ' + feat['area_note'] if feat.get('area_note') else ''})"
+                if feat.get("area_km2") is not None else "")
         documents.append({
             "doc_id": f"osm:{osm_ref}",
             "title": name,
-            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}).",
+            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}){area}.{_cached_clause(result)}",
             "source": "overpass",
             "element_type": "osm_feature",
             "url": f"https://www.openstreetmap.org/{osm_ref}" if feat.get("osm_id") else "",
@@ -278,7 +499,7 @@ def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: i
     result["source"] = "overpass"
     result["documents"] = documents
     result["citation_ids"] = [d["doc_id"] for d in documents]
-    return json.dumps(result, ensure_ascii=True, default=str)
+    return result
 
 
 def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = None) -> str:
@@ -381,6 +602,70 @@ def geocode_places_tool(places: Any) -> str:
     return json.dumps(payload, ensure_ascii=True)
 
 
+_REVERSE_MAX_POINTS = 10  # ~1 s per uncached point under Nominatim's usage policy
+# The address parts that name WHERE a point is, most local first. Nominatim fills whichever
+# OpenStreetMap has for the place: a Chicago point gets neighbourhood/suburb, a rural one a hamlet.
+_PLACE_PARTS = ("neighbourhood", "quarter", "suburb", "city_district", "borough", "hamlet",
+                "village", "town", "city", "county", "state", "country")
+
+
+def reverse_geocode_tool(points: Any, zoom: int = 16) -> str:
+    """Name the place at each coordinate from OpenStreetMap (Nominatim /reverse).
+
+    Live 2026-10-17 (crash hot-spot example): the answer placed a hexagon at -87.622, 41.887
+    "on Chicago's North Side ... around Wrigleyville". It is in the Loop, 7 km south. No tool
+    had named the place; the model had, from memory. This is the tool that names it.
+    """
+    from rag_pipeline.search.opengeodata_new import reverse_geocode_point
+
+    if isinstance(points, str):
+        try:
+            points = json.loads(points)
+        except json.JSONDecodeError:
+            return json.dumps({"ok": False, "error": "points must be a JSON list of "
+                               "{lat, lon} objects or [lat, lon] pairs"})
+    if isinstance(points, dict) or (isinstance(points, (list, tuple)) and len(points) == 2
+                                    and all(isinstance(v, (int, float)) for v in points)):
+        points = [points]
+    parsed: List[Tuple[float, float]] = []
+    for pt in points or []:
+        try:
+            if isinstance(pt, dict):
+                lat, lon = float(pt.get("lat")), float(pt.get("lon", pt.get("lng")))
+            else:
+                lat, lon = float(pt[0]), float(pt[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            parsed.append((lat, lon))
+    dropped = max(0, len(parsed) - _REVERSE_MAX_POINTS)
+    parsed = parsed[:_REVERSE_MAX_POINTS]
+    # Each point is echoed as `point: [lat, lon]`, not as lat/lon fields: the map UI previews any
+    # result object carrying lat/lon as features, and these are only the coordinates asked about
+    # (live 2026-10-17 they became two stray layers beside the route, "reverse_geocode (preview)"
+    # and "Agent results").
+    results: List[Dict[str, Any]] = []
+    for lat, lon in parsed:
+        hit = reverse_geocode_point(lat, lon, zoom=int(zoom or 16))
+        if not hit:
+            results.append({"point": [lat, lon], "found": False})
+            continue
+        addr = hit.get("address") or {}
+        parts = {k: addr[k] for k in _PLACE_PARTS if addr.get(k)}
+        results.append({"point": [lat, lon], "found": True,
+                        "place": next(iter(parts.values()), None), "address": parts,
+                        "road": addr.get("road"), "display_name": hit.get("display_name")})
+    payload: Dict[str, Any] = {"ok": True, "results": results,
+                               "source": "OpenStreetMap Nominatim (© OpenStreetMap contributors)"}
+    if dropped:
+        payload["note"] = (f"only the first {_REVERSE_MAX_POINTS} points were named "
+                           f"({dropped} dropped)")
+    if not parsed:
+        payload = {"ok": False, "error": "no valid coordinates: pass a JSON list of {lat, lon} "
+                   "objects or [lat, lon] pairs"}
+    return json.dumps(payload, ensure_ascii=True)
+
+
 def make_langchain_geocode_tools() -> List[Any]:
     """The geocoding tool for peers that plot named places (code/analysis)."""
     try:
@@ -400,7 +685,20 @@ def make_langchain_geocode_tools() -> List[Any]:
                 f"Max {_GEOCODE_MAX_PLACES} names per call (~1s per uncached name)."
             ),
             metadata={"category": "geospatial"},
-        )
+        ),
+        StructuredTool.from_function(func=accept_null_defaults(reverse_geocode_tool),
+            name="reverse_geocode",
+            description=(
+                "Name the place at coordinates (OpenStreetMap Nominatim reverse geocoding): "
+                "returns, per point, the neighbourhood/suburb/city OSM records there, the nearest "
+                "road and a full address. Input `points`: a JSON list of {\"lat\": ..., \"lon\": "
+                "...} objects or [lat, lon] pairs; `zoom` 10 city, 14 suburb, 16 street "
+                "(default), 18 building. Call it BEFORE saying where a result lies (a "
+                "neighbourhood, district or landmark): never name the place for a coordinate "
+                f"from memory. Max {_REVERSE_MAX_POINTS} points per call (~1s per uncached point)."
+            ),
+            metadata={"category": "geospatial"},
+        ),
     ]
 
 
@@ -432,16 +730,28 @@ def _osm_source_statement(payload: Dict[str, Any], feature: str) -> str:
 
 
 def osm_features_tool(feature: str, place: str = "", bbox: str = "",
-                      limit: int = _OSM_DEFAULT_LIMIT) -> str:
+                      limit: int = _OSM_DEFAULT_LIMIT, debug: bool = False) -> str:
     """overpass_search for the analyze and code peers: the same query, plus a file and a
     statement of what the list covers."""
-    payload = json.loads(overpass_search_tool(feature, place=place, bbox=bbox,
-                                              limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT,
-                                                              maximum=500)))
-    if payload.get("error"):
-        return json.dumps(payload, ensure_ascii=True, default=str)
-    features = payload.get("features") or []
-    payload["source_statement"] = _osm_source_statement(payload, feature)
+    network = _road_network_result(feature, place, bbox, debug=debug)
+    if network is not None:
+        if not network.get("error"):
+            network["source_statement"] = (
+                f"OpenStreetMap roads tagged {network['query']['osm_filter']} in "
+                f"{network['query'].get('place') or 'bbox ' + str(network['query']['bbox'])}, as "
+                "mapped by OSM contributors: not an official road inventory, and a way's oneway "
+                "or maxspeed tag can be missing or out of date." + _cached_clause(network))
+        return json.dumps(network, ensure_ascii=True, default=str)
+    full = _overpass_payload(feature, place=place, bbox=bbox,
+                             limit=_safe_int(limit, default=_OSM_DEFAULT_LIMIT, maximum=500),
+                             debug=debug)
+    if full.get("error"):
+        return json.dumps(full, ensure_ascii=True, default=str)
+    # The file gets every vertex (it is what execute_code and the overlays measure); the
+    # payload the model reads gets the simplified outlines.
+    features = full.get("features") or []
+    payload = _for_display(full)
+    payload["source_statement"] = _osm_source_statement(payload, feature) + _cached_clause(payload)
     if features:
         from agent_runtime.file_store import create_output_file_from_path
 
@@ -486,7 +796,12 @@ def make_langchain_osm_tools() -> List[Any]:
                 "that distance and measure the exact distance afterwards. `source_statement` "
                 "says what the list covers. Geocoding names one place at a time; this finds "
                 "every mapped feature of a kind at once. Location: `place` (a name, geocoded) "
-                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. For the boundary of a named US "
+                "or `bbox` as 'minLon,minLat,maxLon,maxLat'. `diagnostics` counts named "
+                "features and warns when a result looks wrong; `debug=true` adds the Overpass "
+                "query sent, each mirror's answer and the raw response start. A named boundary (pass its name as "
+                "`feature`, e.g. '1st District of Palawan', with a `place` around it) comes back "
+                "as one polygon with `area_km2` measured on the ellipsoid; the file keeps the full "
+                "outline. " + _ROAD_NETWORK_NOTE + " For the boundary of a named US "
                 f"state, county or city, admin_boundary is the better source. Default limit "
                 f"{_OSM_DEFAULT_LIMIT}, max 500."
             ),
@@ -819,19 +1134,30 @@ def make_langchain_granular_tools(
                 "search return records and links rather than geometry. So it is the one that "
                 "answers 'where are the X', 'what X are in / near / intersect this area or upload', "
                 "and requests to see features on a map. "
-                "EXCEPTION — the boundary of a named US state, county or city: use "
-                "`admin_boundary` instead. OSM returns the boundary as fragmentary ways (a "
-                "'show me Champaign County' query here returned five LineStrings, not the "
-                "county), while admin_boundary returns the one authoritative Census polygon "
-                "with its GEOID, which is also what embed_zones needs. "
+                "BOUNDARIES: a named boundary anywhere (a province, district, municipality, "
+                "electoral district, protected area) comes back as ONE polygon with its name and "
+                "`area_km2`, measured on the ellipsoid from the full OSM outline. For one named "
+                "boundary, pass its name as `feature` and a `place` around it (feature='1st "
+                "District of Palawan', place='Palawan, Philippines'); for every boundary in an "
+                "area, feature='boundary' or 'boundary=administrative'. Large outlines are "
+                "simplified in what you read (`simplified` says so); `area_km2` is not. For a "
+                "named US state, county or city, `admin_boundary` is still preferred: it returns "
+                "the Census polygon with its GEOID, which embed_zones needs. "
+                + _ROAD_NETWORK_NOTE + " "
                 "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
-                "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
+                "('amenity=school', 'waterway=river', 'highway~\"^(primary|trunk)$\"', "
+                "'[highway]' for every value of a key); and a location — `place` (e.g. 'Chicago, "
                 "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
                 "For an UPLOADED file, pass the file's bounding box as `bbox` (read it first with a "
                 "geo/file tool or execute_code if you don't already have it). "
                 "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
                 "NOT also call a map-rendering tool (e.g. qgis_map_image) for it. "
-                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
+                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry, "
+                "area_km2 (boundaries and other relation polygons)}], diagnostics}. "
+                "`diagnostics.warnings` flags a result that looks wrong (e.g. no feature has a "
+                "name); read it before using the result. `debug=true` adds the Overpass query "
+                "sent, every mirror's answer and the start of the raw response, for when the "
+                "result does not match what you expected."
             ),
             metadata={"category": "retrieval_external"},
         ),

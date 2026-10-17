@@ -196,9 +196,11 @@ def _normalize_enabled_search_methods(enabled_search_methods: Optional[Sequence[
     Shares agent_runtime.search_methods with the API layer so a name is validated the same way on
     every entry point; an unknown name raises ValueError rather than silently disabling retrieval.
     """
+    from agent_runtime.client_profile import chat_only_search_methods
     from agent_runtime.search_methods import normalize_search_methods
 
-    return normalize_search_methods(enabled_search_methods)
+    # A chat-only client (the platform) searches only what it can show (client_profile).
+    return chat_only_search_methods(normalize_search_methods(enabled_search_methods))
 
 
 
@@ -361,7 +363,7 @@ def run_agent_chat(
     answer = sanitize_answer_links(_extract_agent_answer(result))
     # What the turn's model calls cost (model_pricing.summarize): returned with the answer and
     # kept on the conversation's history entry.
-    turn_cost = result.get("usage") if isinstance(result, Mapping) else None
+    turn_cost = _charge_turn(result.get("usage") if isinstance(result, Mapping) else None)
     message_id = str(uuid4())
     # The graph reports the key it ran under, or one it generated when it was given none.
     agent_thread_id = result.get("thread_id") or agent_thread_id
@@ -412,6 +414,25 @@ def run_agent_chat(
         response["warning"] = memory_warning
     return response
 
+
+
+def _charge_turn(turn_cost: Optional[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """Add the turn's cost to the signed-in user's day (usage_limit) and return the turn's usage
+    with today's totals beside it, so a client can show how much of the day is left."""
+    if not turn_cost:
+        return turn_cost
+    try:
+        from agent_runtime import identity, usage_limit
+
+        owner = identity.current_user_id()
+        totals = usage_limit.record(owner, turn_cost)
+        if totals is None:
+            return turn_cost
+        return {**turn_cost, "today": {**totals, "limits": usage_limit.limits_for(owner),
+                                       "resets_at": usage_limit.resets_at()}}
+    except Exception:  # noqa: BLE001 - accounting must never cost the turn
+        logger.warning("could not charge the turn's usage", exc_info=True)
+        return turn_cost
 
 def _guard_stream(source):
     """Yield from *source*, then yield the exception instead of propagating it.
@@ -553,6 +574,7 @@ def stream_agent_chat_events(
             trace_events.append(event)
 
     stream_error: Optional[BaseException] = None
+    cancelled: Optional[str] = None
     for event in _guard_stream(stream_agent_query_events(
         effective_input,
         llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
@@ -584,12 +606,18 @@ def stream_agent_chat_events(
         event = _for_client(event, agent_thread_id, effective_thread_id)
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
+        if event.get("event") == "cancelled":
+            cancelled = str((event.get("data") or {}).get("reason") or "stopped by the user")
         yield event
 
     answer = sanitize_answer_links(_extract_agent_answer(completed_response or {}))
     # Every model call of the turn, priced (see run_agent_chat). Absent when the turn failed
     # before completing; the calls it did make are still in its trace's llm_usage events.
-    turn_cost = (completed_response or {}).get("usage")
+    turn_cost = _charge_turn((completed_response or {}).get("usage"))
+    if cancelled and not answer.strip():
+        # Recorded, so the conversation still holds the question and the next turn knows the
+        # last one never answered it.
+        answer = f"[Stopped before an answer was composed: {cancelled}.]"
     if stream_error is not None and not answer.strip():
         # A failed turn used to be erased: `update_memory` sits after this loop, so an exception
         # skipped it entirely and the user's own question vanished from the conversation. The

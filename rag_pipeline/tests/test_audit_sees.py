@@ -51,7 +51,8 @@ def test_the_prompt_says_an_elision_is_not_an_absence():
     and told what to do instead — downgrade, not flag."""
     assert "ELIDED RECORDS" in _AUDIT_PROMPT
     assert "chars elided" in _AUDIT_PROMPT, "the exact marker, so it is recognisable"
-    assert "TRUNCATED" in _AUDIT_PROMPT
+    assert '"unseen", NOT "absent"' in _AUDIT_PROMPT
+    assert "not an issue and not an over-reach" in _AUDIT_PROMPT
 
 
 # --- 2. this turn is described like every other turn ---------------------------------------

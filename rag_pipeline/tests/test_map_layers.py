@@ -34,11 +34,24 @@ def test_categorical_layer_keeps_its_render_when_the_legend_is_usable():
     assert [e["label"] for e in out["legend"]] == ["High-High", "Low-Low"]
 
 
-def test_a_malformed_legend_counts_as_no_legend():
+def test_a_legend_entry_needs_a_label_and_its_colour_is_optional():
+    """Classes travel without colours unless the colour means something or the user asked:
+    the map client colours the rest (palette.ts). A colour is resolved here, names included;
+    one that is not a colour is dropped and its class kept. An entry with no label is dropped."""
     from agent_runtime.map_layers import build_map_layer
 
     out = build_map_layer("add_map_layer", _descriptor(
-        legend=[{"label": "High-High", "color": "red"}, {"color": [1, 2, 3, 4]}]))
+        legend=[{"label": "High-High", "color": "red"}, {"label": "Low-Low"},
+                {"label": "Odd", "color": "not-a-colour"}, {"color": [1, 2, 3, 4]}]))
+    assert out["render"] == "categories"
+    assert out["legend"] == [{"label": "High-High", "color": [255, 0, 0, 255]},
+                             {"label": "Low-Low"}, {"label": "Odd"}]
+
+
+def test_a_legend_with_no_labels_counts_as_no_legend():
+    from agent_runtime.map_layers import build_map_layer
+
+    out = build_map_layer("add_map_layer", _descriptor(legend=[{"color": [1, 2, 3, 4]}]))
     assert out["render"] == "shapes"
     assert "legend" not in out
 

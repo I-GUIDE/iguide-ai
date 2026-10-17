@@ -39,10 +39,13 @@ from agent_runtime.supervisor.evidence_subgraph import (
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
+from agent_runtime.client_profile import CHAT_ONLY_CORRECTION, CHAT_ONLY_NOTE, chat_only
 from agent_runtime import agreement as turn_agreement
+from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enabled
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
+from agent_runtime.turn_control import TurnCancelled
 from agent_runtime import lineage
 from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
@@ -146,6 +149,7 @@ class SupervisorState(TypedDict, total=False):
     turn_log_summary: Dict[str, Any]  # counts from the log, set by run_supervisor at the end
     bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
     verdict: Dict[str, Any]        # {status, findings, numbers}: the single verdict (stage 44)
+    clarify: Dict[str, Any]        # the clarification gate's decision (AGENT_CLARIFY_POLICY=ask)
 
 
 
@@ -1518,6 +1522,20 @@ def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
     return out
 
 
+def _code_step_summary(result: Any) -> str:
+    """How the code step ended, in words: "Code step finished: 6 runs, 1 failed".
+
+    It used to say "Code ready" (and "Generating code" at the start), which read as if code had
+    been written and was waiting, when the step had already run it, a dozen times on T16."""
+    results = (result.get("tool_results") or []) if isinstance(result, dict) else []
+    runs = [r for r in results if isinstance(r, dict) and r.get("name") == "execute_code"]
+    if not runs:
+        return "Code step finished"
+    failed = sum(1 for r in runs if not turn_log.parse_result(r.get("content"))["ok"])
+    text = f"Code step finished: {len(runs)} run{'s' if len(runs) != 1 else ''}"
+    return text + (f", {failed} failed" if failed else "")
+
+
 def _merge_peer_result(prior: Any, new: Any, log: Any = None, peer: Optional[str] = None) -> Any:
     """A peer's result for the TURN: its earlier runs' tool records plus this run's.
 
@@ -1838,7 +1856,7 @@ def _run_peer(name: str, call, state: SupervisorState):
     try:
         return call(), None
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
             raise
         # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
         # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
@@ -1847,7 +1865,10 @@ def _run_peer(name: str, call, state: SupervisorState):
                    "fatal": _is_fatal_peer_error(exc), "at": len(state.get("actions") or [])}
         try:
             import logging
-            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"])
+            # With the traceback: the message alone named a TypeError (GIS harness T16,
+            # 2026-10-16) and nothing said which line raised it, so it took a reproduction.
+            logging.getLogger(__name__).warning("peer %s failed: %s", name, failure["error"],
+                                                exc_info=exc)
         except Exception:
             pass
         emit_trace_event(
@@ -2169,6 +2190,7 @@ class Decision(str):
 
     plan: Optional[Dict[str, Any]] = None
     subgoal: Optional[str] = None
+    reason: str = ""
 
 
 def _initial_plan(state: SupervisorState) -> Dict[str, Any]:
@@ -2313,8 +2335,14 @@ def _correct_artifact_claims(answer: str, *contexts: Any,
                 f"other model, not the layer you were given — which was computed here by {ran}."
             )
 
-    if _DENIES_MAP_RE.search(text) and (any(_map_delivered_this_turn(c) for c in contexts)
-                                         or _map_delivered_earlier(prior_rows)):
+    if chat_only():
+        # No map in this client (client_profile). The usual note below would point the user
+        # at a layer they cannot see, so it is replaced by the opposite correction, made only
+        # when the answer itself talks about a map.
+        if _claims_map_in_text(text):
+            notes.append(CHAT_ONLY_CORRECTION)
+    elif _DENIES_MAP_RE.search(text) and (any(_map_delivered_this_turn(c) for c in contexts)
+                                           or _map_delivered_earlier(prior_rows)):
         notes.append(
             "The layer is already on your interactive map — it was added automatically. "
             "There is no need to add it from a URL; the download link is only if you want a "
@@ -2585,6 +2613,15 @@ _MAP_AFFORDANCE_RE = re.compile(
 )
 
 
+def _claims_map_in_text(text: str) -> bool:
+    """Whether an answer talks about a map: the same markers and affordances ``_is_map_claim``
+    reads in one claim, applied to the whole text. Used on chat-only turns, where any such
+    sentence describes something the user cannot see."""
+    low = str(text or "").lower()
+    return (any(m in low for m in _MAP_CLAIM_MARKERS)
+            or bool(_MAP_AFFORDANCE_RE.search(str(text or ""))))
+
+
 def _is_map_claim(claim: str) -> bool:
     """A claim about the user's map: that a layer is on it, or what they can do with it there.
 
@@ -2695,6 +2732,37 @@ def _ungated_record(execution_context: Optional[Any]) -> str:
     if not rows:
         return ""
     return json.dumps(rows, default=str).replace(",", "")
+
+
+def _check_disputed_claims(audit: Optional[Dict[str, Any]], analysis_results: Any,
+                           code_result: Any, thread_id: Optional[str], llm: Any) -> Optional[Dict[str, Any]]:
+    """The auditor's surviving claims, checked by code against the turn's files. Never raises."""
+    from agent_runtime import claim_checker
+
+    if not claim_checker.enabled():
+        return audit
+    claims = claim_checker.claims_to_check(audit)
+    if not claims:
+        return audit
+    try:
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        files = claim_checker.turn_files([analysis_results, code_result], thread_id)
+        verdicts = claim_checker.check_claims(claims, files, active)
+        emit_trace_event("node_completed", {
+            "stage": "claim_check",
+            "message": (f"Checked {len(verdicts)} disputed claim(s) against the turn's data: "
+                        + ", ".join(f"{sum(v['verdict'] == k for v in verdicts)} {k}"
+                                    for k in ("supported", "contradicted", "unverified"))),
+            "detail": {"verdicts": verdicts[:40], "files": [f["name"] for f in files]}},
+            node="synthesize")
+        return claim_checker.apply(audit, verdicts)
+    except Exception as exc:  # noqa: BLE001 - a broken check leaves the audit as it was
+        logger.warning("claim check failed: %s", exc, exc_info=True)
+        return audit
 
 
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
@@ -2857,6 +2925,34 @@ _RETRIEVAL_REQUEST_RE = re.compile(
     r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.I,
 )
+
+
+# Words that ask for something only retrieval can supply. Narrower than _RETRIEVAL_REQUEST_RE on
+# purpose: that one counts "show me … map" as a request for platform maps, which is right for
+# deciding whether an empty knowledge base is a real answer and wrong for deciding whether a
+# finished map still needs a search.
+_OUTSIDE_EVIDENCE_RE = re.compile(
+    r"\b(?:literature|papers?|publications?|studies|references?|citations?|cite|sources?|"
+    r"datasets?|notebooks?|oers?|knowledge\s+elements?|i-?guide|knowledge\s+base|"
+    r"related\s+(?:elements?|resources?)|search|look\s+up|web|online|news)\b",
+    re.I,
+)
+
+
+def _work_delivered_without_retrieval(state: Dict[str, Any]) -> bool:
+    """The analysis put this turn's map on the user's map and the request asks for nothing
+    retrieval supplies, so a search step has nothing to add.
+
+    2026-10-15, Chicago demo, the SKATER step: analyze drew the regions at 14:37:38 and
+    finished at 14:38:42; the decider then chose search, which read 45 of the conversation's
+    own files over 3 min 16 s and added nothing ("2 consecutive steps added nothing"). The
+    decide prompt already says to choose `done` once `map_layer_delivered` holds; it was not
+    enough, so this is enforced here, like the other routing vetoes."""
+    if state.get("analysis_results") is None and state.get("code_result") is None:
+        return False
+    if not _map_delivered_this_turn(state.get("analysis_results"), state.get("code_result")):
+        return False
+    return not _OUTSIDE_EVIDENCE_RE.search(str(state.get("query") or ""))
 
 
 def _needs_kb_evidence(query: str) -> bool:
@@ -3271,6 +3367,7 @@ def default_decide_fn(llm: Optional[Any] = None, *, code_peer: Optional[str] = N
                     node="supervisor",
                 )
                 decision = Decision(nxt)
+                decision.reason = reason
                 if isinstance(parsed.get("plan"), dict):
                     decision.plan = parsed["plan"]
                 if parsed.get("subgoal"):
@@ -3684,7 +3781,11 @@ def kb_ablated() -> bool:
     """
     import os
 
-    return (os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+    from agent_runtime.client_profile import agent_kb_allowed
+
+    # A chat-only client gets no KB either (client_profile.CHAT_ONLY_BLOCKED_TOOLS).
+    return ((os.getenv("AGENT_ABLATE_KB") or "").strip().lower() in {"1", "true", "yes", "on"}
+            or not agent_kb_allowed())
 
 
 def _peer_kb_tools() -> set:
@@ -4554,6 +4655,8 @@ def _decision_sentence(nxt: str, why: str) -> Optional[str]:
         return "Stopping: this turn reached its step limit"
     if why == "search exhausted":
         return "Stopping: the knowledge base has nothing further to give"
+    if why.startswith("map delivered"):
+        return "Stopping: the map is drawn and the request asks for nothing a search would add"
     if why == "nothing has run yet":
         return f"Starting with {nxt}: nothing has run yet this turn"
     if why.startswith("no-progress repeat"):
@@ -4964,7 +5067,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         on_map = _map_delivered_this_turn(artifacts)
         wants_map = bool(_WANTS_MAP_RE.search(query or "")
                          or _CLAIMS_MAP_RE.search(result["summary"] or ""))
-        if input_file_ids and wants_map and not on_map and not caps:
+        # Skipped for a chat-only client: it has no map to deliver to (client_profile).
+        if input_file_ids and wants_map and not on_map and not caps and not chat_only():
             emit_trace_event(
                 "map_layer_not_delivered",
                 {"stage": "analyze",
@@ -5101,11 +5205,12 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
         turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
         reran = True
 
-    _record_execution_outcome(result, turn)
+    _record_execution_outcome(result, turn, prose_key=prose_key, any_fence=any_fence)
     return reran
 
 
-def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> bool:
+def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any], *,
+                              prose_key: str = "answer", any_fence: bool = True) -> bool:
     """Write ``executed`` and ``execution_error`` from what the turn's tool results show.
 
     The pair must be written TOGETHER, and the CLEAR is the half that gets forgotten. This
@@ -5114,8 +5219,20 @@ def _record_execution_outcome(result: Dict[str, Any], turn: Dict[str, Any]) -> b
     failure it had just fixed and the grounding auditor read a working run as a broken one.
     One function, so the two cannot drift apart again.
 
+    ``executed`` is a statement about CODE, so it is written only when there is code to speak
+    of: an execute_code call, or a code block in the peer's prose. A peer that answered with
+    tools alone wrote no code, and ``executed=False`` on its result told synthesis "the code in
+    this result did NOT run … do not describe its output as a result". Live, 2026-10-15
+    (sess-7c3ef000): six ok tool calls, two layers on the map, and an answer saying nothing
+    had run (stage 68).
+
     Returns whether a run is recorded.
     """
+    if not (_has_execution_record(turn)
+            or _ships_unrun_code(result.get(prose_key) or "", any_fence=any_fence)):
+        result.pop("executed", None)
+        result.pop("execution_error", None)
+        return False
     ran, error = _execution_outcome(turn)
     result["executed"] = bool(ran)
     # Only when a run actually failed: an absent run is already said by executed=False, and a
@@ -5506,7 +5623,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
                 result["tool_results"] = list(_session.turn_artifacts["tool_results"])
                 turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
-                ran = _record_execution_outcome(result, turn)
+                ran = _record_execution_outcome(result, turn, prose_key="answer")
                 caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)
@@ -5594,8 +5711,18 @@ def _execution_note(result: Any) -> str:
         return "EXECUTION: the code in this result RAN and its output is real."
     error = str(result.get("execution_error") or "").strip()
     tail = f" The failure was: {error[:200]}" if error else ""
-    return ("EXECUTION: the code in this result did NOT run." + tail
-            + " Do not present it as executed, and do not describe its output as a result.")
+    note = ("EXECUTION: the code in this result did NOT run." + tail
+            + " Do not present that code as executed, and do not report any output of that "
+              "code as a result.")
+    # The flag is about the CODE. Unscoped, it read as a verdict on the whole result, and the
+    # writer disowned the tool calls beside it that had run (stage 68).
+    ran = list(dict.fromkeys(str(r.get("tool")) for r in _ledger_rows(result)
+                             if r.get("tool") and r.get("tool") != "execute_code"
+                             and not r.get("failed")))
+    if ran:
+        note += (" This concerns the code only: these other tool calls in this result DID run "
+                 "and their results are real: " + ", ".join(ran[:12]) + ".")
+    return note
 
 
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
@@ -5612,6 +5739,15 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
 
             active = build_default_llm()
         parts = [SYNTHESIS_PROMPT]
+        if chat_only():
+            # Shown without a map (client_profile). Stated as the client's capability; the
+            # deterministic correction in _correct_artifact_claims checks what comes back.
+            parts.append(CHAT_ONLY_NOTE)
+        from agent_runtime.clarify_policy import writer_rule
+
+        _rule = writer_rule()
+        if _rule:
+            parts.append(_rule)
         history = _format_chat_history(chat_history)
         if history:
             parts.append(f"Conversation so far:\n{history}")
@@ -5705,6 +5841,7 @@ def build_supervisor_graph(
         needs = [n for n in needs if not _dead(n)]
 
         failures = state.get("peer_failures") or []
+        decided: Any = None
         if any(f.get("fatal") for f in failures):
             # The model backend itself is unreachable. Every remaining peer would pay its full
             # latency to fail the same way, and so would a re-route.
@@ -5751,6 +5888,8 @@ def build_supervisor_graph(
             # Don't keep hitting the search agent once the KB has nothing left to give.
             elif nxt == "search" and _search_exhausted(state):
                 nxt, why = "done", "search exhausted"
+            elif nxt == "search" and _work_delivered_without_retrieval(state):
+                nxt, why = "done", "map delivered; nothing asked to retrieve"
         # A VETO, not a hint: _available_actions only shapes the menu the decider is shown,
         # and it answered `done` at step 0 anyway. Measured on the merged shape — "Find flood
         # risk datasets on I-GUIDE" finished without retrieving and replied "I couldn't find
@@ -5768,9 +5907,15 @@ def build_supervisor_graph(
         # loop did something a reader would otherwise call a bug (stopped early, stopped
         # without searching, ran analysis on a request that named no analysis). Those get a
         # sentence AND their own event, so folding the routing ladder cannot hide them.
+        # The decider's own reason, when this route is the decider's. It was emitted only as a
+        # detail-tier event, so the visible trace read "Next: search" with no hint why a turn
+        # whose map was already drawn went looking for documents. Shown whole: a 200-character
+        # cut stopped it mid-word ("…plus citywide and highest-").
+        _said = (getattr(decided, "reason", "") or "").strip() if why == "decision" else ""
         emit_trace_event(
             "node_completed",
-            {"stage": "supervisor", "route": nxt, "message": f"Next: {nxt}"},
+            {"stage": "supervisor", "route": nxt,
+             "message": f"Next: {nxt}" + (f" — {_said}" if _said else "")},
             node="supervisor",
         )
         _reason = _decision_sentence(nxt, why)
@@ -5964,7 +6109,7 @@ def build_supervisor_graph(
 
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
-        emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
+        emit_trace_event("node_started", {"stage": "code", "message": "Analysing in code"}, node="code")
         log = turn_log.log_for_state(state)
         with turn_log.bind(log, "code", _turn_brief(state)) as bound_run:
             raw, failure = _run_peer(
@@ -5980,7 +6125,8 @@ def build_supervisor_graph(
                                  state, failure)
         clean, needs = _extract_needs(raw)
         log.record_needs("code", bound_run.run, needs)
-        emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
+        emit_trace_event("node_completed", {"stage": "code", "message": _code_step_summary(clean)},
+                         node="code")
         update: Dict[str, Any] = {**logged,
                                   "code_result": _merge_peer_result(prior, clean, log, "code")}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
@@ -6039,7 +6185,7 @@ def build_supervisor_graph(
             if not update.get("reground"):
                 update["reground"] = False
         except BaseException as exc:                  # noqa: BLE001 - deliberately total
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
                 raise
             reason = f"{type(exc).__name__}: {exc}"[:200]
             try:
@@ -6195,11 +6341,14 @@ def build_supervisor_graph(
             # CROSS-RUN AGREEMENT (plan step 4a): two runs that computed the same figure and
             # disagree. The writer is told before writing, so it settles the disagreement
             # instead of reporting the last value silently (T10: 309.531 then 295.06 ppm).
-            _disagreements = turn_agreement.for_log(_log)
+            # Answer validation off (client_profile.validation_enabled): no check below runs,
+            # including these two recomputations, and the verdict says the answer is unchecked.
+            _checks = validation_enabled()
+            _disagreements = turn_agreement.for_log(_log) if _checks else []
             # REFERENCE RECOMPUTATION (plan step 4b): a standard method the turn ran, recomputed
             # with a reference library from the same inputs (kriging with pykrige, Gi* and
             # Moran's I with esda, Horn slope, zonal mean).
-            _references = turn_reference.for_log(_log)
+            _references = turn_reference.for_log(_log) if _checks else []
             _reconcile = "\n\n".join(n for n in (
                 turn_agreement.reconcile_note(_disagreements),
                 turn_reference.reconcile_note(_references)) if n)
@@ -6238,12 +6387,18 @@ def build_supervisor_graph(
             # a genuinely-produced map/file/count is not flagged as hallucination.
             audit = audit_answer_grounding(
                 q, answer, evidence, llm=llm, execution_context=exec_ctx,
-            ) if (do_audit and (answer or "").strip() and has_grounding) else {}
+            ) if (do_audit and _checks and (answer or "").strip() and has_grounding) else {}
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=gate_ctx,
-                                                    prior_rows=_rows)
+            if _checks:
+                audit = _reconcile_audit_with_artifacts(audit, artifacts,
+                                                        execution_context=gate_ctx,
+                                                        prior_rows=_rows)
+                # What reconciliation could not settle by rule, code can: each disputed claim is
+                # checked against the turn's own files (agent_runtime/claim_checker). Off unless
+                # AGENT_CLAIM_CHECK=1. Validation off (Stage 66) skips it with the rest.
+                audit = _check_disputed_claims(audit, ar, cr, state.get("thread_id"), llm)
             # THE NUMBER SCAN (stage 44). Every stated figure that resolves to no recorded
             # number is a finding, whatever it is about: an area, a population, a road distance.
             # The producer check (stage 42) says whether some bound tool could produce it. If
@@ -6261,8 +6416,11 @@ def build_supervisor_graph(
                     if (sentences_ or qualitative) else {})
                 return _producer_memo
 
-            answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
-                answer, fact_set, _producers_for)
+            if _checks:
+                answer, dropped, kept_unresolved, resolutions, _ = _cut_unproducible_figures(
+                    answer, fact_set, _producers_for)
+            else:
+                dropped, kept_unresolved = [], []
             if qualitative and not _producer_memo:
                 _producers_for([])
             _producers = _producer_memo
@@ -6376,7 +6534,12 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        if validation_enabled():
+            final, corrections = _artifact_corrections(final, ar, cr, prior_rows=_rows)
+        else:
+            corrections = []
+            verdict_findings = [*verdict_findings, turn_verdict.Finding(
+                "validation", turn_verdict.UNVERIFIABLE, VALIDATION_OFF_FINDING)]
         verdict_findings = [*verdict_findings,
                             *[turn_verdict.Finding("correction", turn_verdict.PROBLEM, n)
                               for n in corrections]]
@@ -6395,6 +6558,36 @@ def build_supervisor_graph(
                             "numbers": number_links},
                 "distilled": {**_distill(merged), "answer": final}}
 
+    def clarify_node(state: SupervisorState) -> Dict[str, Any]:
+        """AGENT_CLARIFY_POLICY=ask: one question before any work, or nothing (clarify_policy)."""
+        from agent_runtime import clarify_policy
+
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        combined = clarify_policy.resolved_query(state.get("query") or "", state.get("thread_id"))
+        if combined:
+            # The answer to our question: work on the whole request, not the fragment.
+            emit_trace_event("node_completed",
+                             {"stage": "clarify", "message": "Continuing the question the user "
+                              "just answered", "detail": {"ask": False, "resolved": True}},
+                             node="clarify")
+            return {"clarify": {"ask": False, "resolved": True}, "query": combined}
+        decision = clarify_policy.gate(state.get("query") or "", state.get("chat_history"),
+                                       state.get("thread_id"), active)
+        emit_trace_event("node_completed",
+                         {"stage": "clarify", "message": ("Asking the user: " + decision["question"])
+                          if decision.get("ask") else "No question needed",
+                          "detail": decision}, node="clarify")
+        if not decision.get("ask"):
+            return {"clarify": decision}
+        q = decision["question"]
+        merged = {**state, "answer": q, "audit": {}}
+        return {"clarify": decision, "answer": q, "final_answer": q, "audit": {},
+                "distilled": {**_distill(merged), "answer": q}}
+
     builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("search", search_node)
@@ -6402,7 +6595,18 @@ def build_supervisor_graph(
     builder.add_node("code", code_node)
     builder.add_node("synthesize", synthesize_node)
 
-    builder.add_edge(START, "supervisor")
+    from agent_runtime.clarify_policy import policy as _clarify_policy
+
+    if _clarify_policy() == "ask":
+        builder.add_node("clarify", clarify_node)
+        builder.add_edge(START, "clarify")
+        builder.add_conditional_edges(
+            "clarify",
+            lambda s: "asked" if (s.get("clarify") or {}).get("ask") else "proceed",
+            {"asked": END, "proceed": "supervisor"},
+        )
+    else:
+        builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         lambda s: s.get("next_action", "done"),

@@ -293,6 +293,11 @@ def build_default_llm() -> Any:
     lumen = _lumen_settings()
     if lumen:
         return ChatOpenAI(temperature=0.0, **lumen)     # no max_tokens: see build_llm's branch
+    fb = _lumen_fallback()
+    if fb:
+        # The Lumen pool is running low (lumen_failover): the default moves to the fallback
+        # until a refill brings usage back under the return threshold.
+        return build_llm(provider=fb["provider"], model=fb["model"])
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -376,6 +381,17 @@ def _lumen_base_url() -> str:
     return normalize_openai_base_url(os.getenv("LUMEN_URL") or LUMEN_DEFAULT_URL)
 
 
+def _lumen_fallback() -> Optional[Dict[str, str]]:
+    """The fallback model while Lumen's pool is low, or None (agent_runtime/lumen_failover.py)."""
+    try:
+        from agent_runtime import lumen_failover
+
+        return lumen_failover.fallback() if lumen_failover.failed_over() else None
+    except Exception:  # noqa: BLE001 - a failover check must never stop the default building
+        logger.warning("Lumen failover check failed; staying on Lumen", exc_info=True)
+        return None
+
+
 def _lumen_settings() -> Optional[Dict[str, Any]]:
     """NCSA Lumen as the PROCESS default, or None. Selected by AGENT_LLM_PROVIDER=lumen.
 
@@ -386,6 +402,8 @@ def _lumen_settings() -> Optional[Dict[str, Any]]:
     default, as with AnvilGPT.
     """
     if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "lumen":
+        return None
+    if _lumen_fallback():
         return None
     key = os.getenv("LUMEN_API_KEY")
     if not key:
@@ -816,6 +834,9 @@ def active_llm_description() -> Dict[str, Any]:
     if lumen:
         return {"provider": "lumen", "model": lumen["model"],
                 "base_url": lumen["base_url"], "max_tokens": "unset (server default)"}
+    fb = _lumen_fallback()
+    if fb:
+        return {**fb, "reason": "Lumen pool low: failed over (lumen_failover)"}
     if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
         return {"provider": "vllm",
                 "model": os.getenv("VLLM_MODEL"),
@@ -1962,9 +1983,28 @@ def build_agent_executor(
         filtered = [tool for tool in tools if getattr(tool, "name", "") in allowed]
         if filtered:
             tools = filtered
+    # A chat-only client has no map, so the tools whose only output is a map layer are not
+    # offered at all (client_profile). Every peer is built here, so this is the one place to do it.
+    from agent_runtime.client_profile import CHAT_ONLY_BLOCKED_TOOLS, MAP_ONLY_TOOLS, chat_only
+
+    if chat_only():
+        # Nor graph or agent-KB search: their hits do not fit the platform frontend's elements.
+        tools = [tool for tool in tools
+                 if getattr(tool, "name", "") not in MAP_ONLY_TOOLS | CHAT_ONLY_BLOCKED_TOOLS]
+    # With answer validation off, a peer is not offered the audit tool either.
+    from agent_runtime.client_profile import VALIDATION_TOOLS, validation_enabled
+
+    if not validation_enabled():
+        tools = [tool for tool in tools if getattr(tool, "name", "") not in VALIDATION_TOOLS]
     active_llm = llm or build_default_llm()
 
     system_prompt = system_prompt_override or DEFAULT_AGENT_PROMPT
+    if chat_only():
+        # The peers' prompts carry a paragraph about the live map; a chat-only peer gets the
+        # same facts for a client with none, so it is not told about a tool it does not have.
+        from agent_runtime.supervisor.prompts import CHAT_ONLY_DISPLAY_RULE, VISUALIZATION_ROUTES_RULE
+
+        system_prompt = system_prompt.replace(VISUALIZATION_ROUTES_RULE, CHAT_ONLY_DISPLAY_RULE)
 
     # LangGraph agent (langchain>=1.0). ``create_agent`` returns a compiled
     # StateGraph whose invocation accepts ``{"messages": [...]}`` and returns the
