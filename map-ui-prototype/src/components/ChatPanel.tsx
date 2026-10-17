@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
 import type { CodeProgress, FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
+import { runBarTitle } from '../codeRun';
 import { SUGGESTIONS } from '../agentBrain';
 import type { AppTab } from '../uiVariant';
 import { groupedSources, sourceHref, sourceThumb, type SourceGroup } from '../answerFormat';
@@ -272,8 +273,10 @@ export function visibleSteps(trace: TraceLine[]): number {
 // — but the interesting half of a stack trace is the part that got cut. Clamped, clickable.
 const TRACE_CLAMP = 140;
 
-function TraceRow({ row }: { row: Row }) {
-  const { line, folded } = row;
+function TraceRow({ row, debug }: { row: Row; debug?: boolean }) {
+  const { folded } = row;
+  // Debug mode shows each step as recorded (the raw tool call); the default shows it in words.
+  const line = debug && row.line.raw ? { ...row.line, text: row.line.raw } : row.line;
   const long = line.text.length > TRACE_CLAMP;
   const run = folded?.length || 0;
   // TWO independent states, because the two things a row can hide are not the same thing.
@@ -379,7 +382,7 @@ function CodeRunBar({ progress, onStop }: { progress: CodeProgress & { at: numbe
   return (
     <div className="coderun" role="status" aria-live="polite">
       <div className="coderun-line">
-        <span className="coderun-what">Running code{progress.label ? ` · ${progress.label}` : ''}</span>
+        <span className="coderun-what">{runBarTitle(progress)}</span>
         <span className="coderun-time">{clock(elapsed)}{limit ? ` of ${clock(limit)}` : ''}</span>
       </div>
       {limit > 0 && <div className="coderun-track"><div className="coderun-fill" style={{ width: `${share * 100}%` }} /></div>}
@@ -394,8 +397,26 @@ function CodeRunBar({ progress, onStop }: { progress: CodeProgress & { at: numbe
   );
 }
 
+const TRACE_DEBUG_KEY = 'iguide.trace.debug';
+
+function readTraceDebug(): boolean {
+  try { return localStorage.getItem(TRACE_DEBUG_KEY) === '1'; } catch { return false; }
+}
+
+/** Detailed (default): each step in words, with the model's reason above its calls. Debug: the
+ *  raw tool calls as recorded. A per-browser choice, kept across reloads. */
+function useTraceDebug(): [boolean, () => void] {
+  const [debug, setDebug] = useState(readTraceDebug);
+  const toggle = () => setDebug((v) => {
+    try { localStorage.setItem(TRACE_DEBUG_KEY, v ? '0' : '1'); } catch { /* private window */ }
+    return !v;
+  });
+  return [debug, toggle];
+}
+
 function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: string) => string;
                                                 onStop?: () => void }) {
+  const [debug, toggleDebug] = useTraceDebug();
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
   const hasBody = m.html || m.text;
@@ -410,7 +431,15 @@ function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: 
               minus the folded model ladder. Counting the collapsed rows instead called a
               fifteen-row transcript "7 steps" while fifteen rows sat under it. */}
           <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${visibleSteps(m.trace)} steps`}</span><span className="chev">▾</span></summary>
-          <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
+          <div className="body">
+            {m.trace.some((t) => t.raw) && (
+              <button type="button" className="trace-mode" onClick={toggleDebug} aria-pressed={debug}
+                      title="Debug mode shows each tool call with its raw arguments">
+                {debug ? 'Show steps in words' : 'Show raw calls'}
+              </button>
+            )}
+            {foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} debug={debug} />)}
+          </div>
         </details>
       )}
       {m.streaming && m.progress && <CodeRunBar progress={m.progress} onStop={onStop} />}

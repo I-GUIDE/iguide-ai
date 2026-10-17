@@ -259,7 +259,16 @@ def _normalize_tool_args(raw: Any) -> Any:
         try:
             return _json_safe(json.loads(stripped))
         except Exception:
-            return stripped
+            pass
+        # str() of a dict is a Python literal, not JSON; read it as one before giving up.
+        try:
+            import ast
+            value = ast.literal_eval(stripped)
+            if isinstance(value, (dict, list)):
+                return _json_safe(value)
+        except Exception:
+            pass
+        return stripped
     return _json_safe(raw)
 
 
@@ -423,9 +432,19 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 content = _message_content(message) if message is not None else str(getattr(generation, "text", "") or "")
                 raw_tool_calls = getattr(message, "tool_calls", None) if message is not None else None
                 if isinstance(raw_tool_calls, list) and raw_tool_calls:
-                    # Tool decisions are surfaced once, as `tool_call` events from
-                    # ``on_tool_start``. Emitting them here too made every decision
-                    # appear twice in the stream — skip the redundant copy.
+                    # The calls themselves are surfaced once, as `tool_call` events from
+                    # ``on_tool_start``. The TEXT beside them is the model saying what it is
+                    # about to do and why ("I'll inspect both files to understand their
+                    # structure…"): deepseek wrote one in 6 of 6 probes, 2026-10-17. It was
+                    # dropped here with the duplicate calls, so the trace showed bare function
+                    # calls with no reason. It is the step's purpose, emitted before its calls.
+                    plan = content.strip()
+                    if plan:
+                        names = [str((c or {}).get("name") or "") for c in raw_tool_calls
+                                 if isinstance(c, dict)]
+                        self._emit("tool_plan", {"kind": "tool_plan", "label": "Plan",
+                                                 "message": _short_text(plan, limit=400),
+                                                 "tools": [n for n in names if n]})
                     continue
                 if content.strip():
                     self._emit(
@@ -451,7 +470,11 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
     def on_tool_start(self, serialized: Dict[str, Any], input_str: Any, **kwargs: Any) -> None:
         turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         tool_name = str((serialized or {}).get("name") or kwargs.get("name") or "unknown_tool")
-        args = _normalize_tool_args(input_str)
+        # `inputs` is the call's own argument dict. `input_str` is str() of it, a Python repr
+        # ("{'file_id': …}") that JSON cannot read, so the client received the arguments as
+        # one opaque string and could not say which file a call was about.
+        inputs = kwargs.get("inputs")
+        args = _normalize_tool_args(inputs if isinstance(inputs, dict) else input_str)
         run_key = self._tool_run_key(kwargs.get("run_id"))
         with self._lock:
             self._tool_runs[run_key] = {"name": tool_name, "args": args,

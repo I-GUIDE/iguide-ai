@@ -23,6 +23,7 @@ import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation, deleteConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { describeToolCall } from './toolPhrases';
 import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
@@ -158,6 +159,8 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   // The running turn's server id (the stream's first event), so Stop can end it there too.
   const turnIdRef = useRef<string | null>(null);
+  // file_id → filename, so a trace row says "Inspecting buildings.geojson", not the id.
+  const fileNames = useRef(new Map<string, string>());
 
   // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
   // the same single record as everything else. It has to be in BOTH the payload and the deps: in
@@ -711,14 +714,20 @@ export default function App() {
       }, asAgentConfig(), {
         onTrace: (l) => addTrace(l),
         onToolCall: (name, args) => {
-          addTrace({ text: `${name}(${short(args)})`, kind: 'tool' });
+          // What the call does, in words (toolPhrases); the raw call stays on the row for
+          // debug mode.
+          addTrace({ text: describeToolCall(name, args, (id) => fileNames.current.get(id)),
+                     raw: `${name}(${short(args)})`, kind: 'tool' });
           drawFromToolArgs(name, args);
         },
         onToolResult: (name, parsed) => {
           const fc = extractFeatures(parsed);
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
-        onFile: (files) => patch({ artifacts: files }),
+        onFile: (files) => {
+          for (const r of files) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
+          patch({ artifacts: files });
+        },
         onMapLayer: tracked(async (layer) => {
           mapLayerDelivered.current = true;
           if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
@@ -987,6 +996,7 @@ export default function App() {
     if (mode === 'live') {
       try {
         const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
+        for (const r of recs) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could

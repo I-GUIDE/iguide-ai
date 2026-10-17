@@ -805,6 +805,7 @@ class ExecResult:
     # The concurrent review's record (code_watch.RunWatch), and the pre-run rule findings.
     review: Optional[Dict[str, Any]] = None
     rule_findings: List[Dict[str, Any]] = field(default_factory=list)
+    parameter_checks: List[Dict[str, Any]] = field(default_factory=list)
     ran_seconds: Optional[float] = None
     time_limit_s: Optional[int] = None
 
@@ -832,6 +833,7 @@ class ExecResult:
             **({"stuck_at": self.stuck_at} if self.stuck_at else {}),
             **({"review": self.review} if self.review else {}),
             **({"performance_hints": self.rule_findings} if self.rule_findings else {}),
+            **({"parameter_checks": self.parameter_checks} if self.parameter_checks else {}),
             **({"ran_seconds": self.ran_seconds} if self.ran_seconds is not None else {}),
             **({"time_limit_s": self.time_limit_s} if self.time_limit_s else {}),
         }
@@ -1589,6 +1591,10 @@ class CodeExecutor:
                     bridge.cleanup()
                 if info.runtime is not None:
                     shutil.rmtree(info.runtime, ignore_errors=True)
+            # Performance hints go back only for a run that was slow; a fast run's result saying
+            # "this construct is slow" invites rewriting code that was fine (code_watch).
+            perf_hints, param_checks = code_watch.hints_for_result(
+                findings, ran_s=info.ran_s, slow=bool(timed_out or info.interrupt))
             stuck = None
             if timed_out and info.frames:
                 stuck = code_watch.stack_report(info.frames, source_for_deps, findings)
@@ -1681,7 +1687,8 @@ class CodeExecutor:
                               interrupted=(info.interrupt.kind if info.interrupt else None),
                               stuck_at=stuck,
                               review=(watch.review_record if watch is not None else None),
-                              rule_findings=findings, ran_seconds=info.ran_s,
+                              rule_findings=perf_hints, parameter_checks=param_checks,
+                              ran_seconds=info.ran_s,
                               time_limit_s=timeout)
         finally:
             shutil.rmtree(work, ignore_errors=True)
