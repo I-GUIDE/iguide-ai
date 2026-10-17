@@ -514,6 +514,26 @@ def _keep_platform_elements(formatted: dict) -> None:
             **orch, "evidence": platform_elements_only(orch["evidence"])}}
 
 
+def _daily_limit_refusal(user: Any) -> Optional[dict]:
+    """The refusal for a signed-in user who has spent today's limit, or None.
+
+    Lumen coins and OpenAI dollars are limited separately (agent_runtime/usage_limit.py). A
+    caller identified by nobody (the service key, dev and local modes) is never limited."""
+    owner = getattr(user, "id", None) if user is not None else None
+    if not owner:
+        return None
+    try:
+        from agent_runtime import usage_limit
+
+        refusal = usage_limit.refusal(owner)
+    except Exception:  # noqa: BLE001 - a broken ledger must not lock everyone out
+        logger.warning("daily usage check failed; letting the turn run", exc_info=True)
+        return None
+    if refusal:
+        logger.info("Chat refused: daily usage limit reached (%s)", refusal["spent"])
+    return refusal
+
+
 def _format_agent_chat_result(payload: dict) -> dict:
     """Align output shape to the legacy Node /llm/search result object."""
     answer = payload.get("answer") or ""
@@ -1351,6 +1371,146 @@ def agent_conversation_delete(memory_id):
     except Exception as exc:  # noqa: BLE001
         logger.error("Error deleting conversation %s: %s", memory_id, exc, exc_info=True)
         return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+# Admins are role 2 (Admin) or 1 (Super admin) on the platform's scale, which runs backwards: a
+# lower number is more privileged (agent_runtime/identity.py). Same rule as the platform
+# backend's authorizeRole(Role.ADMIN).
+ADMIN_ROLE = 2
+
+
+def _require_admin():
+    """``(user, None)`` for a signed-in admin, or ``(None, error_response)``."""
+    try:
+        user = _require_user()
+    except identity.IdentityError as exc:
+        return None, _identity_error_response(exc)
+    if not user or getattr(user, "role", None) is None or int(user.role) > ADMIN_ROLE:
+        # A service key identifies nobody, so it cannot be an admin either.
+        return None, (jsonify({"error": "Forbidden", "reason": "admin_required"}), 403)
+    return user, None
+
+
+def _user_usage_view(user_id: str) -> dict:
+    from agent_runtime import usage_limit
+
+    return {
+        "userId": user_id,
+        "today": usage_limit.spent(user_id),
+        "limits": usage_limit.limits_for(user_id),
+        "defaultLimits": {"coins": usage_limit.coin_limit(), "usd": usage_limit.usd_limit()},
+        "override": usage_limit.override_for(user_id),
+        "resetsAt": usage_limit.resets_at(),
+        "recent": usage_limit.history(user_id, days=7),
+    }
+
+
+# `<path:...>` because a CILogon id is a URL (`http://cilogon.org/serverE/users/1`). Encoded or
+# not, it reaches the handler intact; two tests hold that.
+@app.route('/agent/admin/users/<path:user_id>/usage', methods=['GET'])
+def agent_admin_user_usage(user_id):
+    """
+    One user's agent usage today, their daily limits, and the last seven days. Admins only.
+    ---
+    tags:
+      - admin
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: user_id
+        type: string
+        required: true
+        description: >-
+          The user's CILogon id (the platform's `openid`), URL-encoded, e.g.
+          `http%3A%2F%2Fcilogon.org%2FserverE%2Fusers%2F443511`.
+    responses:
+      200:
+        description: >-
+          `{ userId, today: {coins, usd, turns}, limits: {coins, usd}, defaultLimits, override,
+          resetsAt, recent: [{day, coins, usd, turns}] }`. A limit of `null` means unlimited.
+          Coins are NCSA Lumen coins and usd is OpenAI spending; each is limited separately.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in as an Admin or Super admin (platform role 2 or lower).
+    """
+    _admin, error = _require_admin()
+    if error:
+        return error
+    return jsonify(_user_usage_view(user_id))
+
+
+@app.route('/agent/admin/users/<path:user_id>/usage', methods=['PUT'])
+def agent_admin_user_usage_update(user_id):
+    """
+    Adjust one user's daily limits, or clear what they have spent today. Admins only.
+    ---
+    tags:
+      - admin
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: path
+        name: user_id
+        type: string
+        required: true
+        description: The user's CILogon id (the platform's `openid`), URL-encoded.
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          properties:
+            coinLimit:
+              description: >-
+                Daily Lumen coin limit for this user: a number >= 0 (0 blocks Lumen),
+                "unlimited", or null to return to the default. Omit to leave it unchanged.
+            usdLimit:
+              description: Daily OpenAI dollar limit for this user, same values as coinLimit.
+            resetToday:
+              type: boolean
+              description: Forget what the user has spent today, so their next turn is allowed.
+    responses:
+      200:
+        description: The user's usage after the change, in the GET response's shape.
+      400:
+        description: A limit that is not a number >= 0, null or "unlimited", or nothing to change.
+      401:
+        description: The access token expired. Refresh it and retry.
+      403:
+        description: Not signed in as an Admin or Super admin (platform role 2 or lower).
+    """
+    admin, error = _require_admin()
+    if error:
+        return error
+    from agent_runtime import usage_limit
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "The body must be a JSON object."}), 400
+    changes = {}
+    for cur, keys in (("coins", ("coinLimit", "coin_limit")), ("usd", ("usdLimit", "usd_limit"))):
+        key = next((k for k in keys if k in body), None)
+        if key is None:
+            continue
+        try:
+            changes[cur] = usage_limit.parse_limit(body[key])
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": f"{key}: {exc}"}), 400
+    reset = bool(body.get("resetToday") or body.get("reset_today"))
+    if not changes and not reset:
+        return jsonify({"error": "Nothing to change: send coinLimit, usdLimit or resetToday."}), 400
+    if changes:
+        usage_limit.set_override(user_id, **changes)
+    if reset:
+        usage_limit.reset_today(user_id)
+    # Who changed what, for the record. Ids and values only.
+    logger.info("Usage limits changed by admin %s for %s: %s%s", admin.id, user_id,
+                changes or "-", " (today reset)" if reset else "")
+    return jsonify(_user_usage_view(user_id))
 
 
 @app.route('/agent/conversations/<memory_id>/traces', methods=['GET'])
@@ -2687,6 +2847,10 @@ def agent_chat():
         if not user_query:
             return jsonify({"error": "Missing userQuery in request body."}), 400
 
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            return jsonify(_limit_refusal), 429
+
         logger.info(f"Processing agent chat: {user_query[:100]}...")
         # Bind the conversation for the whole turn, so every file a tool writes records who
         # wrote it and every lookup sees this conversation's files first. Set at the EDGE
@@ -3227,6 +3391,18 @@ def agent_chat_stream():
                 yield _sse_event("error", {"error": "Missing userQuery in request body."})
             return Response(
                 stream_with_context(_single_error()),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            )
+
+        _limit_refusal = _daily_limit_refusal(_request_user)
+        if _limit_refusal:
+            # An SSE error event like the missing-query case above, so the chat shows the message
+            # in place of an answer instead of a raw HTTP failure.
+            def _limit_error():
+                yield _sse_event("error", _limit_refusal)
+            return Response(
+                stream_with_context(_limit_error()),
                 mimetype="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
             )

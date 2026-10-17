@@ -86,6 +86,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 70 | [Overpass keeps its last good answer](#stage-70) | 2026-10-16 | every good Overpass answer is kept on disk by the hash of its query text; when every mirror fails the kept copy is served, marked `cached` with its time, and the Sources line says so; identical calls in flight are sent once, at most two requests at a time |
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
+| 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11376,3 +11377,130 @@ follows them across browsers; it is private by default and shareable.
   with an admin first.
 - Nothing reclaims the store beyond the per-account cap. Deleting an account on the platform
   leaves its examples.
+
+## Stage 74 — Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget {#stage-74}
+
+**Why.** Stage 59 priced every turn in dollars, so the VM's default model, NCSA Lumen
+deepseek-v4-flash, reported `cost_usd: null` on every turn. Lumen bills coins, not dollars, and
+publishes what the agent needed:
+- each model's coin rate on `GET /v1/models/<id>` (`input_cost_per_million`,
+  `output_cost_per_million`; deepseek-v4-flash was 0.161857 and 0.37146 on 2026-10-16);
+- the account's remaining balance on `GET /v1/usage` (`coins_available`, 99.93 that day, after
+  0.97 coins spent over 231 requests on the deployment's key).
+
+The user then set two rules:
+- move the default to OpenAI gpt-5.6-luna when 90% of the Lumen pool is used, and back to Lumen
+  once usage is below 80%;
+- each signed-in user may spend at most 3 coins and, separately, $3 per day, the day ending at
+  midnight US Central.
+
+**Coins** (`agent_runtime/lumen_coins.py`, `model_pricing.summarize`).
+- **Which calls count as Lumen's.** A call is Lumen's when it went to Lumen's endpoint. The usage
+  handler keeps each run's base URL (`openai_api_base`) for that and records nothing of it. It is
+  never decided by model id: `gpt-4o` exists on Lumen and on OpenAI. The first version priced a
+  Lumen `gpt-4o` call at OpenAI's dollar rate before looking at the endpoint, and a test caught it.
+- **The price.** A Lumen call gets `cost_coins` by Lumen's own formula (input/1e6 × input rate +
+  output/1e6 × output rate, with no cached rate) and `cost_usd: null`.
+- **Rates are read live.** Each is cached six hours; a failed lookup is remembered as unknown for
+  ten minutes.
+- **The turn's `usage`** gains `cost_coins` and `coin_priced_calls`, beside `cost_usd` and
+  `priced_calls`. When the turn used Lumen it also gets `coins_available`: the balance read once,
+  at the end. `currency` is gone, because a turn can now spend both.
+- **Memory** keeps `cost_coins` and `coins_available` as floats.
+
+**Failover** (`agent_runtime/lumen_failover.py`).
+- **The thresholds.** The user first stated them as "credit below 90% / above 80%". Read as
+  remaining credit, that would flip the default at every reading between the two, so they were
+  confirmed as fractions of the pool USED: fail over at ≥ 90%, return at ≤ 80%.
+- **The pool's size.** Lumen's API does not return it, so it is configured:
+  `AGENT_LUMEN_POOL_COINS` (100).
+- **Where it applies.** `build_default_llm` and `active_llm_description` go through it, so every
+  default-model build moves at once, the search agents' Text2Cypher (Stage 58) included. A
+  request that picks its own model is untouched, and so is any provider other than
+  `AGENT_LLM_PROVIDER=lumen`.
+- **The balance is read** at most once a minute, plus after every Lumen turn.
+- **The side survives a restart.** It is kept in `lumen_failover.json` in the file store, so a
+  restart inside the 80–90% band does not change sides.
+- **Unknown or unlimited balances.** An unknown balance keeps the current side. An unlimited pool
+  (`-2`) never fails over.
+- **Settings:** `AGENT_LUMEN_FAILOVER=0` disables it. `AGENT_LUMEN_SWITCH_AT`,
+  `AGENT_LUMEN_RETURN_AT`, `AGENT_LUMEN_FALLBACK_PROVIDER` and `AGENT_LUMEN_FALLBACK_MODEL`
+  tune it.
+
+**Daily budget** (`agent_runtime/usage_limit.py`).
+- **The ledger.** Every finished turn adds its `cost_coins` and `cost_usd` to the signed-in
+  user's day. It is a JSON file per day under the file store, keyed by a digest of the user id,
+  written atomically, and pruned after 31 days. The deployment runs one gunicorn worker, so a
+  process lock suffices.
+- **Refusal.** Both chat routes refuse before running a turn when either currency has reached its
+  limit:
+  - `/agent/chat` answers 429;
+  - `/agent/chat/stream` answers with an SSE `error` event, so the chat shows the message in
+    place of an answer.
+
+  The refusal carries `reason: daily_limit`, today's `spent`, the `limits` and `resets_at`.
+- **What is not limited.** A turn already running finishes even if it crosses the limit, because
+  its cost is known only at the end. A caller identified by nobody (service key, dev, local,
+  harness) is never limited.
+- **The turn's `usage`** reports `today` (coins, usd, turns, limits, resets_at), so a client can
+  show what is left.
+- **Settings:** `AGENT_DAILY_COIN_LIMIT` and `AGENT_DAILY_USD_LIMIT` (3; a value of 0 disables
+  one) and `AGENT_USAGE_TZ` (America/Chicago).
+
+**Tests.**
+- `test_lumen_coins.py`, 9 tests:
+  - the endpoint, not the id, decides Lumen;
+  - the coin formula;
+  - one rate lookup per model;
+  - the key and the URL are never recorded;
+  - the balance is read only when Lumen was used.
+- `test_lumen_failover_and_daily_limit.py`, 13 tests:
+  - the hysteresis, its survival across a restart, and the once-a-minute read;
+  - only a Lumen default fails over, and the default builds as gpt-5.6-luna while failed over;
+  - separate currencies and the Central-midnight reset;
+  - nobody is limited when unidentified, and the ledger holds no user id;
+  - both routes refuse before running a turn.
+- Stage 59's 13 tests still pass.
+
+### Stage S74.1 Admins adjust one user's limits (2026-10-16)
+
+The user asked for an endpoint so admins can adjust a specific user's usage. It is modelled on
+the platform backend's own admin routes, `PUT /api/users/:id/role` in
+`iguide-ue-backend/routes/users_v2.js` (`authenticateJWT`, then `authorizeRole(Role.SUPER_ADMIN)`,
+the user named in the path by their CILogon id and decoded with `decodeURIComponent`, the change
+in the JSON body).
+
+- **Read:** `GET /agent/admin/users/<cilogon id>/usage` returns today's spending, the limits that
+  apply, the deployment defaults, any override, the reset time and the last seven days.
+- **Change:** `PUT` on the same path takes `coinLimit` and `usdLimit`, each one of:
+  - a number ≥ 0 (0 blocks that currency);
+  - `"unlimited"`;
+  - `null`, back to the default.
+
+  It also takes `resetToday`, which forgets what the user has spent today. A bad value is a 400
+  that changes nothing.
+- **Who may call it.** Only a signed-in Admin or Super admin, platform role 2 or lower: the
+  backend's `authorizeRole(Role.ADMIN)` on the same backwards scale. Everyone else gets 403
+  `admin_required`. A service key identifies nobody, so it cannot be an admin.
+- **Where overrides are kept.** They sit beside the day files in
+  `usage_ledger/overrides.json`, keyed by the same user-id digest. `refusal` and the turn's
+  `usage.today.limits` read the user's effective limits, so a change applies to their next turn.
+  Each change is logged with the admin's id and the values.
+- **The id in the path.** A CILogon id is a URL, so the route takes it as a `<path:…>`. A
+  suspected problem, Flask merging the `//` in an unencoded id, did not reproduce on this
+  version, either encoded or not. Two tests hold that, instead of a setting nobody needed.
+- **Tests.** `test_admin_usage_limits.py`, 15 tests:
+  - roles 3, 4, 8 and none are refused;
+  - the encoded and the unencoded id;
+  - a raised limit takes effect;
+  - unlimited, 0 and back to the default;
+  - the reset;
+  - bad values;
+  - the override file holds no user id.
+
+**Not done.**
+- The map UI does not display the day's remaining budget yet.
+- The pool size is configured by hand and must follow the account if NCSA changes it.
+- The daily ledger is per process and per host. A second worker or host would need a shared
+  store.
+
