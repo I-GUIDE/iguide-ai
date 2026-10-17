@@ -209,3 +209,84 @@ def test_meaningful_colours_stay_with_their_tool():
     hot = _legend(_HOTSPOT_COLORS, ["Hot spot (p < 0.01)", "Not significant"])
     assert all(len(e["color"]) == 4 for e in hot)
     assert _legend(_LISA_COLORS, ["High-High"])[0]["color"][0] > 200, "High-High is red"
+
+
+# --------------------------------------------------------------------------- recolouring
+# Live 2026-10-17: asked to colour two branches, the code peer copied the layer's file, added a
+# `color` column and drew the copy, and the map listed the service areas twice.
+
+
+def _child_of(store, tmp_path, parent_id, gdf, name):
+    """A file written from `parent_id`, as execute_code's lineage records it."""
+    import json as _json
+
+    from agent_runtime.file_store import _metadata_path, get_file_record
+
+    child = store(gdf, name)
+    rec = get_file_record(child)
+    rec["lineage"] = {"produced_by": {"tool": "execute_code"}, "parents": [parent_id], "sources": []}
+    _metadata_path(child).write_text(_json.dumps(rec), encoding="utf-8")
+    return child
+
+
+def _layer_ids(*results):
+    from agent_runtime.map_layers import build_map_layers
+
+    return [ml["id"] for out in results for ml in build_map_layers("add_map_layer", out, qa=False)]
+
+
+def test_a_copy_that_only_adds_a_colour_column_restyles_its_parents_layer(store, tmp_path):
+    add = _add_map_layer()
+    bg = _block_groups(60)
+    parent = store(bg, "assignment.geojson")
+    first = add.invoke({"file_id": parent, "render": "categories", "column": "nearest_branch"})
+    coloured = bg.assign(color=["black" if b == "Lozano" else "default" for b in bg["nearest_branch"]])
+    child = _child_of(store, tmp_path, parent, coloured, "assignment_colored.geojson")
+    again = add.invoke({"file_id": child, "render": "categories", "column": "nearest_branch",
+                        "class_colors": {"Lozano": "black"}})
+    assert json.loads(again)["ok"], again
+    assert len(set(_layer_ids(first, again))) == 1, "one layer, restyled in place"
+    assert parent in json.loads(again)["restyled"], "and the model is told to redraw the parent"
+
+
+def test_a_copy_that_adds_a_result_column_is_its_own_layer(store, tmp_path):
+    add = _add_map_layer()
+    bg = _block_groups(60)
+    parent = store(bg, "rates.geojson")
+    first = add.invoke({"file_id": parent, "render": "categories", "column": "nearest_branch"})
+    lisa = bg.assign(lisa_class=["High-High" if i % 2 else "Low-Low" for i in range(len(bg))])
+    child = _child_of(store, tmp_path, parent, lisa, "rates_lisa.geojson")
+    other = add.invoke({"file_id": child, "render": "categories", "column": "lisa_class"})
+    assert len(set(_layer_ids(first, other))) == 2, "a new result keeps its own layer"
+    assert "restyled" not in json.loads(other)
+
+
+def test_a_coloured_file_with_no_recorded_parent_is_its_own_layer(store):
+    add = _add_map_layer()
+    bg = _block_groups(60)
+    first = add.invoke({"file_id": store(bg, "a.geojson"), "render": "categories",
+                        "column": "nearest_branch"})
+    other = add.invoke({"file_id": store(bg.assign(color="red"), "b.geojson"),
+                        "render": "categories", "column": "nearest_branch"})
+    assert len(set(_layer_ids(first, other))) == 2
+
+
+def test_the_tool_says_how_to_recolour():
+    desc = _add_map_layer().description
+    assert "RECOLOUR" in desc and "SAME file_id" in desc
+
+
+def test_redrawing_the_styled_copy_add_map_layer_wrote_restyles_the_same_layer(store):
+    """Live, second try: the model recoloured by drawing the file add_map_layer had returned
+    for the first draw (its styled copy), not the file it drew from."""
+    add = _add_map_layer()
+    first = add.invoke({"file_id": store(_block_groups(60), "assigned.geojson"),
+                        "render": "categories", "column": "nearest_branch"})
+    copy_id = json.loads(first)["file_id"]
+    again = add.invoke({"file_id": copy_id, "render": "categories", "column": "nearest_branch",
+                        "class_colors": {"Lozano": "black", "Portage-Cragin": "hotpink"}})
+    assert json.loads(again)["ok"], again
+    assert len(set(_layer_ids(first, again))) == 1, "the recolour replaces the first layer"
+    third = add.invoke({"file_id": json.loads(again)["file_id"], "render": "categories",
+                        "column": "nearest_branch"})
+    assert len(set(_layer_ids(first, again, third))) == 1, "and so does a copy of the copy"
