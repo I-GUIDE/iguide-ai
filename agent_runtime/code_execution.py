@@ -365,6 +365,25 @@ def _clip(text: Any, limit: int = MAX_OUTPUT_CHARS) -> str:
     return s if len(s) <= limit else (s[:limit] + f"\n…[truncated {len(s) - limit} chars]")
 
 
+def _timed_out_output(exc: subprocess.TimeoutExpired) -> Tuple[str, str]:
+    """(stdout, stderr) of a killed run, as text.
+
+    ``TimeoutExpired`` carries the partial output as BYTES even when the run asked for
+    ``text=True`` (documented: "always bytes when any output was captured"). Passed on as it
+    was, the first ``"..." in stderr`` after the run raised ``TypeError: a bytes-like object is
+    required, not 'str'`` out of execute_code, so a run that printed and then timed out failed
+    the whole code peer instead of returning ``timed_out``. GIS harness T16, 2026-10-16: twice,
+    each time a script that printed its CRS checks and then overlaid 9,843 buildings.
+    """
+    def text(out: Any) -> str:
+        if out is None:
+            return ""
+        if isinstance(out, (bytes, bytearray)):
+            return bytes(out).decode("utf-8", errors="replace")
+        return str(out)
+    return text(exc.stdout), text(exc.stderr)
+
+
 def method_library_root() -> Optional[Path]:
     """Where the generated method library lives, built or not: the ONE answer for its reader and
     its writers.
@@ -1641,7 +1660,7 @@ class DockerCodeExecutor(CodeExecutor):
             except subprocess.TimeoutExpired as exc:
                 fork_safe.run(["docker", "kill", iname], capture_output=True)
                 _evict_torn_cache(deps_cache)
-                return None, (exc.stdout or ""), (exc.stderr or ""), True, "dependency install timed out"
+                return None, *_timed_out_output(exc), True, "dependency install timed out"
             except FileNotFoundError:
                 return None, "", "", False, "docker executable not found"
             if inst.returncode != 0:
@@ -1656,7 +1675,7 @@ class DockerCodeExecutor(CodeExecutor):
             return proc.returncode, proc.stdout, proc.stderr, False, None
         except subprocess.TimeoutExpired as exc:
             fork_safe.run(["docker", "kill", name], capture_output=True)
-            return None, (exc.stdout or ""), (exc.stderr or ""), True, "execution timed out"
+            return None, *_timed_out_output(exc), True, "execution timed out"
         except FileNotFoundError:
             return None, "", "", False, "docker executable not found"
         except Exception as exc:  # pragma: no cover - defensive
@@ -1707,7 +1726,7 @@ class LocalSubprocessExecutor(CodeExecutor):
                     capture_output=True, text=True, timeout=DEFAULT_INSTALL_TIMEOUT,
                 )
             except subprocess.TimeoutExpired as exc:
-                return None, (exc.stdout or ""), (exc.stderr or ""), True, "dependency install timed out"
+                return None, *_timed_out_output(exc), True, "dependency install timed out"
             if inst.returncode != 0:
                 return None, inst.stdout, _clip(inst.stderr), False, "dependency install failed"
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(work)}
@@ -1730,7 +1749,7 @@ class LocalSubprocessExecutor(CodeExecutor):
             )
             return proc.returncode, proc.stdout, proc.stderr, False, None
         except subprocess.TimeoutExpired as exc:
-            return None, (exc.stdout or ""), (exc.stderr or ""), True, "execution timed out"
+            return None, *_timed_out_output(exc), True, "execution timed out"
         except Exception as exc:  # pragma: no cover - defensive
             return None, "", "", False, f"{type(exc).__name__}: {exc}"
 

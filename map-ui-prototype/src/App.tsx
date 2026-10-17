@@ -762,12 +762,17 @@ export default function App() {
           // collapsing it to 'geojson' sends a class-NAME style column down the numeric
           // choropleth ramp, which yields NaN for every feature and one flat fill.
           const categorical = layer.render === 'categories' && !!layer.legend?.length;
+          // A road network and a route on it keep their render: toDeckLayer draws them the way a
+          // navigation app does, and AgentMap stacks the network under everything, the route on top.
+          const lineRole = layer.render === 'network' || layer.render === 'route' ? layer.render : null;
           putLayer({
             kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
             data: fc, fitBounds: true, sourceUrl: layer.url,
-            render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
+            render: heat ? 'heatmap' : categorical ? 'categories' : lineRole ?? 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // The colour the user asked for, set by the agent; it wins over every default.
+            color: layer.color,
             // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
             // Dropped here once already: the flag reached the client and died in this call,
             // so the zone came back as a violet slab over its own pixel image.

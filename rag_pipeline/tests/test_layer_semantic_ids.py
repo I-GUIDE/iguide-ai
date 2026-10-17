@@ -190,10 +190,10 @@ def test_the_basis_actually_fitted_decides_the_shared_pca_layer():
 
 
 def _zone_content(clusters=5, **over):
-    from agent_runtime.rs_embed_tools import _CLUSTER_COLORS
+    from agent_runtime.rs_embed_tools import _MAX_CLUSTERS
     c = dict(file="f1", model="gse", period=("year", 2022), tile_px=200, max_tiles=None,
              zone_id_field="GEOID", siblings=None, zone_ids=None,
-             clusters=max(2, min(int(clusters), len(_CLUSTER_COLORS))))
+             clusters=max(2, min(int(clusters), _MAX_CLUSTERS)))
     c.update(over)
     return c
 

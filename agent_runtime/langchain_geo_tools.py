@@ -375,13 +375,31 @@ def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
             raise ValueError(f"unreadable vector/tabular source: {table_error or exc}") from exc
     return dataframe_to_points(frame)
 
-# Qualitative palette for render="categories". Distinct hues rather than a ramp: these are
-# class NAMES with no order, so a sequential scale would imply one.
-_CATEGORY_COLORS = [
-    [215, 25, 28, 200], [44, 123, 182, 200], [253, 174, 97, 200], [171, 217, 233, 200],
-    [26, 150, 65, 200], [123, 50, 148, 200], [255, 217, 47, 200], [166, 97, 26, 200],
-    [230, 97, 158, 200], [102, 194, 165, 200], [140, 140, 140, 200], [8, 81, 156, 200],
-]
+# The most classes render="categories" draws: past a dozen distinct hues, colours stop being
+# tellable apart. The palette itself is the map client's (map-ui-prototype palette.ts), so the
+# look of every map is decided in one place; a tool sends class names, and a colour only where
+# the user asked for one (`class_colors`) or the colour carries meaning (Gi*, LISA).
+_MAX_CATEGORIES = 12
+
+
+def _auto_render(gdf, column: Optional[str], is_point: bool) -> str:
+    """What render="auto" draws. A `column` asked for is what the layer is FOR, so it decides:
+    class names (a branch, a LISA class, a region id) are categories, numbers a choropleth.
+    Without one, a large point set is a density surface and anything else is drawn plainly.
+
+    The column used to be ignored here. Live 2026-10-17 (cooling-centre example, step 2: "map
+    the block groups coloured by the branch that serves them"), add_map_layer drew the 2,158
+    block-group points as a heatmap, past the 2,000-point line, and the answer said they were
+    coloured by branch.
+    """
+    if column and column in gdf.columns:
+        import pandas as _pd
+        values = gdf[column]
+        if _pd.api.types.is_bool_dtype(values) or not _pd.api.types.is_numeric_dtype(values):
+            return "categories"
+        return "choropleth"
+    return "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+
 
 def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the vector/shapefile StructuredTools (geopandas-backed).
@@ -862,13 +880,20 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
     def add_map_layer(file_id: str, render: str = "auto", column: Optional[str] = None,
                       name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
-                      max_points: Optional[int] = None) -> str:
+                      max_points: Optional[int] = None, color: Optional[str] = None,
+                      class_colors: Optional[Dict[str, str]] = None) -> str:
         """Put a dataset on the user's interactive map as a styled layer.
 
         `render`: "heatmap" (point density), "choropleth" (polygons shaded by a NUMERIC
         `column`), "categories" (shaded by a CLASS-NAME `column` — LISA classes, Gi* bands,
-        region ids; a legend is built for you), "points"/"shapes", or "auto". Returns the layer descriptor
-        the client plots, plus a downloadable GeoJSON file_id.
+        region ids; a legend is built for you), "route" (a path found on a network, drawn like a
+        navigation app: a cased line with its start and end marked), "network" (a road or street
+        network as muted context lines beneath the rest), "points"/"shapes", or "auto". Returns
+        the layer descriptor the client plots, plus a downloadable GeoJSON file_id.
+
+        `color` colours the whole layer ("the crimes in red"); `class_colors` maps class names
+        to colours for render="categories". Both take a name or hex. Leave them out unless the
+        user asked for a colour: the map has its own palette.
         """
         tmp = None
         try:
@@ -878,6 +903,21 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             redirect = _unmappable_input(file_id)
             if redirect:
                 return json.dumps(redirect)
+            from agent_runtime.map_layers import parse_colour
+
+            # Colours the user asked for, resolved before any work so a bad one is answered at
+            # once. The map draws numbers; a name it cannot place is reported, never guessed.
+            layer_colour = parse_colour(color) if color else None
+            if color and not layer_colour:
+                return json.dumps({"ok": False, "error": f"{color!r} is not a colour",
+                                   "hint": "Use a colour name (red, darkorange) or hex (#d7191c)."})
+            wanted: Dict[str, List[int]] = {}
+            for cls, value in (class_colors or {}).items():
+                rgba = parse_colour(value)
+                if not rgba:
+                    return json.dumps({"ok": False, "error": f"{value!r} (for {cls!r}) is not a colour",
+                                       "hint": "Use a colour name (red, darkorange) or hex (#d7191c)."})
+                wanted[str(cls)] = rgba
             read_path, tmp = _stage(file_id, sibling_file_ids)
             gdf = read_vector(read_path)
             if getattr(gdf, "crs", None) is not None:
@@ -891,7 +931,27 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             # worth suggesting live in the columns that were dropped.
             full = gdf
             if mode == "auto":
-                mode = "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+                mode = _auto_render(gdf, column, bool(is_point))
+            if layer_colour and mode == "categories":
+                return json.dumps({"ok": False,
+                                   "error": "a categories layer is coloured per class",
+                                   "hint": "Pass class_colors={class: colour} for the classes the "
+                                           "user named; the rest keep the map's palette."})
+            if layer_colour and mode == "choropleth":
+                return json.dumps({"ok": False,
+                                   "error": "a choropleth's colour is its value scale, so one colour "
+                                            "cannot be applied",
+                                   "hint": "Drop `color`, or draw the features with render='shapes' "
+                                           "(or 'points') to show them in one colour."})
+            if mode in {"route", "network"} and not geom_types <= {"LineString", "MultiLineString"}:
+                # The navigation-style renders draw lines: a route as a cased line with its two
+                # ends marked, a network as muted context beneath it. Anything else would draw
+                # nothing the user could read as a road.
+                return json.dumps({"ok": False,
+                                   "error": f"render={mode!r} draws lines; this file holds "
+                                            f"{sorted(geom_types)}",
+                                   "hint": "Pass the path as LineString features (one per edge, in "
+                                           "travel order, or one merged line), or use 'points'/'shapes'."})
             if mode == "categories":
                 # A class-NAME column (LISA's High-High, a Gi* band, a region id). Without a
                 # legend the client has nothing to map names to colours and falls back to the
@@ -903,13 +963,25 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                                 "column to colour by",
                                        "columns": [c for c in gdf.columns if c != "geometry"][:40]})
                 classes = [str(v) for v in gdf[column].dropna().unique()]
-                if len(classes) > len(_CATEGORY_COLORS):
+                if len(classes) > _MAX_CATEGORIES:
                     return json.dumps({"ok": False,
                                        "error": f"{column!r} has {len(classes)} distinct values; "
-                                                f"categories renders at most {len(_CATEGORY_COLORS)}",
+                                                f"categories renders at most {_MAX_CATEGORIES}",
                                        "hint": "Use render='choropleth' for a numeric column, or bin "
                                                "the values first."})
-                legend = [{"label": c, "color": _CATEGORY_COLORS[i]} for i, c in enumerate(sorted(classes))]
+                unknown = sorted(set(wanted) - set(classes))
+                if unknown:
+                    return json.dumps({"ok": False,
+                                       "error": f"class_colors names {unknown}, which {column!r} "
+                                                "does not hold",
+                                       "classes": sorted(classes)})
+                legend = [{"label": c, **({"color": wanted[c]} if c in wanted else {})}
+                          for c in sorted(classes)]
+            elif wanted:
+                return json.dumps({"ok": False,
+                                   "error": "class_colors colours classes, so it needs "
+                                            "render='categories' and its `column`",
+                                   "hint": "For one colour for the whole layer, pass `color`."})
             if mode == "choropleth":
                 if not column or column not in gdf.columns:
                     # List the NUMERIC columns: an arbitrary first-N slice hides the very
@@ -1002,10 +1074,24 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                  # Only categorical layers carry one; the client keys its
                                  # 'categories' render off its presence.
                                  **({"legend": legend} if legend else {}),
+                                 **({"color": layer_colour} if layer_colour else {}),
                                  # Carried to the UI so a partial layer says so on screen.
                                  "sampled": bool(sampled), "total": total}}
             if note:
                 res["note"] = note
+            # What colours the map will actually show, so the answer can name a colour only when
+            # one was set. Before this the model could say "highlighted in red" over a purple
+            # layer: nothing it called could make one red.
+            set_colours = {**({"layer": color} if layer_colour else {}),
+                           **({"classes": dict(class_colors or {})} if wanted else {})}
+            if set_colours:
+                res["colours_set"] = set_colours
+            res["colour_note"] = (
+                "Colours set here are what the map shows; any other class or layer uses the "
+                "map's own palette. Name a colour in the answer only if it was set here."
+                if set_colours else
+                "No colour was set: the map uses its own palette, so do not name colours in the "
+                "answer. Pass `color` or `class_colors` if the user asked for one.")
             if qa.get("notes"):
                 res["visual_notes"] = qa["notes"]
             # The map keeps ONE layer per source file (map_layers.source_layer_id). Said here
@@ -1024,9 +1110,21 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             description=("Put a dataset on the user's INTERACTIVE MAP as a styled layer they can pan, "
                          "zoom and click — this is how a map is delivered here, and it is what to use "
                          "when the user asks to see/plot/visualize data on the map. `render`: "
-                         "'heatmap' for point density, 'choropleth' for polygons shaded by a numeric "
-                         "`column` (e.g. the count from vector_spatial_join), 'points'/'shapes', or "
-                         "'auto'. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
+                         "'heatmap' for point density, 'choropleth' for features shaded by a numeric "
+                         "`column` (e.g. the count from vector_spatial_join), 'categories' for "
+                         "features coloured by a class-name `column` (which facility serves each "
+                         "area, a LISA class, a region id; a legend is built), 'points'/'shapes', or "
+                         "'auto' (with a `column`: categories or choropleth by its type; without "
+                         "one: a heatmap for more than 2,000 points). COLOURS: the map has its "
+                         "own palette; when the user asks for a colour, pass `color` (whole "
+                         "layer, e.g. 'red') or `class_colors` ({class: colour} for "
+                         "'categories'); name a colour in the answer only if you set it. For a route found on a "
+                         "network (shortest or fastest path), use 'route': it is drawn like a "
+                         "navigation app, a thick cased line with its start and end marked, above a "
+                         "muted road network; 'network' draws a network you built that way. Pass "
+                         "the route as LineString features in travel order (or one merged line); "
+                         "its start and end are marked for you, so a separate endpoints layer only "
+                         "doubles them. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download. The map keeps one layer per source file: drawing a file that "

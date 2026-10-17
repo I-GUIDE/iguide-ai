@@ -70,7 +70,23 @@ SYNTHESIS_PROMPT = (
     "information is unavailable. Do not present it as work done this turn, do not embed an image "
     "or link that appears only there, and if a record contradicts this turn's results, this turn "
     "wins. A line marked FAILED means the tool did not work — that result does not exist and must "
-    "never be reported as produced."
+    "never be reported as produced.\n"
+    "9. PLACE NAMES: say which neighbourhood, district, landmark or side of a city a coordinate "
+    "lies in ONLY when a result names it (reverse_geocode, or a name column in the data). A place "
+    "name for a coordinate that no result gives is invented: leave it out and give the "
+    "coordinates. (Observed: a Loop hexagon described as \"around Wrigleyville\", 7 km away.)"
+)
+
+# Where a result lies, in words, comes from a tool or the data, never from memory. Live
+# 2026-10-17 (crash hot-spot example): the code peer described hexagon H1852 at -87.622, 41.887
+# as "on Chicago's North Side ... around Wrigleyville"; reverse_geocode puts it in the Loop (New
+# East Side), 7 km south, and the synthesizer passed the code peer's sentence through. Appended to
+# both peers' prompts, and rule 9 of SYNTHESIS_PROMPT drops any such name no result carries.
+PLACE_NAMES_RULE = (
+    "PLACE NAMES: to say where a result lies (a neighbourhood, district, landmark or side of a "
+    "city), call `reverse_geocode` with its coordinates, or use a name column the data carries. "
+    "Never name the place at a coordinate from memory: it is a guess that reads as a fact. If "
+    "neither is available, give the coordinates alone.\n"
 )
 
 # The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map
@@ -153,6 +169,7 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "sandbox working directory, which holds scratch files and not the user's artifacts. "
     "Never answer 'what did you save' by listing a directory in execute_code.\n"
     + VISUALIZATION_ROUTES_RULE
+    + PLACE_NAMES_RULE
 )
 
 CODE_PEER_PROMPT = (
@@ -231,6 +248,7 @@ CODE_PEER_PROMPT = (
     "coordinates or ask the user for them. Drop names that come back found=false (organizations "
     "without a location, 'null' rows) and note them in your report."
     + VISUALIZATION_ROUTES_RULE
+    + PLACE_NAMES_RULE
 )
 
 # Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or

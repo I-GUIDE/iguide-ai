@@ -427,6 +427,46 @@ def geocode_place_point(place: str) -> Optional[Tuple[float, float]]:
     return geocode_point_cache.get(place)
 
 
+
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+reverse_cache: Dict[Tuple[float, float, int], Optional[Dict[str, Any]]] = {}
+
+
+def reverse_geocode_point(lat: float, lon: float, zoom: int = 16) -> Optional[Dict[str, Any]]:
+    """What OpenStreetMap says is at (lat, lon): Nominatim /reverse, as {display_name, address}.
+
+    ``zoom`` is Nominatim's level of detail (10 city, 14 suburb, 16 major street, 18 building).
+    Shares geocode_place's ~1 request/second limiter; cached per point (to 1e-5 degrees, about a
+    metre) for the life of the process. None when nothing is there or the service fails.
+    """
+    global last_geocode_call
+    key = (round(float(lat), 5), round(float(lon), 5), int(zoom))
+    if key in reverse_cache:
+        return reverse_cache[key]
+    elapsed = time.monotonic() - last_geocode_call
+    if elapsed < 1.0:
+        time.sleep(1.0 - elapsed)
+    try:
+        resp = session().get(
+            NOMINATIM_REVERSE_URL,
+            params={"lat": key[0], "lon": key[1], "zoom": key[2], "format": "jsonv2",
+                    "addressdetails": 1},
+            headers={"User-Agent": NOMINATIM_USER_AGENT},
+        )
+        last_geocode_call = time.monotonic()
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict) or body.get("error") or not body.get("display_name"):
+            reverse_cache[key] = None
+            return None
+        out = {"display_name": body.get("display_name"), "address": body.get("address") or {},
+               "osm_type": body.get("osm_type"), "osm_id": body.get("osm_id")}
+        reverse_cache[key] = out
+        return out
+    except Exception:
+        logger.exception("Reverse geocoding failed for %s", key)
+        return None
+
 from ..llm_utils import call_llm as _call_llm
 
 

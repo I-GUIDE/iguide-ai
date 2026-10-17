@@ -195,3 +195,17 @@ def test_each_run_gets_its_own_checkpoint_namespace():
         "the second turn inherited the first turn's step counter")
     assert "conv-1" in first["checkpoint_thread_id"], (
         "the conversation is still identifiable in the checkpoint key")
+
+
+def test_the_peer_failure_log_carries_the_traceback(caplog):
+    """The log used to carry the message only. GIS harness T16 (2026-10-16) logged
+    "peer code failed: TypeError: a bytes-like object is required, not 'str'" twice, and finding
+    the line that raised it took a reproduction. The traceback names it."""
+    def where_it_broke(*_a, **_k):
+        raise TypeError("a bytes-like object is required, not 'str'")
+
+    with caplog.at_level("WARNING", logger=G.__name__):
+        G._run_peer("code", where_it_broke, {"actions": ["code"]})
+    rec = next(r for r in caplog.records if r.getMessage().startswith("peer code failed"))
+    assert rec.exc_info and rec.exc_info[0] is TypeError
+    assert "where_it_broke" in caplog.text
