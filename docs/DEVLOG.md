@@ -5892,3 +5892,36 @@ rather than from the previous one.
   real ones.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
   `npm run check:route`; `npm run check:palette`.
+
+## 2026-10-17 · M8.111 · Recolouring restyles the layer it names (architecture S76.1)
+
+- **The fault:** asked to recolour two branches, the agent copied the layer's file, added a
+  `color` column and drew the copy, so the map showed the layer twice.
+- **The fix:** `add_map_layer` now treats a file that is a recorded parent plus only colour or
+  style columns as that parent, so the redraw replaces the parent's layer. A copy that adds a
+  result column keeps its own layer.
+- **The second path:** each styled copy `add_map_layer` writes now records which layer it stands
+  for, so redrawing that copy (the second live try) restyles the same layer.
+- **What the model is told:** the tool says to recolour by redrawing the same file_id with
+  `color` / `class_colors`.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
+
+## 2026-10-17 · M8.113 · A code run can be watched, stopped and reviewed while it runs (architecture stage 78)
+
+- **The fault:** T16 on production lost three of six runs to a 60 s limit on correct but slow
+  code. The model saw only "execution timed out", and Stop left the container running.
+- **Limit:** 180 s by default, capped at 600.
+- **Supervision:** runs are supervised (heartbeat, Stop, review) instead of one blocking call.
+- **Timeouts:** a timed-out run names the line it was on, from a faulthandler stack taken before
+  the kill.
+- **Rules before the run:** slow constructs, and a stated value the code never uses.
+- **Model review during the run:** starts after 5 s, with a live stack sample and vertex
+  counts. It stops the run only on a critical verdict the code backs (the quote is on the line;
+  a performance claim is where the stack is, and waits for 30 s and a re-check; a parameter
+  claim quotes the task).
+- **Stop:** `POST /agent/chat/cancel` with the stream's `turn` id kills the container and stops
+  the agent at its next step.
+- **Map UI:** a run bar with the elapsed time and the review state, and a Stop offer after 90 s.
+- **Vertex counts:** `inspect_vector` reports them.
+- **Tests:** `rag_pipeline/tests/test_code_watch.py`, plus `test_code_execution.py` (Docker
+  timeout through the new loop).

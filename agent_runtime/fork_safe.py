@@ -89,6 +89,32 @@ def run(args: Union[StrPath, Sequence[StrPath]], *, cwd: Optional[StrPath] = Non
     return subprocess.run(argv, executable=program, env=env, close_fds=False, **kwargs)
 
 
+def popen(args: Union[StrPath, Sequence[StrPath]], *, cwd: Optional[StrPath] = None,
+          env: Optional[Mapping[str, str]] = None, **kwargs: Any) -> subprocess.Popen:
+    """:class:`subprocess.Popen` with :func:`run`'s guarantee: on macOS no fork of this process.
+
+    For a child that has to be watched while it runs (code_execution._supervise polls it for a
+    Stop, a heartbeat and a review verdict) rather than waited on in one call.
+    """
+    unsupported = sorted(_UNSUPPORTED.intersection(kwargs))
+    if unsupported:
+        raise TypeError(f"fork_safe.popen() does not take {', '.join(unsupported)}: on macOS "
+                        "each would either fork this process or change what the arguments mean")
+    if not avoids_fork():
+        return subprocess.Popen(args, cwd=cwd, env=env, **kwargs)
+    if isinstance(args, (str, bytes, os.PathLike)):
+        args = [args]
+    argv = [os.fspath(a) for a in args]
+    program = _program_path(argv[0], env)
+    if cwd is not None:
+        directory = os.fspath(cwd)
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), directory)
+        argv = ["/bin/sh", "-c", _CD_THEN_EXEC, "sh", directory, program, *argv[1:]]
+        program = "/bin/sh"
+    return subprocess.Popen(argv, executable=program, env=env, close_fds=False, **kwargs)
+
+
 def _program_path(name: str, env: Optional[Mapping[str, str]]) -> str:
     """``name`` as a path, searched on ``env``'s PATH as subprocess would, or FileNotFoundError.
 
@@ -104,4 +130,4 @@ def _program_path(name: str, env: Optional[Mapping[str, str]]) -> str:
     return found
 
 
-__all__ = ["avoids_fork", "run"]
+__all__ = ["avoids_fork", "popen", "run"]

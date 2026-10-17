@@ -277,6 +277,40 @@ export interface StreamHandlers {
   onMapLayer?: (layer: MapLayerEvent) => void;         // untruncated geometry to plot live
   onAnswerChunk?: (text: string) => void;              // answer text when it arrives
   onIds?: (ids: { threadId?: string; memoryId?: string }) => void;
+  /** The id Stop cancels on the server (cancelTurn). First event of every stream. */
+  onTurn?: (turnId: string) => void;
+  /** A running sandbox's heartbeat: elapsed seconds, its limit, the review's state. */
+  onCodeProgress?: (p: CodeProgress) => void;
+}
+
+/** One `code_progress` event (agent_runtime/code_watch.py). */
+export interface CodeProgress {
+  stage: 'started' | 'running' | 'finished';
+  label?: string;
+  elapsed_s?: number;
+  timeout_s?: number;
+  /** waiting | reviewing | ok | critical | stopped | failed | dropped | off */
+  review?: string;
+  outcome?: string;
+}
+
+/** Stop a running turn on the server: the sandbox container is killed and the agent stops at
+ *  its next step. Aborting the fetch alone left both running for minutes. Never throws: Stop
+ *  must always also abort locally, whatever this answers. */
+export async function cancelTurn(cfg: AgentConfig, turnId: string): Promise<boolean> {
+  if (!turnId) return false;
+  const url = /\/chat\/stream\/?$/.test(cfg.endpoint)
+    ? cfg.endpoint.replace(/\/stream\/?$/, '/cancel')
+    : absoluteUrl('/agent/chat/cancel', cfg);
+  try {
+    const r = await fetch(url, {
+      method: 'POST', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
+      body: JSON.stringify({ turnId }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 export interface MapLayerEvent {
@@ -654,6 +688,25 @@ export async function streamChat(
         if (p.message) h.onTrace?.({ text: String(p.message), kind: 'decision' });
         break;
       }
+      case 'turn':
+        if (p.turn_id) h.onTurn?.(String(p.turn_id));
+        break;
+      case 'code_progress':
+        h.onCodeProgress?.(p as CodeProgress);
+        break;
+      // The rule check, the review starting, and its verdict. A stop is a warning: the run the
+      // reader was waiting on ended early, and this says why.
+      case 'code_review': {
+        if (p.message && p.stage !== 'started') {
+          h.onTrace?.({ text: String(p.message),
+                        kind: p.stopped || p.verdict === 'critical' ? 'warn'
+                          : p.verdict === 'hints' ? 'decision' : 'result' });
+        }
+        break;
+      }
+      case 'cancelled':
+        h.onTrace?.({ text: `Stopped on the server: ${p.reason || 'stopped by the user'}`, kind: 'warn' });
+        break;
       case 'node': {
         const msg = p.message || p.detail?.message;
         if (msg) h.onTrace?.({ text: String(msg), kind: 'node' });

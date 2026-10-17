@@ -22,23 +22,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import inspect
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent_runtime.extraction_flag import extraction_enabled
 # Children are started through fork_safe, never subprocess directly: on macOS a fork of this
 # process after its first reprojection kills the child before exec (see fork_safe).
 from agent_runtime import fork_safe
+from agent_runtime import code_watch, turn_control
 
 def _num_env(name: str, default: float) -> float:
     """A numeric env var that tolerates being present but blank.
@@ -60,7 +64,13 @@ def _num_env(name: str, default: float) -> float:
 # without first building anything. The pre-baked image is opt-in via the env var, and the
 # probe below reports which one is actually in play — see _log_image_choice.
 DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
-DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
+# 180 s by default, and never more than AGENT_CODE_EXEC_MAX_TIMEOUT whatever the model asks for.
+# 60 s killed real work: production T16 (2026-10-17) lost three of six runs to it, each a
+# correct program on 9,843 buildings that needed two to four minutes. A longer run is no
+# longer a silent one: it sends a heartbeat, can be stopped, and is reviewed while it runs
+# (code_watch), so the limit can be generous without leaving someone staring at a spinner.
+DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "180"))
+MAX_TIMEOUT = max(1, int(os.getenv("AGENT_CODE_EXEC_MAX_TIMEOUT", "600")))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
 # Per-run sandbox budget. 512m was too small for the real work this agent is asked to do:
 # a city-scale incident CSV (~130k rows) through pandas + geopandas, a KDE/hexbin heatmap, or
@@ -384,6 +394,149 @@ def _timed_out_output(exc: subprocess.TimeoutExpired) -> Tuple[str, str]:
     return text(exc.stdout), text(exc.stderr)
 
 
+@dataclass
+class _RunInfo:
+    """What one supervised run leaves beyond the (code, stdout, stderr, timed_out, error) tuple
+    every backend's ``_run`` returns. Filled in by :func:`_supervise`."""
+    watch: Optional["code_watch.RunWatch"] = None
+    runtime: Optional[Path] = None          # the run's .iguide_rt directory (stack dumps)
+    script: str = "script.py"
+    line_offset: int = 0                     # lines the invariant gate put before the code
+    code_lines: int = 0
+    interrupt: Optional["code_watch.Interrupt"] = None
+    frames: List[Dict[str, Any]] = field(default_factory=list)
+    ran_s: Optional[float] = None
+
+
+def _prepare_runtime(work: Path) -> Optional[Path]:
+    """Write the run's sitecustomize (stack dumps on SIGUSR1) into ``work/.iguide_rt``."""
+    rt = work / code_watch.RUNTIME_DIRNAME
+    try:
+        rt.mkdir(exist_ok=True)
+        (rt / "sitecustomize.py").write_text(code_watch.SITECUSTOMIZE, encoding="utf-8")
+        stack = rt / code_watch.STACK_FILENAME
+        stack.write_text("", encoding="utf-8")
+        os.chmod(rt, 0o777)
+        os.chmod(stack, 0o666)    # written by the container's user, which is not ours
+    except OSError:
+        return None
+    return rt
+
+
+def _read_tail(fh: Any, limit: int) -> str:
+    """The last *limit* bytes a child has written to *fh*, read without moving its offset.
+
+    The child shares the file description, so a seek here would move where its next write
+    lands; ``pread`` reads at an offset and leaves the shared one alone."""
+    try:
+        fd = fh.fileno()
+        size = os.fstat(fd).st_size
+        start = max(0, size - limit)
+        return os.pread(fd, size - start, start).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
+
+
+def _supervise(argv: List[str], *, timeout: int, info: _RunInfo,
+               kill: Callable[[Any], None], signal_stack: Callable[[Any], None],
+               grace: float = 0.0, cwd: Optional[Path] = None,
+               env: Optional[Dict[str, str]] = None) -> Tuple[Optional[int], str, str, bool]:
+    """Run *argv* and watch it: a Stop, the time limit, the heartbeat and the concurrent review.
+
+    Replaces a single blocking ``run(timeout=...)``, which could do none of those things: the
+    agent learned only "execution timed out", the browser saw nothing for a minute, and Stop
+    left the container computing. Output goes to files rather than pipes so a live tail can be
+    read for the review without draining the child's pipe.
+
+    Returns ``(returncode, stdout, stderr, timed_out)``; ``info`` gets the interrupt, the stack
+    frames sampled before a timeout kill, and the run's wall time.
+    """
+    def sample() -> List[Dict[str, Any]]:
+        if info.runtime is None:
+            return []
+        stack_path = info.runtime / code_watch.STACK_FILENAME
+        try:
+            before = stack_path.stat().st_size
+        except OSError:
+            return []
+        try:
+            signal_stack(proc)
+        except Exception:  # noqa: BLE001 - a missing sample is not a failure
+            return []
+        deadline = time.monotonic() + 1.5
+        size = before
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            try:
+                now = stack_path.stat().st_size
+            except OSError:
+                return []
+            if now > before and now == size:    # grew, then stopped growing: complete
+                break
+            size = now
+        try:
+            with open(stack_path, "rb") as fh:
+                fh.seek(before)
+                text = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return []
+        return code_watch.parse_stack(text, script=info.script, line_offset=info.line_offset,
+                                      code_lines=info.code_lines)
+
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        started = time.monotonic()
+        proc = fork_safe.popen(argv, stdout=out_f, stderr=err_f, cwd=cwd, env=env)
+        timed_out = False
+        watch = info.watch
+        if watch is not None:
+            watch.start(code_watch.RunProbe(sample_stack=sample,
+                                            stdout_tail=lambda: _read_tail(out_f, 4000)))
+        returncode: Optional[int] = None
+        try:
+            while True:
+                try:
+                    returncode = proc.wait(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                elapsed = time.monotonic() - started
+                if turn_control.cancel_requested():
+                    info.interrupt = code_watch.Interrupt(
+                        "cancelled", "stopped: the person who asked stopped this turn")
+                    break
+                if elapsed >= timeout + grace:
+                    timed_out = True
+                    info.frames = sample()     # where it was, before it is gone
+                    break
+                if watch is not None:
+                    info.interrupt = watch.tick(elapsed)
+                    if info.interrupt is not None:
+                        break
+        finally:
+            if returncode is None:
+                try:
+                    kill(proc)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    returncode = proc.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    returncode = proc.wait()
+                if timed_out or info.interrupt is not None:
+                    returncode = None
+            info.ran_s = round(time.monotonic() - started, 1)
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout = out_f.read().decode("utf-8", errors="replace")
+        stderr = err_f.read().decode("utf-8", errors="replace")
+    if watch is not None:
+        outcome = ("timed_out" if timed_out else info.interrupt.kind if info.interrupt
+                   else "ok" if returncode == 0 else "failed")
+        watch.finish(ran_s=info.ran_s or 0.0, outcome=outcome)
+    return returncode, stdout, stderr, timed_out
+
+
 def method_library_root() -> Optional[Path]:
     """Where the generated method library lives, built or not: the ONE answer for its reader and
     its writers.
@@ -643,6 +796,17 @@ class ExecResult:
     verification: Dict[str, Any] = field(default_factory=dict)
     # Calls the code made through the tool bridge (agent_runtime/tool_bridge.py), in order.
     bridge_calls: List[Dict[str, Any]] = field(default_factory=list)
+    # Why the run was stopped before it ended on its own: "review" (the concurrent code review
+    # found a critical problem) or "cancelled" (the person stopped the turn). None otherwise.
+    interrupted: Optional[str] = None
+    # A timed-out run's last position: line, its source, the call stack, and the rule finding
+    # that explains it (code_watch.stack_report).
+    stuck_at: Optional[Dict[str, Any]] = None
+    # The concurrent review's record (code_watch.RunWatch), and the pre-run rule findings.
+    review: Optional[Dict[str, Any]] = None
+    rule_findings: List[Dict[str, Any]] = field(default_factory=list)
+    ran_seconds: Optional[float] = None
+    time_limit_s: Optional[int] = None
 
     @property
     def ok(self) -> bool:
@@ -664,6 +828,12 @@ class ExecResult:
             # model can react in-loop: reproject and re-run rather than caveat a wrong number.
             "verification": self.verification,
             **({"bridge_calls": self.bridge_calls} if self.bridge_calls else {}),
+            **({"interrupted": self.interrupted} if self.interrupted else {}),
+            **({"stuck_at": self.stuck_at} if self.stuck_at else {}),
+            **({"review": self.review} if self.review else {}),
+            **({"performance_hints": self.rule_findings} if self.rule_findings else {}),
+            **({"ran_seconds": self.ran_seconds} if self.ran_seconds is not None else {}),
+            **({"time_limit_s": self.time_limit_s} if self.time_limit_s else {}),
         }
 
 
@@ -1264,11 +1434,15 @@ class CodeExecutor:
                 input_files: Optional[List[Dict[str, str]]] = None,
                 label: Optional[str] = None,
                 session: Optional[str] = None,
-                entrypoint: Optional[str] = None) -> ExecResult:
+                entrypoint: Optional[str] = None,
+                watch: Optional["code_watch.RunWatch"] = None) -> ExecResult:
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
-        timeout = int(timeout or DEFAULT_TIMEOUT)
+        asked = int(timeout or DEFAULT_TIMEOUT)
+        timeout = max(1, min(asked, MAX_TIMEOUT))
+        clamp_note = (f"[time limit: {asked} s was asked for and the cap is {MAX_TIMEOUT} s, so "
+                      f"this run had {timeout} s]" if asked > MAX_TIMEOUT else None)
         entrypoint = (str(entrypoint).strip() if entrypoint else "") or None
         if not (code or "").strip() and not entrypoint:
             return ExecResult(
@@ -1312,6 +1486,13 @@ class CodeExecutor:
                 source_for_deps = ""
 
         deps, rejected = _sanitize_deps(dependencies)
+        # Rules before the run (code_watch.precheck): instant, never blocking. They go back with
+        # the result, to the concurrent review as leads, and to the stuck-line report.
+        findings = code_watch.precheck(source_for_deps, brief=(watch.brief if watch else ""))
+        info = _RunInfo(watch=watch, script=(entrypoint or "script.py"),
+                        code_lines=len(source_for_deps.splitlines()))
+        if watch is not None:
+            watch.code, watch.timeout, watch.findings = source_for_deps, timeout, findings
         auto = _infer_deps(source_for_deps, deps)
         if auto:
             deps = [*deps, *auto]
@@ -1364,7 +1545,10 @@ class CodeExecutor:
                 script = code or ""
                 if invariant_gate_enabled():
                     from agent_runtime.sandbox_verify import epilogue_source, prologue_source
-                    script = prologue_source(contracts_for_code(code or "")) + script + epilogue_source()
+                    prologue = prologue_source(contracts_for_code(code or ""))
+                    # Stack frames report lines of the written file; the code starts after this.
+                    info.line_offset = prologue.count("\n")
+                    script = prologue + script + epilogue_source()
                 (work / "script.py").write_text(script, encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors, shadowed = _stage_inputs(work, input_files)
@@ -1391,6 +1575,11 @@ class CodeExecutor:
                                            else str(broot)), session=session)
                 bridge.start()
                 extra_run["bridge_dir"] = broot
+            # The supervision record, for a backend whose _run takes it (both real ones do; an
+            # executor written against the older signature runs unwatched, as it always did).
+            if "info" in inspect.signature(self._run).parameters:
+                info.runtime = _prepare_runtime(work)
+                extra_run["info"] = info
             try:
                 exit_code, stdout, stderr, timed_out, error = self._run(
                     work, timeout, deps, deps_cache=deps_cache, entrypoint=entrypoint, **extra_run)
@@ -1398,6 +1587,41 @@ class CodeExecutor:
                 if bridge is not None:
                     bridge.stop()
                     bridge.cleanup()
+                if info.runtime is not None:
+                    shutil.rmtree(info.runtime, ignore_errors=True)
+            stuck = None
+            if timed_out and info.frames:
+                stuck = code_watch.stack_report(info.frames, source_for_deps, findings)
+            notes: List[str] = []
+            if clamp_note:
+                notes.append(clamp_note)
+            if timed_out and error == "execution timed out":
+                error = f"execution timed out after {timeout} s"
+                if stuck:
+                    where = f"line {stuck['line']}: {stuck['source']}"
+                    if stuck.get("inside"):
+                        where += f" (inside {stuck['inside']})"
+                    note = f"[timed out at {where}]"
+                    if stuck.get("explained_by"):
+                        hint = stuck["explained_by"]
+                        note += f"\n[that is the {hint['rule'].replace('_', ' ')} the pre-run check flagged: " \
+                                f"{hint['message']}. Fix: {hint['fix']}]"
+                    notes.append(note)
+            if info.interrupt is not None:
+                if info.interrupt.kind == "review" and info.interrupt.review:
+                    r = info.interrupt.review
+                    error = (f"stopped after {info.ran_s} s by the code review: "
+                             f"{r.get('problem', '')}")
+                    notes.append(f"[code review, line {r.get('line')} ({r.get('category')}): "
+                                 f"{r.get('problem', '')}\nFix: {r.get('fix', '')}\n"
+                                 "Apply the fix and run again. Nothing this run computed is "
+                                 "a result.]")
+                else:
+                    error = info.interrupt.message
+            if notes:
+                # FIRST, like the library note below: `_clip` keeps the head, and these are the
+                # explanation of the run's outcome, not footnotes to it.
+                stderr = ("\n".join(notes) + "\n" + str(stderr or "")).strip()
             # Output files the run produced, plus the executed source itself (downloadable).
             # Staged input files are excluded so uploads aren't re-persisted as outputs — but only
             # while they still hold the input: a run that wrote under an input's name made a file.
@@ -1453,7 +1677,12 @@ class CodeExecutor:
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps,
                               verification=verification,
-                              bridge_calls=(bridge.calls if bridge is not None else []))
+                              bridge_calls=(bridge.calls if bridge is not None else []),
+                              interrupted=(info.interrupt.kind if info.interrupt else None),
+                              stuck_at=stuck,
+                              review=(watch.review_record if watch is not None else None),
+                              rule_findings=findings, ran_seconds=info.ran_s,
+                              time_limit_s=timeout)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -1461,7 +1690,8 @@ class CodeExecutor:
              dependencies: Optional[List[str]] = None,
              deps_cache: Optional[Path] = None,
              entrypoint: Optional[str] = None,
-             bridge_dir: Optional[Path] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
+             bridge_dir: Optional[Path] = None,
+             info: Optional[_RunInfo] = None) -> Tuple[Optional[int], str, str, bool, Optional[str]]:
         raise NotImplementedError
 
 
@@ -1556,7 +1786,8 @@ class DockerCodeExecutor(CodeExecutor):
     def build_argv(self, work: Path, name: str,
                    deps_cache: Optional[Path] = None,
                    entrypoint: Optional[str] = None,
-                   bridge_dir: Optional[Path] = None) -> List[str]:
+                   bridge_dir: Optional[Path] = None,
+                   runtime: bool = False) -> List[str]:
         """Execution phase: NO network, read-only rootfs, deps importable via PYTHONPATH."""
         argv = [
             "docker", "run", "--rm", "--init", "--name", name,
@@ -1588,6 +1819,11 @@ class DockerCodeExecutor(CodeExecutor):
                      "-v", f"{bridge_dir}/out:{CONTAINER_ROOT}/out:ro",
                      "--env", f"IGUIDE_BRIDGE={CONTAINER_ROOT}"]
             pythonpath = f"{pythonpath}:{CONTAINER_ROOT}/out"
+        if runtime:
+            # First on the path so its sitecustomize is the one imported (code_watch).
+            rt = f"/work/{code_watch.RUNTIME_DIRNAME}"
+            pythonpath = f"{rt}:{pythonpath}"
+            argv += ["--env", f"IGUIDE_STACK_FILE={rt}/{code_watch.STACK_FILENAME}"]
         argv += ["--env", f"PYTHONPATH={pythonpath}"]
         if deps_cache is not None:
             # READ-ONLY on purpose. The cache outlives the run, so code that could write to it
@@ -1637,7 +1873,8 @@ class DockerCodeExecutor(CodeExecutor):
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
              deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None,
-             bridge_dir: Optional[Path] = None):
+             bridge_dir: Optional[Path] = None, info: Optional[_RunInfo] = None):
+        info = info or _RunInfo()
         # Phase 1 (deps): a separate container WITH network installs into /work/.deps.
         # Nothing to install is the common case once the image is baked and the cache is warm,
         # and then this phase — a whole container start — is skipped entirely.
@@ -1668,14 +1905,22 @@ class DockerCodeExecutor(CodeExecutor):
                 return None, inst.stdout, _clip(inst.stderr), False, "dependency install failed"
         # Phase 2 (exec): NO network.
         name = f"agentexec_{uuid.uuid4().hex[:12]}"
+        argv = self.build_argv(work, name, deps_cache, entrypoint,
+                               **({"bridge_dir": bridge_dir} if bridge_dir else {}),
+                               **({"runtime": True} if info.runtime is not None else {}))
         try:
-            proc = fork_safe.run(self.build_argv(work, name, deps_cache, entrypoint,
-                                                 **({"bridge_dir": bridge_dir} if bridge_dir else {})),
-                                 capture_output=True, text=True, timeout=timeout + 5)
-            return proc.returncode, proc.stdout, proc.stderr, False, None
-        except subprocess.TimeoutExpired as exc:
-            fork_safe.run(["docker", "kill", name], capture_output=True)
-            return None, *_timed_out_output(exc), True, "execution timed out"
+            # The container is named so it can be reached: SIGUSR1 asks it for its stack
+            # (tini, from --init, forwards it to python), and kill ends it. Killing the docker
+            # CLI alone would leave the container running.
+            rc, out, err, timed_out = _supervise(
+                argv, timeout=timeout, info=info, grace=5.0,
+                kill=lambda _p: fork_safe.run(["docker", "kill", name], capture_output=True,
+                                              timeout=30),
+                signal_stack=lambda _p: fork_safe.run(
+                    ["docker", "kill", "--signal", "USR1", name], capture_output=True, timeout=10))
+            if timed_out:
+                return None, out, err, True, "execution timed out"
+            return rc, out, err, False, None
         except FileNotFoundError:
             return None, "", "", False, "docker executable not found"
         except Exception as exc:  # pragma: no cover - defensive
@@ -1715,7 +1960,8 @@ class LocalSubprocessExecutor(CodeExecutor):
 
     def _run(self, work: Path, timeout: int, dependencies: Optional[List[str]] = None,
              deps_cache: Optional[Path] = None, entrypoint: Optional[str] = None,
-             bridge_dir: Optional[Path] = None):
+             bridge_dir: Optional[Path] = None, info: Optional[_RunInfo] = None):
+        info = info or _RunInfo()
         # No container to mount into, so the durable cache IS the target directory.
         deps_dir = deps_cache if deps_cache is not None else (work / DEPS_DIRNAME)
         if dependencies:
@@ -1740,16 +1986,20 @@ class LocalSubprocessExecutor(CodeExecutor):
         if bridge_dir is not None:
             env["IGUIDE_BRIDGE"] = str(bridge_dir)
             paths.append(str(Path(bridge_dir) / "out"))
+        if info.runtime is not None:
+            paths.insert(0, str(info.runtime))
+            env["IGUIDE_STACK_FILE"] = str(info.runtime / code_watch.STACK_FILENAME)
         if paths:
             env["PYTHONPATH"] = os.pathsep.join(paths)
         try:
-            proc = fork_safe.run(
+            rc, out, err, timed_out = _supervise(
                 [sys.executable or "python", entrypoint or "script.py"],
-                cwd=str(work), env=env, capture_output=True, text=True, timeout=timeout,
-            )
-            return proc.returncode, proc.stdout, proc.stderr, False, None
-        except subprocess.TimeoutExpired as exc:
-            return None, *_timed_out_output(exc), True, "execution timed out"
+                timeout=timeout, info=info, cwd=work, env=env,
+                kill=lambda p: p.kill(),
+                signal_stack=lambda p: p.send_signal(signal.SIGUSR1))
+            if timed_out:
+                return None, out, err, True, "execution timed out"
+            return rc, out, err, False, None
         except Exception as exc:  # pragma: no cover - defensive
             return None, "", "", False, f"{type(exc).__name__}: {exc}"
 

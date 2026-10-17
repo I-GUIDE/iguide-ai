@@ -45,6 +45,7 @@ from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enab
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
+from agent_runtime.turn_control import TurnCancelled
 from agent_runtime import lineage
 from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
@@ -1841,7 +1842,7 @@ def _run_peer(name: str, call, state: SupervisorState):
     try:
         return call(), None
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
             raise
         # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
         # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
@@ -6169,7 +6170,7 @@ def build_supervisor_graph(
             if not update.get("reground"):
                 update["reground"] = False
         except BaseException as exc:                  # noqa: BLE001 - deliberately total
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
                 raise
             reason = f"{type(exc).__name__}: {exc}"[:200]
             try:

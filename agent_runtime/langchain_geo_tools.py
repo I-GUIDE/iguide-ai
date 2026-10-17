@@ -326,6 +326,87 @@ def dataframe_to_points(df: Any) -> Any:
     )
 
 
+# Column names a STYLING copy adds: a file that differs from its parent only by columns like
+# these is the parent, restyled.
+_STYLE_COLUMN_RE = re.compile(r"colou?r|fill|stroke|hex|rgba?|style|symbol|marker|swatch", re.I)
+
+
+def styling_parent(file_id: Any, gdf: Any) -> Optional[str]:
+    """The file this one is a restyled copy of, or None.
+
+    Live 2026-10-17 (cooling centres, "colour Lozano black and Portage-Cragin hot pink"): the
+    code peer copied the layer's file, added a `color` column, and drew the copy. The map keeps
+    one layer per source file, so the copy came up as a SECOND layer over the first. A copy that
+    adds nothing but colour or style columns to a file it was made from (its recorded lineage
+    parent: same rows, same geometry, same values in every shared column) is that file, drawn
+    again: it takes the parent's layer. A copy that adds anything else (a LISA class, a rate) is
+    a new result and keeps its own.
+    """
+    try:
+        from agent_runtime.file_store import get_file_record, resolve_file_id
+
+        # Cheap first: no colour or style column, no styling copy (most code outputs stop here,
+        # before any parent is read).
+        if gdf is None or len(gdf) == 0 or not any(_STYLE_COLUMN_RE.search(str(c))
+                                                   for c in gdf.columns):
+            return None
+        record = get_file_record(str(file_id)) or {}
+        parents = list(((record.get("lineage") or {}).get("parents")) or [])
+        if not parents:
+            return None
+        for parent in parents:
+            try:
+                prec = get_file_record(str(parent)) or {}
+                name = str(prec.get("filename") or "").lower()
+                if not name.endswith((".geojson", ".json", ".gpkg", ".parquet", ".zip", ".shp")):
+                    continue
+                other = read_vector(resolve_file_id(str(parent)))
+            except Exception:  # noqa: BLE001 - an unreadable parent is simply not the one
+                continue
+            if len(other) != len(gdf):
+                continue
+            added = [c for c in gdf.columns if c not in other.columns]
+            if not added or any(c not in gdf.columns for c in other.columns):
+                continue
+            if not all(_STYLE_COLUMN_RE.search(str(c)) for c in added):
+                continue
+            a = other.to_crs(gdf.crs) if (other.crs and gdf.crs and other.crs != gdf.crs) else other
+            if not all(x.equals_exact(y, 1e-9) for x, y in zip(a.geometry, gdf.geometry)):
+                continue
+            shared = [c for c in other.columns if c != other.geometry.name]
+            if all(a[c].astype(str).tolist() == gdf[c].astype(str).tolist() for c in shared):
+                return str(parent)
+    except Exception:  # noqa: BLE001 - never stops a layer being drawn
+        return None
+    return None
+
+
+def layer_source_key_for(file_id: Any, read_path: Any, gdf: Any) -> Tuple[str, Optional[str]]:
+    """The source key of the map layer a draw of `file_id` belongs to, and the parent file it was
+    resolved through (or None).
+
+    Live 2026-10-17, second try at "colour Lozano black": the model redrew the styled copy that
+    add_map_layer had itself written for the first draw. That copy is keyed by its own content,
+    so the recolour came up as a second layer. A copy now carries the key of the layer it stands
+    for (`layer_source_key`, set when add_map_layer writes it), and that key wins here.
+    """
+    from agent_runtime.file_store import get_file_record, resolve_file_id
+
+    def recorded(ref: Any) -> Optional[str]:
+        try:
+            return (get_file_record(str(ref)) or {}).get("layer_source_key") or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    own = recorded(file_id)
+    if own:
+        return str(own), None
+    parent = styling_parent(file_id, gdf)
+    if parent:
+        return (recorded(parent) or source_content_key(parent, resolve_file_id(parent))), parent
+    return source_content_key(file_id, read_path), None
+
+
 def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
     """Load any supported vector source as a GeoDataFrame.
 
@@ -473,7 +554,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     def inspect_vector(file_id: str, sibling_file_ids: Optional[List[str]] = None,
                        layer: Optional[str] = None) -> str:
         """Read a vector dataset's metadata (CRS, extent, geometry type, feature count,
-        attribute schema) WITHOUT loading all geometry. Accepts a TIGER/shapefile .zip,
+        vertex counts, attribute schema). Geometry is read only to count vertices, and only for
+        layers up to 250,000 features. Accepts a TIGER/shapefile .zip,
         a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet. """
         tmp = None
         try:
@@ -516,6 +598,17 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "columns": cols,
                 "bounds": [float(x) for x in tb] if tb is not None else None,
             }
+            # Vertices, not just features: one 97,315-vertex polygon reported as "1 feature"
+            # is how T16's overlay was written as if it were cheap (code_watch.geometry_size).
+            if payload["geometry_type"]:
+                from agent_runtime.code_watch import geometry_size
+                size = geometry_size(str(read_path), layer)
+                if size:
+                    payload["vertex_count"] = size.get("vertices_total")
+                    payload["max_vertices_per_feature"] = size.get("vertices_max")
+                    payload["max_parts_per_feature"] = size.get("parts_max")
+                    if size.get("note"):
+                        payload["size_note"] = size["note"]
             # A CSV/TSV of coordinates has no geometry OF ITS OWN, so pyogrio reports none —
             # which reads as "not mappable". Report the geometry we can DERIVE from its
             # coordinate columns instead, so the caller knows the layer is usable as points.
@@ -897,7 +990,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         """
         tmp = None
         try:
-            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.file_store import create_output_file_from_path, resolve_file_id
             from agent_runtime.map_layers import drawn_layer_key
 
             redirect = _unmappable_input(file_id)
@@ -1024,9 +1117,14 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             # layer. The same data drawn as a heatmap and as points stays two layers, because
             # render, column and sampling are part of the key. The input counts as what was READ
             # (source_content_key), so a sibling that changes nothing read changes nothing here.
-            key = drawn_layer_key(source_content_key(file_id, read_path), mode, column=column,
+            # Which map layer this draw belongs to. A styled copy this tool wrote earlier says so
+            # on its record; a restyled copy (its parent's rows plus a colour column) is its
+            # parent's layer; anything else is its own.
+            src_key, parent = layer_source_key_for(file_id, read_path, full)
+            key = drawn_layer_key(src_key, mode, column=column,
                                   sample=ceiling if sampled else None)
-            rec = create_output_file_from_path(out, filename=fname, content_key=key)
+            rec = create_output_file_from_path(out, filename=fname, content_key=key,
+                                               layer_source_key=src_key)
             # Look at what was actually written before calling it a visual. A choropleth over a
             # constant column, a styling column that did not survive the write, or geometry in
             # metres labelled EPSG:4326 all produce a map that is technically delivered and
@@ -1067,7 +1165,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    # One layer per SOURCE file: the styled copy written above stands for the
                    # input, so drawing the same input again, in any render, replaces this layer
                    # (map_layers.source_layer_id). `key` stays the copy's own content key.
-                   "map_layer": {"source_key": source_content_key(file_id, read_path),
+                   "map_layer": {"source_key": src_key,
                                  "url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
                                  "count": int(len(gdf)),
@@ -1091,13 +1189,18 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "map's own palette. Name a colour in the answer only if it was set here."
                 if set_colours else
                 "No colour was set: the map uses its own palette, so do not name colours in the "
-                "answer. Pass `color` or `class_colors` if the user asked for one.")
+                "answer. Pass `color` or `class_colors` if the user asked for one. To recolour "
+                "this layer later, call add_map_layer on this same file_id with them.")
             if qa.get("notes"):
                 res["visual_notes"] = qa["notes"]
             # The map keeps ONE layer per source file (map_layers.source_layer_id). Said here
             # because the model cannot see the map: told nothing, it reported "the earlier layer
             # is still on the map too" after a redraw had replaced it (Chicago demo, 2026-10-15).
             res["layer_identity"] = LAYER_IDENTITY_NOTE
+            if parent:
+                res["restyled"] = (f"this file is {parent} plus colour/style columns only, so it "
+                                   "replaced that file's layer; next time call add_map_layer on "
+                                   f"{parent} itself with color/class_colors")
             return json.dumps(res, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
@@ -1118,7 +1221,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "one: a heatmap for more than 2,000 points). COLOURS: the map has its "
                          "own palette; when the user asks for a colour, pass `color` (whole "
                          "layer, e.g. 'red') or `class_colors` ({class: colour} for "
-                         "'categories'); name a colour in the answer only if you set it. For a route found on a "
+                         "'categories'); name a colour in the answer only if you set it. To "
+                         "RECOLOUR or restyle a layer already on the map, call add_map_layer again "
+                         "on the SAME file_id with the new color/class_colors: never write a "
+                         "colour column or a copy of the file first. For a route found on a "
                          "network (shortest or fastest path), use 'route': it is drawn like a "
                          "navigation app, a thick cased line with its start and end marked, above a "
                          "muted road network; 'network' draws a network you built that way. Pass "
@@ -1141,7 +1247,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "drawing an image already on the map replaces its layer.")),
         StructuredTool.from_function(func=accept_null_defaults(inspect_vector), name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
-                         "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
+                         "count, vertex counts, attribute columns). The vertex counts say what "
+                         "geometry operations will cost: one feature can hold 100,000 vertices. Handles a TIGER/Line "
                          "shapefile .zip, a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet by "
                          "file_id. " + _SIB)),
         StructuredTool.from_function(func=accept_null_defaults(render_map_image), name="render_map_image", metadata=meta,

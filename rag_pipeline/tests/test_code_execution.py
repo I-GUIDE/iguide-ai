@@ -73,25 +73,46 @@ def test_timeout_after_printing_returns_text_not_a_crash():
 
 
 def test_docker_timeout_output_is_decoded(monkeypatch, tmp_path):
+    """A docker run that printed and then timed out: text out, and the CONTAINER killed.
+
+    The exec phase is supervised now (code_execution._supervise: Popen + a polling loop, so a
+    Stop, the heartbeat and the review can act during the run), so the fake is a process that
+    writes and then never exits until `docker kill` names its container."""
     import subprocess
 
     import agent_runtime.code_execution as ce
 
     calls = []
+    state = {"killed": False}
+
+    class FakeProc:
+        def __init__(self, argv, stdout=None, stderr=None, **kwargs):
+            stdout.write("Waikīkī\n".encode())
+            stderr.write(b"UserWarning: geographic CRS\n")
+            stdout.flush()
+            stderr.flush()
+
+        def wait(self, timeout=None):
+            if state["killed"]:
+                return 137
+            raise subprocess.TimeoutExpired("docker", timeout)
+
+        def kill(self):
+            state["killed"] = True
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
-        if argv[:2] == ["docker", "kill"]:
-            return subprocess.CompletedProcess(argv, 0, "", "")
-        raise subprocess.TimeoutExpired(argv, 5, output="Waikīkī\n".encode(),
-                                        stderr=b"UserWarning: geographic CRS\n")
+        if argv[:2] == ["docker", "kill"] and "--signal" not in argv:
+            state["killed"] = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(ce.fork_safe, "run", fake_run)
+    monkeypatch.setattr(ce.fork_safe, "popen", FakeProc)
     exit_code, stdout, stderr, timed_out, error = DockerCodeExecutor(image="img:test")._run(
         tmp_path, 1)
     assert (exit_code, timed_out, error) == (None, True, "execution timed out")
     assert stdout == "Waikīkī\n" and stderr == "UserWarning: geographic CRS\n"
-    assert any(c[:2] == ["docker", "kill"] for c in calls)
+    assert any(c[:2] == ["docker", "kill"] and "--signal" not in c for c in calls)
 
 
 def test_timed_out_output_handles_every_shape():

@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from agent_runtime import turn_control
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,13 @@ _STATUS_TIER_EVENTS = frozenset(
         # Plottable geometry from geo tools (e.g. overpass_search). Status-tier so a
         # map client receives it even when detail-tier tracing (agent_dev) is off.
         "map_layer",
+        # A code run's heartbeat (elapsed time, the concurrent review's state) and that review's
+        # verdict. Status tier: someone waiting on a three-minute run needs to see it is alive
+        # whether or not they asked for the detailed trace.
+        "code_progress",
+        "code_review",
+        "turn",
+        "cancelled",
     }
 )
 
@@ -379,6 +388,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         return (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
 
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         name = self._model_label(serialized, kwargs)
         message_count = sum(len(group or []) for group in messages or []) if isinstance(messages, list) else None
         self._emit(
@@ -392,6 +402,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         name = self._model_label(serialized, kwargs)
         self._emit(
             "llm_start",
@@ -438,6 +449,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_tool_start(self, serialized: Dict[str, Any], input_str: Any, **kwargs: Any) -> None:
+        turn_control.raise_if_cancelled()   # Stop takes effect at the next step
         tool_name = str((serialized or {}).get("name") or kwargs.get("name") or "unknown_tool")
         args = _normalize_tool_args(input_str)
         run_key = self._tool_run_key(kwargs.get("run_id"))
