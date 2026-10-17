@@ -5856,3 +5856,16 @@ rather than from the previous one.
 
 **Measured** 14 offline tests; Stage 63/71 tests updated.
 
+## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
+
+- **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column
+  (class names → categories, numbers → choropleth); before, 2,158 points became a heatmap. The
+  tool description now lists `categories`.
+- **Invented place names:** new `reverse_geocode` tool (Nominatim `/reverse`), plus a rule in both
+  peers and the synthesizer that a place named for a coordinate must come from a tool or the data.
+  Live, the Loop hexagon is now "in the Loop", not "around Wrigleyville".
+- **Routes:** `route` and `network` renders. The route is a cased blue line with green start and
+  red end markers on top; the network is muted slate lines beneath. The OSM road network arrives
+  as `network`.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
+  `npm run check:route`.

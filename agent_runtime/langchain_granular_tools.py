@@ -640,15 +640,19 @@ def reverse_geocode_tool(points: Any, zoom: int = 16) -> str:
             parsed.append((lat, lon))
     dropped = max(0, len(parsed) - _REVERSE_MAX_POINTS)
     parsed = parsed[:_REVERSE_MAX_POINTS]
+    # Each point is echoed as `point: [lat, lon]`, not as lat/lon fields: the map UI previews any
+    # result object carrying lat/lon as features, and these are only the coordinates asked about
+    # (live 2026-10-17 they became two stray layers beside the route, "reverse_geocode (preview)"
+    # and "Agent results").
     results: List[Dict[str, Any]] = []
     for lat, lon in parsed:
         hit = reverse_geocode_point(lat, lon, zoom=int(zoom or 16))
         if not hit:
-            results.append({"lat": lat, "lon": lon, "found": False})
+            results.append({"point": [lat, lon], "found": False})
             continue
         addr = hit.get("address") or {}
         parts = {k: addr[k] for k in _PLACE_PARTS if addr.get(k)}
-        results.append({"lat": lat, "lon": lon, "found": True,
+        results.append({"point": [lat, lon], "found": True,
                         "place": next(iter(parts.values()), None), "address": parts,
                         "road": addr.get("road"), "display_name": hit.get("display_name")})
     payload: Dict[str, Any] = {"ok": True, "results": results,

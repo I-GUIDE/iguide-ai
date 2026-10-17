@@ -113,6 +113,8 @@ def test_reverse_geocode_names_each_point_from_nominatim(monkeypatch):
     assert first["road"] == "North Lower Stetson Avenue"
     assert calls[1][:2] == (41.95, -87.65), "[lat, lon] pairs are read as lat, lon"
     assert "OpenStreetMap" in out["source"]
+    # No lat/lon fields: the map UI would preview the queried points as a stray layer.
+    assert first["point"] == [41.8872, -87.6222] and "lat" not in first and "lon" not in first
 
 
 def test_reverse_geocode_refuses_what_is_not_a_coordinate():
