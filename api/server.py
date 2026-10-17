@@ -1,3 +1,4 @@
+import io
 import os
 import logging
 import json
@@ -17,6 +18,7 @@ from rag_pipeline.agent_file_store import (may_read as file_store_may_read,
                                            set_session as set_file_store_session)
 from rag_pipeline.agent_chat_service import run_agent_chat, stream_agent_chat_events
 from agent_runtime import deployment_mode, identity, platform_endpoints
+from agent_runtime.strict_json import strict_dumps, strict_json_bytes
 from agent_runtime.client_profile import (requested_validation, reset_chat_only, reset_validation,
                                           set_chat_only, set_validation)
 from rag_pipeline.memory_module import (ConversationDeleted, MemoryAccessDenied,
@@ -923,7 +925,9 @@ def _classify_stream_error(exc: BaseException) -> dict:
 
 
 def _sse_event(name, data):
-    payload = json.dumps(data or {}, ensure_ascii=True, default=str)
+    # Strict: a `map_layer` event can carry its GeoJSON inline, and a bare NaN in it made the
+    # client's JSON.parse of the whole event fail, so the layer arrived with no data at all.
+    payload = strict_dumps(data or {}, ensure_ascii=True, default=str)
     return f"event: {name}\ndata: {payload}\n\n"
 
 
@@ -1773,6 +1777,12 @@ def upload_agent_files():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
+# The largest .geojson the download route reads into memory to make strict. Map layers are far
+# smaller (add_map_layer caps their features); a bigger file is sent as stored, and the map says
+# so if it cannot parse it.
+_STRICT_GEOJSON_MAX_BYTES = 64 * 1024 * 1024
+
+
 @app.route('/agent/files/<file_id>/download', methods=['GET'])
 def download_agent_file(file_id):
     """
@@ -1842,7 +1852,18 @@ def download_agent_file(file_id):
         # run it — and that now downloads instead.
         inline_ok = suffix in image_types and suffix != ".svg"
         force_download = request.args.get("download") in ("1", "true", "yes")
-        resp = send_file(path, as_attachment=(force_download or not inline_ok),
+        body = path
+        if suffix == ".geojson" and path.stat().st_size <= _STRICT_GEOJSON_MAX_BYTES:
+            # Every map layer is fetched through here and parsed with JSON.parse, which throws on
+            # the NaN/Infinity tokens Python's json writes. Fixed at serve time rather than in
+            # each producer, so a code peer's raw file, any tool's output and the files already
+            # in the store are covered too (the r59 route, 2026-10-17). The stored bytes are left
+            # as they are; only what is sent changes.
+            fixed, nulled = strict_json_bytes(path.read_bytes())
+            if fixed is not None:
+                logger.info("Served %s with %d non-finite value(s) written as null", file_id, nulled)
+                body = io.BytesIO(fixed)
+        resp = send_file(body, as_attachment=(force_download or not inline_ok),
                          download_name=record.get("filename") or path.name, mimetype=mimetype)
         # Never let a browser content-sniff a stored file into an executable type.
         resp.headers["X-Content-Type-Options"] = "nosniff"

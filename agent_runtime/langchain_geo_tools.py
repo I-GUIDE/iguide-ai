@@ -944,6 +944,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             fname = artifact_name(name, "geojson", source=str(read_path), default=f"{mode}_layer")
             out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
             gdf.to_file(out, driver="GeoJSON")
+            # GDAL nulls a NaN scalar but copies a list property through as raw JSON, NaN and
+            # all, and JSON.parse in the browser throws on it (r59's route, 2026-10-17). The
+            # download route makes every served .geojson strict anyway; this keeps the STORED
+            # copy strict as well, for whatever reads it without going through that route.
+            from agent_runtime.strict_json import sanitize_json_file
+            nulled = sanitize_json_file(out)
             # The layer is identified by WHAT IT SHOWS: the input's content and the view chosen
             # for it. It used to be identified by its label, i.e. by the `name` the model passed,
             # which is a per-run choice. The re-grounding pass of 2026-10-01 drew the same 2 km
@@ -1006,6 +1012,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                  "sampled": bool(sampled), "total": total}}
             if note:
                 res["note"] = note
+            if nulled:
+                res["nonfinite_as_null"] = (f"{nulled} NaN/Infinity value(s) in the attributes were "
+                                            "written as null so the browser can read the file")
             if qa.get("notes"):
                 res["visual_notes"] = qa["notes"]
             # The map keeps ONE layer per source file (map_layers.source_layer_id). Said here

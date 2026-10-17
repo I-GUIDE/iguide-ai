@@ -27,6 +27,7 @@ import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
 import { layerVerdicts, type ReplayMeta } from './replay';
+import { loadLayerData, undrawnLine } from './layerLoad';
 import {
   deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, rerenderMessages, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -683,6 +684,10 @@ export default function App() {
     const layerLoads: Promise<unknown>[] = [];
     const tracked = (draw: (layer: MapLayerEvent) => Promise<void>) =>
       (layer: MapLayerEvent) => { layerLoads.push(draw(layer)); };
+    // Layers the agent sent that did not draw, one sentence each. Shown on the answer card, not
+    // only in the trace: the trace is folded once the turn ends, and the answer above it may say
+    // the layer is on the map.
+    const undrawn: string[] = [];
     setBusy(true);
     // A drawn region becomes spatial context for the agent (the API has no geometry
     // field, so it rides along in the prompt). The user bubble keeps the original text.
@@ -729,23 +734,20 @@ export default function App() {
             addTrace({ text: `map: raster — ${layer.label}`, kind: 'tool' });
             return;
           }
-          // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths).
-          let fc = layer.geojson;
-          if (!fc && layer.url) {
-            try {
-              const res = await fetchAgentFile(resolveUrl(layer.url), asAgentConfig(),
-                                               { signal: ctl.signal });
-              if (res.ok) fc = await res.json();
-              else {
-                // Say so. A refused download used to vanish here without a word, beside an
-                // answer saying the layer was on the map.
-                const why = await res.json().then((j) => j?.reason || '').catch(() => '');
-                addTrace({ text: `map: ${layer.label} could not be loaded (HTTP ${res.status}`
-                  + `${why ? `, ${why}` : ''}), so it is not on the map`, kind: 'warn' });
-              }
-            } catch { /* leave it undelivered rather than guess */ }
+          // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths). Every
+          // way it can fail to draw is SAID, in the trace and on the answer card: an empty
+          // `catch {}` here once swallowed a JSON.parse error on a file holding NaN, and the
+          // answer beside the empty map said the route was on it (r59, 2026-10-17).
+          const loaded = await loadLayerData(layer.geojson, layer.url,
+            (u) => fetchAgentFile(resolveUrl(u), asAgentConfig(), { signal: ctl.signal }));
+          if ('aborted' in loaded) return;
+          if ('problem' in loaded) {
+            const line = undrawnLine(layer.label || 'a layer', loaded.problem);
+            undrawn.push(line);
+            addTrace({ text: line, kind: 'warn' });
+            return;
           }
-          if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;
+          const fc = loaded.fc;
           const heat = layer.render === 'heatmap';
           const green = layer.source === 'overpass';
           // A categorical layer (LISA classes, Gi* bands, region ids) must keep that render:
@@ -826,6 +828,7 @@ export default function App() {
         addTrace({ text: `map: a layer was still downloading ${LAYER_WAIT_MS / 1000} s after the reply; `
           + 'the turn was saved without it', kind: 'warn' });
       }
+      if (undrawn.length) patch({ mapWarnings: [...undrawn] });
       setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1);
     }
     // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
