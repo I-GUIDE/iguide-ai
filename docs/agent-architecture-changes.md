@@ -11490,8 +11490,37 @@ stage, user 2026-10-17).
 - **The answer can only name colours that are real.** The tool result echoes `colours_set`, and
   `colour_note` says to name a colour only if it was set here, or not to name colours at all.
 
+**Recolouring restyles the layer it names** (S76.1, user 2026-10-17).
+- **The fault.** Live, asked to colour two branches, the code peer copied the layer's file,
+  added a `color` column, and drew the copy with `class_colors`. The map keeps one layer per
+  source file (Stage 67), so the copy came up as a second service-area layer over the first.
+- **The structural fix.** `langchain_geo_tools.styling_parent` checks the input's recorded
+  lineage parents (`file_store` keeps them, Stage 56). If the input is one of its parents plus
+  nothing but colour or style columns (`color`, `fill`, `hex`, `style` …), with the same rows,
+  the same geometry and the same values in every shared column, `add_map_layer` keys the layer
+  by that parent. The redraw then replaces the parent's layer.
+  - A copy that adds a result column (a LISA class, a rate) is a new result, and keeps its own
+    layer.
+  - So does a coloured file with no recorded parent.
+  - The check reads no parent unless the input has a colour or style column, so ordinary code
+    outputs pay nothing.
+- **The second path.** On a second live try, the model redrew the styled copy that
+  `add_map_layer` had itself written for the first draw. That copy was keyed by its own content,
+  so it too came up as a new layer. `add_map_layer` now records on each copy it writes the
+  source key of the layer it stands for (`file_store` `layer_source_key`).
+  `layer_source_key_for` resolves a draw in this order: a recorded key, then a styling parent
+  (through that parent's own recorded key), then the file's own content. A copy of a copy lands
+  on the same layer too.
+- **What the model is told.** The tool description and `colour_note` say to recolour by calling
+  `add_map_layer` on the SAME file_id with new `color`/`class_colors`, never by writing a colour
+  column or a copy. A redraw the fix caught says so in `restyled`, naming the file to use next
+  time.
+
 **Verified.**
-- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; colours:
+- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; recolouring:
+  five more tests (a colour copy restyles its parent's layer, a redraw of add_map_layer's own
+  copy and a copy of that copy do too, a result copy and an unparented file stay separate, the
+  description says how); colours:
   `palette.check.ts`, six more tests in `test_map_roles_and_place_names.py`, and
   `test_map_layers.py` (an entry needs a label, its colour is optional); the full suite
   passed: 4,659 tests, with one deselected test that fails on prototype too, a networkx pin that

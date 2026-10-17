@@ -5873,3 +5873,16 @@ rather than from the previous one.
   real ones.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
   `npm run check:route`; `npm run check:palette`.
+
+## 2026-10-17 · M8.111 · Recolouring restyles the layer it names (architecture S76.1)
+
+- **The fault:** asked to recolour two branches, the agent copied the layer's file, added a
+  `color` column and drew the copy, so the map showed the layer twice.
+- **The fix:** `add_map_layer` now treats a file that is a recorded parent plus only colour or
+  style columns as that parent, so the redraw replaces the parent's layer. A copy that adds a
+  result column keeps its own layer.
+- **The second path:** each styled copy `add_map_layer` writes now records which layer it stands
+  for, so redrawing that copy (the second live try) restyles the same layer.
+- **What the model is told:** the tool says to recolour by redrawing the same file_id with
+  `color` / `class_colors`.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
