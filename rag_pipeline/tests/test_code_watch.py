@@ -222,13 +222,21 @@ def _watch(reviewer, events, **kw):
 def test_a_critical_review_stops_the_run_and_returns_the_fix():
     events: list = []
 
+    prompts: list = []
+
     def reviewer(prompt):
-        assert "LIVE STACK (where" in prompt and "line 7" in prompt
+        # Recorded, not asserted here: an assert in the review thread only kills the review,
+        # and the test then reports a 60 s run instead of the wrong prompt.
+        prompts.append(prompt)
         return json.dumps(_verdict(fix="scipy.spatial.cKDTree(pts).query(pts, k=2)"))
 
     started = time.monotonic()
     r = LocalSubprocessExecutor().execute(SLOW_NESTED, timeout=60,
                                           watch=_watch(reviewer, events)).to_dict()
+    # The sample lands on either line of the inner loop: line 7 on macOS, line 6 (the `for`)
+    # on CI's Linux. Both are inside the loop the verdict cites.
+    assert prompts and "LIVE STACK (where" in prompts[0]
+    assert "- line 6 in" in prompts[0] or "- line 7 in" in prompts[0]
     assert time.monotonic() - started < 20
     assert r["interrupted"] == "review" and not r["ok"]
     assert r["review"]["stopped_run"] and r["review"]["line"] == 5
