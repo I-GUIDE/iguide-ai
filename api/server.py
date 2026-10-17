@@ -2588,6 +2588,59 @@ def agent_chat():
         return jsonify(payload), 500
 
 
+@app.route('/agent/chat/cancel', methods=['POST'])
+def agent_chat_cancel():
+    """
+    Stop a running streamed turn on the server.
+    ---
+    tags:
+      - Agent Chat
+    description: >
+      The stream's first event is `turn` with a `turn_id`. Posting that id here stops the turn:
+      a running sandbox container is killed within about a second, and the agent stops at its
+      next model call or tool call (a model call already under way finishes first). The stream
+      then sends `cancelled` and ends. Only the person who started the turn can stop it.
+      Turns live in the process that streams them, so this assumes one gunicorn worker
+      (WEB_CONCURRENCY=1, as deployed).
+    parameters:
+      - in: body
+        name: body
+        schema:
+          type: object
+          required: [turnId]
+          properties:
+            turnId:
+              type: string
+    responses:
+      200:
+        description: The turn was told to stop.
+      404:
+        description: No running turn of yours has that id (it may already have finished).
+    """
+    try:
+        _request_user = _require_user()
+    except identity.IdentityError as exc:
+        return _identity_error_response(exc)
+    try:
+        _require_agent_chat_api_key(_request_user)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except RuntimeError:
+        return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+    data = request.get_json(silent=True) or {}
+    turn_id = str(data.get("turnId") or data.get("turn_id") or "").strip()
+    from agent_runtime import turn_control
+    outcome = turn_control.request_cancel(
+        turn_id, getattr(_request_user, "id", None) if _request_user else None)
+    if outcome == "cancelled":
+        logger.info("Turn %s stopped on request", turn_id[:12])
+        return jsonify({"cancelled": True, "turnId": turn_id})
+    if outcome == "not_yours":
+        logger.info("Refused to stop turn %s: another caller's", turn_id[:12])
+    # Same answer for both: a turn that is not yours does not exist as far as you can tell.
+    return jsonify({"cancelled": False, "reason": "no_such_turn"}), 404
+
+
 @app.route('/agent/chat/stream', methods=['POST'])
 def agent_chat_stream():
     """
@@ -3223,6 +3276,13 @@ def agent_chat_stream():
 
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name in {"turn", "code_progress", "code_review", "cancelled"}:
+                        # turn: the id Stop cancels (POST /agent/chat/cancel). code_progress: a
+                        # running sandbox's heartbeat. code_review: the concurrent reviewer's
+                        # verdict. cancelled: the turn stopped on request. Forwarded as they are.
+                        yield _sse_event(event_name, payload)
+                        continue
 
                     if event_name == "map_layer":
                         # Untruncated plottable geometry from a geo tool (overpass_search, ...).

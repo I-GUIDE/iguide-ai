@@ -88,6 +88,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
+| 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11536,3 +11537,96 @@ stage, user 2026-10-17).
 against 1,378 m and 1.71 minutes: its route code mis-summed the length. Another run looped on its
 own routing script until the no-progress stop. These are routing correctness, not drawing.
 
+
+## Stage 78 — A code run can be watched, stopped and reviewed while it runs {#stage-78}
+
+**Why.** On production (2026-10-17, prototype 66248542) T16 lost three of six code runs to the
+60 s limit. Each was a correct program that was too slow:
+- 9,843 buildings tested against one unprepared 97,315-vertex polygon: 86 s as written, 7 s
+  prepared;
+- a Python loop over 23,382 road nodes for each building: 8.4 s, 0.2 s with a KD-tree.
+
+The model learned only "execution timed out". `inspect_vector` had called the polygon "1 feature".
+The browser showed a spinner for a minute. And Stop aborted only the fetch: the worker thread, the
+container and the following model calls carried on.
+
+The user asked for all of it (2026-10-17), adding two requirements. A model should review the
+code *while it executes*, and interrupt and correct a critical problem. A rule-based check should
+run as well.
+
+**Change.**
+- **Time limit** (`code_execution`). 180 s by default (`AGENT_CODE_EXEC_TIMEOUT`), and never more
+  than `AGENT_CODE_EXEC_MAX_TIMEOUT` (600) whatever `timeout_seconds` asks; a clamp is said in
+  the result.
+- **Supervised runs** (`code_execution._supervise`). The exec phase is a `fork_safe.popen` and a
+  polling loop instead of one blocking `run`. Output goes to files, so a live tail can be read
+  without draining a pipe. Each tick checks the turn's Stop, the time limit and the watcher. The
+  Docker backend signals and kills the named container, not the CLI.
+- **Where it stuck** (`code_watch.SITECUSTOMIZE`, `parse_stack`, `stack_report`).
+  - **How:** each run gets a `sitecustomize.py` first on `PYTHONPATH` that registers
+    faulthandler on SIGUSR1 into `.iguide_rt/stack.txt`. The program's line numbers are
+    untouched, and its stderr stays the model's. Docker's tini forwards the signal.
+  - **On a timeout:** before the kill, the host asks for the stack. The result's `stuck_at` names
+    the program line (mapped back through the invariant gate's prologue) and the library call it
+    was inside. `stderr` opens with `[timed out at line N: …]` and the matching rule finding.
+- **Rules before the run** (`code_watch.precheck`).
+  - **Constructs flagged:** an unprepared predicate against one geometry, nested row loops,
+    `iterrows`, a geometry method in a row-wise `apply`, and unions, file reads or `distance` inside
+    loops.
+  - **Stated parameters:** a distance or time the task states next to a parameter word (buffer,
+    radius, within…) that no number in the code equals in any unit. This is the "buffer 2500 m,
+    used 1000" issue.
+  - **Effect:** none of this blocks a run. The findings come back as `performance_hints`, go to
+    the reviewer as leads, and explain a stuck line.
+- **The review during the run** (`code_watch.RunWatch`).
+  - **When it starts:** once a run passes `AGENT_CODE_REVIEW_AFTER_S` (5 s). A thread sends one
+    model call carrying the task (the peer's brief without its data-source catalogue), the
+    numbered code, the inputs with feature *and vertex* counts, the rule findings, a live stack
+    sample and the stdout tail.
+  - **Cost:** a run that ends first waits for nothing, and the review is dropped.
+  - **What a stop needs:** a critical verdict stops the container only after `accept_verdict`
+    checks it against what the reviewer cannot invent. The quote must be on the cited line, and
+    a fix must be given. A performance claim must point at where the live stack is (the line or a
+    loop around it). A parameter claim must quote the task.
+  - **Performance stops are held.** A "too slow" verdict waits until the run has gone
+    `AGENT_CODE_REVIEW_PERF_FLOOR_S` (30 s), then re-samples the stack and stops only if the
+    program is still there. Live, the review stopped an `sjoin` at 7.7 s that had finished in
+    12 s one run earlier.
+  - **What the agent gets:** the stop returns `interrupted: "review"` with the line, problem and
+    fix. The code peer, which owns the code, applies it; the reviewer never runs code.
+  - **Modes:** `AGENT_CODE_REVIEW=observe` reports but never stops, and `off` makes no model
+    call.
+- **Stop** (`turn_control`, `POST /agent/chat/cancel`).
+  - **The handle:** every stream's first event is `turn` with an id, and the UI's Stop posts it
+    (owner-checked).
+  - **Where it acts:** the code run's loop kills the container within a second. The streaming
+    callback handler raises `TurnCancelled` at the next model call or tool start.
+  - **Why `TurnCancelled` is a `BaseException`:** so the tool node, the callback manager and the
+    supervisor's containment wrappers cannot turn it into an observation and carry on. The two
+    wrappers that catch `BaseException` re-raise it by name.
+  - **Disconnects:** a stream closed before its turn ends (a closed tab) cancels it too
+    (`AGENT_CANCEL_ON_DISCONNECT`).
+  - **Recording:** the turn is recorded as stopped.
+- **Heartbeat and UI.** `code_progress` (every 5 s) and `code_review` events are status tier. The
+  map UI shows a run bar: the label, the elapsed time against the limit, and the review's state.
+  After 90 s it offers a Stop of its own. Rule hints, review verdicts and stops appear in the
+  trace.
+- **Vertex counts** (`code_watch.geometry_size`). `inspect_vector` reports `vertex_count`,
+  `max_vertices_per_feature`, `max_parts_per_feature`, and a `size_note` above 10,000 vertices
+  in one feature.
+- **Prompt** (`PERFORMANCE_RULE`, both peers). Check sizes; prepare or `sjoin`; use KD-trees,
+  not nested loops; work on whole columns; read files and build unions once; fix `stuck_at`
+  rather than raise the limit; apply a review's fix.
+
+**Verified.**
+- **Unit tests:** `test_code_watch.py` (44), including real local runs for the timeout line,
+  review stop, held stop, dropped hold, Stop and the cap.
+- **Docker** (`iguide-codeexec:latest` and `python:3.11-slim`): the timeout names the line with
+  the gate on and off, the review stops the container, and no container is left.
+- **Live reviewer** (Lumen deepseek-v4-flash, real Waikīkī files). It stopped the unprepared
+  overlay at 12.9 s with the `shapely.prepare` fix (it would have run about 90 s).
+- **In the browser** (local agent from this branch):
+  - the run bar and the rule hints showed;
+  - the review stopped a row-wise predicate at 9.5 s and the agent rewrote it with `sjoin`;
+  - the answer was 909 / 324, both exactly the T16 reference;
+  - Stop during a run logged the cancel, killed the container, and no model call followed.

@@ -89,6 +89,25 @@ PLACE_NAMES_RULE = (
     "neither is available, give the coordinates alone.\n"
 )
 
+# Production T16 (2026-10-17): three of six runs timed out on correct but slow code. 9,843
+# buildings tested against one unprepared 97,315-vertex polygon (86 s; 7 s prepared) and a
+# Python loop over 23,382 road nodes for each building (8.4 s; 0.2 s with a KD-tree). The rule
+# check and the concurrent review (code_watch) catch these during a run; this is the same
+# knowledge before the code is written. Appended to both peers' prompts.
+PERFORMANCE_RULE = (
+    "WRITE GEOMETRY CODE FOR THE SIZE OF THE DATA. Check sizes first (inspect_vector reports "
+    "features AND vertices: one feature can hold 100,000 vertices). Then: test many geometries "
+    "against one big polygon only after `shapely.prepare(poly)`, or with `gpd.sjoin`, which "
+    "indexes both sides; find nearest points with `scipy.spatial.cKDTree` or "
+    "`gpd.sjoin_nearest`, never a Python loop inside a loop; call GeoSeries methods on whole "
+    "columns, not row by row in `apply` or `iterrows`; read files and build unions once, "
+    "outside loops. Print progress in long steps. A run is limited to 180 s by default "
+    "(`timeout_seconds` up to 600); a run that times out reports `stuck_at`, the line it was "
+    "on: fix that line, do not just raise the limit. A run stopped with `interrupted: "
+    "\"review\"` was stopped by a reviewer who read the code while it ran: apply its `fix` and "
+    "run again.\n"
+)
+
 # The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map
 # (a GeoJSON file the client auto-loads); a PNG is a separate, explicitly-requested export.
 # Without this, every "show it on the map" request produced only a downloadable image.
@@ -170,6 +189,7 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "Never answer 'what did you save' by listing a directory in execute_code.\n"
     + VISUALIZATION_ROUTES_RULE
     + PLACE_NAMES_RULE
+    + PERFORMANCE_RULE
 )
 
 CODE_PEER_PROMPT = (
@@ -249,6 +269,7 @@ CODE_PEER_PROMPT = (
     "without a location, 'null' rows) and note them in your report."
     + VISUALIZATION_ROUTES_RULE
     + PLACE_NAMES_RULE
+    + PERFORMANCE_RULE
 )
 
 # Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or

@@ -15,7 +15,7 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  streamChat, cancelTurn, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   fetchAgentFile,
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
@@ -156,6 +156,8 @@ export default function App() {
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
   const abortRef = useRef<AbortController | null>(null);
+  // The running turn's server id (the stream's first event), so Stop can end it there too.
+  const turnIdRef = useRef<string | null>(null);
 
   // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
   // the same single record as everything else. It has to be in BOTH the payload and the deps: in
@@ -189,6 +191,14 @@ export default function App() {
     ? { ...cfg, apiKey: '', uploadEndpoint: '/agent/files/upload',
         endpoint: `/agent/chat/stream?replay=${encodeURIComponent(REPLAY_KEY)}` }
     : { ...cfg }), [cfg]);
+  // Stop ends the turn on the server as well as here: the sandbox run is killed and the agent
+  // stops at its next step. Aborting the fetch alone left both running for minutes. The abort
+  // does not wait for the cancel call, so Stop is instant whatever the server answers.
+  const stopTurn = useCallback(() => {
+    const id = turnIdRef.current;
+    if (id) void cancelTurn(asAgentConfig(), id);
+    abortRef.current?.abort();
+  }, [asAgentConfig]);
   // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
   // so a link can be handed to an audience without also handing them a credential to paste.
   // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
@@ -784,6 +794,8 @@ export default function App() {
                             return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
         }),
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
+        onTurn: (id) => { turnIdRef.current = id; },
+        onCodeProgress: (cp) => patch({ progress: cp.stage === 'finished' ? undefined : { ...cp, at: Date.now() } }),
       });
       pendingFileIds.current = []; // attached to the thread server-side now
       // Reconcile with authoritative terminal result.
@@ -794,7 +806,7 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, markdown: res.error ? undefined : res.answer || undefined,
-              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
+              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false, progress: undefined });
       // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
       // rather than being awaited here. The await put the fallback's layers before `finally` ended
       // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
@@ -818,8 +830,8 @@ export default function App() {
       // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
       // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
       patch(isAuth
-        ? { html: renderMarkdown(text, resolveUrl), streaming: false }
-        : { text, streaming: false });
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false, progress: undefined }
+        : { text, streaming: false, progress: undefined });
     } finally {
       // The turn ends when its layers are drawn, so the snapshot this counter triggers includes
       // them, and `busy` keeps the composer from starting the next turn until then. A second save
@@ -831,7 +843,7 @@ export default function App() {
         addTrace({ text: `map: a layer was still downloading ${LAYER_WAIT_MS / 1000} s after the reply; `
           + 'the turn was saved without it', kind: 'warn' });
       }
-      setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1);
+      setBusy(false); abortRef.current = null; turnIdRef.current = null; setTurnsEnded((n) => n + 1);
     }
     // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
     // `snapshotSession` was first missing from these deps, and that single omission was the
@@ -1189,7 +1201,7 @@ export default function App() {
           models={models}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode && !tokenMode} resolveUrl={resolveUrl}
           onSend={runAgent}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stopTurn}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
