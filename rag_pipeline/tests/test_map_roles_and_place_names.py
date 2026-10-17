@@ -139,3 +139,73 @@ def test_reverse_geocode_is_bound_with_the_geocoder():
     from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
 
     assert [t.name for t in make_langchain_geocode_tools()] == ["geocode_places", "reverse_geocode"]
+
+
+# --------------------------------------------------------------------------- colours
+# The palette is the map client's (palette.ts). The agent sends a colour only where the user asked
+# for one or the colour carries meaning, and says which colours it set.
+
+
+def test_parse_colour_reads_names_hex_and_numbers():
+    from agent_runtime.map_layers import parse_colour
+
+    assert parse_colour("red") == [255, 0, 0, 255]
+    assert parse_colour("#d7191c") == [215, 25, 28, 255]
+    assert parse_colour("#d7191c80") == [215, 25, 28, 128]
+    assert parse_colour([10, 20, 30]) == [10, 20, 30, 255]
+    assert parse_colour([1.0, 0.5, 0.0]) == [255, 128, 0, 255]
+    assert parse_colour("not-a-colour") is None and parse_colour([300, 0, 0]) is None
+
+
+def test_categories_send_class_names_and_only_the_colours_asked_for(store):
+    fid = store(_block_groups(60), "bg3.geojson")
+    out = json.loads(_add_map_layer().invoke({
+        "file_id": fid, "render": "categories", "column": "nearest_branch",
+        "class_colors": {"Lozano": "orange"}}))
+    assert out["ok"], out
+    legend = {e["label"]: e.get("color") for e in out["map_layer"]["legend"]}
+    assert legend["Lozano"] == [255, 165, 0, 255]
+    assert all(c is None for k, c in legend.items() if k != "Lozano"), "the rest are the map's"
+    assert out["colours_set"] == {"classes": {"Lozano": "orange"}}
+
+
+def test_without_a_colour_the_answer_is_told_not_to_name_one(store):
+    out = json.loads(_add_map_layer().invoke({"file_id": store(_block_groups(60), "bg4.geojson"),
+                                              "render": "categories", "column": "nearest_branch"}))
+    assert all("color" not in e for e in out["map_layer"]["legend"])
+    assert "colours_set" not in out and "do not name colours" in out["colour_note"]
+
+
+def test_a_layer_colour_reaches_the_map_layer_event(store):
+    from agent_runtime.map_layers import build_map_layers
+
+    out = _add_map_layer().invoke({"file_id": store(_block_groups(60), "bg5.geojson"),
+                                   "render": "points", "color": "red"})
+    r = json.loads(out)
+    assert r["ok"] and r["colours_set"] == {"layer": "red"}
+    assert [ml.get("color") for ml in build_map_layers("add_map_layer", out)] == [[255, 0, 0, 255]]
+
+
+def test_colours_that_cannot_apply_are_refused_with_the_way_that_can(store):
+    add = _add_map_layer()
+    fid = store(_block_groups(60), "bg6.geojson")
+    bad = json.loads(add.invoke({"file_id": fid, "render": "points", "color": "blurple"}))
+    assert not bad["ok"] and "not a colour" in bad["error"]
+    cat = json.loads(add.invoke({"file_id": fid, "render": "categories",
+                                 "column": "nearest_branch", "color": "red"}))
+    assert not cat["ok"] and "class_colors" in cat["hint"]
+    unknown = json.loads(add.invoke({"file_id": fid, "render": "categories",
+                                     "column": "nearest_branch", "class_colors": {"Nowhere": "red"}}))
+    assert not unknown["ok"] and "Nowhere" in unknown["error"]
+    chor = json.loads(add.invoke({"file_id": fid, "render": "choropleth", "column": "population",
+                                  "color": "red"}))
+    assert not chor["ok"] and "value scale" in chor["error"]
+
+
+def test_meaningful_colours_stay_with_their_tool():
+    """Hot spots red and cold spots blue are the statistic's own reading, not decoration."""
+    from agent_runtime.analysis_spatial_stats_tools import _HOTSPOT_COLORS, _LISA_COLORS, _legend
+
+    hot = _legend(_HOTSPOT_COLORS, ["Hot spot (p < 0.01)", "Not significant"])
+    assert all(len(e["color"]) == 4 for e in hot)
+    assert _legend(_LISA_COLORS, ["High-High"])[0]["color"][0] > 200, "High-High is red"

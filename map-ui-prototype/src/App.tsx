@@ -761,6 +761,8 @@ export default function App() {
             render: heat ? 'heatmap' : categorical ? 'categories' : lineRole ?? 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // The colour the user asked for, set by the agent; it wins over every default.
+            color: layer.color,
             // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
             // Dropped here once already: the flag reached the client and died in this call,
             // so the zone came back as a violet slab over its own pixel image.

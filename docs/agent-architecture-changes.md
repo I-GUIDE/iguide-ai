@@ -87,7 +87,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
-| 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does |
+| 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11463,8 +11463,37 @@ examples (#150) and the Loop drive were checked step by step.
   - `overpass_search(feature='road network')` now sends `render: "network"`.
   - `add_map_layer` refuses `route`/`network` for anything that is not lines.
 
+**Colours: the map owns the palette, the agent sets a colour only when asked** (follow-up, same
+stage, user 2026-10-17).
+- **The question.** Should the categorical palette move to the client? Moved outright, a request
+  like "highlight the crimes in red" could never reach the map. It could not before either:
+  `add_map_layer` had no colour argument, the client coloured single-colour layers by source,
+  and the agent's fixed palette gave the first class red whatever was asked. The answer could
+  still say "in red".
+- **The client owns the defaults.** `palette.ts` holds the qualitative palette (the same twelve
+  hues, in the same order, so maps look as before), and `resolveLegend` fills every class that
+  arrives without a colour. A hue the agent set explicitly is not reused for another class.
+- **The agent sends colours only with a reason.**
+  - **Meaning:** Gi* hot and cold spots, and LISA classes, keep their colours, which are part of
+    the statistic's reading.
+  - **Arbitrary:** `add_map_layer`'s generic categories, `regionalize`'s regions and rs-embed's
+    look-alike zone groups now send class names only.
+  - **The user asked:** `add_map_layer` gains `color` (the whole layer: points, shapes, route,
+    network, or the heatmap's hue) and `class_colors` ({class: colour} for categories). Both
+    take names or hex, resolved on the server by `map_layers.parse_colour`.
+  - **What is refused, with the way that works:** a bad colour; `color` on a categories layer
+    (use `class_colors`); `color` on a choropleth (its colour is the value scale); a
+    `class_colors` class the column does not hold.
+- **The colour wins.** At the boundary, `build_map_layer` keeps a legend entry's colour as
+  optional and carries `color`. On the client an agent colour beats the source colour, the route
+  blue, the network slate and the heatmap ramp, and the layer list's dot shows it.
+- **The answer can only name colours that are real.** The tool result echoes `colours_set`, and
+  `colour_note` says to name a colour only if it was set here, or not to name colours at all.
+
 **Verified.**
-- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; the full suite
+- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; colours:
+  `palette.check.ts`, six more tests in `test_map_roles_and_place_names.py`, and
+  `test_map_layers.py` (an entry needs a label, its colour is optional); the full suite
   passed: 4,659 tests, with one deselected test that fails on prototype too, a networkx pin that
   differs on the Mac.
 - Live on a local agent (Lumen deepseek-v4-flash, validation off):

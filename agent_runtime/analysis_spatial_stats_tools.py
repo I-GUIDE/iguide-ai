@@ -415,9 +415,10 @@ def _too_few(frame: Any, notes: List[str]) -> Optional[str]:
 
 # --- categorical map layers ----------------------------------------------------------
 
-# GeoDa's cluster-map colours, sent WITH the layer as a legend rather than hardcoded in the
-# client: the map client shades a categorical layer straight from these, so a new categorical
-# tool needs no client change, and the labels the user reads are the labels the tool assigned.
+# GeoDa's cluster-map colours, sent WITH the layer as a legend. These colours MEAN something
+# (High-High and hot spots red, Low-Low and cold spots blue, not significant grey), so they stay
+# with the tool that assigned the classes. A class with no such meaning (a region, a generic
+# category) is sent without a colour and drawn with the map client's palette (palette.ts).
 _LISA_COLORS: Dict[str, List[int]] = {
     "High-High": [215, 25, 28, 200],
     "Low-Low": [44, 123, 182, 200],
@@ -1235,13 +1236,9 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
     # GeoDa's own regionalization algorithms. Each takes a target region count except max-p,
     # which DERIVES the count from a minimum-size constraint instead.
     _METHODS = ("skater", "redcap", "azp", "schc", "maxp")
-    # A qualitative palette: regions are nominal, so a sequential ramp would imply that region 7
-    # is "more" than region 2. Cycled when there are more regions than colours.
-    _REGION_COLORS = [
-        [166, 206, 227, 200], [31, 120, 180, 200], [178, 223, 138, 200], [51, 160, 44, 200],
-        [251, 154, 153, 200], [227, 26, 28, 200], [253, 191, 111, 200], [255, 127, 0, 200],
-        [202, 178, 214, 200], [106, 61, 154, 200], [255, 255, 153, 200], [177, 89, 40, 200],
-    ]
+    # Regions are nominal, so a sequential ramp would imply that region 7 is "more" than region
+    # 2. They are drawn with the map client's qualitative palette (map-ui-prototype palette.ts):
+    # the layer sends region names only, no colours.
 
     def regionalize(file_id: str, columns: List[str], n_regions: int = 5,
                     method: str = "skater", bound_column: Optional[str] = None,
@@ -1415,8 +1412,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
             csv_rec = _write_csv(pd.DataFrame(summary_rows), base, _source_stem(file_id),
                                  "region_summary")
 
-            palette = {f"Region {r}": _REGION_COLORS[i % len(_REGION_COLORS)]
-                       for i, r in enumerate(found)}
+            region_names = [f"Region {r}" for r in found]
             ratio = None
             if isinstance(result, dict):
                 for key in result:
@@ -1446,7 +1442,8 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 "summary_csv": _asset(csv_rec),
                 "map_layer": _categorical_layer(rec, _label_for(name, rec) or f"{meth} regions",
                                                 "region", int(len(out)),
-                                                _legend(palette, out["region"]), key=layer_key),
+                                                [{"label": n} for n in region_names
+                                                 if n in {str(v) for v in out["region"]}], key=layer_key),
                 "notes": notes or None,
             })
         except ImportError as exc:

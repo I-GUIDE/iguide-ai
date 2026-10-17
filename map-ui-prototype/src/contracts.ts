@@ -10,7 +10,9 @@ export type RGBA = [number, number, number, number];
 
 export interface Legend {
   label: string;
-  color: RGBA;
+  // Set only where the colour means something (a hot spot is red) or the user asked for it;
+  // every other class takes the map's palette (palette.ts resolveLegend).
+  color?: RGBA;
 }
 
 export interface DeckStyle {
@@ -72,6 +74,9 @@ export type LayerArtifact =
       outline?: boolean;
       partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
+      // One colour for the whole layer, set by the agent only when the user asked for it ("the
+      // crimes in red"). It wins over the source colour, the route blue and the heatmap ramp.
+      color?: RGBA;
       fitBounds?: boolean;
       visible?: boolean;
       // Where `data` was fetched from. Not used to render — it exists so a saved session can

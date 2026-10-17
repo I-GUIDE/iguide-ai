@@ -289,7 +289,8 @@ export interface MapLayerEvent {
   render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes' | 'network' | 'route'
   outline?: boolean;            // boundary only, so anything drawn beneath stays visible
   styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
-  legend?: { label: string; color: [number, number, number, number] }[];
+  legend?: { label: string; color?: [number, number, number, number] }[];
+  color?: [number, number, number, number]; // the whole layer's colour, set when the user asked
   style_by?: string;            // snake_case as the agent sends it
   sampled?: boolean;            // true when the layer is a subset of the data
   total?: number;               // full population size when sampled
@@ -607,7 +608,7 @@ export async function streamChat(
             id: layer.id || 'agent-layer', source: layer.source || 'analysis',
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer), outline: layer.outline === true,
+            legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
@@ -626,7 +627,7 @@ export async function streamChat(
             count: layer.count,
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer), outline: layer.outline === true,
+            legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
           });
         }
@@ -695,19 +696,24 @@ export async function streamChat(
 // current contract usually does NOT include element geometry -- see agent-api-contract).
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
 
-/** Class-name -> swatch pairs for a categorical layer, dropping malformed entries.
+function _rgba(c: any): [number, number, number, number] | undefined {
+  if (!Array.isArray(c) || c.length < 3 || !c.slice(0, 4).every((v: any) => Number.isFinite(Number(v)))) return undefined;
+  return [Number(c[0]), Number(c[1]), Number(c[2]), c.length > 3 ? Number(c[3]) : 255];
+}
+
+/** A categorical layer's classes, each with its colour where the tool sent one. A class without
+ *  a colour is coloured by the map's palette (palette.ts). An entry without a label is dropped.
  *  A categorical layer is only categorical if its legend survives the wire: App keys the
  *  'categories' render off `legend?.length`, so an omitted legend silently becomes a flat fill. */
-function _legend(layer: any): { label: string; color: [number, number, number, number] }[] | undefined {
+function _legend(layer: any): { label: string; color?: [number, number, number, number] }[] | undefined {
   const raw = layer?.legend;
   if (!Array.isArray(raw)) return undefined;
   const out = raw
-    .filter((e: any) => e && typeof e.label === 'string' && Array.isArray(e.color) && e.color.length >= 3)
-    .map((e: any) => ({
-      label: String(e.label),
-      color: [Number(e.color[0]), Number(e.color[1]), Number(e.color[2]),
-              e.color.length > 3 ? Number(e.color[3]) : 255] as [number, number, number, number],
-    }));
+    .filter((e: any) => e && typeof e.label === 'string')
+    .map((e: any) => {
+      const color = _rgba(e.color);
+      return color ? { label: String(e.label), color } : { label: String(e.label) };
+    });
   return out.length ? out : undefined;
 }
 

@@ -5867,5 +5867,9 @@ rather than from the previous one.
 - **Routes:** `route` and `network` renders. The route is a cased blue line with green start and
   red end markers on top; the network is muted slate lines beneath. The OSM road network arrives
   as `network`.
+- **Colours:** the client owns the category palette (`palette.ts`). The agent sends a colour only
+  when the user asked (`add_map_layer` `color` / `class_colors`, names or hex) or when it means
+  something (Gi*, LISA). The tool result says which colours were set, so the answer names only
+  real ones.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
-  `npm run check:route`.
+  `npm run check:route`; `npm run check:palette`.
