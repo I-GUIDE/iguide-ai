@@ -50,6 +50,7 @@ from agent_runtime.code_execution import (
     _clip,
     _host_user,
     _stage_inputs,
+    _timed_out_output,
     _work_root,
 )
 
@@ -315,7 +316,7 @@ def run_opencode(
             exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
             fork_safe.run(["docker", "kill", name], capture_output=True)
-            stdout, stderr = str(exc.stdout or ""), str(exc.stderr or "")
+            stdout, stderr = _timed_out_output(exc)
             timed_out, error = True, f"opencode run timed out after {timeout}s"
         except FileNotFoundError:
             error = "docker executable not found"
