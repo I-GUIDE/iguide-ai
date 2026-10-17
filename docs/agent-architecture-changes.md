@@ -87,6 +87,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
+| 75 | [A layer with NaN in its attributes still reaches the map](#stage-75) | 2026-10-17 | every `.geojson` the download route serves, and every SSE event, is strict JSON (NaN/Infinity written as null); add_map_layer stores strict JSON too; a layer that fails to draw is named in the trace and on the answer card |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11415,3 +11416,78 @@ in the JSON body).
 - The daily ledger is per process and per host. A second worker or host would need a shared
   store.
 
+## Stage 75 — A layer with NaN in its attributes still reaches the map {#stage-75}
+
+**Why.** Round r59 of the GIS assessment log (2026-10-17 01:12 UTC, Lumen deepseek-v4-flash)
+answered the Loop routing question correctly, 5.19 min, and drew no route. execute_code wrote the
+route GeoJSON with Python's `json`, and its `streets` list held five bare `NaN` (pandas NaN for
+unnamed ways). add_map_layer re-wrote the file through GDAL, which writes a NaN scalar as null
+but copies a list property through as raw JSON, so the NaN survived into `file_75ef8ade64a3`.
+The download route served it with a 200. The map's `JSON.parse` threw "Unexpected token 'N'",
+`onMapLayer` swallowed that in an empty `catch {}`, and the answer told the user the route was on
+the map. Nothing anywhere said otherwise.
+
+**What changed.**
+- **`agent_runtime/strict_json.py`.** `strict_json_bytes` rewrites JSON text holding `NaN`,
+  `Infinity` or `-Infinity` (or a number too large for a float) with null in their place,
+  wherever they sit: a scalar property, inside a list, inside a nested object. Text without
+  either token is answered by a substring test and never parsed. Text that is not JSON is left
+  alone. `strict_dumps` is `json.dumps(allow_nan=False)` that nulls non-finite floats instead
+  of raising.
+- **Where: serve time, with write time as well for add_map_layer.** The download route
+  (`GET /agent/files/<id>/download`) sends every `.geojson` up to 64 MB through
+  `strict_json_bytes`. That is the one place every layer passes. It covers add_map_layer, a
+  code peer's raw files (`map_layers.layers_for_artifacts` points the map straight at them, so
+  no tool ever re-writes them), any other tool's file, and the files already in the store. Fixing
+  each producer would have left the peer path and the existing files broken. The stored bytes are
+  not edited: a file's bytes can be its content key, and the record should stay what the
+  producer wrote. add_map_layer also rewrites its own output strict before storing it
+  (`sanitize_json_file`), since it re-serializes anyway and its copy is read by layer_qa and by
+  later tools. Its result says how many values became null (`nonfinite_as_null`).
+- **SSE events.** `_sse_event` uses `strict_dumps`. A `map_layer` event can carry its GeoJSON
+  inline (`map_layers.build_map_layer`), and one NaN made the client's parse of the whole event
+  fail, so the layer arrived with no data.
+- **Map UI.** `src/layerLoad.ts` `loadLayerData` loads a `map_layer` event's GeoJSON and returns
+  either the collection or a sentence saying why it cannot draw: HTTP refusal (wording kept),
+  network failure, invalid JSON (the parser's own message), not a FeatureCollection, no features,
+  or an event with neither data nor a url. Stop (AbortError) is not reported. `onMapLayer` adds
+  each failure as a `warn` trace line, `map: <label> could not be loaded (<why>), so it is not on
+  the map`. At the end of the turn it puts the same lines on the answer card (`mapWarnings`, red
+  note under the answer). The card is where the reader sees them: the trace is folded once the
+  turn ends, and the answer above it may say the layer is on the map.
+
+**Not done.** The answer's text is not rewritten. Checking the "on the map" claim against what
+drew would need the server to know what the client drew, and it does not: the server's own
+`delivers_map_layer` judges the descriptor, not the browser. The note beside the answer is the
+check the reader gets. A `.geojson` over 64 MB is served as stored. The artifact fallback
+(`loadVectorArtifacts`, for turns with no `map_layer` event) still skips an unreadable file
+quietly, because those files were never claimed to be on the map.
+
+**Measured.** `rag_pipeline/tests/test_strict_geojson_layers.py`, 8 offline tests, each parsing
+what a browser receives with a strict parser (`json.loads` with `parse_constant` raising, and
+node's `JSON.parse` where node is installed):
+- the helper on scalars, lists, nested objects, `-Infinity`, `1e999`; strict text and non-JSON
+  left alone;
+- a raw r59-shaped file served strict while the stored bytes stay unchanged;
+- add_map_layer storing and serving strict JSON, with `nonfinite_as_null` set;
+- an inline `map_layer` SSE event.
+
+With the helper patched out, the three end-to-end tests fail. `npm run check:layers`: 11 checks,
+including the r59 body (a NaN inside `streets`) giving the warn line.
+
+**Measured live** (2026-10-17, local agent from this branch, `AGENT_MODE=local`, Lumen
+deepseek-v4-flash, Chrome, a new tab per test):
+- **The Loop question.** The route drew: a layer "Fastest route SW→NE Loop", 1 feature, and no
+  warning. The answer was 5.4 min and 4.41 km, not r59's 5.19 min and 4.21 km. This branch does
+  not carry S69.1 (#152), the routing rules r59 ran with. This run's route file held no NaN, so
+  it shows only that nothing regressed.
+- **The r59 shape, forced.** A route GeoJSON written by Python's `json` with 6 bare NaN (5 in
+  `streets`, 1 scalar) was uploaded and the agent asked to map it. add_map_layer's stored copy had
+  0 NaN, with null in their place, and the line drew ("loop route nan", 1 feature). The answer
+  quoted 5.19 min and 4.21 km from the attributes.
+- **The raw upload, fetched with the browser's own `JSON.parse`.** No tool rewrote this file.
+  It parsed, with null where the NaN were. The server logged `Served file_… with 6 non-finite
+  value(s) written as null`, and the stored bytes still hold the NaN.
+
+The answer-card note did not appear live, because nothing failed. It is covered by
+`check:layers` and the type check.

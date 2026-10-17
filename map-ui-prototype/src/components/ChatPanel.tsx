@@ -18,6 +18,9 @@ export interface ChatMessage {
   layers?: { id: string; label: string; source: string }[];
   response?: any;
   streaming?: boolean;
+  /** Layers the agent sent this turn that did not draw, one sentence each (layerLoad.ts). On
+   *  the card because the answer may say they are on the map, and the trace is folded. */
+  mapWarnings?: string[];
 }
 
 export type Mode = 'live' | 'local';
@@ -362,10 +365,15 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
           <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
         </details>
       )}
-      {(hasBody || imgs.length > 0 || m.response) && (
+      {(hasBody || imgs.length > 0 || m.response || m.mapWarnings?.length) && (
         <div className="answer-card">
           {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
           {m.streaming && !m.html && <span className="cursor">▋</span>}
+          {m.mapWarnings?.length ? (
+            <div className="map-warn" role="status">
+              {m.mapWarnings.map((w, i) => <p key={i}>⚠ {w.replace(/^map: /, '')}</p>)}
+            </div>
+          ) : null}
           {imgs.length > 0 && (
             <div className="art-imgs">
               {imgs.map((f) => (

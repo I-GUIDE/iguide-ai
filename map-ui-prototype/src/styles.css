@@ -269,6 +269,10 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 
 /* answer card */
 .answer-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); padding: 6px 18px 14px; }
+/* A layer the agent sent that did not draw. Beside the answer, because the answer may say it is on the map. */
+.answer-card .map-warn { margin: 10px 0 2px; padding: 8px 12px; border-radius: 8px; background: #fbeeec; color: #a4453a; font-size: 13px; }
+.answer-card .map-warn p { margin: 0; }
+.answer-card .map-warn p + p { margin-top: 4px; }
 .cursor { color: var(--brand); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
