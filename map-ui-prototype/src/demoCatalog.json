@@ -46,6 +46,50 @@
   ]
  },
  {
+  "id": "crash-hotspots",
+  "title": "Where serious crashes cluster in Chicago",
+  "blurb": "Chicago's Vision Zero plan targets the crashes that kill or seriously injure people. This case takes five years of them, 2020 to 2024, and finds where they cluster, which streets run through the clusters, and when they happen.",
+  "tags": [
+   "hot spots",
+   "Gi*",
+   "Vision Zero",
+   "temporal"
+  ],
+  "category": "Hypothesis testing",
+  "harnessTask": "T14",
+  "reliability": "3 of 3 harness runs",
+  "files": [
+   {
+    "name": "chicago_serious_crashes_2020_2024.csv",
+    "path": "demos/crash-hotspots/chicago_serious_crashes_2020_2024.csv",
+    "bytes": 2286661
+   },
+   {
+    "name": "hex_grid_500m.geojson",
+    "path": "demos/crash-hotspots/hex_grid_500m.geojson",
+    "bytes": 925078
+   }
+  ],
+  "steps": [
+   {
+    "label": "Count the crashes",
+    "prompt": "Count Chicago's serious crashes from 2020 to 2024 in each 500 m hexagon and map the counts. How many crashes fall in the grid, and which hexagon has the most?"
+   },
+   {
+    "label": "Are they clustered?",
+    "prompt": "Run Getis-Ord Gi* on those counts with binary queen contiguity, each hexagon in its own neighbourhood, and analytical z-scores. How many hexagons are hot spots (z > 1.96), and which hexagon has the highest z? Map the z-scores themselves, so the hot spots stand out."
+   },
+   {
+    "label": "Which streets?",
+    "prompt": "Using the street recorded with each crash (its street name; W and E Madison St are one street), which three streets have the most serious crashes inside the hot-spot hexagons, and how many each?"
+   },
+   {
+    "label": "When?",
+    "prompt": "What share of all the serious crashes happened at night, from 10 p.m. to 4 a.m. (crash_hour 22, 23, 0, 1, 2 or 3)? And over all the serious crashes, how many were there per year on average in 2020–2022 and in 2023–2024?"
+   }
+  ]
+ },
+ {
   "id": "schools-buffer",
   "title": "Schools within a mile of a site",
   "blurb": "A development site in the Chicago Loop and the schools around it. The case asks which schools are within a mile of the site and which one is closest.",
@@ -164,6 +208,45 @@
    {
     "label": "Map the service areas",
     "prompt": "Map the demand points coloured by the chosen site that serves each one, and mark the two chosen sites."
+   }
+  ]
+ },
+ {
+  "id": "cooling-centres",
+  "title": "Libraries as heat-emergency cooling centres",
+  "blurb": "In a heat emergency Chicago opens its public libraries as cooling centres. If only 6 of the 82 branches can stay open late, this case finds the 6 that keep residents closest, using 2020 census population.",
+  "tags": [
+   "location-allocation",
+   "p-median",
+   "census"
+  ],
+  "category": "Optimisation",
+  "harnessTask": "T15",
+  "reliability": "6 of 6 harness runs",
+  "files": [
+   {
+    "name": "chicago_blockgroup_population_centres_2020.csv",
+    "path": "demos/cooling-centres/chicago_blockgroup_population_centres_2020.csv",
+    "bytes": 82983
+   },
+   {
+    "name": "cpl_branches.csv",
+    "path": "demos/cooling-centres/cpl_branches.csv",
+    "bytes": 4924
+   }
+  ],
+  "steps": [
+   {
+    "label": "Pick 6 branches",
+    "prompt": "In a heat emergency Chicago can keep only 6 library branches open late as cooling centres. Which 6 minimise the total population-weighted straight-line distance from each block group to its nearest open branch? Measure distance in metres in UTM zone 16N (EPSG:26916) and solve it exactly (it is a 6-median problem). Report the 6 branches, the average distance per resident in km, and the share of residents more than 2 km from their nearest open branch."
+   },
+   {
+    "label": "Map the service areas",
+    "prompt": "Map the block groups coloured by the branch that serves them, and mark the 6 branches."
+   },
+   {
+    "label": "Who is served?",
+    "prompt": "Count how many residents each of the 6 branches serves, by summing the population of the block groups assigned to it."
    }
   ]
  },
