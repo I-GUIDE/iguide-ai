@@ -5886,3 +5886,23 @@ rather than from the previous one.
 - **What the model is told:** the tool says to recolour by redrawing the same file_id with
   `color` / `class_colors`.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
+
+## 2026-10-17 · M8.113 · A code run can be watched, stopped and reviewed while it runs (architecture stage 78)
+
+- **The fault:** T16 on production lost three of six runs to a 60 s limit on correct but slow
+  code. The model saw only "execution timed out", and Stop left the container running.
+- **Limit:** 180 s by default, capped at 600.
+- **Supervision:** runs are supervised (heartbeat, Stop, review) instead of one blocking call.
+- **Timeouts:** a timed-out run names the line it was on, from a faulthandler stack taken before
+  the kill.
+- **Rules before the run:** slow constructs, and a stated value the code never uses.
+- **Model review during the run:** starts after 5 s, with a live stack sample and vertex
+  counts. It stops the run only on a critical verdict the code backs (the quote is on the line;
+  a performance claim is where the stack is, and waits for 30 s and a re-check; a parameter
+  claim quotes the task).
+- **Stop:** `POST /agent/chat/cancel` with the stream's `turn` id kills the container and stops
+  the agent at its next step.
+- **Map UI:** a run bar with the elapsed time and the review state, and a Stop offer after 90 s.
+- **Vertex counts:** `inspect_vector` reports them.
+- **Tests:** `rag_pipeline/tests/test_code_watch.py`, plus `test_code_execution.py` (Docker
+  timeout through the new loop).

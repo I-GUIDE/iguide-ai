@@ -554,7 +554,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     def inspect_vector(file_id: str, sibling_file_ids: Optional[List[str]] = None,
                        layer: Optional[str] = None) -> str:
         """Read a vector dataset's metadata (CRS, extent, geometry type, feature count,
-        attribute schema) WITHOUT loading all geometry. Accepts a TIGER/shapefile .zip,
+        vertex counts, attribute schema). Geometry is read only to count vertices, and only for
+        layers up to 250,000 features. Accepts a TIGER/shapefile .zip,
         a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet. """
         tmp = None
         try:
@@ -597,6 +598,17 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "columns": cols,
                 "bounds": [float(x) for x in tb] if tb is not None else None,
             }
+            # Vertices, not just features: one 97,315-vertex polygon reported as "1 feature"
+            # is how T16's overlay was written as if it were cheap (code_watch.geometry_size).
+            if payload["geometry_type"]:
+                from agent_runtime.code_watch import geometry_size
+                size = geometry_size(str(read_path), layer)
+                if size:
+                    payload["vertex_count"] = size.get("vertices_total")
+                    payload["max_vertices_per_feature"] = size.get("vertices_max")
+                    payload["max_parts_per_feature"] = size.get("parts_max")
+                    if size.get("note"):
+                        payload["size_note"] = size["note"]
             # A CSV/TSV of coordinates has no geometry OF ITS OWN, so pyogrio reports none —
             # which reads as "not mappable". Report the geometry we can DERIVE from its
             # coordinate columns instead, so the caller knows the layer is usable as points.
@@ -1235,7 +1247,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "drawing an image already on the map replaces its layer.")),
         StructuredTool.from_function(func=accept_null_defaults(inspect_vector), name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
-                         "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
+                         "count, vertex counts, attribute columns). The vertex counts say what "
+                         "geometry operations will cost: one feature can hold 100,000 vertices. Handles a TIGER/Line "
                          "shapefile .zip, a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet by "
                          "file_id. " + _SIB)),
         StructuredTool.from_function(func=accept_null_defaults(render_map_image), name="render_map_image", metadata=meta,

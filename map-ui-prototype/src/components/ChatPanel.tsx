@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
-import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
+import type { CodeProgress, FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
 import type { AppTab } from '../uiVariant';
 import { groupedSources, sourceHref, sourceThumb, type SourceGroup } from '../answerFormat';
@@ -18,6 +18,8 @@ export interface ChatMessage {
   layers?: { id: string; label: string; source: string }[];
   response?: any;
   streaming?: boolean;
+  /** The sandbox run in progress, from its heartbeat; `at` is when that beat arrived. */
+  progress?: CodeProgress & { at: number };
 }
 
 export type Mode = 'live' | 'local';
@@ -344,7 +346,56 @@ function FileIcon({ name }: { name: string }) {
   );
 }
 
-function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
+// After this long a run is offered a Stop of its own: three minutes of a spinner reads as hung.
+const NUDGE_AFTER_S = 90;
+
+const REVIEW_STATE: Record<string, string> = {
+  waiting: 'review starts shortly',
+  reviewing: 'being reviewed',
+  ok: 'review found no critical problem',
+  critical: 'review flagged a problem',
+  stopped: 'review stopped it',
+  failed: 'review unavailable',
+};
+
+function clock(s: number): string {
+  const t = Math.max(0, Math.floor(s));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+/** The sandbox run in progress: what it is, how long it has had of its limit, and the review.
+ *  The heartbeat arrives every few seconds; the clock between beats is counted here. */
+function CodeRunBar({ progress, onStop }: { progress: CodeProgress & { at: number };
+                                            onStop?: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = (progress.elapsed_s || 0) + (now - progress.at) / 1000;
+  const limit = progress.timeout_s || 0;
+  const share = limit ? Math.min(1, elapsed / limit) : 0;
+  const review = REVIEW_STATE[progress.review || ''];
+  return (
+    <div className="coderun" role="status" aria-live="polite">
+      <div className="coderun-line">
+        <span className="coderun-what">Running code{progress.label ? ` · ${progress.label}` : ''}</span>
+        <span className="coderun-time">{clock(elapsed)}{limit ? ` of ${clock(limit)}` : ''}</span>
+      </div>
+      {limit > 0 && <div className="coderun-track"><div className="coderun-fill" style={{ width: `${share * 100}%` }} /></div>}
+      {review && <div className="coderun-review">{review}</div>}
+      {elapsed >= NUDGE_AFTER_S && onStop && (
+        <div className="coderun-nudge">
+          This run is taking a while. Stopping it ends the turn; anything already on the map stays.
+          <button type="button" className="coderun-stop" onClick={onStop}>Stop</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: string) => string;
+                                                onStop?: () => void }) {
   const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
   const files = (m.artifacts || []).filter((f) => !isImg(f));
   const hasBody = m.html || m.text;
@@ -362,6 +413,7 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
           <div className="body">{foldTrace(m.trace).map((r, j) => <TraceRow key={j} row={r} />)}</div>
         </details>
       )}
+      {m.streaming && m.progress && <CodeRunBar progress={m.progress} onStop={onStop} />}
       {(hasBody || imgs.length > 0 || m.response) && (
         <div className="answer-card">
           {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
@@ -775,7 +827,7 @@ export function ChatPanel(p: Props) {
             <div className="who you">You</div>
             <div className="row right"><div className="bubble user">{m.text}</div></div>
           </div>
-        ) : <AgentTurn key={i} m={m} resolveUrl={p.resolveUrl} />)}
+        ) : <AgentTurn key={i} m={m} resolveUrl={p.resolveUrl} onStop={p.onStop} />)}
         {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 

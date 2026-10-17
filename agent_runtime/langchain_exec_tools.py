@@ -186,6 +186,46 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     return staging, staged_info, errors, skipped
 
 
+def _task_text() -> str:
+    """The user's request and the plan, from the code peer's brief, without the data-source
+    catalogue appended to it: that catalogue is the same every turn and full of distances
+    ("within 1 km") that are not this task's parameters."""
+    try:
+        from agent_runtime import turn_log
+        brief = turn_log.active_brief() or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return brief.split("Data sources reachable here", 1)[0].strip()
+
+
+def _run_watch(executor: Any, staging: List[Dict[str, str]], label: Optional[str]) -> Any:
+    """A code_watch.RunWatch for this run, or None for an executor that cannot take one."""
+    import inspect
+
+    try:
+        if "watch" not in inspect.signature(executor.execute).parameters:
+            return None
+        from agent_runtime import code_watch
+    except (TypeError, ValueError, ImportError):
+        return None
+    inputs: List[Dict[str, Any]] = []
+    seen: set = set()
+    for spec in staging:
+        src = str(spec.get("source") or "")
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        try:
+            size_mb = round(Path(src).stat().st_size / 1e6, 1)
+        except OSError:
+            size_mb = None
+        inputs.append({"name": spec.get("dest"), "path": src, "size_mb": size_mb})
+    # code and timeout are filled in by the executor, which knows the source it really runs
+    # (an entrypoint's file) and the limit after the cap.
+    return code_watch.RunWatch(code="", timeout=0, label=str(label or ""), brief=_task_text(),
+                               inputs=inputs)
+
+
 # The shape of every id the store mints (file_store: f"file_{uuid4().hex[:12]}"). Bounded on both
 # sides so a longer identifier that merely contains one is not read as one.
 _MINTED_FILE_ID = re.compile(r"(?<![A-Za-z0-9_])file_[0-9a-f]{12}(?![A-Za-z0-9_])")
@@ -442,6 +482,9 @@ def make_code_execution_tools(
             extra["session"] = session_id   # durable workspace across runs in this conversation
         if entrypoint:
             extra["entrypoint"] = entrypoint  # run a file already in that workspace
+        watch = _run_watch(ex, staging, label)
+        if watch is not None:
+            extra["watch"] = watch  # heartbeat, Stop, and the concurrent review (code_watch)
         result = ex.execute(
             code,
             language=language,
@@ -599,6 +642,13 @@ def make_code_execution_tools(
             "whole thing: write it to a named file with write_workspace_file, then run it with "
             "`entrypoint` (e.g. entrypoint=\"main.py\", no `code`), and fix it with "
             "edit_workspace_file between runs. "
+            "`timeout_seconds` defaults to 180 and is capped at 600. A long run is not silent: "
+            "the user sees it running and can stop it, and a reviewer reads the code WHILE it "
+            "runs. If the review finds a critical problem (a loop that cannot finish, a value "
+            "the task states differently, a bug that makes the result wrong) the run is stopped "
+            "and the result says `interrupted: \"review\"` with the line and the fix: apply it "
+            "and run again. `performance_hints` lists slow constructs found before the run; a "
+            "timed-out run's `stuck_at` names the line it was on. "
             + (_EXTRACTION_NOTE if extraction_enabled() else "")
             # Network in the run phase, or the tool bridge: said only while one is really on.
             + sandbox_capability_note()
