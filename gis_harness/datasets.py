@@ -484,13 +484,16 @@ def _morans_i(x: np.ndarray, W: np.ndarray) -> float:
     return float(len(x) / Wr.sum() * (zc @ Wr @ zc) / (zc @ zc))
 
 
-def _gi_star_z(x: np.ndarray, W: np.ndarray) -> np.ndarray:
-    Ws = W + np.eye(len(x))
+def _gi_star_z(x: np.ndarray, W) -> np.ndarray:
+    """Getis-Ord Gi* z-scores, each unit in its own neighbourhood. W: dense or sparse, no self."""
+    import scipy.sparse as sp
+
     n = len(x)
+    Ws = sp.csr_matrix(W) + sp.identity(n, format="csr")
     xbar = x.mean()
     S = math.sqrt((x ** 2).mean() - xbar ** 2)
-    wsum = Ws.sum(axis=1)
-    w2 = (Ws ** 2).sum(axis=1)
+    wsum = np.asarray(Ws.sum(axis=1)).ravel()
+    w2 = np.asarray(Ws.multiply(Ws).sum(axis=1)).ravel()
     num = Ws @ x - xbar * wsum
     den = S * np.sqrt((n * w2 - wsum ** 2) / (n - 1))
     return num / den
@@ -693,23 +696,36 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _chicago_snapshot(cache: Path) -> Path:
-    """The pinned snapshot directory: the cache, else the archive copy; every file hash-checked."""
-    candidates = [cache / CHICAGO_DIR]
+def _pinned_snapshot(cache: Path, dirname: str, sha256s: Dict[str, str], missing: str) -> Path:
+    """A pinned snapshot directory: the cache, else $GIS_HARNESS_SNAPSHOTS; every file hash-checked."""
+    candidates = [cache / dirname]
     archive = os.environ.get("GIS_HARNESS_SNAPSHOTS")
     if archive:
-        candidates.append(Path(archive) / CHICAGO_DIR)
+        candidates.append(Path(archive) / dirname)
     for d in candidates:
-        if all((d / name).exists() for name in CHICAGO_FILES):
-            bad = [n for n, (_, sha) in CHICAGO_FILES.items() if _sha256(d / n) != sha]
+        if all((d / name).exists() for name in sha256s):
+            bad = [n for n, sha in sha256s.items() if _sha256(d / n) != sha]
             if bad:
                 raise RuntimeError(f"{d}: {bad} do not match the pinned SHA-256; this is not the "
-                                   "task's data (see CHICAGO_FILES)")
+                                   "task's data")
             return d
     raise FileNotFoundError(
-        "the Chicago crime snapshot is missing: copy it from the archive "
-        "(gis_harness_runs_archive/datasets/chicago_crime_2024, or set GIS_HARNESS_SNAPSHOTS), or "
-        "run `python -m gis_harness.datasets --snapshot chicago_crime` and accept that the "
+        f"the {dirname} snapshot is missing: copy it from the archive "
+        f"(gis_harness_runs_archive/datasets/{dirname}, or set GIS_HARNESS_SNAPSHOTS). {missing}")
+
+
+def _copy_snapshot(snap: Path, names, out: Path) -> Dict[str, Path]:
+    files = {}
+    for name in names:
+        files[name] = out / name
+        shutil.copyfile(snap / name, files[name])
+    return files
+
+
+def _chicago_snapshot(cache: Path) -> Path:
+    return _pinned_snapshot(
+        cache, CHICAGO_DIR, {n: sha for n, (_, sha) in CHICAGO_FILES.items()},
+        "Or run `python -m gis_harness.datasets --snapshot chicago_crime` and accept that the "
         "portal's current data will not match the pinned hashes")
 
 
@@ -753,12 +769,7 @@ def chicago_expected(crimes: Path, areas: Path, acs: Path) -> Dict[str, Any]:
 
 
 def chicago_crime(out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
-    snap = _chicago_snapshot(cache)
-    files = {}
-    for name in CHICAGO_FILES:
-        dest = out / name
-        shutil.copyfile(snap / name, dest)
-        files[name] = dest
+    files = _copy_snapshot(_chicago_snapshot(cache), CHICAGO_FILES, out)
     return files, chicago_expected(files["crimes_2024.csv"], files["community_areas.geojson"],
                                    files["acs_2023_community_areas.csv"])
 
@@ -780,6 +791,328 @@ def snapshot_chicago(cache: Path) -> Path:
     return d
 
 
+# --------------------------------------------------------------------------- T14-T16: real data
+# Three more snapshots pinned by SHA-256, taken 2026-10-16 for the Spatial Analysis examples
+# (crash hot spots, library cooling centres, Waikīkī). Like T13's they are not in the repository;
+# copies live in the git-excluded archive (gis_harness_runs_archive/datasets/<dir>). Unlike T13's
+# they are DERIVED files (filtered, clipped, a grid built for the task), so there is no download
+# command that reproduces their bytes: each block below says what was fetched and what was done
+# to it, and a new snapshot means new hashes and re-checked expected values.
+
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """The smallest value at which the cumulative weight reaches half the total."""
+    o = np.argsort(values, kind="stable")
+    cw = np.cumsum(np.asarray(weights, float)[o])
+    return float(np.asarray(values)[o][np.searchsorted(cw, cw[-1] / 2.0)])
+
+
+def _shared_vertex_contiguity(geoms) -> "Any":
+    """Binary queen contiguity: two polygons are neighbours when they share a vertex as written
+    (rounded to 1e-6 degrees). A second route to what libpysal's Queen computes; the test
+    compares the two."""
+    import scipy.sparse as sp
+    from collections import defaultdict
+
+    at = defaultdict(set)
+    for i, g in enumerate(geoms):
+        for poly in getattr(g, "geoms", [g]):
+            for x, y in poly.exterior.coords:
+                at[(round(x, 6), round(y, 6))].add(i)
+    rows, cols = [], []
+    for members in at.values():
+        for a in members:
+            for b in members:
+                if a != b:
+                    rows.append(a)
+                    cols.append(b)
+    n = len(geoms)
+    W = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n)).tocsr()
+    W.data[:] = 1.0
+    return W
+
+
+# T14. Taken 2026-10-16T00:09Z.
+#  chicago_serious_crashes_2020_2024.csv: City of Chicago Data Portal, Traffic Crashes - Crashes
+#    (85ca-t3if), every crash with injuries_fatal > 0 or injuries_incapacitating > 0 dated
+#    2020-01-01 to 2024-12-31: 10,076 rows, 68 of them without usable coordinates (67 blank, 1 at
+#    0,0). Columns as the portal gives them.
+#  hex_grid_500m.geojson: built for the task. Pointy-top hexagons 500 m across the flats in UTM
+#    16N (EPSG:26916), kept where they intersect the city (T13's 77 community areas), numbered
+#    H0001... row by row from the south-west, written in WGS84 to 6 decimals: 3,028 cells.
+CRASH_DIR = "chicago_serious_crashes_2020_2024"
+CRASH_FILES = {
+    "chicago_serious_crashes_2020_2024.csv":
+        "6b56a64aa3bad81ed7df1c91e4a5849904034f5d18778bc765c10e7fc43ed02d",
+    "hex_grid_500m.geojson": "635738b77654e9eb13e3d48842eaad6ca27621318a10e08984afea19085b8ac3",
+}
+NIGHT_HOURS = (22, 23, 0, 1, 2, 3)
+
+
+def crashes_expected(crashes: Path, hexes: Path) -> Dict[str, Any]:
+    """Counts by point-in-polygon; Gi* with binary queen weights from shared vertices, each
+    hexagon in its own neighbourhood, analytical z; the hot-spot streets from each crash's own
+    street_name. The share at night and the yearly averages are over every row of the file."""
+    import geopandas as gpd
+    import pandas as pd
+
+    c = pd.read_csv(crashes)
+    grid = gpd.read_file(hexes)
+    ok = (c["latitude"].notna() & c["longitude"].notna()
+          & (c["latitude"] != 0) & (c["longitude"] != 0))
+    pts = gpd.GeoDataFrame(c[ok], crs=4326, geometry=gpd.points_from_xy(
+        c.loc[ok, "longitude"], c.loc[ok, "latitude"]))
+    j = gpd.sjoin(pts, grid[["hex_id", "geometry"]], predicate="within", how="inner")
+    counts = grid["hex_id"].map(j.groupby("hex_id").size()).fillna(0).to_numpy(float)
+    z = _gi_star_z(counts, _shared_vertex_contiguity(list(grid.geometry)))
+    top_n, top_z = int(np.argmax(counts)), int(np.argmax(z))
+    hot = set(grid["hex_id"][z > 1.96])
+    streets = j[j["hex_id"].isin(hot)]["street_name"].value_counts()
+    # The answer is unambiguous: one busiest hexagon, one highest z, and a clear third street.
+    assert (counts == counts[top_n]).sum() == 1 and (z == z[top_z]).sum() == 1
+    assert streets.iloc[2] > streets.iloc[3]
+    year = c["crash_date"].str[:4].astype(int)
+    return {
+        "crashes_in_grid": int(len(j)),
+        "top_count_hex": str(grid["hex_id"][top_n]),
+        "top_count": int(counts[top_n]),
+        "hot_cells": int(len(hot)),
+        "top_z_hex": str(grid["hex_id"][top_z]),
+        "top_z": round(float(z[top_z]), 3),
+        # "MADISON ST" is matched as MADISON: the agent may write "W. Madison Street".
+        "hot_streets": [s.rsplit(" ", 1)[0] for s in streets.index[:3]],
+        "street_1_crashes": int(streets.iloc[0]),
+        "street_2_crashes": int(streets.iloc[1]),
+        "street_3_crashes": int(streets.iloc[2]),
+        "night_pct": round(float(c["crash_hour"].isin(NIGHT_HOURS).mean() * 100), 2),
+        "per_year_2020_2022": round(float((year <= 2022).sum() / 3), 1),
+        "per_year_2023_2024": round(float((year >= 2023).sum() / 2), 1),
+        "_why": (f"{len(c)} rows, {int(ok.sum())} with coordinates, {len(j)} in a hexagon; "
+                 f"{len(grid)} hexagons; Gi* over shared-vertex queen contiguity; streets "
+                 f"{ {k: int(v) for k, v in streets.head(4).items()} }"),
+    }
+
+
+def serious_crashes(out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
+    snap = _pinned_snapshot(cache, CRASH_DIR, CRASH_FILES, "The files are derived; see CRASH_FILES.")
+    files = _copy_snapshot(snap, CRASH_FILES, out)
+    return files, crashes_expected(files["chicago_serious_crashes_2020_2024.csv"],
+                                   files["hex_grid_500m.geojson"])
+
+
+# T15. Taken 2026-10-16T00:09Z.
+#  cpl_branches.csv: City of Chicago Data Portal, Chicago Public Library locations (x8fc-8rcq):
+#    branch, address, zip, and the latitude/longitude parsed from its location field; 82 branches.
+#  chicago_blockgroup_population_centres_2020.csv: Census Bureau 2020 centres of population by
+#    block group, Illinois (CenPop2020_Mean_BG17.txt), Cook County block groups whose centre
+#    lies inside the city (T13's 77 community areas) with population > 0: 2,158 rows.
+COOLING_DIR = "chicago_cooling_centres_2020"
+COOLING_FILES = {
+    "cpl_branches.csv": "f748488b60cbc3efdcda700c3d360c75b911a1caaf7e28caf1c1334939aaa2d7",
+    "chicago_blockgroup_population_centres_2020.csv":
+        "eb41315592e9546334bee26b8ece1d53cb6f93d87526cd4b18a2e564045203a1",
+}
+COOLING_OPEN = 6
+
+
+def _p_median_exact(cost: np.ndarray, p: int) -> np.ndarray:
+    """Exact p-median by MILP (scipy's HiGHS): open y_j, assign x_ij <= y_j, sum_j x_ij = 1.
+    *cost* is demand x site, already weighted. Returns the indices of the open sites."""
+    from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import coo_matrix
+
+    n, m = cost.shape
+    nx_ = n * m
+    ii, jj = np.repeat(np.arange(n), m), np.tile(np.arange(m), n)
+    link = n + np.arange(nx_)
+    rows = np.concatenate([ii, link, link, np.full(m, n + nx_)])
+    cols = np.concatenate([m + ii * m + jj, m + np.arange(nx_), jj, np.arange(m)])
+    vals = np.concatenate([np.ones(nx_), np.ones(nx_), -np.ones(nx_), np.ones(m)])
+    A = coo_matrix((vals, (rows, cols)), shape=(n + nx_ + 1, m + nx_)).tocsr()
+    lb = np.concatenate([np.ones(n), np.full(nx_, -np.inf), [p]])
+    ub = np.concatenate([np.ones(n), np.zeros(nx_), [p]])
+    res = milp(np.concatenate([np.zeros(m), cost.ravel()]),
+               constraints=LinearConstraint(A, lb, ub),
+               integrality=np.concatenate([np.ones(m), np.zeros(nx_)]),
+               bounds=Bounds(0, 1), options={"time_limit": 900})
+    if res.status != 0:
+        raise RuntimeError(f"p-median MILP did not solve to optimality: {res.message}")
+    return np.sort(np.where(res.x[:m] > 0.5)[0])
+
+
+def cooling_expected(branches: Path, blockgroups: Path) -> Dict[str, Any]:
+    """Exact 6-median over the branches, straight-line metres in UTM 16N, population weights;
+    then each block group is served by its nearest open branch. The best single swap away from
+    the optimum is reported, so the tolerance on the mean distance can be set below it."""
+    import geopandas as gpd
+    import pandas as pd
+
+    lib = pd.read_csv(branches)
+    bg = pd.read_csv(blockgroups)
+    L = gpd.GeoSeries(gpd.points_from_xy(lib.longitude, lib.latitude), crs=4326).to_crs(26916)
+    B = gpd.GeoSeries(gpd.points_from_xy(bg.longitude, bg.latitude), crs=4326).to_crs(26916)
+    km = np.hypot(B.x.to_numpy()[:, None] - L.x.to_numpy()[None, :],
+                  B.y.to_numpy()[:, None] - L.y.to_numpy()[None, :]) / 1000.0
+    pop = bg["population"].to_numpy(float)
+    open_ = _p_median_exact(pop[:, None] * km, COOLING_OPEN)
+    dmin = km[:, open_].min(axis=1)
+    serving = open_[km[:, open_].argmin(axis=1)]
+    obj = float((pop * dmin).sum())
+    swap = min(float((pop * km[:, [s for s in open_ if s != a] + [k]].min(axis=1)).sum())
+               for a in open_ for k in range(len(lib)) if k not in open_)
+    names = {j: str(lib["branch"][j]) for j in open_}
+    by_name = sorted(open_, key=lambda j: names[j])
+    out = {
+        # Matched by the name's first words: "Whitney M. Young, Jr." is also "Whitney Young".
+        "branches": [names[j].split(",")[0].split(" M.")[0] for j in by_name],
+        "mean_km": round(obj / pop.sum(), 4),
+        "share_over_2km_pct": round(float(pop[dmin > 2].sum() / pop.sum() * 100), 2),
+        "objective_person_km": round(obj, 1),
+        "best_swap_ratio": round(swap / obj, 5),
+        "_why": (f"{len(lib)} branches, {len(bg)} block groups, {int(pop.sum())} people; exact "
+                 f"MILP; served {[(names[j], int(pop[serving == j].sum())) for j in by_name]}"),
+    }
+    for i, j in enumerate(by_name, 1):
+        out[f"served_{i}"] = int(pop[serving == j].sum())
+    return out
+
+
+def cooling_centres(out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
+    snap = _pinned_snapshot(cache, COOLING_DIR, COOLING_FILES,
+                            "The files are derived; see COOLING_FILES.")
+    files = _copy_snapshot(snap, COOLING_FILES, out)
+    return files, cooling_expected(files["cpl_branches.csv"],
+                                   files["chicago_blockgroup_population_centres_2020.csv"])
+
+
+# T16. Taken 2026-10-16T02:24Z, clipped to Waikīkī, the Ala Wai and McCully: the box
+# -157.850, 21.255 to -157.805, 21.300.
+#  tsunami_evacuation_zone.geojson: Hawaii Statewide GIS Program, Hazards/MapServer/2 (Tsunami
+#    Evacuation Zones; City and County of Honolulu), the Oʻahu zone, made valid and clipped.
+#  census_blocks_2020.geojson: Census TIGERweb tigerWMS_Census2020 layer 10, Honolulu County
+#    blocks intersecting the box: GEOID, POP100, HU100 and the internal point (561 blocks).
+#  osm_streets.geojson, osm_hotels.geojson: OpenStreetMap via Overpass, data as of
+#    2026-10-16T02:24:20Z (ODbL; attribution required). Streets: highway ways of the walkable
+#    classes in the box, less foot=no (5,648 ways). Hotels: tourism=hotel nodes, and the centres
+#    of ways and relations, inside the box (88).
+#  slr_exposure_3_2ft.geojson: Hawaii Statewide GIS Program, Climate/MapServer/45 (SLR Exposure
+#    Area, 3.2 ft scenario; SOEST, UH CGG, PacIOOS, Tetra Tech), the Oʻahu feature, clipped and
+#    dissolved into one geometry.
+#  buildings.geojson: City and County of Honolulu DPP, HoLIS building footprints (ArcGIS Online
+#    "Building Footprints CCH"), footprints intersecting the box, numbered B00001... (9,843).
+WAIKIKI_DIR = "waikiki_tsunami_2026"
+WAIKIKI_FILES = {
+    "tsunami_evacuation_zone.geojson":
+        "f0c7d05c4245f712257c64a1648bc9c68a444b23ff238037c089bfb2cd3a6c91",
+    "census_blocks_2020.geojson": "7e9f5b59fe724d7eb3de03eeab4692d80ef4da8f4de908d819a6275e33a9a6b4",
+    "osm_hotels.geojson": "43d7d48e370f548b39311e28892c8a586663d7233f0685c38006956dea84285f",
+    "osm_streets.geojson": "80e4466965e39fa144625e9084a0bc751acd94b35a57dfded0f7b59c1064ca8b",
+    "slr_exposure_3_2ft.geojson": "a65e086b5893fc9c50602c4591457499048de47d06e44ccbd2a370df94a1d748",
+    "buildings.geojson": "f4806a2b7976dae8b9d575bae69458f059891957ea1fe5595daf8e3a093dde47",
+}
+WAIKIKI_UTM = 32604
+WALK_M_PER_S = 1.1
+
+
+def _walk_minutes(lines, start_xy: np.ndarray, inside, epsg: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Shortest walk, in minutes, from each start to the nearest street node outside *inside*.
+
+    The network is undirected; ways join where they share a vertex as written (to 1e-7 degrees).
+    Each start snaps to its nearest node of the largest connected part. Lengths in *epsg*."""
+    import geopandas as gpd
+    import pandas as pd
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components, dijkstra
+    from scipy.spatial import cKDTree
+    from shapely import contains_xy
+
+    key: Dict[Tuple[float, float], int] = {}
+    lonlat: List[Tuple[float, float]] = []
+    us, vs = [], []
+    for g in lines:
+        ids = []
+        for x, y in g.coords:
+            k = (round(x, 7), round(y, 7))
+            if k not in key:
+                key[k] = len(lonlat)
+                lonlat.append(k)
+            ids.append(key[k])
+        for u, v in zip(ids[:-1], ids[1:]):
+            if u != v:
+                us.append(u)
+                vs.append(v)
+    ll = np.array(lonlat)
+    p = gpd.GeoSeries(gpd.points_from_xy(ll[:, 0], ll[:, 1]), crs=4326).to_crs(epsg)
+    xy = np.c_[p.x.to_numpy(), p.y.to_numpy()]
+    us, vs = np.array(us), np.array(vs)
+    e = pd.DataFrame({"u": np.r_[us, vs], "v": np.r_[vs, us],
+                      "w": np.tile(np.hypot(*(xy[us] - xy[vs]).T), 2)})
+    e = e.groupby(["u", "v"], as_index=False)["w"].min()
+    G = sp.csr_matrix((e["w"], (e["u"], e["v"])), shape=(len(xy), len(xy)))
+    ncomp, label = connected_components(G, directed=False)
+    big = np.where(label == np.bincount(label).argmax())[0]
+    exits = big[~contains_xy(inside, xy[big, 0], xy[big, 1])]
+    metres = dijkstra(G, directed=False, indices=exits, min_only=True)
+    _, k = cKDTree(xy[big]).query(start_xy)
+    return metres[big[k]] / WALK_M_PER_S / 60.0, {"nodes": len(xy), "components": int(ncomp),
+                                                  "largest": int(len(big))}
+
+
+def waikiki_expected(d: Dict[str, Path]) -> Dict[str, Any]:
+    """Blocks are in the zone when their internal point is. The walk is `_walk_minutes`; the
+    median is population-weighted. Sea-level rise: buildings that intersect the exposure area,
+    and those whose centroid is inside it, in UTM 4N; the WGS84 intersect count is in _why."""
+    import geopandas as gpd
+    import shapely
+
+    U = WAIKIKI_UTM
+    zone = gpd.read_file(d["tsunami_evacuation_zone.geojson"]).to_crs(U).union_all()
+    blocks = gpd.read_file(d["census_blocks_2020.geojson"])
+    ip = gpd.GeoSeries(gpd.points_from_xy(blocks.INTPTLON, blocks.INTPTLAT), crs=4326).to_crs(U)
+    inz = ip.within(zone).to_numpy()
+    hotels = gpd.read_file(d["osm_hotels.geojson"]).to_crs(U)
+    streets = gpd.read_file(d["osm_streets.geojson"])
+    walk = inz & (blocks["POP100"].to_numpy() > 0)
+    mins, net = _walk_minutes(streets.geometry, np.c_[ip.x.to_numpy()[walk], ip.y.to_numpy()[walk]],
+                              zone, U)
+    pop = blocks["POP100"].to_numpy()[walk]
+    far = int(np.argmax(mins))
+    near = sorted(round(float(m), 2) for m in mins if 9.5 < m < 10.5)
+    slr = gpd.read_file(d["slr_exposure_3_2ft.geojson"])
+    bld = gpd.read_file(d["buildings.geojson"])
+    S, Sw = slr.to_crs(U).union_all(), slr.union_all()
+    shapely.prepare(S)
+    shapely.prepare(Sw)
+    bu = bld.to_crs(U)
+    cen = bu.geometry.centroid
+    return {
+        "zone_pop": int(blocks["POP100"][inz].sum()),
+        "zone_hu": int(blocks["HU100"][inz].sum()),
+        "hotels_in_zone": int(hotels.within(zone).sum()),
+        "walk_median_min": round(_weighted_median(mins, pop), 2),
+        "walk_max_min": round(float(mins[far]), 2),
+        "walk_max_block": str(blocks["GEOID"].to_numpy()[walk][far]),
+        "pop_over_10min": int(pop[mins > 10].sum()),
+        "slr_buildings_intersect": int(shapely.intersects(S, bu.geometry.values).sum()),
+        "slr_buildings_centroid": int(shapely.contains_xy(S, cen.x.to_numpy(), cen.y.to_numpy()).sum()),
+        "hotels_in_slr": int(shapely.contains_xy(S, hotels.geometry.x.to_numpy(),
+                                                 hotels.geometry.y.to_numpy()).sum()),
+        "_why": (f"{int(inz.sum())} of {len(blocks)} blocks in the zone; {int(walk.sum())} populated "
+                 f"blocks walked; network {net}; walks within 0.5 min of 10: {near}; "
+                 f"{int(shapely.intersects(Sw, bld.geometry.values).sum())} buildings intersect in "
+                 f"WGS84; {len(hotels)} hotels"),
+    }
+
+
+def waikiki_tsunami(out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
+    snap = _pinned_snapshot(cache, WAIKIKI_DIR, WAIKIKI_FILES,
+                            "The files are derived; see WAIKIKI_FILES.")
+    files = _copy_snapshot(snap, WAIKIKI_FILES, out)
+    return files, waikiki_expected(files)
+
+
+SNAPSHOT_BUILDERS = ("meuse", "chicago_crime", "serious_crashes", "cooling_centres",
+                     "waikiki_tsunami")
+
 BUILDERS = {
     "area_distance": area_distance,
     "schools": schools,
@@ -795,13 +1128,16 @@ BUILDERS = {
     "earthquakes": earthquakes,
     "single_band_red": single_band_red,
     "chicago_crime": chicago_crime,
+    "serious_crashes": serious_crashes,
+    "cooling_centres": cooling_centres,
+    "waikiki_tsunami": waikiki_tsunami,
 }
 
 
 def build(name: str, out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
     out.mkdir(parents=True, exist_ok=True)
     fn = BUILDERS[name]
-    return fn(out, cache) if name in ("meuse", "chicago_crime") else fn(out)
+    return fn(out, cache) if name in SNAPSHOT_BUILDERS else fn(out)
 
 
 if __name__ == "__main__":

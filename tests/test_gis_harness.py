@@ -7,6 +7,7 @@ each dataset is built to catch.
 """
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -39,6 +40,14 @@ def test_a_count_is_exact():
     c = Check("n", kind="count")
     assert check_value(c, {"n": 20}, "There are **20** schools within a mile.")["matched"]
     assert not check_value(c, {"n": 20}, "There are 19 schools within a mile.")["matched"]
+
+
+def test_a_count_is_not_answered_by_a_quantity_with_a_unit():
+    # T16 asks for "how many residents need more than 10 minutes" and for a count of 10 hotels:
+    # the "10 minutes" restated from the question must not answer the hotels.
+    c = Check("hotels", kind="count")
+    assert not check_value(c, {"hotels": 10}, "846 residents need more than 10 minutes.")["matched"]
+    assert check_value(c, {"hotels": 10}, "10 of the 88 hotels are inside it.")["matched"]
 
 
 def test_text_ids_tolerate_zero_padding_and_spelled_out_zones():
@@ -223,6 +232,96 @@ def test_earthquake_snapshot_is_the_pinned_one(out):
     assert exp["mainshock_id"] == "ci38457511"
     assert exp["mainshock_mag"] == pytest.approx(7.1)
     assert exp["aftershocks_7d_25km"] > exp["aftershocks_m4_7d_25km"] > 0
+
+
+def test_shared_vertex_contiguity_is_libpysal_queen(out):
+    libpysal = pytest.importorskip("libpysal")
+    import geopandas as gpd
+
+    files, _ = d.build("lattice_autocorrelation", out / "l2", out / "cache")
+    gdf = gpd.read_file(files["lattice.geojson"])
+    W = d._shared_vertex_contiguity(list(gdf.geometry)).toarray()
+    q = libpysal.weights.Queen.from_dataframe(gdf, use_index=False)
+    assert all(set(np.nonzero(W[i])[0]) == set(q.neighbors[i]) for i in range(len(gdf)))
+
+
+def test_exact_p_median_is_the_brute_force_optimum():
+    rng = np.random.default_rng(1)
+    cost = rng.uniform(1, 50, (40, 9)) * rng.integers(1, 100, (40, 1))
+    best = min(itertools.combinations(range(9), 3), key=lambda s: cost[:, list(s)].min(axis=1).sum())
+    assert list(d._p_median_exact(cost, 3)) == sorted(best)
+
+
+def test_the_walk_joins_ways_at_shared_vertices_and_leaves_by_the_nearest_exit():
+    from shapely.geometry import LineString, box
+
+    # Two ways cross at (0.001, 0): the second starts at the first's middle vertex. The zone is
+    # the box west of x = 0.0025, so the exits are the nodes at x = 0.003 and beyond.
+    ways = [LineString([(0, 0), (0.001, 0), (0.002, 0), (0.003, 0)]),
+            LineString([(0.001, 0), (0.001, 0.003), (0.004, 0.003)])]
+    zone = box(-1, -1, 0.0025, 1)
+    mins, net = d._walk_minutes(ways, np.array([[0.0, 0.0]]), zone, 4326)
+    # In degrees (epsg 4326): 0.003 east along the first way; the detour north is longer.
+    assert mins[0] == pytest.approx(0.003 / d.WALK_M_PER_S / 60)
+    assert net["components"] == 1
+
+
+def test_population_weighted_median():
+    assert d._weighted_median(np.array([5.0, 1.0, 3.0]), np.array([1, 1, 10])) == 3.0
+    assert d._weighted_median(np.array([1.0, 2.0]), np.array([1, 3])) == 2.0
+
+
+# The three real-data snapshots are not in the repository (see datasets.py): these run where the
+# archive is, with GIS_HARNESS_SNAPSHOTS set to its datasets/ directory. Their values were
+# computed first, on 2026-10-15, by separate scripts (networkx for the walk, esda for Gi*, the
+# original MILP) and are pinned here so a change to either route shows.
+def _snapshot_or_skip(out, name):
+    try:
+        return d.build(name, out / name, out / "cache")
+    except FileNotFoundError as exc:
+        pytest.skip(str(exc))
+
+
+def test_serious_crashes_reference(out):
+    files, exp = _snapshot_or_skip(out, "serious_crashes")
+    assert (exp["crashes_in_grid"], exp["top_count_hex"], exp["top_count"]) == (10008, "H1852", 35)
+    assert (exp["hot_cells"], exp["top_z_hex"], exp["top_z"]) == (331, "H1851", 11.571)
+    assert exp["hot_streets"] == ["MADISON", "CICERO", "ROOSEVELT"]
+    assert (exp["street_1_crashes"], exp["street_2_crashes"], exp["street_3_crashes"]) == (104, 87, 87)
+    assert (exp["night_pct"], exp["per_year_2020_2022"], exp["per_year_2023_2024"]) == (21.53, 2100.7, 1887.0)
+    esda = pytest.importorskip("esda")
+    libpysal = pytest.importorskip("libpysal")
+    import geopandas as gpd
+    import pandas as pd
+
+    grid = gpd.read_file(files["hex_grid_500m.geojson"])
+    c = pd.read_csv(files["chicago_serious_crashes_2020_2024.csv"]).dropna(subset=["latitude"])
+    c = c[c["latitude"] != 0]
+    pts = gpd.GeoDataFrame(c, geometry=gpd.points_from_xy(c.longitude, c.latitude), crs=4326)
+    n = grid["hex_id"].map(gpd.sjoin(pts, grid, predicate="within").groupby("hex_id").size())
+    g = esda.G_Local(n.fillna(0).to_numpy(float), libpysal.weights.Queen.from_dataframe(
+        grid, use_index=False), transform="B", star=True, permutations=0)
+    assert int((g.Zs > 1.96).sum()) == exp["hot_cells"]
+
+
+def test_cooling_centres_reference(out):
+    _, exp = _snapshot_or_skip(out, "cooling_centres")
+    assert exp["branches"] == ["Budlong Woods", "Chicago Lawn", "Lincoln Park", "Lozano",
+                               "Portage-Cragin", "Whitney"]
+    assert (exp["mean_km"], exp["share_over_2km_pct"]) == (3.6934, 81.44)
+    assert [exp[f"served_{i}"] for i in range(1, 7)] == [386643, 391236, 461837, 443099, 540492,
+                                                         521879]
+    assert exp["best_swap_ratio"] > 1.004  # the 0.2% tolerance on mean_km is below it
+
+
+def test_waikiki_reference(out):
+    _, exp = _snapshot_or_skip(out, "waikiki_tsunami")
+    assert (exp["zone_pop"], exp["zone_hu"], exp["hotels_in_zone"]) == (20294, 17067, 65)
+    assert (exp["walk_median_min"], exp["walk_max_min"], exp["walk_max_block"]) == (
+        3.91, 14.38, "150030017002005")
+    assert exp["pop_over_10min"] == 846
+    assert (exp["slr_buildings_intersect"], exp["slr_buildings_centroid"], exp["hotels_in_slr"]) == (
+        909, 324, 10)
 
 
 def test_a_typographic_apostrophe_still_reads_as_a_refusal():

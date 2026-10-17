@@ -36,6 +36,11 @@ RELIABILITY = {
     "T05": "25 of 25 harness runs", "T07": "25 of 25 harness runs",
     "T08": "29 of 29 harness runs", "T11": "25 of 25 harness runs",
     "T12": "25 of 26 harness runs", "T13": "3 of 3 harness runs",
+    # 2026-10-16/17, deepseek-v4-flash, validation OFF as deployed (the figures above were
+    # measured with it on). T14: runs on its final wording only (39d9bf0a); three earlier runs
+    # missed only through wording the prompt has since pinned. T15: every validation-off run (its
+    # wording never changed); with validation on it was 2 of 3, one turn re-checked past the cap.
+    "T14": "3 of 3 harness runs", "T15": "6 of 6 harness runs",
 }
 
 CASES = [
@@ -60,6 +65,37 @@ CASES = [
           "prompt": "Group the 77 community areas into 6 contiguous regions with similar violent "
                     "crime rates using SKATER. Map the regions and give each one's community "
                     "areas, population and mean rate."},
+     ]},
+    # T14. The data is a pinned snapshot (datasets.CRASH_FILES), copied by datasets.build. The
+    # steps carry the three wordings T14's runs pinned: a street is its name (W and E Madison St
+    # are one), the night is crash_hour 22-3, the yearly averages count every crash in the file.
+    # Live 2026-10-15 every figure was right; step 2 once re-used the hot/cold layer instead of
+    # mapping the z-scores, hence "a map of the z-scores themselves".
+    {"id": "crash-hotspots", "task": "T14",
+     "title": "Where serious crashes cluster in Chicago",
+     "blurb": "Chicago's Vision Zero plan targets the crashes that kill or seriously injure people. "
+              "This case takes five years of them, 2020 to 2024, and finds where they cluster, which "
+              "streets run through the clusters, and when they happen.",
+     "tags": ["hot spots", "Gi*", "Vision Zero", "temporal"],
+     "category": "Hypothesis testing",
+     "steps": [
+         {"label": "Count the crashes",
+          "prompt": "Count Chicago's serious crashes from 2020 to 2024 in each 500 m hexagon and "
+                    "map the counts. How many crashes fall in the grid, and which hexagon has the "
+                    "most?"},
+         {"label": "Are they clustered?",
+          "prompt": "Run Getis-Ord Gi* on those counts with binary queen contiguity, each hexagon "
+                    "in its own neighbourhood, and analytical z-scores. How many hexagons are hot "
+                    "spots (z > 1.96), and which hexagon has the highest z? Map the z-scores "
+                    "themselves, so the hot spots stand out."},
+         {"label": "Which streets?",
+          "prompt": "Using the street recorded with each crash (its street name; W and E Madison "
+                    "St are one street), which three streets have the most serious crashes inside "
+                    "the hot-spot hexagons, and how many each?"},
+         {"label": "When?",
+          "prompt": "What share of all the serious crashes happened at night, from 10 p.m. to 4 "
+                    "a.m. (crash_hour 22, 23, 0, 1, 2 or 3)? And over all the serious crashes, how "
+                    "many were there per year on average in 2020–2022 and in 2023–2024?"},
      ]},
     {"id": "schools-buffer", "task": "T02",
      "title": "Schools within a mile of a site",
@@ -126,6 +162,31 @@ CASES = [
                {"label": "Map the service areas",
                 "prompt": "Map the demand points coloured by the chosen site that serves each "
                           "one, and mark the two chosen sites."}]},
+    # T15. Pinned snapshot (datasets.COOLING_FILES). Live 2026-10-15, step 3 ("How many residents
+    # does each serve?") was answered from memory with no tool call, and wrongly; it now asks for
+    # the count from the assignment, which is one groupby on the agent's own file.
+    {"id": "cooling-centres", "task": "T15",
+     "title": "Libraries as heat-emergency cooling centres",
+     "blurb": "In a heat emergency Chicago opens its public libraries as cooling centres. If only 6 "
+              "of the 82 branches can stay open late, this case finds the 6 that keep residents "
+              "closest, using 2020 census population.",
+     "tags": ["location-allocation", "p-median", "census"],
+     "category": "Optimisation",
+     "steps": [
+         {"label": "Pick 6 branches",
+          "prompt": "In a heat emergency Chicago can keep only 6 library branches open late as "
+                    "cooling centres. Which 6 minimise the total population-weighted straight-line "
+                    "distance from each block group to its nearest open branch? Measure distance in "
+                    "metres in UTM zone 16N (EPSG:26916) and solve it exactly (it is a 6-median "
+                    "problem). Report the 6 branches, the average distance per resident in km, and "
+                    "the share of residents more than 2 km from their nearest open branch."},
+         {"label": "Map the service areas",
+          "prompt": "Map the block groups coloured by the branch that serves them, and mark the 6 "
+                    "branches."},
+         {"label": "Who is served?",
+          "prompt": "Count how many residents each of the 6 branches serves, by summing the "
+                    "population of the block groups assigned to it."},
+     ]},
     # No upload and no harness task: admin_boundary(city) -> dem_for_region(clip to the city) ->
     # inundation_at_level. Replaces T07's synthetic tile. The city boundary is ~80% open water,
     # which a bathtub calls flooded (asked about "the city", 98.7%); the question asks about
