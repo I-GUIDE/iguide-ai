@@ -5886,3 +5886,13 @@ rather than from the previous one.
 - **What the model is told:** the tool says to recolour by redrawing the same file_id with
   `color` / `class_colors`.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
+
+## 2026-10-17 · M8.112 · An answer whose figures no result holds is not shipped (architecture stage 77)
+
+- **The fault:** on production with validation off, T16 reported nine invented figures after
+  five of six code runs failed.
+- **The guard:** always on, deterministic, no re-run. When at least 3 figures are stated and 60%
+  or more match nothing the turn recorded, those statements are removed and the answer says they
+  could not be computed, naming the failed runs.
+- **Measured:** replayed on the archive, it touched 0 of 352 correct answers.
+- **Tests:** `rag_pipeline/tests/test_untraceable_figures.py`.
