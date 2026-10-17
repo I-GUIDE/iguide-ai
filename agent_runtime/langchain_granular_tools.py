@@ -269,7 +269,8 @@ _ROAD_NETWORK_NOTE = (
     "service roads, nothing private), as OSMnx's drive network has it; a raw filter such as "
     "'highway~\"^(primary|secondary)$\"' picks classes. A network is written WHOLE to a GeoJSON "
     "file (`file_id`: ways with highway, name, oneway, maxspeed and length_m) and drawn on the "
-    "map; you read counts and a summary, not the features, so route over it with execute_code. "
+    "map; you read counts and a summary, not the features, so route over it with execute_code, "
+    "joining ways only at shared vertices (`how_to_route` says how). "
     "'highway' alone means highway=motorway only.")
 _NETWORK_SAMPLE_NAMES = 12
 
@@ -388,16 +389,31 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
         "download_url": rec.get("download_url"),
         "filename": rec.get("filename"),
         "summary": summary,
+        # Live, 2026-10-17 (S69.1): the corners of the Loop box sat on one-way stubs the box cut
+        # off, so the first route found no path. The model then merged every pair of vertices
+        # within 5 m and drove between Upper and Lower Wacker Drive eleven times: 4.89 min, where
+        # the best legal route on the same file is 5.19. It had computed the strongly connected
+        # components and still snapped to the WEAK one. The old text said "join on identical
+        # coordinates" once; it now says what not to do, why, and what to do instead.
         "how_to_route": (
             "The features are NOT in this result: read the file with execute_code "
             "(input_files=[file_id]). Each feature is one OSM way, a LineString in lon/lat "
             "(EPSG:4326) with its tags as properties (highway, name, oneway, maxspeed, lanes, "
-            "...) and length_m. Ways meet where they share a vertex (an OSM node), so split each "
-            "way at every vertex it shares with another and join on identical coordinates; a "
-            "bridge over a street shares none. oneway: yes/true/1 = only in the vertex order, "
-            "-1 = only against it, absent/no = both ways. maxspeed is text ('30 mph', '50' = "
-            "km/h, 'none', 'signals'); untagged ways need the default speed the user states, "
-            "or say which default was used."),
+            "layer, bridge, tunnel, ...) and length_m. Build a directed graph whose nodes are the "
+            "EXACT vertex coordinates: ways connect only where they share a vertex (an OSM node). "
+            "NEVER merge, snap or buffer vertices that are merely close, and never add an edge "
+            "the file does not have: stacked roads (an upper and a lower level), bridges and the "
+            "streets under them, and ramps lie within a few metres of roads they do not connect "
+            "to, so any distance tolerance invents shortcuts a car cannot take. oneway: "
+            "yes/true/1 = only in the vertex order, -1 = only against it, absent/no = both ways. "
+            "maxspeed is text ('30 mph', '50' = km/h, 'none', 'signals'); untagged ways need the "
+            "default speed the user states, or say which default was used. The area's edge cuts "
+            "roads, leaving one-way stubs that can be entered but not left, so the vertex nearest "
+            "a point may have no route out: snap the origin and the destination to the nearest "
+            "vertex in the LARGEST STRONGLY connected component (networkx."
+            "strongly_connected_components; the weakly connected one is not enough) and report "
+            "how far each was moved. If there is still no path, say so instead of changing the "
+            "network."),
         "map_layer": {"url": rec.get("download_url"), "render": "shapes",
                       "label": f"OSM road network ({len(rows)} ways)",
                       "id": content_layer_id("overpass", "road_network", None,
