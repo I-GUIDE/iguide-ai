@@ -398,7 +398,9 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
             "-1 = only against it, absent/no = both ways. maxspeed is text ('30 mph', '50' = "
             "km/h, 'none', 'signals'); untagged ways need the default speed the user states, "
             "or say which default was used."),
-        "map_layer": {"url": rec.get("download_url"), "render": "shapes",
+        # 'network': drawn as muted context lines beneath everything else, so a route found on
+        # it reads the way a navigation app shows one (map-ui-prototype toDeckLayer).
+        "map_layer": {"url": rec.get("download_url"), "render": "network",
                       "label": f"OSM road network ({len(rows)} ways)",
                       "id": content_layer_id("overpass", "road_network", None,
                                              osm_filter=query["osm_filter"], bbox=region),
@@ -600,6 +602,66 @@ def geocode_places_tool(places: Any) -> str:
     return json.dumps(payload, ensure_ascii=True)
 
 
+_REVERSE_MAX_POINTS = 10  # ~1 s per uncached point under Nominatim's usage policy
+# The address parts that name WHERE a point is, most local first. Nominatim fills whichever
+# OpenStreetMap has for the place: a Chicago point gets neighbourhood/suburb, a rural one a hamlet.
+_PLACE_PARTS = ("neighbourhood", "quarter", "suburb", "city_district", "borough", "hamlet",
+                "village", "town", "city", "county", "state", "country")
+
+
+def reverse_geocode_tool(points: Any, zoom: int = 16) -> str:
+    """Name the place at each coordinate from OpenStreetMap (Nominatim /reverse).
+
+    Live 2026-10-17 (crash hot-spot example): the answer placed a hexagon at -87.622, 41.887
+    "on Chicago's North Side ... around Wrigleyville". It is in the Loop, 7 km south. No tool
+    had named the place; the model had, from memory. This is the tool that names it.
+    """
+    from rag_pipeline.search.opengeodata_new import reverse_geocode_point
+
+    if isinstance(points, str):
+        try:
+            points = json.loads(points)
+        except json.JSONDecodeError:
+            return json.dumps({"ok": False, "error": "points must be a JSON list of "
+                               "{lat, lon} objects or [lat, lon] pairs"})
+    if isinstance(points, dict) or (isinstance(points, (list, tuple)) and len(points) == 2
+                                    and all(isinstance(v, (int, float)) for v in points)):
+        points = [points]
+    parsed: List[Tuple[float, float]] = []
+    for pt in points or []:
+        try:
+            if isinstance(pt, dict):
+                lat, lon = float(pt.get("lat")), float(pt.get("lon", pt.get("lng")))
+            else:
+                lat, lon = float(pt[0]), float(pt[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            parsed.append((lat, lon))
+    dropped = max(0, len(parsed) - _REVERSE_MAX_POINTS)
+    parsed = parsed[:_REVERSE_MAX_POINTS]
+    results: List[Dict[str, Any]] = []
+    for lat, lon in parsed:
+        hit = reverse_geocode_point(lat, lon, zoom=int(zoom or 16))
+        if not hit:
+            results.append({"lat": lat, "lon": lon, "found": False})
+            continue
+        addr = hit.get("address") or {}
+        parts = {k: addr[k] for k in _PLACE_PARTS if addr.get(k)}
+        results.append({"lat": lat, "lon": lon, "found": True,
+                        "place": next(iter(parts.values()), None), "address": parts,
+                        "road": addr.get("road"), "display_name": hit.get("display_name")})
+    payload: Dict[str, Any] = {"ok": True, "results": results,
+                               "source": "OpenStreetMap Nominatim (© OpenStreetMap contributors)"}
+    if dropped:
+        payload["note"] = (f"only the first {_REVERSE_MAX_POINTS} points were named "
+                           f"({dropped} dropped)")
+    if not parsed:
+        payload = {"ok": False, "error": "no valid coordinates: pass a JSON list of {lat, lon} "
+                   "objects or [lat, lon] pairs"}
+    return json.dumps(payload, ensure_ascii=True)
+
+
 def make_langchain_geocode_tools() -> List[Any]:
     """The geocoding tool for peers that plot named places (code/analysis)."""
     try:
@@ -619,7 +681,20 @@ def make_langchain_geocode_tools() -> List[Any]:
                 f"Max {_GEOCODE_MAX_PLACES} names per call (~1s per uncached name)."
             ),
             metadata={"category": "geospatial"},
-        )
+        ),
+        StructuredTool.from_function(func=accept_null_defaults(reverse_geocode_tool),
+            name="reverse_geocode",
+            description=(
+                "Name the place at coordinates (OpenStreetMap Nominatim reverse geocoding): "
+                "returns, per point, the neighbourhood/suburb/city OSM records there, the nearest "
+                "road and a full address. Input `points`: a JSON list of {\"lat\": ..., \"lon\": "
+                "...} objects or [lat, lon] pairs; `zoom` 10 city, 14 suburb, 16 street "
+                "(default), 18 building. Call it BEFORE saying where a result lies (a "
+                "neighbourhood, district or landmark): never name the place for a coordinate "
+                f"from memory. Max {_REVERSE_MAX_POINTS} points per call (~1s per uncached point)."
+            ),
+            metadata={"category": "geospatial"},
+        ),
     ]
 
 

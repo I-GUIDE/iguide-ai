@@ -61,6 +61,13 @@ export function LeftPanel(p: Props) {
                 )}
                 {/* A cluster map is unreadable without its key: "High-High" is a colour on the
                     map and nowhere else. Only categorical layers carry one. */}
+                {/* A route's two markers mean nothing without a key either. */}
+                {l.kind === 'geojson' && l.render === 'route' && !l.legend?.length && (
+                  <ul className="lp-legend">
+                    <li><span className="swatch" style={{ background: 'rgb(52,168,83)' }} /><span className="llabel">Start</span></li>
+                    <li><span className="swatch" style={{ background: 'rgb(234,67,53)' }} /><span className="llabel">End</span></li>
+                  </ul>
+                )}
                 {l.kind === 'geojson' && !!l.legend?.length && (
                   <ul className="lp-legend">
                     {l.legend.map((e) => (

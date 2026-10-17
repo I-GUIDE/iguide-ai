@@ -286,7 +286,7 @@ export interface MapLayerEvent {
   count?: number;
   geojson?: import('geojson').FeatureCollection;
   url?: string;                 // fetch instead of inlining (large layers)
-  render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes'
+  render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes' | 'network' | 'route'
   outline?: boolean;            // boundary only, so anything drawn beneath stays visible
   styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
   legend?: { label: string; color: [number, number, number, number] }[];

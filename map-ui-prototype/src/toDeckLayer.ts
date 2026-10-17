@@ -1,8 +1,9 @@
 // The thin renderer: LayerArtifact -> deck.gl layer. One switch, easy to test.
-import { BitmapLayer, GeoJsonLayer } from '@deck.gl/layers';
+import { BitmapLayer, GeoJsonLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
 import type { LayerArtifact } from './contracts';
 import type { Feature, Point } from 'geojson';
+import { routeEnds } from './routeGeometry';
 
 const DEFAULT_FILL: [number, number, number, number] = [51, 136, 255, 120];
 const DEFAULT_LINE: [number, number, number, number] = [20, 90, 200, 255];
@@ -43,6 +44,49 @@ function categoricalFor(a: VectorLayer): ((f: any) => [number, number, number, n
   const byLabel = new Map(a.legend.map((e) => [e.label, e.color]));
   const UNKNOWN: [number, number, number, number] = [200, 200, 200, 140];
   return (f: any) => byLabel.get(String((f.properties || {})[key])) ?? UNKNOWN;
+}
+
+// Navigation-app styling for a road network and a route found on it. The network is context:
+// thin slate lines the basemap still reads through. The route is the answer: a thick blue line
+// on a white casing, so it stays legible over any street, with its start (green) and end (red)
+// marked. Before this both were drawn with the same 2-3 px default line, and the fastest drive
+// across the Loop could not be told apart from the 1,521 ways it was found on.
+const NETWORK_LINE: [number, number, number, number] = [71, 85, 105, 150];
+const ROUTE_LINE: [number, number, number, number] = [26, 115, 232, 255];
+const ROUTE_CASING: [number, number, number, number] = [255, 255, 255, 235];
+const ROUTE_START: [number, number, number, number] = [52, 168, 83, 255];
+const ROUTE_END: [number, number, number, number] = [234, 67, 53, 255];
+
+function routeLayers(a: VectorLayer) {
+  const visible = a.visible !== false;
+  const line = { lineWidthUnits: 'pixels' as const, lineCapRounded: true, lineJointRounded: true,
+                 filled: false, stroked: true };
+  const layers: any[] = [
+    new GeoJsonLayer({ id: `${a.id}--casing`, data: a.data, visible, pickable: false, ...line,
+                       getLineColor: ROUTE_CASING, getLineWidth: 11 }),
+    new GeoJsonLayer({ id: a.id, data: a.data, visible, pickable: true, ...line,
+                       getLineColor: ROUTE_LINE, getLineWidth: 6 }),
+  ];
+  const ends = routeEnds(a.data);
+  if (ends) {
+    layers.push(new ScatterplotLayer({
+      id: `${a.id}--ends`, visible, pickable: false,
+      data: [{ position: ends.start, color: ROUTE_START }, { position: ends.end, color: ROUTE_END }],
+      getPosition: (d: any) => d.position, getFillColor: (d: any) => d.color,
+      getLineColor: [255, 255, 255, 255], stroked: true, lineWidthUnits: 'pixels', getLineWidth: 3,
+      radiusUnits: 'pixels', getRadius: 8,
+    }));
+  }
+  return layers;
+}
+
+function networkLayer(a: VectorLayer) {
+  return new GeoJsonLayer({
+    id: a.id, data: a.data, visible: a.visible !== false, pickable: true,
+    filled: false, stroked: true, lineWidthUnits: 'pixels', lineCapRounded: true,
+    lineJointRounded: true, getLineColor: NETWORK_LINE, getLineWidth: 1.5,
+    pointType: 'circle', getPointRadius: 2, pointRadiusUnits: 'pixels',
+  });
 }
 
 export function toDeckLayer(a: LayerArtifact) {
@@ -86,6 +130,9 @@ export function toDeckLayer(a: LayerArtifact) {
       pickable: false,
     });
   }
+
+  if (a.render === 'route') return routeLayers(a);
+  if (a.render === 'network') return networkLayer(a);
 
   // Categorical first: a class-name column would ramp to NaN and come out one flat colour.
   const ramp = a.render === 'categories' ? categoricalFor(a) ?? rampFor(a) : rampFor(a);

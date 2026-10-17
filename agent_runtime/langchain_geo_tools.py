@@ -383,6 +383,26 @@ _CATEGORY_COLORS = [
     [230, 97, 158, 200], [102, 194, 165, 200], [140, 140, 140, 200], [8, 81, 156, 200],
 ]
 
+
+def _auto_render(gdf, column: Optional[str], is_point: bool) -> str:
+    """What render="auto" draws. A `column` asked for is what the layer is FOR, so it decides:
+    class names (a branch, a LISA class, a region id) are categories, numbers a choropleth.
+    Without one, a large point set is a density surface and anything else is drawn plainly.
+
+    The column used to be ignored here. Live 2026-10-17 (cooling-centre example, step 2: "map
+    the block groups coloured by the branch that serves them"), add_map_layer drew the 2,158
+    block-group points as a heatmap, past the 2,000-point line, and the answer said they were
+    coloured by branch.
+    """
+    if column and column in gdf.columns:
+        import pandas as _pd
+        values = gdf[column]
+        if _pd.api.types.is_bool_dtype(values) or not _pd.api.types.is_numeric_dtype(values):
+            return "categories"
+        return "choropleth"
+    return "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+
+
 def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the vector/shapefile StructuredTools (geopandas-backed).
 
@@ -867,8 +887,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
         `render`: "heatmap" (point density), "choropleth" (polygons shaded by a NUMERIC
         `column`), "categories" (shaded by a CLASS-NAME `column` — LISA classes, Gi* bands,
-        region ids; a legend is built for you), "points"/"shapes", or "auto". Returns the layer descriptor
-        the client plots, plus a downloadable GeoJSON file_id.
+        region ids; a legend is built for you), "route" (a path found on a network, drawn like a
+        navigation app: a cased line with its start and end marked), "network" (a road or street
+        network as muted context lines beneath the rest), "points"/"shapes", or "auto". Returns
+        the layer descriptor the client plots, plus a downloadable GeoJSON file_id.
         """
         tmp = None
         try:
@@ -891,7 +913,16 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             # worth suggesting live in the columns that were dropped.
             full = gdf
             if mode == "auto":
-                mode = "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+                mode = _auto_render(gdf, column, bool(is_point))
+            if mode in {"route", "network"} and not geom_types <= {"LineString", "MultiLineString"}:
+                # The navigation-style renders draw lines: a route as a cased line with its two
+                # ends marked, a network as muted context beneath it. Anything else would draw
+                # nothing the user could read as a road.
+                return json.dumps({"ok": False,
+                                   "error": f"render={mode!r} draws lines; this file holds "
+                                            f"{sorted(geom_types)}",
+                                   "hint": "Pass the path as LineString features (one per edge, in "
+                                           "travel order, or one merged line), or use 'points'/'shapes'."})
             if mode == "categories":
                 # A class-NAME column (LISA's High-High, a Gi* band, a region id). Without a
                 # legend the client has nothing to map names to colours and falls back to the
@@ -1024,9 +1055,16 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             description=("Put a dataset on the user's INTERACTIVE MAP as a styled layer they can pan, "
                          "zoom and click — this is how a map is delivered here, and it is what to use "
                          "when the user asks to see/plot/visualize data on the map. `render`: "
-                         "'heatmap' for point density, 'choropleth' for polygons shaded by a numeric "
-                         "`column` (e.g. the count from vector_spatial_join), 'points'/'shapes', or "
-                         "'auto'. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
+                         "'heatmap' for point density, 'choropleth' for features shaded by a numeric "
+                         "`column` (e.g. the count from vector_spatial_join), 'categories' for "
+                         "features coloured by a class-name `column` (which facility serves each "
+                         "area, a LISA class, a region id; a legend is built), 'points'/'shapes', or "
+                         "'auto' (with a `column`: categories or choropleth by its type; without "
+                         "one: a heatmap for more than 2,000 points). For a route found on a "
+                         "network (shortest or fastest path), use 'route': it is drawn like a "
+                         "navigation app, a thick cased line with its start and end marked, above a "
+                         "muted road network; 'network' draws a network you built that way. Pass "
+                         "the route as LineString features in travel order (or one merged line). Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download. The map keeps one layer per source file: drawing a file that "

@@ -191,7 +191,7 @@ def test_a_network_comes_back_whole_as_a_file_not_as_features(monkeypatch, store
     assert any(f["properties"]["oneway"] == "-1" for f in fc["features"])
 
     ml = out["map_layer"]
-    assert ml["url"] == out["download_url"] and ml["render"] == "shapes" and ml["count"] == 840
+    assert ml["url"] == out["download_url"] and ml["render"] == "network" and ml["count"] == 840
     assert out["citation_ids"] == ["osm:road_network"]
 
 
