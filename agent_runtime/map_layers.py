@@ -17,6 +17,41 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def parse_colour(value: Any, alpha: int = 255) -> Optional[List[int]]:
+    """A colour as ``[r, g, b, a]`` (0-255), or None when *value* is not one.
+
+    Accepts what a user or a tool would write: a name ("red", "darkorange"), a hex string
+    ("#d7191c", "#d7191ccc"), or 3-4 numbers. Numbers all within 0-1 are read as fractions.
+    The map client draws numbers only, so every colour is resolved here, on the server, and a
+    bad one is reported back to the model rather than guessed at.
+    """
+    if isinstance(value, (list, tuple)) and len(value) in (3, 4):
+        try:
+            nums = [float(v) for v in value]
+        except (TypeError, ValueError):
+            return None
+        if all(0.0 <= v <= 1.0 for v in nums) and any(v not in (0.0, 1.0) for v in nums):
+            nums = [v * 255.0 for v in nums]
+        if not all(0.0 <= v <= 255.0 for v in nums):
+            return None
+        rgba = [int(round(v)) for v in nums]
+        return rgba if len(rgba) == 4 else rgba + [int(alpha)]
+    if isinstance(value, str) and value.strip():
+        try:
+            from matplotlib.colors import to_rgba
+        except Exception:  # pragma: no cover - matplotlib is in the image
+            return None
+        text = value.strip().lower().replace(" ", "")
+        try:
+            r, g, b, a = to_rgba(text)
+        except ValueError:
+            return None
+        has_alpha = text.startswith("#") and len(text) in (5, 9)
+        return [int(round(r * 255)), int(round(g * 255)), int(round(b * 255)),
+                int(round(a * 255)) if has_alpha else int(alpha)]
+    return None
+
 # Cap features per emitted layer so a single event stays a sane size.
 _MAX_FEATURES = 500
 # How much of a label's slug stays readable in a layer id. Beyond this a digest of the FULL
@@ -377,20 +412,29 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
                                         if v not in (None, "", [], {})}
                 return out
 
-            # A CATEGORICAL layer carries its own palette: the tool that assigned the classes
-            # is the only thing that knows what they mean, so the legend travels WITH the layer
-            # instead of being hardcoded per-tool in the client. Dropped when malformed rather
-            # than passed through half-valid.
+            # A CATEGORICAL layer carries its classes; a colour per class only where the colour
+            # MEANS something (a hot spot is red, a cold spot blue) or the user asked for one.
+            # Every other class is coloured by the map client's own palette (map-ui-prototype
+            # palette.ts), so the look of a map is decided in one place. An entry without a
+            # label is dropped; a colour that is not one is dropped and the class kept.
             legend = ml.get("legend")
             if isinstance(legend, list):
-                entries = [
-                    {"label": str(e.get("label")), "color": [int(v) for v in e.get("color")]}
-                    for e in legend
-                    if isinstance(e, dict) and e.get("label") is not None
-                    and isinstance(e.get("color"), (list, tuple)) and len(e["color"]) == 4
-                ]
+                entries = []
+                for e in legend:
+                    if not isinstance(e, dict) or e.get("label") is None:
+                        continue
+                    entry: Dict[str, Any] = {"label": str(e.get("label"))}
+                    rgba = parse_colour(e.get("color")) if e.get("color") is not None else None
+                    if rgba:
+                        entry["color"] = rgba
+                    entries.append(entry)
                 if entries:
                     out["legend"] = entries
+            # One colour for the whole layer, set only when the user asked for it ("the crimes in
+            # red"); without it the client colours the layer by its source.
+            colour = parse_colour(ml.get("color")) if ml.get("color") is not None else None
+            if colour:
+                out["color"] = colour
 
             # INVARIANT: a 'categories' render is meaningless without its palette. The client
             # maps class NAMES through the legend; with no legend it falls back to the NUMERIC

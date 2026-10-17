@@ -19,6 +19,8 @@
     "check:markdown": "esbuild src/markdown.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/markdowncheck.mjs && node node_modules/.cache/markdowncheck.mjs",
     "check:conversations": "esbuild src/conversations.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/conversationscheck.mjs && node node_modules/.cache/conversationscheck.mjs",
     "check:restore": "esbuild src/restore.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/restorecheck.mjs && node node_modules/.cache/restorecheck.mjs",
+    "check:palette": "esbuild src/palette.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/palettecheck.mjs && node node_modules/.cache/palettecheck.mjs",
+    "check:route": "esbuild src/routeGeometry.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/routecheck.mjs && node node_modules/.cache/routecheck.mjs",
     "check:demos": "esbuild src/demos.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/demoscheck.mjs --define:import.meta.env='{\"BASE_URL\":\"/\"}' && node node_modules/.cache/demoscheck.mjs"
   },
   "dependencies": {

@@ -87,6 +87,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
+| 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11414,4 +11415,95 @@ in the JSON body).
 - The pool size is configured by hand and must follow the account if NCSA changes it.
 - The daily ledger is per process and per host. A second worker or host would need a shared
   store.
+
+## Stage 76 — Map layers say what they are {#stage-76}
+
+**Why.** Three faults showed live on 2026-10-17, while the crash hot-spot and cooling-centre
+examples (#150) and the Loop drive were checked step by step.
+- **Cooling centres, step 2** ("map the block groups coloured by the branch that serves them").
+  The 2,158 block-group points arrived as a heatmap, a yellow blob, and the answer said they were
+  coloured by branch. `add_map_layer` with `render="auto"` ignored the `column` it was given:
+  every point set over 2,000 became a density surface. The tool description the model reads also
+  listed every render except `categories`, which existed only in the function's docstring.
+- **Crash hot spots.** Hexagon H1852 at -87.622, 41.887 was described as "on Chicago's North Side
+  ... around Wrigleyville". It is in the Loop (New East Side), 7 km south. Nothing could have
+  named the place: the agent had a forward geocoder (`geocode_places`) and no reverse one, so the
+  name came from the model's memory, and the synthesizer passed the peer's sentence through.
+- **The Loop drive.** The fastest route and the 1,521 ways it was found on were drawn with the
+  same 2–3 px line. The answer could not be told apart from its input.
+
+**Change.**
+- **`render="auto"` with a `column`** (`langchain_geo_tools._auto_render`). Class names (and
+  booleans) give `categories`, numbers give `choropleth`. With no column it is unchanged: a
+  heatmap above 2,000 points, otherwise points or shapes. The tool description now lists
+  `categories`, `route` and `network`, and says what `auto` does.
+- **`reverse_geocode`** (`langchain_granular_tools.reverse_geocode_tool`,
+  `opengeodata_new.reverse_geocode_point`).
+  - It calls Nominatim `/reverse`, sharing the forward geocoder's 1 request/second limiter and
+    User-Agent, cached per point.
+  - It returns the neighbourhood, suburb and city that OpenStreetMap records, the nearest road,
+    and the full address. At most 10 points per call.
+  - It is bound wherever `geocode_places` is (both peers), and the source catalogue lists it
+    under Nominatim.
+  - Points are echoed as `point: [lat, lon]`, not as lat/lon fields. The map UI previews any
+    result object with lat/lon, and in the first live check the two queried points became two
+    stray layers beside the route.
+- **A rule on place names.** `PLACE_NAMES_RULE` is appended to both peers' prompts: say where a
+  result lies only from `reverse_geocode` or a name column in the data. `SYNTHESIS_PROMPT` rule 9
+  drops any place named for a coordinate that no result names.
+- **Routes and networks** (`map-ui-prototype`: `toDeckLayer`, `routeGeometry`, `AgentMap`).
+  - Two renders join the layer contract: `route` and `network`.
+  - A route is drawn as a 6 px blue line on an 11 px white casing, with rounded joins.
+  - Its start (green) and end (red) are marked. The ends are the path's two odd-degree vertices,
+    so a route written one edge per feature, in any order or direction, still gets its ends; a
+    set of lines that is not one path gets no markers rather than wrong ones.
+  - A network is drawn as 1.5 px slate lines the basemap reads through.
+  - The map stacks networks under everything and routes on top, whatever order they arrived in.
+  - The layer list shows a Start/End key for a route.
+  - `overpass_search(feature='road network')` now sends `render: "network"`.
+  - `add_map_layer` refuses `route`/`network` for anything that is not lines.
+
+**Colours: the map owns the palette, the agent sets a colour only when asked** (follow-up, same
+stage, user 2026-10-17).
+- **The question.** Should the categorical palette move to the client? Moved outright, a request
+  like "highlight the crimes in red" could never reach the map. It could not before either:
+  `add_map_layer` had no colour argument, the client coloured single-colour layers by source,
+  and the agent's fixed palette gave the first class red whatever was asked. The answer could
+  still say "in red".
+- **The client owns the defaults.** `palette.ts` holds the qualitative palette (the same twelve
+  hues, in the same order, so maps look as before), and `resolveLegend` fills every class that
+  arrives without a colour. A hue the agent set explicitly is not reused for another class.
+- **The agent sends colours only with a reason.**
+  - **Meaning:** Gi* hot and cold spots, and LISA classes, keep their colours, which are part of
+    the statistic's reading.
+  - **Arbitrary:** `add_map_layer`'s generic categories, `regionalize`'s regions and rs-embed's
+    look-alike zone groups now send class names only.
+  - **The user asked:** `add_map_layer` gains `color` (the whole layer: points, shapes, route,
+    network, or the heatmap's hue) and `class_colors` ({class: colour} for categories). Both
+    take names or hex, resolved on the server by `map_layers.parse_colour`.
+  - **What is refused, with the way that works:** a bad colour; `color` on a categories layer
+    (use `class_colors`); `color` on a choropleth (its colour is the value scale); a
+    `class_colors` class the column does not hold.
+- **The colour wins.** At the boundary, `build_map_layer` keeps a legend entry's colour as
+  optional and carries `color`. On the client an agent colour beats the source colour, the route
+  blue, the network slate and the heatmap ramp, and the layer list's dot shows it.
+- **The answer can only name colours that are real.** The tool result echoes `colours_set`, and
+  `colour_note` says to name a colour only if it was set here, or not to name colours at all.
+
+**Verified.**
+- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; colours:
+  `palette.check.ts`, six more tests in `test_map_roles_and_place_names.py`, and
+  `test_map_layers.py` (an entry needs a label, its colour is optional); the full suite
+  passed: 4,659 tests, with one deselected test that fails on prototype too, a networkx pin that
+  differs on the Mac.
+- Live on a local agent (Lumen deepseek-v4-flash, validation off):
+  - **Cooling step 1** drew the service areas coloured by branch, with a six-branch key.
+  - **Crash step 1** called `reverse_geocode` and placed H1852 "in the Loop".
+  - **The Loop drive** drew the network as context and the route as a cased blue line from Union
+    Station to Michigan & Adams, with its ends marked, named "West Loop Gate" and "Jewelers Row /
+    Loop" from `reverse_geocode`.
+
+**Not changed.** That Loop-drive turn drew the right path but reported 2.45 miles and 4.9 minutes,
+against 1,378 m and 1.71 minutes: its route code mis-summed the length. Another run looped on its
+own routing script until the no-progress stop. These are routing correctness, not drawing.
 
