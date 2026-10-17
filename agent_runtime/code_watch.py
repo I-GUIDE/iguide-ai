@@ -85,6 +85,51 @@ def perf_floor_s() -> float:
     return max(0.0, _env_float("AGENT_CODE_REVIEW_PERF_FLOOR_S", 30.0))
 
 
+def hints_after_s() -> float:
+    """How long a run must be going before its performance hints are shown in the trace.
+
+    The rules read code, not data, so they fire on any `apply` or nested loop. Live T16 on
+    production (2026-10-17) showed them on runs that took 1.8 s, beside runs that took 46 s: a
+    hint on every run reads as noise and is ignored on the run it was right about. Shown once a
+    run has actually been slow, at the same point the review starts."""
+    return max(0.0, _env_float("AGENT_CODE_HINTS_AFTER_S", 5.0))
+
+
+def hints_in_result_after_s() -> float:
+    """How long a run must have taken for its performance hints to go back to the model. A
+    fast run's result carrying "this construct is slow" invites a rewrite of code that was fine."""
+    return max(0.0, _env_float("AGENT_CODE_HINTS_RESULT_AFTER_S", 10.0))
+
+
+# Rules about correctness rather than speed: shown whatever the run's timing.
+PARAMETER_RULES = frozenset({"stated_parameter"})
+
+
+def split_findings(findings: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
+                                                                List[Dict[str, Any]]]:
+    """(performance findings, parameter findings)."""
+    perf = [f for f in findings if f.get("rule") not in PARAMETER_RULES]
+    params = [f for f in findings if f.get("rule") in PARAMETER_RULES]
+    return perf, params
+
+
+def hints_for_result(findings: Sequence[Dict[str, Any]], *, ran_s: Optional[float],
+                     slow: bool) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(performance hints, parameter checks) a run's result carries: performance hints only
+    when the run was slow (timed out, stopped, or took the threshold), parameter checks always."""
+    perf, params = split_findings(findings)
+    if not (slow or (ran_s is not None and ran_s >= hints_in_result_after_s())):
+        perf = []
+    return perf, params
+
+
+def _hint_message(findings: Sequence[Dict[str, Any]], lead: str) -> str:
+    return lead + "; ".join(
+        f"line {f['line']}: {f['rule'].replace('_', ' ')}" if f.get("line")
+        else f["message"] if f.get("rule") in PARAMETER_RULES
+        else f["rule"].replace("_", " ") for f in findings[:4])
+
+
 def heartbeat_every_s() -> float:
     return max(1.0, _env_float("AGENT_CODE_PROGRESS_SECONDS", 5.0))
 
@@ -659,12 +704,14 @@ class RunWatch:
     code: str
     timeout: int
     label: str = ""
+    purpose: str = ""            # completes "Executing code to …" (execute_code's `purpose`)
     brief: str = ""
     inputs: List[Dict[str, Any]] = field(default_factory=list)
     findings: List[Dict[str, Any]] = field(default_factory=list)
     mode: str = field(default_factory=review_mode)
     review_after: float = field(default_factory=review_after_s)
     perf_floor: float = field(default_factory=perf_floor_s)
+    hints_after: float = field(default_factory=hints_after_s)
     heartbeat_every: float = field(default_factory=heartbeat_every_s)
     reviewer: Callable[[str], str] = default_reviewer
     emit: Optional[Callable[[str, Dict[str, Any]], None]] = None
@@ -678,6 +725,7 @@ class RunWatch:
         self.review_state = "off" if self.mode == "off" else "waiting"
         self.review_record: Optional[Dict[str, Any]] = None
         self._held: Optional[Dict[str, Any]] = None     # a performance stop waiting for its floor
+        self._hints_sent = False
         if self.emit is None:
             from agent_runtime.streaming_trace import emit_trace_event
             self.emit = lambda event, data: emit_trace_event(event, data)
@@ -686,15 +734,24 @@ class RunWatch:
     def start(self, probe: RunProbe) -> None:
         self._probe = probe
         self._send("code_progress", {"stage": "started", "elapsed_s": 0})
-        if self.findings:
-            self._send("code_review", {
-                "stage": "rules", "verdict": "hints",
-                "message": "Rule check: " + "; ".join(
-                    f"line {f['line']}: {f['rule'].replace('_', ' ')}" if f.get("line")
-                    else f["rule"].replace("_", " ") for f in self.findings[:4]),
-                "findings": self.findings[:8]})
+        # A stated value the code never uses is wrong at any speed: said at once. Performance
+        # hints wait until the run has been slow (tick).
+        _, params = split_findings(self.findings)
+        if params:
+            self._send("code_review", {"stage": "rules", "verdict": "hints",
+                                       "message": _hint_message(params, "Parameter check: "),
+                                       "findings": params[:8]})
 
     def tick(self, elapsed: float) -> Optional[Interrupt]:
+        if not self._hints_sent and elapsed >= self.hints_after:
+            self._hints_sent = True
+            perf, _ = split_findings(self.findings)
+            if perf:
+                self._send("code_review", {
+                    "stage": "rules", "verdict": "hints",
+                    "message": _hint_message(perf, f"Still running after {int(elapsed)} s; "
+                                                   "slow constructs: "),
+                    "findings": perf[:8]})
         if self.mode != "off" and self._thread is None and elapsed >= self.review_after:
             self._begin_review(elapsed)
         if elapsed - self._last_beat >= self.heartbeat_every:
@@ -749,6 +806,7 @@ class RunWatch:
     # -- internals -----------------------------------------------------------------------
     def _send(self, event: str, data: Dict[str, Any]) -> None:
         payload = {"label": self.label or "code", "timeout_s": self.timeout,
+                   **({"purpose": self.purpose} if self.purpose else {}),
                    "review": self.review_state, **data}
         try:
             self.emit(event, payload)        # type: ignore[misc]
@@ -845,6 +903,6 @@ class RunWatch:
         return None
 
 
-__all__ = ["Finding", "Interrupt", "RUNTIME_DIRNAME", "RunProbe", "RunWatch", "SITECUSTOMIZE",
+__all__ = ["PARAMETER_RULES", "hints_for_result", "split_findings", "Finding", "Interrupt", "RUNTIME_DIRNAME", "RunProbe", "RunWatch", "SITECUSTOMIZE",
            "STACK_FILENAME", "accept_verdict", "enclosing_lines", "parse_stack", "parse_verdict",
            "precheck", "review_mode", "review_prompt", "stack_report", "stated_parameters"]

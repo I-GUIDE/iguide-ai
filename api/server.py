@@ -3597,6 +3597,9 @@ def agent_chat_stream():
                         # observation, and it was dropped HERE, so the one repair mechanism the
                         # agent already had has never been visible to anyone watching.
                         "tool_retry",
+                        # The model's sentence beside its tool calls: what it is about to do
+                        # and why. The map UI shows it above the calls' action lines.
+                        "tool_plan",
                         "tool_recovered",
                         "tool_dead_end",
                         # Provider token counts, one per model call (streaming_trace's

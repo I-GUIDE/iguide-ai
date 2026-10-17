@@ -702,3 +702,12 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
   border: 1px solid currentColor; background: transparent; color: inherit; }
 .coderun-stop:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .coderun-fill { transition: none; } }
+
+/* The model's own reason for the calls that follow it (tool_plan), and the detailed/debug switch. */
+.ln.plan { font-style: italic; opacity: .85; margin-top: 4px; }
+.trace-mode { display: block; position: relative; z-index: 1; font: inherit; font-size: 11px;
+  padding: 1px 8px; margin: 0 0 6px auto;
+  border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit;
+  opacity: .7; cursor: pointer; }
+.trace-mode:hover, .trace-mode[aria-pressed="true"] { opacity: 1; }
+.trace-mode:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

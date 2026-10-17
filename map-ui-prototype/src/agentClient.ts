@@ -267,7 +267,9 @@ export interface FileRecord {
   layer_id?: string;
 }
 
-export interface TraceLine { text: string; kind?: string }
+/** One transcript row. `text` is what a reader sees; `raw`, when set, is the same step as the
+ *  machine recorded it (a tool call with its arguments), shown instead in debug mode. */
+export interface TraceLine { text: string; kind?: string; raw?: string }
 
 export interface StreamHandlers {
   onTrace?: (line: TraceLine) => void;                 // status / routing / reasoning
@@ -287,6 +289,8 @@ export interface StreamHandlers {
 export interface CodeProgress {
   stage: 'started' | 'running' | 'finished';
   label?: string;
+  /** Completes "Executing code to …" (execute_code's `purpose`). */
+  purpose?: string;
   elapsed_s?: number;
   timeout_s?: number;
   /** waiting | reviewing | ok | critical | stopped | failed | dropped | off */
@@ -690,6 +694,11 @@ export async function streamChat(
       }
       case 'turn':
         if (p.turn_id) h.onTurn?.(String(p.turn_id));
+        break;
+      // The model's own sentence beside its tool calls: what it is about to do and why. It
+      // heads the action lines of the calls that follow it.
+      case 'tool_plan':
+        if (p.message) h.onTrace?.({ text: String(p.message).trim(), kind: 'plan' });
         break;
       case 'code_progress':
         h.onCodeProgress?.(p as CodeProgress);

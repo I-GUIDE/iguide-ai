@@ -147,8 +147,9 @@ def _record_tool_calls(calls):
 def test_a_tool_called_with_no_arguments_is_stored(live):
     """The 10-08 19:55 turn: `list_conversation_files` and `list_available_skills`, no args.
 
-    LangChain passes `str(tool_input)`. With arguments that is a Python repr, not JSON, so `args`
-    stays a string; with none it is "{}", which parses to a dict and hits the `text` field.
+    LangChain passes `str(tool_input)`. With arguments that is a Python repr, not JSON; it is
+    read as a literal since S78.1. With none it is "{}", which parses to a dict and hits the
+    `text` field.
     """
     events = _record_tool_calls([("list_conversation_files", "{}"),
                                  ("list_available_skills", "{}"),
@@ -161,8 +162,10 @@ def test_a_tool_called_with_no_arguments_is_stored(live):
     res = _save(events)
     assert res["stored"] is True, res
     doc = live.docs[res["traceId"]]
+    # The repr is read as a Python literal now (S78.1, so the client can phrase the call), and
+    # stored as JSON text like any other dict of arguments.
     assert [e["data"]["args"] for e in doc["events"]] == [
-        "{}", "{}", "{'query': 'flood', 'limit': 6}"]
+        "{}", "{}", '{"query": "flood", "limit": 6}']
     assert doc["events"][0]["data"]["tool_calls"] == [
         {"name": "list_conversation_files", "args": "{}"}]
 
