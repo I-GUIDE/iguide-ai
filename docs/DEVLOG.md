@@ -5856,6 +5856,25 @@ rather than from the previous one.
 
 **Measured** 14 offline tests; Stage 63/71 tests updated.
 
+
+## 2026-10-16 · M8.107 · Users write and share their own Spatial Analysis examples (architecture stage 73)
+
+**Change** Signed-in users create examples (title, description, category, topics, data files,
+  ordered steps). They are stored on the agent's file-store volume under `examples/`, private by
+  default. The owner can make a share link (`?example=<token>`) that other signed-in users open,
+  run and copy. Admins (role ≤ `AGENT_EXAMPLES_PUBLISH_ROLE`, default 2) publish one to everyone.
+  New routes are under `/agent/examples`. The panel gains "My examples", "Shared with me", a
+  "Community" badge on published examples, and an editor.
+
+**Why** User request. Adding an example meant a catalogue change and a deploy.
+
+**Measured** 31 offline route tests and 28 client checks. Driven in Chrome with three test users
+  against a local token-mode agent: create, run (step 1 on Lumen drew the layer), share, open,
+  copy, revoke, publish, edit-unpublishes, delete.
+
+**Not fixed** Lists refresh on load, not live. There is no moderation queue: an admin publishes
+  what they can open. Nothing reclaims the store beyond the per-account cap.
+
 ## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
 
 - **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column

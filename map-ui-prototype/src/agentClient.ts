@@ -378,9 +378,9 @@ export function absoluteUrl(path: string, cfg: AgentConfig): string {
  *  Same-origin would send them anyway — the UI and the API share agent.i-guide.io — but a
  *  developer running `npm run dev` against the deployed API is cross-origin, and there the
  *  default omits the cookie and every request looks unauthenticated for no visible reason. */
-const CREDENTIALS: RequestCredentials = 'include';
+export const CREDENTIALS: RequestCredentials = 'include';
 
-function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
+export function authHeaders(cfg: AgentConfig, json: boolean): Record<string, string> {
   const h: Record<string, string> = {};
   if (json) h['Content-Type'] = 'application/json';
   if (cfg.apiKey.trim()) h['X-API-KEY'] = cfg.apiKey.trim();
