@@ -5906,3 +5906,13 @@ rather than from the previous one.
 - **Vertex counts:** `inspect_vector` reports them.
 - **Tests:** `rag_pipeline/tests/test_code_watch.py`, plus `test_code_execution.py` (Docker
   timeout through the new loop).
+
+## 2026-10-17 · M8.114 · The trace says what each step does (architecture S78.1)
+
+- **The fault:** production T16's trace showed rule hints on 2-second runs, raw `execute_code({'code': …})` calls and "Code ready".
+- **Hints:** performance hints appear only for slow runs (5 s in the trace, 10 s in the result). Stated-parameter checks are shown on every run.
+- **Purpose:** the model's own sentence beside its tool calls (it was being dropped) is the step's purpose (`tool_plan`). Both peers are asked for it, and `execute_code` takes `purpose`.
+- **Actions:** each of 88 tools reads as words, with file names. The raw calls are behind "Show raw calls".
+- **Arguments:** tool-call events now carry their arguments as a dict.
+- **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
+- **Tests:** `test_code_watch.py`; `npm run check:coderun`.

@@ -215,6 +215,7 @@ def _watch(reviewer, events, **kw):
     return code_watch.RunWatch(code="", timeout=0, label="t", brief=kw.pop("brief", "nearest"),
                                reviewer=reviewer, review_after=kw.pop("review_after", 0.5),
                                perf_floor=kw.pop("perf_floor", 0.0),
+                               hints_after=kw.pop("hints_after", 0.5),
                                heartbeat_every=0.5, emit=lambda e, d: events.append((e, d)), **kw)
 
 
@@ -434,3 +435,127 @@ def test_geometry_size_reports_vertices_not_just_features(tmp_path):
     size = code_watch.geometry_size(str(path))
     assert size["features"] == 1 and size["vertices_max"] > 10_000
     assert "shapely.prepare" in size["note"]
+
+
+# --------------------------------------------------------------------------- quiet hints (S78.1)
+
+QUICK_NESTED = ("rows = list(range(40))\ntotal = 0\nfor a in rows:\n    for b in rows:\n"
+                "        total += a * b\nprint(total)\n")
+
+
+def test_a_fast_run_shows_and_returns_no_performance_hints():
+    """Production T16, 2026-10-17: 'nested loop' and 'rowwise geometry' were shown on runs that
+    took 1.8 s. A hint on every run is noise."""
+    events: list = []
+    w = code_watch.RunWatch(code="", timeout=0, label="q", mode="off",
+                            emit=lambda e, d: events.append((e, d)))
+    r = LocalSubprocessExecutor().execute(QUICK_NESTED, timeout=60, watch=w).to_dict()
+    assert r["ok"] and "performance_hints" not in r
+    assert not [d for e, d in events if e == "code_review"]
+
+
+def test_a_slow_run_shows_its_hints_once_and_returns_them():
+    events: list = []
+    w = code_watch.RunWatch(code="", timeout=0, label="s", mode="off", hints_after=1.0,
+                            emit=lambda e, d: events.append((e, d)))
+    r = LocalSubprocessExecutor().execute(SLOW_NESTED, timeout=4, watch=w).to_dict()
+    shown = [d for e, d in events if e == "code_review" and d.get("stage") == "rules"]
+    assert len(shown) == 1 and shown[0]["message"].startswith("Still running after 1 s")
+    assert [h["rule"] for h in r["performance_hints"]] == ["nested_loop"]
+
+
+def test_a_run_past_the_result_threshold_returns_hints(monkeypatch):
+    monkeypatch.setenv("AGENT_CODE_HINTS_RESULT_AFTER_S", "1")
+    r = LocalSubprocessExecutor().execute(
+        "import time\nrows = range(3000)\nfor a in rows:\n    for b in rows:\n        pass\n"
+        "time.sleep(1.2)\n", timeout=60).to_dict()
+    assert r["ok"] and r["performance_hints"][0]["rule"] == "nested_loop"
+
+
+def test_a_parameter_check_is_shown_at_once_and_returned_even_on_a_fast_run():
+    events: list = []
+    w = code_watch.RunWatch(code="", timeout=0, label="p", mode="off",
+                            brief="Task: buffer the sites by 2500 m",
+                            emit=lambda e, d: events.append((e, d)))
+    r = LocalSubprocessExecutor().execute("radius = 1000\nprint(radius)\n", timeout=60,
+                                          watch=w).to_dict()
+    assert r["ok"] and r["parameter_checks"][0]["rule"] == "stated_parameter"
+    shown = [d for e, d in events if e == "code_review"]
+    assert shown and shown[0]["message"].startswith("Parameter check: the task states")
+
+
+def test_hints_for_result_splits_by_kind_and_speed():
+    found = [{"rule": "nested_loop", "line": 3}, {"rule": "stated_parameter", "line": 0}]
+    assert code_watch.hints_for_result(found, ran_s=1.0, slow=False) == (
+        [], [{"rule": "stated_parameter", "line": 0}])
+    assert code_watch.hints_for_result(found, ran_s=1.0, slow=True)[0] == [
+        {"rule": "nested_loop", "line": 3}]
+
+
+# --------------------------------------------------------------------------- step narration (S78.1)
+
+def _llm_end(handler, content, tool_calls):
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    msg = AIMessage(content=content, tool_calls=tool_calls)
+    handler.on_llm_end(LLMResult(generations=[[ChatGeneration(message=msg)]]))
+
+
+def test_the_sentence_beside_tool_calls_is_emitted_as_the_step_plan():
+    """deepseek writes what it is about to do next to its tool calls (6 of 6 probes); the trace
+    used to drop it with the duplicate calls, leaving bare function calls with no reason."""
+    from agent_runtime.streaming_trace import active_callback_handler, trace_context
+
+    events = []
+    with trace_context(events.append, agent_dev=True):
+        handler = active_callback_handler()
+        _llm_end(handler, "\n\nI'll inspect both files to understand their structure.",
+                 [{"name": "inspect_vector", "args": {"file_id": "f1"}, "id": "c1"},
+                  {"name": "inspect_vector", "args": {"file_id": "f2"}, "id": "c2"}])
+        _llm_end(handler, "", [{"name": "execute_code", "args": {"code": "x"}, "id": "c3"}])
+    plans = [e["data"] for e in events if e["event"] == "tool_plan"]
+    assert len(plans) == 1
+    assert plans[0]["message"] == "I'll inspect both files to understand their structure."
+    assert plans[0]["tools"] == ["inspect_vector", "inspect_vector"]
+    # the calls themselves are still not duplicated as messages
+    assert not [e for e in events if e["event"] == "llm_interaction"]
+
+
+def test_both_peers_are_asked_to_narrate_their_steps():
+    from agent_runtime.supervisor.prompts import ANALYSIS_WORKFLOW_PROMPT, CODE_PEER_PROMPT
+
+    for prompt in (ANALYSIS_WORKFLOW_PROMPT, CODE_PEER_PROMPT):
+        assert "what you are about to do and why" in prompt
+
+
+def test_tool_call_events_carry_the_arguments_as_a_dict():
+    """The client turns a call into words from its arguments; a Python repr string gave it
+    nothing to read ("Inspecting a file")."""
+    from agent_runtime.streaming_trace import active_callback_handler, trace_context
+
+    events = []
+    with trace_context(events.append, agent_dev=True):
+        h = active_callback_handler()
+        h.on_tool_start({"name": "inspect_vector"}, "{'file_id': 'file_885af7d38fd5'}",
+                        inputs={"file_id": "file_885af7d38fd5"})
+        h.on_tool_start({"name": "inspect_vector"}, "{'file_id': 'file_2437c7f294d7'}")
+    args = [e["data"]["args"] for e in events if e["event"] == "tool_call"]
+    assert args == [{"file_id": "file_885af7d38fd5"}, {"file_id": "file_2437c7f294d7"}]
+
+
+def test_the_code_step_says_what_it_did():
+    """"Code ready" read as code waiting to run, after the step had run it many times."""
+    import json as _json
+
+    from agent_runtime.supervisor.graph import _code_step_summary
+
+    ok = {"name": "execute_code", "content": _json.dumps({"ok": True, "exit_code": 0})}
+    bad = {"name": "execute_code", "content": _json.dumps({"ok": False, "exit_code": 1,
+                                                           "error": "boom"})}
+    other = {"name": "inspect_vector", "content": "{}"}
+    assert _code_step_summary({"tool_results": [ok, bad, ok, other]}) == \
+        "Code step finished: 3 runs, 1 failed"
+    assert _code_step_summary({"tool_results": [ok]}) == "Code step finished: 1 run"
+    assert _code_step_summary({"tool_results": [other]}) == "Code step finished"
+    assert _code_step_summary("not a dict") == "Code step finished"

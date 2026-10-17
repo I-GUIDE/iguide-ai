@@ -11630,3 +11630,40 @@ run as well.
   - the review stopped a row-wise predicate at 9.5 s and the agent rewrote it with `sjoin`;
   - the answer was 909 / 324, both exactly the T16 reference;
   - Stop during a run logged the cancel, killed the container, and no model call followed.
+
+### S78.1 — The trace says what each step does {#stage-78-1}
+
+**Why.** Production T16 (2026-10-17, e3e7673d, the user watching in Chrome):
+- **Rule hints on every run.** "nested loop" and "rowwise geometry" appeared even on runs that took 1.8 s, beside runs that took 46 s. Shown on every run, they read as noise.
+- **Raw calls.** Every step read `execute_code({'code': 'import geopandas as gpd\nimport pandas…)` or `inspect_vector({'file_id': 'file_885af7d38fd5'})`.
+- **"Code ready".** The step that runs analyses said this when it finished, as if code had been written and was waiting.
+
+The user asked for each step's action and purpose by default, with the raw records behind a debug switch, and for the purpose to come from the model's own decision.
+
+**Change.**
+- **Quiet hints** (`code_watch`):
+  - **Trace:** performance rule hints appear only once a run has gone `AGENT_CODE_HINTS_AFTER_S` (5 s).
+  - **Result:** they go back to the model only when the run took `AGENT_CODE_HINTS_RESULT_AFTER_S` (10 s) or more, timed out, or was stopped.
+  - **Unchanged:** the stated-parameter check is about correctness, so it is still shown and returned on every run, now as `parameter_checks`.
+- **The purpose comes from the decision** (`streaming_trace.on_llm_end`).
+  - **The sentence was already there:** the text the model writes beside its tool calls says what it is about to do and why. deepseek wrote one unasked in 6 of 6 probes.
+  - **It was dropped:** that text was discarded along with the duplicate calls. It is now emitted as `tool_plan`, before the calls it introduces.
+  - **Other models:** `NARRATE_STEPS_RULE` asks both peers for that sentence, for models that do not volunteer it.
+  - **Per run:** `execute_code` gains an optional `purpose`, a phrase completing "Executing code to …".
+- **Actions in words** (map UI, `toolPhrases.ts`):
+  - **Every one of the 88 tools** has a phrase built from its own arguments, e.g. "Inspecting buildings.geojson" or "Joining buildings.geojson with slr_exposure_3_2ft.geojson (intersects)".
+  - **File names:** file ids are resolved from the uploads and artifacts the page has seen.
+  - **Unknown tools** (MCP, or added later) read as their name in words plus their most telling argument.
+  - **Run bar:** it uses the same purpose.
+- **Arguments as data.** Tool-call events used to carry the arguments as `str()` of a dict, a Python repr that JSON cannot read. They now carry the dict itself (`inputs`), falling back to `ast.literal_eval`.
+- **Detailed and debug modes.**
+  - **Detailed (default):** each trace row keeps its words in `text`.
+  - **Debug:** the raw call is kept in `raw` and shown by "Show raw calls", a per-browser switch in the Reasoning panel. It is there rather than in the settings panel, which production hides in token mode.
+- **The code step says what it did.** It starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
+
+**Verified.**
+- **Tests:** `test_code_watch.py` (hint gating, `tool_plan`, argument dicts, step summary). `check:coderun` covers the phrases, and checks that no tool's phrase leaks raw-call syntax.
+- **Live,** local agent from this branch, Lumen deepseek, hotels × evacuation zone:
+  - the trace read: the plan sentence, "Executing code to count hotels inside tsunami evacuation zone…", "ok · 3.36 s", "Code step finished: 1 run";
+  - "Show raw calls" switched to `execute_code({...})` and back;
+  - the answer was 65, which matches the T16 reference.

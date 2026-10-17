@@ -94,6 +94,14 @@ PLACE_NAMES_RULE = (
 # Python loop over 23,382 road nodes for each building (8.4 s; 0.2 s with a KD-tree). The rule
 # check and the concurrent review (code_watch) catch these during a run; this is the same
 # knowledge before the code is written. Appended to both peers' prompts.
+# The trace shows the reader each step as the model's own reason followed by what it ran
+# (streaming_trace emits the text beside the tool calls as `tool_plan`). deepseek writes that
+# sentence unasked; this keeps models that don't from leaving the step unexplained.
+NARRATE_STEPS_RULE = (
+    "Whenever you call tools, begin that message with one short plain sentence for the person "
+    "watching: what you are about to do and why.\n"
+)
+
 PERFORMANCE_RULE = (
     "WRITE GEOMETRY CODE FOR THE SIZE OF THE DATA. Check sizes first (inspect_vector reports "
     "features AND vertices: one feature can hold 100,000 vertices). Then: test many geometries "
@@ -190,6 +198,7 @@ ANALYSIS_WORKFLOW_PROMPT = (
     + VISUALIZATION_ROUTES_RULE
     + PLACE_NAMES_RULE
     + PERFORMANCE_RULE
+    + NARRATE_STEPS_RULE
 )
 
 CODE_PEER_PROMPT = (
@@ -270,6 +279,7 @@ CODE_PEER_PROMPT = (
     + VISUALIZATION_ROUTES_RULE
     + PLACE_NAMES_RULE
     + PERFORMANCE_RULE
+    + NARRATE_STEPS_RULE
 )
 
 # Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or
