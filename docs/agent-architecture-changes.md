@@ -11564,6 +11564,46 @@ stage, user 2026-10-17).
 against 1,378 m and 1.71 minutes: its route code mis-summed the length. Another run looped on its
 own routing script until the no-progress stop. These are routing correctness, not drawing.
 
+**A layer that frames others stays out of their way** (S76.2, user 2026-10-18).
+- **The fault.** Live, on the schools example's step 2 ("show the site, its 1-mile buffer and the
+  schools inside it"), `add_map_layer` drew the buffer in a blue the agent picked unasked. That
+  colour fills at the cap (190/255, `fillAndLine`), and the buffer sat over the 20 schools inside
+  it. The map then fitted to the buffer, so the whole view was one blue disc, with the streets
+  hidden and the schools tinted.
+- **Why not a rule.** Whether a layer IS the answer (a choropleth) or a frame around it (a buffer,
+  a service area, a study area) depends on what it is for. Only the model knows that, so the user
+  asked that the LLM decide.
+- **What the model can now say.** `add_map_layer` takes three new arguments:
+  - `outline` (boundary only);
+  - `fill_opacity` (0 to 1);
+  - `beneath` (draw under the other analysis layers, above a road network).
+
+  The tool description tells the model to keep the default for a layer whose fill is the answer.
+  A frame should be an outline, or a light fill (about 0.15) drawn beneath. `outline` with
+  choropleth, categories or heatmap is refused: those carry their values in the fill. A
+  `fill_opacity` outside 0 to 1 is refused.
+- **On the wire.** `build_map_layer` carries `beneath` and a valid `fill_opacity`.
+  - The client replaces the fill's alpha with `fill_opacity`, a choropleth ramp's included; the
+    outline keeps its own.
+  - `AgentMap.drawRank` puts a `beneath` layer at 0.5, over the network and under every other
+    result.
+  - The fields ride on the stored layer, so a restored session keeps them.
+- **And the viewer can decide too.** Clicking a vector layer's name in the layers panel (which
+  still zooms to it) opens a fill-opacity slider. It sets the same `fillOpacity`, starting from
+  what is drawn. Rasters keep their existing slider. The model's choice is the first view, and
+  the slider covers the times it chooses badly.
+- **Verified.**
+  - `test_layer_framing.py` (7 tests): the choice reaches the event, an unset layer is
+    unchanged, bad values and outline-on-a-fill render are refused, and the description says
+    the choice is the model's.
+  - `palette.check.ts`: alpha 0.15 gives 38; the outline keeps 255; no choice keeps the 190 cap;
+    a ramp takes the chosen alpha.
+  - Live on a local agent (Lumen deepseek-v4-flash, prod settings): the schools step 2 drew the
+    buffer at `fill_opacity` 0.15 and `beneath`, with no colour, so the streets and all 20
+    schools read through it.
+  - In the browser: a zones upload's fill slider at 0.1 left the outlines and the basemap
+    visible.
+
 
 ## Stage 78 — A code run can be watched, stopped and reviewed while it runs {#stage-78}
 
