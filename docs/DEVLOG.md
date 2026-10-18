@@ -6005,3 +6005,10 @@ rather than from the previous one.
 - **The model decides:** `add_map_layer` takes `outline`, `fill_opacity` (0 to 1) and `beneath`. The description asks for a frame (buffer, service area, boundary) to be an outline or a light fill drawn beneath. `outline` on a fill-carrying render is refused.
 - **The viewer decides too:** clicking a vector layer's name opens a fill-opacity slider, and the map applies the fill alpha the model or the viewer chose.
 - **Tests:** `test_layer_framing.py`, `palette.check.ts`. Live locally, the buffer came out at 0.15, beneath, with no colour.
+
+## 2026-10-18 · M8.118 · Earlier answers count as sources for the untraceable-figures guard (architecture S77.1)
+
+- **The fault:** live on 8e5d31cb, the zone-rates step 2 restated the previous turn's table with no tool call. The Stage 77 guard found 35 of 39 figures in no result of THIS turn, and replaced a correct answer with "I could not compute this reliably".
+- **Why it was missed:** the replay that measured zero false alarms was single-turn only, with no follow-ups.
+- **Change:** `facts.build(history=…)` adds the conversation's numbers as "earlier answer". `synthesize` passes the raw chat history.
+- **Tests:** `test_untraceable_figures.py` +3 (follow-up untouched; cut without history; history does not launder a fabrication).

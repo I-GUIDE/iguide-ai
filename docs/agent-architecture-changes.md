@@ -11854,6 +11854,24 @@ replay of the recorded tool results).
 - **The live T16 answer:** in the tests (`test_untraceable_figures.py`) it is replaced by an
   account naming 4 failed runs of 5 (2 timeouts, 2 IndexErrors).
 
+**Earlier answers count as sources** (S77.1, 2026-10-18).
+- **The fault.** The same day the guard went live (prototype 8e5d31cb), the zone-rates example's
+  step 2 failed on production. Asked "which zone has the most incidents? why is it not the one
+  with the highest rate?", the agent ran no tool and restated the previous turn's table. 35 of
+  its 39 figures were in that earlier answer and in no result of this turn, so the guard cut
+  them and prefixed "I could not compute this reliably". The answer had been correct.
+- **Why the measurement missed it.** The replay that found no false alarms ran single-turn
+  harness tasks. No follow-up was in it.
+- **The change.** `facts.build` takes `history`, the conversation so far, and files its numbers
+  as "earlier answer". `synthesize` passes `_raw_history_text(chat_history)`. An earlier answer
+  passed these same checks when it was made, so a figure it states is a legitimate source for a
+  follow-up.
+- **Still caught.** A fabricated answer whose figures appear nowhere, this turn or earlier.
+- **Tests.** `test_untraceable_figures.py`, three more:
+  - the zone follow-up is untouched with the history;
+  - the same follow-up is cut without it;
+  - unrelated history does not launder the T16 fabrication.
+
 ## Stage 78 — A code run can be watched, stopped and reviewed while it runs {#stage-78}
 
 **Why.** On production (2026-10-17, prototype 66248542) T16 lost three of six code runs to the

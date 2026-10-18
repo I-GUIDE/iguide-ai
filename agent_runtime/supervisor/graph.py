@@ -6406,7 +6406,8 @@ def build_supervisor_graph(
             _results = [*((ar or {}).get("tool_results") or [] if isinstance(ar, dict) else []),
                         *((cr or {}).get("tool_results") or [] if isinstance(cr, dict) else [])]
             fact_set = turn_facts.build(log=_log, results=_results, query=q, evidence=evidence,
-                                        prior_rows=_rows)
+                                        prior_rows=_rows,
+                                        history=_raw_history_text(state.get("chat_history")))
             _facts_text = fact_set.render()
             if _facts_text:
                 _note = (f"{_note}\n\n" if _note else "") + (
