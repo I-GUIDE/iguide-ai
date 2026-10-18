@@ -517,8 +517,8 @@ def _keep_platform_elements(formatted: dict) -> None:
 def _daily_limit_refusal(user: Any) -> Optional[dict]:
     """The refusal for a signed-in user who has spent today's limit, or None.
 
-    Lumen coins and OpenAI dollars are limited separately (agent_runtime/usage_limit.py). A
-    caller identified by nobody (the service key, dev and local modes) is never limited."""
+    One daily budget in credits, Lumen coins plus OpenAI dollars (agent_runtime/usage_limit.py).
+    A caller identified by nobody (the service key, dev and local modes) is never limited."""
     owner = getattr(user, "id", None) if user is not None else None
     if not owner:
         return None
@@ -1398,7 +1398,7 @@ def _user_usage_view(user_id: str) -> dict:
         "userId": user_id,
         "today": usage_limit.spent(user_id),
         "limits": usage_limit.limits_for(user_id),
-        "defaultLimits": {"coins": usage_limit.coin_limit(), "usd": usage_limit.usd_limit()},
+        "defaultLimits": {"credits": usage_limit.credit_limit()},
         "override": usage_limit.override_for(user_id),
         "resetsAt": usage_limit.resets_at(),
         "recent": usage_limit.history(user_id, days=7),
@@ -1427,9 +1427,10 @@ def agent_admin_user_usage(user_id):
     responses:
       200:
         description: >-
-          `{ userId, today: {coins, usd, turns}, limits: {coins, usd}, defaultLimits, override,
-          resetsAt, recent: [{day, coins, usd, turns}] }`. A limit of `null` means unlimited.
-          Coins are NCSA Lumen coins and usd is OpenAI spending; each is limited separately.
+          `{ userId, today: {credits, coins, usd, turns}, limits: {credits}, defaultLimits,
+          override, resetsAt, recent: [{day, credits, coins, usd, turns}] }`. A limit of `null`
+          means unlimited. The limit is one budget in credits: a credit is one NCSA Lumen coin or
+          one dollar of OpenAI, and `credits` is `coins` + `usd`.
       401:
         description: The access token expired. Refresh it and retry.
       403:
@@ -1464,12 +1465,11 @@ def agent_admin_user_usage_update(user_id):
         schema:
           type: object
           properties:
-            coinLimit:
+            creditLimit:
               description: >-
-                Daily Lumen coin limit for this user: a number >= 0 (0 blocks Lumen),
-                "unlimited", or null to return to the default. Omit to leave it unchanged.
-            usdLimit:
-              description: Daily OpenAI dollar limit for this user, same values as coinLimit.
+                Daily credit limit for this user (Lumen coins plus OpenAI dollars): a number
+                >= 0 (0 blocks the user), "unlimited", or null to return to the default. Omit to
+                leave it unchanged.
             resetToday:
               type: boolean
               description: Forget what the user has spent today, so their next turn is allowed.
@@ -1477,7 +1477,9 @@ def agent_admin_user_usage_update(user_id):
       200:
         description: The user's usage after the change, in the GET response's shape.
       400:
-        description: A limit that is not a number >= 0, null or "unlimited", or nothing to change.
+        description: >-
+          A limit that is not a number >= 0, null or "unlimited"; nothing to change; or the
+          retired coinLimit/usdLimit.
       401:
         description: The access token expired. Refresh it and retry.
       403:
@@ -1491,18 +1493,22 @@ def agent_admin_user_usage_update(user_id):
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return jsonify({"error": "The body must be a JSON object."}), 400
+    retired = [k for k in ("coinLimit", "coin_limit", "usdLimit", "usd_limit") if k in body]
+    if retired:
+        # Two budgets became one on 2026-10-18; guessing which one a caller meant would set the
+        # wrong limit without a word.
+        return jsonify({"error": f"{retired[0]} is retired: the daily limit is one budget in "
+                                 "credits (Lumen coins plus OpenAI dollars). Send creditLimit."}), 400
     changes = {}
-    for cur, keys in (("coins", ("coinLimit", "coin_limit")), ("usd", ("usdLimit", "usd_limit"))):
-        key = next((k for k in keys if k in body), None)
-        if key is None:
-            continue
+    key = next((k for k in ("creditLimit", "credit_limit") if k in body), None)
+    if key is not None:
         try:
-            changes[cur] = usage_limit.parse_limit(body[key])
+            changes["credits"] = usage_limit.parse_limit(body[key])
         except (TypeError, ValueError) as exc:
             return jsonify({"error": f"{key}: {exc}"}), 400
     reset = bool(body.get("resetToday") or body.get("reset_today"))
     if not changes and not reset:
-        return jsonify({"error": "Nothing to change: send coinLimit, usdLimit or resetToday."}), 400
+        return jsonify({"error": "Nothing to change: send creditLimit or resetToday."}), 400
     if changes:
         usage_limit.set_override(user_id, **changes)
     if reset:
@@ -2588,6 +2594,59 @@ def agent_chat():
         return jsonify(payload), 500
 
 
+@app.route('/agent/chat/cancel', methods=['POST'])
+def agent_chat_cancel():
+    """
+    Stop a running streamed turn on the server.
+    ---
+    tags:
+      - Agent Chat
+    description: >
+      The stream's first event is `turn` with a `turn_id`. Posting that id here stops the turn:
+      a running sandbox container is killed within about a second, and the agent stops at its
+      next model call or tool call (a model call already under way finishes first). The stream
+      then sends `cancelled` and ends. Only the person who started the turn can stop it.
+      Turns live in the process that streams them, so this assumes one gunicorn worker
+      (WEB_CONCURRENCY=1, as deployed).
+    parameters:
+      - in: body
+        name: body
+        schema:
+          type: object
+          required: [turnId]
+          properties:
+            turnId:
+              type: string
+    responses:
+      200:
+        description: The turn was told to stop.
+      404:
+        description: No running turn of yours has that id (it may already have finished).
+    """
+    try:
+        _request_user = _require_user()
+    except identity.IdentityError as exc:
+        return _identity_error_response(exc)
+    try:
+        _require_agent_chat_api_key(_request_user)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except RuntimeError:
+        return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+    data = request.get_json(silent=True) or {}
+    turn_id = str(data.get("turnId") or data.get("turn_id") or "").strip()
+    from agent_runtime import turn_control
+    outcome = turn_control.request_cancel(
+        turn_id, getattr(_request_user, "id", None) if _request_user else None)
+    if outcome == "cancelled":
+        logger.info("Turn %s stopped on request", turn_id[:12])
+        return jsonify({"cancelled": True, "turnId": turn_id})
+    if outcome == "not_yours":
+        logger.info("Refused to stop turn %s: another caller's", turn_id[:12])
+    # Same answer for both: a turn that is not yours does not exist as far as you can tell.
+    return jsonify({"cancelled": False, "reason": "no_such_turn"}), 404
+
+
 @app.route('/agent/chat/stream', methods=['POST'])
 def agent_chat_stream():
     """
@@ -3212,6 +3271,9 @@ def agent_chat_stream():
                         # observation, and it was dropped HERE, so the one repair mechanism the
                         # agent already had has never been visible to anyone watching.
                         "tool_retry",
+                        # The model's sentence beside its tool calls: what it is about to do
+                        # and why. The map UI shows it above the calls' action lines.
+                        "tool_plan",
                         "tool_recovered",
                         "tool_dead_end",
                         # Provider token counts, one per model call (streaming_trace's
@@ -3223,6 +3285,13 @@ def agent_chat_stream():
 
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name in {"turn", "code_progress", "code_review", "cancelled"}:
+                        # turn: the id Stop cancels (POST /agent/chat/cancel). code_progress: a
+                        # running sandbox's heartbeat. code_review: the concurrent reviewer's
+                        # verdict. cancelled: the turn stopped on request. Forwarded as they are.
+                        yield _sse_event(event_name, payload)
+                        continue
 
                     if event_name == "map_layer":
                         # Untruncated plottable geometry from a geo tool (overpass_search, ...).

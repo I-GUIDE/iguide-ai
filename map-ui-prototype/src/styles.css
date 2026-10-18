@@ -657,3 +657,28 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .demoexplain:hover:not(:disabled), .demosend:hover:not(:disabled) { background: #fdeec9; border-color: #c98a1a; }
 .demoexplain:disabled, .demosend:disabled { opacity: .45; cursor: default; }
 .demoexplain:focus-visible, .demosend:focus-visible { outline: 2px solid #c98a1a; outline-offset: 2px; }
+
+/* A sandbox run in progress (CodeRunBar): its clock against its limit, the review's state, and
+   after 90 s a Stop of its own. Quiet until it needs attention. */
+.coderun { margin: 6px 0 4px; padding: 8px 10px; border: 1px solid var(--line, rgba(127,127,127,.25));
+  border-radius: 8px; font-size: 12.5px; display: grid; gap: 6px; }
+.coderun-line { display: flex; justify-content: space-between; gap: 12px; }
+.coderun-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coderun-time { font-variant-numeric: tabular-nums; opacity: .8; flex: none; }
+.coderun-track { height: 3px; border-radius: 2px; background: rgba(127,127,127,.2); overflow: hidden; }
+.coderun-fill { height: 100%; background: currentColor; opacity: .55; transition: width 1s linear; }
+.coderun-review { opacity: .75; }
+.coderun-nudge { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.coderun-stop { font: inherit; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid currentColor; background: transparent; color: inherit; }
+.coderun-stop:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .coderun-fill { transition: none; } }
+
+/* The model's own reason for the calls that follow it (tool_plan), and the detailed/debug switch. */
+.ln.plan { font-style: italic; opacity: .85; margin-top: 4px; }
+.trace-mode { display: block; position: relative; z-index: 1; font: inherit; font-size: 11px;
+  padding: 1px 8px; margin: 0 0 6px auto;
+  border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit;
+  opacity: .7; cursor: pointer; }
+.trace-mode:hover, .trace-mode[aria-pressed="true"] { opacity: 1; }
+.trace-mode:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

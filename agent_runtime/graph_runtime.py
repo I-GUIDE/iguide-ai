@@ -36,6 +36,7 @@ from agent_runtime.orchestrator_graph import (
     build_orchestrator_graph,
 )
 from agent_runtime.skills import SkillRegistry
+from agent_runtime import identity, turn_control
 from agent_runtime.streaming_trace import is_agent_dev, trace_context, turn_usage, usage_collection
 from rag_pipeline.search import web_utils
 
@@ -203,6 +204,10 @@ def stream_agent_query_events(
     """
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
     dev_enabled = agent_dev if agent_dev is not None else is_agent_dev()
+    # The handle Stop cancels (turn_control). Its id goes to the client first thing, so a Stop
+    # pressed at any point after the stream opens can name the turn.
+    turn = turn_control.begin(identity.current_user_id())
+    yield {"event": "turn", "data": {"turn_id": turn.id}}
     yield {
         "event": "status",
         "data": {
@@ -241,8 +246,9 @@ def stream_agent_query_events(
             # this thread, and it has to happen at all: a gunicorn sync worker reuses its thread
             # across requests, so without a reset the previous turn's spend would starve this one.
             web_utils.begin_turn()
-            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev,
-                               recorder=trace_recorder):
+            with turn_control.bound(turn), trace_context(
+                    _enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev,
+                    recorder=trace_recorder):
                 graph = build_orchestrator_graph(
                     llm=llm,
                     verbose=verbose,
@@ -339,6 +345,11 @@ def stream_agent_query_events(
                 if usage:
                     response["usage"] = usage
                 _enqueue({"event": "completed", "data": response})
+        except turn_control.TurnCancelled as exc:
+            # Not an error: the person who asked stopped it. No `completed` event follows, so
+            # the caller records the turn as stopped rather than answered.
+            _enqueue({"event": "cancelled",
+                      "data": {"turn_id": turn.id, "reason": str(exc) or "stopped by the user"}})
         except AgentInvocationError as exc:
             readable_trace = exc.diagnostics.get("readable_trace") if exc.diagnostics else None
             _enqueue(
@@ -384,28 +395,44 @@ def stream_agent_query_events(
         heartbeat_s = 20.0
     last_emit = time.monotonic()
 
-    while True:
-        try:
-            item = outbox.get(timeout=0.25)
-        except queue.Empty:
-            if worker.is_alive():
-                if time.monotonic() - last_emit >= heartbeat_s:
-                    last_emit = time.monotonic()
-                    yield {"event": "keepalive", "data": {}}
-                continue
-            break
-        if item.get("event") == "__worker_done__":
-            break
-        last_emit = time.monotonic()
-        yield item
-
-    worker.join(timeout=0)
-    while not outbox.empty():
-        item = outbox.get()
-        if item.get("event") != "__worker_done__":
+    finished = False
+    try:
+        while True:
+            try:
+                item = outbox.get(timeout=0.25)
+            except queue.Empty:
+                if worker.is_alive():
+                    if time.monotonic() - last_emit >= heartbeat_s:
+                        last_emit = time.monotonic()
+                        yield {"event": "keepalive", "data": {}}
+                    continue
+                break
+            if item.get("event") == "__worker_done__":
+                break
+            last_emit = time.monotonic()
             yield item
+
+        worker.join(timeout=0)
+        while not outbox.empty():
+            item = outbox.get()
+            if item.get("event") != "__worker_done__":
+                yield item
+        finished = True
+    finally:
+        # Closed before the worker finished: the reader went away (a closed tab, an aborted
+        # fetch the server noticed on its next write). Nobody will read what the turn produces,
+        # so it stops at its next step and its sandbox run is killed, instead of computing for
+        # minutes into a closed socket. AGENT_CANCEL_ON_DISCONNECT=0 keeps the old behaviour.
+        if not finished and worker.is_alive() and _cancel_on_disconnect():
+            turn_control.request_cancel(turn.id, turn.owner, reason="the client disconnected")
+        turn_control.end(turn)
     if worker_error:
         raise worker_error[0]
+
+
+def _cancel_on_disconnect() -> bool:
+    return (os.getenv("AGENT_CANCEL_ON_DISCONNECT") or "1").strip().lower() not in {
+        "0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------

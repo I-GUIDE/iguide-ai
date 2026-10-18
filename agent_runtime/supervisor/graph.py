@@ -45,6 +45,7 @@ from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enab
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
+from agent_runtime.turn_control import TurnCancelled
 from agent_runtime import lineage
 from agent_runtime import source_catalog
 from agent_runtime import verdict as turn_verdict
@@ -1596,6 +1597,20 @@ def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
     return out
 
 
+def _code_step_summary(result: Any) -> str:
+    """How the code step ended, in words: "Code step finished: 6 runs, 1 failed".
+
+    It used to say "Code ready" (and "Generating code" at the start), which read as if code had
+    been written and was waiting, when the step had already run it, a dozen times on T16."""
+    results = (result.get("tool_results") or []) if isinstance(result, dict) else []
+    runs = [r for r in results if isinstance(r, dict) and r.get("name") == "execute_code"]
+    if not runs:
+        return "Code step finished"
+    failed = sum(1 for r in runs if not turn_log.parse_result(r.get("content"))["ok"])
+    text = f"Code step finished: {len(runs)} run{'s' if len(runs) != 1 else ''}"
+    return text + (f", {failed} failed" if failed else "")
+
+
 def _merge_peer_result(prior: Any, new: Any, log: Any = None, peer: Optional[str] = None) -> Any:
     """A peer's result for the TURN: its earlier runs' tool records plus this run's.
 
@@ -1916,7 +1931,7 @@ def _run_peer(name: str, call, state: SupervisorState):
     try:
         return call(), None
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
             raise
         # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
         # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
@@ -6169,7 +6184,7 @@ def build_supervisor_graph(
 
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
-        emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
+        emit_trace_event("node_started", {"stage": "code", "message": "Analysing in code"}, node="code")
         log = turn_log.log_for_state(state)
         with turn_log.bind(log, "code", _turn_brief(state)) as bound_run:
             raw, failure = _run_peer(
@@ -6185,7 +6200,8 @@ def build_supervisor_graph(
                                  state, failure)
         clean, needs = _extract_needs(raw)
         log.record_needs("code", bound_run.run, needs)
-        emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
+        emit_trace_event("node_completed", {"stage": "code", "message": _code_step_summary(clean)},
+                         node="code")
         update: Dict[str, Any] = {**logged,
                                   "code_result": _merge_peer_result(prior, clean, log, "code")}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
@@ -6244,7 +6260,7 @@ def build_supervisor_graph(
             if not update.get("reground"):
                 update["reground"] = False
         except BaseException as exc:                  # noqa: BLE001 - deliberately total
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
                 raise
             reason = f"{type(exc).__name__}: {exc}"[:200]
             try:
