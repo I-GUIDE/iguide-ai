@@ -5924,3 +5924,17 @@ rather than from the previous one.
 **Measured** Offline replay of 194 archived runs (19 more are unreadable because the trace cuts arguments at 3,000 characters; none of them fired live, and the new rule fires on a subset of the old rule's runs): the old rule matches the live firings on 194 of 194 runs. Firings went from 25 runs / 9 turns to 0. Recall check, with each stated value swapped for a wrong one in the real computing runs: 20 of 20 genuine uses caught (the 4 other swaps were `**2` exponents). Tests: `test_code_watch.py` 68 passed; code-execution suites 220 passed.
 **Surprised by** COOLING's "2 km" is not in the query's parameter window. The live rule found it only because the plan text put it next to "distance", so a replay that uses only the query under-counts.
 **Next** Not deployed. The rule still matches by number alone, so a `**2` in an earlier run counts as using "2 km". A unit-aware match would close that gap.
+
+## 2026-10-18 · M8.116 · One daily budget, in credits (architecture S74.2)
+
+- **The rule (user):** Lumen coins plus OpenAI dollars, at most 3 a day, called credits. The model swaps provider by itself when the Lumen pool runs low, so two separate budgets (3 coins, $3) were neither predictable nor the intended total.
+- **Message:** "You have reached today's usage limit (3.05 of 3 credits). It resets at midnight US Central time." It names no provider.
+- **Setting:** `AGENT_DAILY_CREDIT_LIMIT` (3) replaces the two per-currency settings. Admins send `creditLimit`; `coinLimit` and `usdLimit` are refused by name.
+- **Tests:** `test_lumen_failover_and_daily_limit.py`, `test_admin_usage_limits.py`.
+
+## 2026-10-18 · M8.117 · A layer that frames others stays out of their way (architecture S76.2)
+
+- **The fault:** live, the schools example drew its 1-mile buffer in an unasked blue at the colour cap, over the schools inside it; the view was one blue disc.
+- **The model decides:** `add_map_layer` takes `outline`, `fill_opacity` (0 to 1) and `beneath`. The description asks for a frame (buffer, service area, boundary) to be an outline or a light fill drawn beneath. `outline` on a fill-carrying render is refused.
+- **The viewer decides too:** clicking a vector layer's name opens a fill-opacity slider, and the map applies the fill alpha the model or the viewer chose.
+- **Tests:** `test_layer_framing.py`, `palette.check.ts`. Live locally, the buffer came out at 0.15, beneath, with no colour.

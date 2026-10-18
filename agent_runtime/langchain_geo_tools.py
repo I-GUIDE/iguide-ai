@@ -974,7 +974,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     def add_map_layer(file_id: str, render: str = "auto", column: Optional[str] = None,
                       name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
                       max_points: Optional[int] = None, color: Optional[str] = None,
-                      class_colors: Optional[Dict[str, str]] = None) -> str:
+                      class_colors: Optional[Dict[str, str]] = None, outline: bool = False,
+                      fill_opacity: Optional[float] = None, beneath: bool = False) -> str:
         """Put a dataset on the user's interactive map as a styled layer.
 
         `render`: "heatmap" (point density), "choropleth" (polygons shaded by a NUMERIC
@@ -987,6 +988,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         `color` colours the whole layer ("the crimes in red"); `class_colors` maps class names
         to colours for render="categories". Both take a name or hex. Leave them out unless the
         user asked for a colour: the map has its own palette.
+
+        You decide how the layer sits among the others; the map cannot judge what it is for.
+        A layer whose fill IS the answer (a choropleth, the features asked about) keeps the
+        default fill. A layer that frames others, such as a buffer, service area, study area
+        or boundary with results inside it, should not hide them or the streets beneath:
+        pass `outline=True` (boundary only) or a light `fill_opacity` (0 to 1; about 0.15),
+        and `beneath=True` to draw it under the other layers. Later layers draw on top.
         """
         tmp = None
         try:
@@ -997,6 +1005,15 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             if redirect:
                 return json.dumps(redirect)
             from agent_runtime.map_layers import parse_colour
+
+            if fill_opacity is not None:
+                try:
+                    fill_opacity = float(fill_opacity)
+                except (TypeError, ValueError):
+                    fill_opacity = float("nan")
+                if not 0.0 <= fill_opacity <= 1.0:
+                    return json.dumps({"ok": False, "error": "fill_opacity is a share from 0 to 1",
+                                       "hint": "About 0.15 lets the map show through; 1 is solid."})
 
             # Colours the user asked for, resolved before any work so a bad one is answered at
             # once. The map draws numbers; a name it cannot place is reported, never guessed.
@@ -1036,6 +1053,14 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                             "cannot be applied",
                                    "hint": "Drop `color`, or draw the features with render='shapes' "
                                            "(or 'points') to show them in one colour."})
+            if outline and mode in {"choropleth", "categories", "heatmap"}:
+                # These renders carry their answer in the fill; an outline-only draw of them is a
+                # mesh of borders with nothing in it.
+                return json.dumps({"ok": False,
+                                   "error": f"render={mode!r} shows its values in the fill, so "
+                                            "outline=True would draw nothing readable",
+                                   "hint": "Drop outline, or lower fill_opacity to let the map "
+                                           "show through."})
             if mode in {"route", "network"} and not geom_types <= {"LineString", "MultiLineString"}:
                 # The navigation-style renders draw lines: a route as a cased line with its two
                 # ends marked, a network as muted context beneath it. Anything else would draw
@@ -1173,6 +1198,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                  # 'categories' render off its presence.
                                  **({"legend": legend} if legend else {}),
                                  **({"color": layer_colour} if layer_colour else {}),
+                                 # How the layer sits among the others, as the model chose:
+                                 # a frame (buffer, service area) stays out of the way of the
+                                 # results inside it and the streets beneath.
+                                 **({"outline": True} if outline else {}),
+                                 **({"fill_opacity": fill_opacity}
+                                    if fill_opacity is not None else {}),
+                                 **({"beneath": True} if beneath else {}),
                                  # Carried to the UI so a partial layer says so on screen.
                                  "sampled": bool(sampled), "total": total}}
             if note:
@@ -1230,7 +1262,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "muted road network; 'network' draws a network you built that way. Pass "
                          "the route as LineString features in travel order (or one merged line); "
                          "its start and end are marked for you, so a separate endpoints layer only "
-                         "doubles them. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
+                         "doubles them. HOW IT SITS among the other layers is your call, by what "
+                         "the layer is for: a layer whose fill is the answer keeps the default; a "
+                         "layer that FRAMES other results (a buffer, service area, study area or "
+                         "boundary with the results inside it) must not hide them or the streets: "
+                         "pass outline=True (boundary only) or a light fill_opacity (0-1, about "
+                         "0.15), and beneath=True to draw it under the other layers. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download. The map keeps one layer per source file: drawing a file that "
