@@ -1589,6 +1589,338 @@ def agent_conversation_traces(memory_id):
         return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
+# ---------------------------------------------------------------------------
+# User-authored examples for the Spatial Analysis tab (architecture stage 73)
+# ---------------------------------------------------------------------------
+# The rules (who sees what, the limits, where it is stored) live in agent_runtime/user_examples.py;
+# these routes only establish the caller and translate. Identity first, then the key, exactly as
+# the upload route does. Dev and demo identify nobody: such a caller lists the published examples
+# and is refused anything that needs an owner, never handed one shared owner to write as.
+
+def _examples_caller():
+    """``(user, None)``, or ``(None, response)`` when the caller is refused outright."""
+    try:
+        user = _require_user()
+    except identity.IdentityError as exc:
+        return None, _identity_error_response(exc)
+    try:
+        _require_agent_chat_api_key(user)
+    except PermissionError as exc:
+        return None, (jsonify({"error": str(exc)}), 403)
+    return user, None
+
+
+def _example_error(exc: Exception):
+    from agent_runtime import user_examples
+
+    if isinstance(exc, user_examples.SignInRequired):
+        # No identity at all: a reason the client can act on (it hides the authoring controls)
+        # rather than prose it would have to match.
+        return jsonify({"error": str(exc), "reason": "examples_need_sign_in"}), 403
+    return jsonify({"error": str(exc)}), exc.status
+
+
+def _example_form():
+    """The definition and the uploads of a create or edit: multipart, with the definition as JSON
+    in the ``example`` field, or a plain JSON body when no file is sent."""
+    from agent_runtime import user_examples
+
+    if request.mimetype == "multipart/form-data":
+        raw = request.form.get("example") or "{}"
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise user_examples.Invalid("the example field is not JSON")
+        uploads = [(f.filename, f.stream) for f in _normalize_uploaded_files()]
+    else:
+        data = request.get_json(silent=True)
+        uploads = []
+    return data, uploads
+
+
+@app.route('/agent/examples', methods=['GET', 'POST'])
+def agent_examples():
+    """
+    List the examples this caller can open, or create one.
+    ---
+    tags:
+      - agent
+    consumes:
+      - multipart/form-data
+      - application/json
+    produces:
+      - application/json
+    responses:
+      200:
+        description: >-
+          GET: `{ mine, shared, published, canCreate, canPublish, limits }`. Each example is
+          `{ id, source: "user", title, blurb, category, tags, steps: [{label, prompt}],
+          files: [{name, bytes, url}], mine, visibility: private|link|published, published,
+          shareToken? (owner only), createdAt, updatedAt }`. Outside token mode only the
+          published examples are listed and `canCreate` is false.
+      201:
+        description: >-
+          POST: the new example. Multipart with the definition as JSON in the `example` field
+          (`{title, description, category, tags, steps}`) and the data files under `files`, or a
+          JSON body for an example with no files.
+      400:
+        description: The definition is invalid; `error` names the field.
+      403:
+        description: Not signed in (`reason: examples_need_sign_in` when the deployment identifies nobody).
+      413:
+        description: A limit was reached (examples per account, files, total size).
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        if request.method == "GET":
+            groups = user_examples.list_for(user)
+            return jsonify({
+                **{k: [user_examples.view(e, user) for e in v] for k, v in groups.items()},
+                "canCreate": user is not None,
+                "canPublish": user is not None and user_examples.is_admin(user),
+                "limits": user_examples.limits(),
+            })
+        data, uploads = _example_form()
+        example = user_examples.create(user, data, uploads)
+        logger.info("Example %s created with %d file(s)", example["id"], len(example["files"]))
+        return jsonify(user_examples.view(example, user)), 201
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on examples: %s", exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/examples/<example_id>', methods=['GET', 'PUT', 'DELETE'])
+def agent_example(example_id):
+    """
+    Read, edit (owner) or delete (owner) one example.
+    ---
+    tags:
+      - agent
+    parameters:
+      - in: path
+        name: example_id
+        type: string
+        required: true
+    responses:
+      200:
+        description: >-
+          The example (GET, PUT), or `{deleted: true, id}`. PUT takes the same body as a create,
+          plus `keepFiles` in the definition: the names of the current files to keep (omitted
+          keeps them all). New uploads are added, replacing a kept file of the same name. An edit
+          by an owner who is not an admin takes a published example back to unpublished.
+      404:
+        description: No such example, or not one this caller may see or change.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        if request.method == "GET":
+            return jsonify(user_examples.view(user_examples.get(user, example_id), user))
+        if request.method == "DELETE":
+            user_examples.delete(user, example_id)
+            return jsonify({"deleted": True, "id": example_id})
+        data, uploads = _example_form()
+        keep = data.get("keepFiles") if isinstance(data, dict) else None
+        if keep is not None and not isinstance(keep, list):
+            raise user_examples.Invalid("keepFiles must be a list of file names")
+        example = user_examples.update(user, example_id, data, keep, uploads)
+        return jsonify(user_examples.view(example, user))
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error on example %s: %s", example_id, exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
+
+
+@app.route('/agent/examples/<example_id>/files/<name>', methods=['GET'])
+def agent_example_file(example_id, name):
+    """
+    One data file of an example the caller can see, as an attachment.
+
+    The map UI fetches these and uploads them into the runner's own conversation through
+    `/agent/files/upload`, exactly as it does a built-in example's static files, so the agent's
+    file store and its owner scoping are not involved here at all.
+    ---
+    tags:
+      - agent
+    produces:
+      - application/octet-stream
+    responses:
+      200:
+        description: The file's bytes.
+      404:
+        description: No such example or file, or not one this caller may see.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        path = user_examples.file_path(example_id, name, user)
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+    resp = send_file(path, as_attachment=True, download_name=name,
+                     mimetype="application/octet-stream")
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+@app.route('/agent/examples/<example_id>/share', methods=['POST', 'DELETE'])
+def agent_example_share(example_id):
+    """
+    Make (POST) or revoke (DELETE) the example's share link. Owner only.
+    ---
+    tags:
+      - agent
+    responses:
+      200:
+        description: >-
+          POST: `{shareToken, example}`; the same token every time unless the body sets
+          `rotate: true`, which replaces it and cuts off everyone the old link reached. The
+          client builds the link (`?example=<token>` on its own page). DELETE: `{example}`.
+      404:
+        description: No such example, or not the caller's.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            token = user_examples.share(user, example_id, rotate=bool(body.get("rotate")))
+        else:
+            user_examples.unshare(user, example_id)
+            token = None
+        example = user_examples.get(user, example_id)
+        return jsonify({"shareToken": token, "example": user_examples.view(example, user)})
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+
+
+@app.route('/agent/examples/open', methods=['POST'])
+def agent_example_open():
+    """
+    Open a share link: `{token}` in the body (kept out of the path, so out of access logs).
+    ---
+    tags:
+      - agent
+    responses:
+      200:
+        description: The example, now in the caller's "Shared with me" list (unless it is theirs).
+      403:
+        description: Not signed in. Share links open for signed-in users only.
+      404:
+        description: The link names no example, or it was revoked.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        body = request.get_json(silent=True) or {}
+        example = user_examples.open_shared(user, str(body.get("token") or ""))
+        return jsonify(user_examples.view(example, user))
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+
+
+@app.route('/agent/examples/<example_id>/shared', methods=['DELETE'])
+def agent_example_forget(example_id):
+    """
+    Take an example off the caller's "Shared with me" list. Its owner keeps it.
+    ---
+    tags:
+      - agent
+    responses:
+      200:
+        description: '`{removed: true, id}`'
+      404:
+        description: Not on the caller's list.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        user_examples.forget_shared(user, example_id)
+        return jsonify({"removed": True, "id": example_id})
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+
+
+@app.route('/agent/examples/<example_id>/copy', methods=['POST'])
+def agent_example_copy(example_id):
+    """
+    Copy an example the caller can see into their own examples (private, files included).
+    ---
+    tags:
+      - agent
+    responses:
+      201:
+        description: The new example.
+      404:
+        description: No such example, or not one this caller may see.
+      413:
+        description: The caller already has the most examples one account may keep.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        example = user_examples.copy(user, example_id)
+        return jsonify(user_examples.view(example, user)), 201
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+
+
+@app.route('/agent/examples/<example_id>/publish', methods=['POST', 'DELETE'])
+def agent_example_publish(example_id):
+    """
+    Publish to everyone (POST, admins only) or unpublish (DELETE, an admin or the owner).
+
+    An admin is a caller whose platform role is at or below `AGENT_EXAMPLES_PUBLISH_ROLE`
+    (default 2, Admin; lower is more privileged).
+    ---
+    tags:
+      - agent
+    responses:
+      200:
+        description: The example.
+      403:
+        description: The caller may not publish (or unpublish) it.
+      404:
+        description: No such example, or not one this caller may see.
+    """
+    from agent_runtime import user_examples
+
+    user, refused = _examples_caller()
+    if refused:
+        return refused
+    try:
+        example = user_examples.set_published(user, example_id, request.method == "POST")
+        logger.info("Example %s %s", example_id,
+                    "published" if example["published"] else "unpublished")
+        return jsonify(user_examples.view(example, user))
+    except user_examples.ExampleError as exc:
+        return _example_error(exc)
+
+
 @app.route('/agent/models', methods=['GET'])
 def agent_models():
     """
