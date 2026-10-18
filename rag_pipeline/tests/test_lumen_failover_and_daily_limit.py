@@ -110,7 +110,8 @@ def test_coins_and_dollars_are_limited_separately():
     assert ul.refusal(ALICE, now=NOON) is None
     ul.record(ALICE, {"cost_coins": 0.2, "cost_usd": None}, now=NOON)
     refused = ul.refusal(ALICE, now=NOON)
-    assert refused["reason"] == "daily_limit" and "Lumen coins" in refused["error"]
+    assert refused["reason"] == "daily_limit" and "of 3 credits" in refused["error"]
+    assert "Lumen" not in refused["error"] and "coin" not in refused["error"]
     assert "OpenAI" not in refused["error"]
     assert refused["spent"]["usd"] == pytest.approx(2.9)
 
@@ -119,7 +120,8 @@ def test_the_day_resets_at_midnight_central():
     late = datetime(2026, 10, 16, 23, 59, tzinfo=CENTRAL)
     after = datetime(2026, 10, 17, 0, 1, tzinfo=CENTRAL)
     ul.record(ALICE, {"cost_usd": 3.5}, now=late)
-    assert ul.refusal(ALICE, now=late) is not None
+    assert ul.refusal(ALICE, now=late)["error"] == (
+        "You have reached today's usage limit ($3.50 of $3). It resets at midnight US Central time.")
     assert ul.refusal(ALICE, now=after) is None
     assert ul.resets_at(late).startswith("2026-10-17T00:00:00-05:00")
 

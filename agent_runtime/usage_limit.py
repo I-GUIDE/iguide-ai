@@ -269,10 +269,12 @@ def refusal(owner: Optional[str], now: Optional[datetime] = None) -> Optional[Di
     used = spent(owner, now)
     limits = limits_for(owner)
     over = []
+    # Said to the user, so in the user's terms: credits, not the provider or its coins (user,
+    # 2026-10-18: "(x of 3 credits)", no Lumen). The logs and the admin endpoint keep the names.
     if limits["coins"] is not None and used["coins"] >= limits["coins"]:
-        over.append(f"{used['coins']:.2f} of {limits['coins']:g} Lumen coins")
+        over.append(f"{used['coins']:.2f} of {limits['coins']:g} credits")
     if limits["usd"] is not None and used["usd"] >= limits["usd"]:
-        over.append(f"${used['usd']:.2f} of ${limits['usd']:g} of OpenAI usage")
+        over.append(f"${used['usd']:.2f} of ${limits['usd']:g}")
     if not over:
         return None
     when = resets_at(now)
