@@ -5916,3 +5916,10 @@ rather than from the previous one.
 - **Arguments:** tool-call events now carry their arguments as a dict.
 - **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
 - **Tests:** `test_code_watch.py`; `npm run check:coderun`.
+
+## 2026-10-18 · M8.116 · One daily budget, in credits (architecture S74.2)
+
+- **The rule (user):** Lumen coins plus OpenAI dollars, at most 3 a day, called credits. The model swaps provider by itself when the Lumen pool runs low, so two separate budgets (3 coins, $3) were neither predictable nor the intended total.
+- **Message:** "You have reached today's usage limit (3.05 of 3 credits). It resets at midnight US Central time." It names no provider.
+- **Setting:** `AGENT_DAILY_CREDIT_LIMIT` (3) replaces the two per-currency settings. Admins send `creditLimit`; `coinLimit` and `usdLimit` are refused by name.
+- **Tests:** `test_lumen_failover_and_daily_limit.py`, `test_admin_usage_limits.py`.
