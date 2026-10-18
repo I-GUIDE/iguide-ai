@@ -574,6 +574,7 @@ def stream_agent_chat_events(
             trace_events.append(event)
 
     stream_error: Optional[BaseException] = None
+    cancelled: Optional[str] = None
     for event in _guard_stream(stream_agent_query_events(
         effective_input,
         llm=_llm_for_request(llm_provider, llm_model, reasoning_effort),
@@ -605,12 +606,18 @@ def stream_agent_chat_events(
         event = _for_client(event, agent_thread_id, effective_thread_id)
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
+        if event.get("event") == "cancelled":
+            cancelled = str((event.get("data") or {}).get("reason") or "stopped by the user")
         yield event
 
     answer = sanitize_answer_links(_extract_agent_answer(completed_response or {}))
     # Every model call of the turn, priced (see run_agent_chat). Absent when the turn failed
     # before completing; the calls it did make are still in its trace's llm_usage events.
     turn_cost = _charge_turn((completed_response or {}).get("usage"))
+    if cancelled and not answer.strip():
+        # Recorded, so the conversation still holds the question and the next turn knows the
+        # last one never answered it.
+        answer = f"[Stopped before an answer was composed: {cancelled}.]"
     if stream_error is not None and not answer.strip():
         # A failed turn used to be erased: `update_memory` sits after this loop, so an exception
         # skipped it entirely and the user's own question vanished from the conversation. The

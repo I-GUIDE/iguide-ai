@@ -695,6 +695,7 @@ def create_output_file_from_path(
     filename: Optional[str] = None,
     overwrite: bool = False,
     content_key: Optional[str] = None,
+    layer_source_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     maybe_sweep_expired_files()
     source = Path(source_path).expanduser().resolve()
@@ -731,6 +732,10 @@ def create_output_file_from_path(
     # file_content_key when this file becomes the input to the next step.
     if content_key:
         record["content_key"] = str(content_key)
+    # For a styled copy add_map_layer writes: the source key of the map layer it stands for, so
+    # drawing this copy again restyles that layer instead of adding a second one.
+    if layer_source_key:
+        record["layer_source_key"] = str(layer_source_key)
     return _with_public_url(_write_record(_with_lineage(record, target)))
 
 

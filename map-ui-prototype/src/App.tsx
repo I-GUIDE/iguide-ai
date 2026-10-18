@@ -15,7 +15,7 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
+  streamChat, cancelTurn, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels, fetchUiConfig,
   fetchAgentFile,
   type AgentConfig, type FileRecord, type MapLayerEvent, type ModelCatalogue,
   type TraceLine } from './agentClient';
@@ -23,6 +23,7 @@ import { AuthError, authMessage } from './auth';
 import { fetchWhoAmI, listConversations, putConversation, getConversation, deleteConversation,
   type WhoAmI } from './agentClient';
 import { renderMarkdown } from './markdown';
+import { describeToolCall } from './toolPhrases';
 import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
@@ -157,6 +158,10 @@ export default function App() {
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
   const abortRef = useRef<AbortController | null>(null);
+  // The running turn's server id (the stream's first event), so Stop can end it there too.
+  const turnIdRef = useRef<string | null>(null);
+  // file_id → filename, so a trace row says "Inspecting buildings.geojson", not the id.
+  const fileNames = useRef(new Map<string, string>());
 
   // chatW changes once per gesture (release, key step, reset), never per frame, so it can ride
   // the same single record as everything else. It has to be in BOTH the payload and the deps: in
@@ -190,6 +195,14 @@ export default function App() {
     ? { ...cfg, apiKey: '', uploadEndpoint: '/agent/files/upload',
         endpoint: `/agent/chat/stream?replay=${encodeURIComponent(REPLAY_KEY)}` }
     : { ...cfg }), [cfg]);
+  // Stop ends the turn on the server as well as here: the sandbox run is killed and the agent
+  // stops at its next step. Aborting the fetch alone left both running for minutes. The abort
+  // does not wait for the cancel call, so Stop is instant whatever the server answers.
+  const stopTurn = useCallback(() => {
+    const id = turnIdRef.current;
+    if (id) void cancelTurn(asAgentConfig(), id);
+    abortRef.current?.abort();
+  }, [asAgentConfig]);
   // DEMO_MODE on the server: the API key is not enforced and the connection settings are hidden,
   // so a link can be handed to an audience without also handing them a credential to paste.
   // Asked once per endpoint, and only in live mode — the offline demo has no server to ask.
@@ -563,7 +576,10 @@ export default function App() {
     setLayers((prev) => prev.filter((l) => l.id !== id));
   }, []);
   const setLayerOpacity = useCallback((id: string, opacity: number) => {
-    setLayers((prev) => prev.map((l) => (l.id === id && l.kind === 'raster' ? { ...l, opacity } : l)));
+    // A raster's opacity is the whole image's; a vector layer's is its fill's, so its outline
+    // stays crisp. The same field the agent sets for a layer that frames others.
+    setLayers((prev) => prev.map((l) => (l.id !== id ? l
+      : l.kind === 'raster' ? { ...l, opacity } : { ...l, fillOpacity: opacity })));
   }, []);
   const fitLayer = useCallback((id: string) => {
     const l = layersRef.current.find((x) => x.id === id);
@@ -706,14 +722,20 @@ export default function App() {
       }, asAgentConfig(), {
         onTrace: (l) => addTrace(l),
         onToolCall: (name, args) => {
-          addTrace({ text: `${name}(${short(args)})`, kind: 'tool' });
+          // What the call does, in words (toolPhrases); the raw call stays on the row for
+          // debug mode.
+          addTrace({ text: describeToolCall(name, args, (id) => fileNames.current.get(id)),
+                     raw: `${name}(${short(args)})`, kind: 'tool' });
           drawFromToolArgs(name, args);
         },
         onToolResult: (name, parsed) => {
           const fc = extractFeatures(parsed);
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
-        onFile: (files) => patch({ artifacts: files }),
+        onFile: (files) => {
+          for (const r of files) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
+          patch({ artifacts: files });
+        },
         onMapLayer: tracked(async (layer) => {
           mapLayerDelivered.current = true;
           if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
@@ -754,16 +776,23 @@ export default function App() {
           // collapsing it to 'geojson' sends a class-NAME style column down the numeric
           // choropleth ramp, which yields NaN for every feature and one flat fill.
           const categorical = layer.render === 'categories' && !!layer.legend?.length;
+          // A road network and a route on it keep their render: toDeckLayer draws them the way a
+          // navigation app does, and AgentMap stacks the network under everything, the route on top.
+          const lineRole = layer.render === 'network' || layer.render === 'route' ? layer.render : null;
           putLayer({
             kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
             data: fc, fitBounds: true, sourceUrl: layer.url,
-            render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
+            render: heat ? 'heatmap' : categorical ? 'categories' : lineRole ?? 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // The colour the user asked for, set by the agent; it wins over every default.
+            color: layer.color,
             // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
             // Dropped here once already: the flag reached the client and died in this call,
             // so the zone came back as a violet slab over its own pixel image.
             outline: layer.outline === true ? true : undefined,
+            fillOpacity: layer.fillOpacity,
+            beneath: layer.beneath === true ? true : undefined,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,
@@ -781,6 +810,8 @@ export default function App() {
                             return `(${n} feature${n === 1 ? '' : 's'})`; })()), kind: 'tool' });
         }),
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
+        onTurn: (id) => { turnIdRef.current = id; },
+        onCodeProgress: (cp) => patch({ progress: cp.stage === 'finished' ? undefined : { ...cp, at: Date.now() } }),
       });
       pendingFileIds.current = []; // attached to the thread server-side now
       // Reconcile with authoritative terminal result.
@@ -791,7 +822,7 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, markdown: res.error ? undefined : res.answer || undefined,
-              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
+              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false, progress: undefined });
       // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
       // rather than being awaited here. The await put the fallback's layers before `finally` ended
       // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
@@ -815,8 +846,8 @@ export default function App() {
       // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
       // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
       patch(isAuth
-        ? { html: renderMarkdown(text, resolveUrl), streaming: false }
-        : { text, streaming: false });
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false, progress: undefined }
+        : { text, streaming: false, progress: undefined });
     } finally {
       // The turn ends when its layers are drawn, so the snapshot this counter triggers includes
       // them, and `busy` keeps the composer from starting the next turn until then. A second save
@@ -829,7 +860,7 @@ export default function App() {
           + 'the turn was saved without it', kind: 'warn' });
       }
       if (undrawn.length) patch({ mapWarnings: [...undrawn] });
-      setBusy(false); abortRef.current = null; setTurnsEnded((n) => n + 1);
+      setBusy(false); abortRef.current = null; turnIdRef.current = null; setTurnsEnded((n) => n + 1);
     }
     // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
     // `snapshotSession` was first missing from these deps, and that single omission was the
@@ -973,6 +1004,7 @@ export default function App() {
     if (mode === 'live') {
       try {
         const recs: FileRecord[] = await uploadFiles(files, asAgentConfig(), threadRef.current);
+        for (const r of recs) if (r.file_id && r.filename) fileNames.current.set(r.file_id, r.filename);
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
         sessionFileIds.current.push(...recs.map((r) => r.file_id));
         // The preview layer above was built from the local File, so it has no url and could
@@ -1187,7 +1219,7 @@ export default function App() {
           models={models}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings && !demoMode && !tokenMode} resolveUrl={resolveUrl}
           onSend={runAgent}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stopTurn}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
