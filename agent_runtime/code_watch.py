@@ -10,9 +10,11 @@ would have caught them, in the order they act:
 1. :func:`precheck` — **rules, before the run.** A syntax-tree scan for constructs that are
    slow on real geodata (unprepared predicates against one geometry, nested row loops, row-wise
    ``apply`` of geometry methods, unions or file reads inside loops) and for a stated parameter
-   the code never uses ("buffer 2500 m" with only ``1000`` in the code). Deterministic and
-   instant. It never blocks a run: the findings go back with the result, to the reviewer as
-   leads, and are matched against the stack if the run times out.
+   the code never uses ("buffer 2500 m" with only ``1000`` in the code) — asked only of a run
+   that applies a distance or time (:func:`applies_values`), and satisfied by any earlier run of
+   the turn that used it. Deterministic and instant. It never blocks a run: the findings go
+   back with the result, to the reviewer as leads, and are matched against the stack if the
+   run times out.
 2. :class:`RunWatch` — **a model review, during the run.** Once a run has been going for a few
    seconds (``AGENT_CODE_REVIEW_AFTER_S``) a reviewer model reads the code, the task, the input
    sizes, the rule findings and a live stack sample (where the program is right now), in a
@@ -373,11 +375,94 @@ def stated_parameters(brief: str) -> List[Tuple[float, str, str]]:
     return found
 
 
-def _parameter_findings(code: str, brief: str) -> List[Finding]:
+# Calls that apply a distance or a time to the data, whatever their arguments.
+_VALUE_CALLS = {"buffer", "dwithin", "query_ball_point", "query_ball_tree", "query_radius",
+                "radius_neighbors", "ego_graph", "single_source_dijkstra",
+                "single_source_dijkstra_path_length", "isochrone", "isochrones",
+                "within_distance", "dwithin_join"}
+# A keyword argument with one of these in its name carries a distance or a time.
+_VALUE_KWARG = re.compile(r"dist|radius|cutoff|buffer|threshold|max_time|travel_time|trip_time",
+                          re.IGNORECASE)
+# A comparison against a constant applies a distance/time threshold when the other side names
+# one ("dist_km <= 25", "nearest > 2000.0", "df['travel_min'] < 2"); "df['mag'] >= 7" does
+# not. No bare "m" or "d": a solver's "x[n*m:] > 0.5" (COOLING, 2026-10-18) is not a distance.
+_VALUE_NAME = re.compile(r"dist|km|met(?:er|re)|radius|buffer|minute|(?<![a-z])mins?(?:$|_)|"
+                         r"sec(?:ond)?s?(?:$|_)|time|travel|hour|reach|isochrone|cost|length|"
+                         r"near|within|walk|drive", re.IGNORECASE)
+
+
+def _side_words(node: ast.AST) -> List[str]:
+    words: List[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            words.append(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            words.append(sub.attr)
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            words.append(sub.value)
+    return words
+
+
+def _is_number(node: ast.AST) -> bool:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return (isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool))
+
+
+def _numeric(node: Optional[ast.AST]) -> bool:
+    """A number, or arithmetic on numbers only (``2.5 * 1000``)."""
+    if isinstance(node, ast.BinOp):
+        return _numeric(node.left) and _numeric(node.right)
+    return node is not None and _is_number(node)
+
+
+def applies_values(code: str) -> bool:
+    """Whether *code* applies a distance or a time to the data: a buffer / radius / network
+    cutoff call, a keyword argument that carries one, a number given a name that says it is one
+    (``RADIUS_M = 1000``), or a threshold comparison on something named as one. A run that only
+    reads a file's head, schema or metadata, writes a layer out or checks a file exists applies
+    none, so it cannot use a stated value wrongly.
+
+    Live sweep of the 12 Spatial Analysis examples (2026-10-18, e561e071): the stated-parameter
+    rule fired on 25 runs in 9 turns and every firing was wrong — the first runs that read a CSV
+    head or raster metadata, a "does the file exist" check, a map built after the filter."""
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if _call_name(node) in _VALUE_CALLS:
+                return True
+            if any(kw.arg and _VALUE_KWARG.search(kw.arg) for kw in node.keywords):
+                return True
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and _numeric(node.value):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and (_VALUE_KWARG.search(t.id)
+                                                or _VALUE_NAME.search(t.id)) for t in targets):
+                return True
+        elif isinstance(node, ast.Compare) and not all(
+                isinstance(op, (ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn))
+                for op in node.ops):
+            sides = [node.left, *node.comparators]
+            if not any(_is_number(s) or isinstance(s, ast.Name) for s in sides):
+                continue
+            if any(_VALUE_NAME.search(w) for s in sides for w in _side_words(s)):
+                return True
+    return False
+
+
+def _parameter_findings(code: str, brief: str, earlier: Sequence[str] = ()) -> List[Finding]:
+    """A stated value is missing from a run that applies values (:func:`applies_values`) and
+    from every earlier run of the turn (*earlier*: their code). A run that only inspects, or one
+    after the run that applied the value (the map of the filtered rows), is not asked again."""
     stated = stated_parameters(brief)
-    if not stated:
+    if not stated or not applies_values(code):
         return []
     numbers = _numbers_in(code)
+    for text in earlier:
+        numbers += _numbers_in(text or "")
     out: List[Finding] = []
     for value, unit, words in stated:
         candidates = [value] + [value * f for f in _UNIT_EQUIV.get(unit, [])]
@@ -390,8 +475,10 @@ def _parameter_findings(code: str, brief: str) -> List[Finding]:
     return out
 
 
-def precheck(code: str, *, brief: str = "") -> List[Dict[str, Any]]:
-    """Rule findings for *code* (see the module docstring). Never raises."""
+def precheck(code: str, *, brief: str = "",
+             earlier: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Rule findings for *code* (see the module docstring); *earlier* is the code of the turn's
+    earlier runs, for the stated-parameter rule. Never raises."""
     try:
         tree = ast.parse(code or "")
     except SyntaxError:
@@ -404,7 +491,7 @@ def precheck(code: str, *, brief: str = "") -> List[Dict[str, Any]]:
             found = [f for f in found if f.rule != "unprepared_predicate"]
         if scan.kdtree:
             found = [f for f in found if f.rule not in {"distance_in_loop"}]
-        found += _parameter_findings(code or "", brief)
+        found += _parameter_findings(code or "", brief, earlier)
         return [f.as_dict() for f in sorted(found, key=lambda f: (f.line or 10 ** 9, f.rule))]
     except Exception:  # noqa: BLE001 - a rule check must never cost a run
         logger.debug("precheck failed", exc_info=True)
@@ -706,6 +793,7 @@ class RunWatch:
     label: str = ""
     purpose: str = ""            # completes "Executing code to …" (execute_code's `purpose`)
     brief: str = ""
+    earlier_code: List[str] = field(default_factory=list)   # the turn's earlier runs
     inputs: List[Dict[str, Any]] = field(default_factory=list)
     findings: List[Dict[str, Any]] = field(default_factory=list)
     mode: str = field(default_factory=review_mode)
@@ -905,4 +993,4 @@ class RunWatch:
 
 __all__ = ["PARAMETER_RULES", "hints_for_result", "split_findings", "Finding", "Interrupt", "RUNTIME_DIRNAME", "RunProbe", "RunWatch", "SITECUSTOMIZE",
            "STACK_FILENAME", "accept_verdict", "enclosing_lines", "parse_stack", "parse_verdict",
-           "precheck", "review_mode", "review_prompt", "stack_report", "stated_parameters"]
+           "precheck", "applies_values", "review_mode", "review_prompt", "stack_report", "stated_parameters"]

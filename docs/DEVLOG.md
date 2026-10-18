@@ -5856,6 +5856,44 @@ rather than from the previous one.
 
 **Measured** 14 offline tests; Stage 63/71 tests updated.
 
+
+## 2026-10-16 · M8.107 · Users write and share their own Spatial Analysis examples (architecture stage 73)
+
+**Change** Signed-in users create examples (title, description, category, topics, data files,
+  ordered steps). They are stored on the agent's file-store volume under `examples/`, private by
+  default. The owner can make a share link (`?example=<token>`) that other signed-in users open,
+  run and copy. Admins (role ≤ `AGENT_EXAMPLES_PUBLISH_ROLE`, default 2) publish one to everyone.
+  New routes are under `/agent/examples`. The panel gains "My examples", "Shared with me", a
+  "Community" badge on published examples, and an editor.
+
+**Why** User request. Adding an example meant a catalogue change and a deploy.
+
+**Measured** 31 offline route tests and 28 client checks. Driven in Chrome with three test users
+  against a local token-mode agent: create, run (step 1 on Lumen drew the layer), share, open,
+  copy, revoke, publish, edit-unpublishes, delete.
+
+**Not fixed** Lists refresh on load, not live. There is no moderation queue: an admin publishes
+  what they can open. Nothing reclaims the store beyond the per-account cap.
+
+## 2026-10-17 · M8.108 · The routing guidance forbids joining nearby vertices (architecture S69.1)
+
+**Change** `how_to_route` (the road-network result of `overpass_search`) now states rules:
+  - the graph's nodes are the exact vertices;
+  - never merge, snap or buffer nearby vertices, or add an edge the file lacks;
+  - snap the endpoints into the largest STRONGLY connected component;
+  - say so when there is no path.
+
+**Why** The first end-to-end Loop run (r58) merged vertices within 5 m and drove between Upper
+  and Lower Wacker Drive: 4.89 min against a legal 5.19.
+
+**Measured** On the same question it gave 5.19 min / 4.213 km, which matches the checker, in 8
+  tool calls (was 18) and 2 min 40 s (was 6 min).
+
+**Not fixed**
+  - The route's GeoJSON had bare NaN, so the browser could not parse it and the layer was
+    dropped silently.
+  - The rules are guidance; nothing enforces them.
+
 ## 2026-10-17 · M8.109 · A layer with NaN in its attributes still reaches the map (architecture stage 75)
 
 **Change** The download route serves every `.geojson` (≤ 64 MB) as strict JSON, writing
@@ -5935,6 +5973,14 @@ rather than from the previous one.
 - **Arguments:** tool-call events now carry their arguments as a dict.
 - **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
 - **Tests:** `test_code_watch.py`; `npm run check:coderun`.
+
+## 2026-10-18 · M8.115 · The stated-parameter check asks only runs that apply a value (architecture S78.2)
+
+**Change** `code_watch.applies_values` decides whether a run applies a distance or a time: a buffer, radius or cutoff call, a keyword argument that carries one, a number assigned to a distance- or time-named variable, or a threshold comparison on something named as one. The stated-parameter rule checks only those runs. A value used by an earlier `execute_code` run of the turn counts as used: the turn log supplies that code through `langchain_exec_tools._earlier_code` and `RunWatch.earlier_code`.
+**Why** In the live sweep of 2026-10-18 (e561e071, 81 turns, Lumen deepseek-v4-flash) the rule fired on 25 runs in 9 turns, and every firing was a false positive. They were runs that read a CSV head or raster metadata, checked a file existed, or drew the map after the filter had already been applied.
+**Measured** Offline replay of 194 archived runs (19 more are unreadable because the trace cuts arguments at 3,000 characters; none of them fired live, and the new rule fires on a subset of the old rule's runs): the old rule matches the live firings on 194 of 194 runs. Firings went from 25 runs / 9 turns to 0. Recall check, with each stated value swapped for a wrong one in the real computing runs: 20 of 20 genuine uses caught (the 4 other swaps were `**2` exponents). Tests: `test_code_watch.py` 68 passed; code-execution suites 220 passed.
+**Surprised by** COOLING's "2 km" is not in the query's parameter window. The live rule found it only because the plan text put it next to "distance", so a replay that uses only the query under-counts.
+**Next** Not deployed. The rule still matches by number alone, so a `**2` in an earlier run counts as using "2 km". A unit-aware match would close that gap.
 
 ## 2026-10-18 · M8.116 · One daily budget, in credits (architecture S74.2)
 

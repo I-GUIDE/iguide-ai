@@ -23,6 +23,7 @@
     "check:route": "esbuild src/routeGeometry.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/routecheck.mjs && node node_modules/.cache/routecheck.mjs",
     "check:layers": "esbuild src/layerLoad.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/layerloadcheck.mjs && node node_modules/.cache/layerloadcheck.mjs",
     "check:demos": "esbuild src/demos.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/demoscheck.mjs --define:import.meta.env='{\"BASE_URL\":\"/\"}' && node node_modules/.cache/demoscheck.mjs",
+    "check:examples": "esbuild src/userExamples.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/examplescheck.mjs --define:import.meta.env='{\"BASE_URL\":\"/\"}' && node node_modules/.cache/examplescheck.mjs",
     "check:coderun": "esbuild src/codeRun.check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/coderuncheck.mjs && node node_modules/.cache/coderuncheck.mjs"
   },
   "dependencies": {

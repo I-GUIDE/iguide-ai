@@ -242,3 +242,20 @@ def test_the_bridge_gets_the_network_filter_too(monkeypatch, store):
     out = tool_bridge._overpass_handler("road network", bbox=[-87.645, 41.866, -87.618, 41.889])
     assert out["osm_filter"] == ov.DRIVE_NETWORK_FILTER and out["count"] == 15
     assert "living_street" in sent[0]
+
+
+def test_routing_instructions_forbid_snapping_and_name_the_strong_component(monkeypatch, store):
+    """S69.1. Live, 2026-10-17: the corners of the Loop box sat on one-way stubs the box cut off,
+    the model merged every pair of vertices within 5 m to get a path, and drove between Upper
+    and Lower Wacker Drive eleven times (4.89 min against a legal 5.19). The instructions now
+    forbid any tolerance join and say where to snap the endpoints instead."""
+    _patch(monkeypatch, [_Resp({"elements": _grid(3)})])
+    how = json.loads(_tools()["search"].invoke({"feature": "road network",
+                                                "bbox": LOOP_BBOX}))["how_to_route"]
+    assert "EXACT vertex coordinates" in how
+    assert "NEVER merge, snap or buffer vertices" in how and "never add an edge" in how
+    assert "LARGEST STRONGLY connected component" in how and "weakly" in how
+    assert "say so instead of changing the network" in how
+    from agent_runtime.langchain_granular_tools import _ROAD_NETWORK_NOTE
+
+    assert "only at shared vertices" in _ROAD_NETWORK_NOTE
