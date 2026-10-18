@@ -66,48 +66,6 @@ CASES = [
                     "crime rates using SKATER. Map the regions and give each one's community "
                     "areas, population and mean rate."},
      ]},
-    # T14. The data is a pinned snapshot (datasets.CRASH_FILES), copied by datasets.build. The
-    # steps carry the three wordings T14's runs pinned: a street is its name (W and E Madison St
-    # are one), the night is crash_hour 22-3, the yearly averages count every crash in the file.
-    # Live 2026-10-15 every figure was right; step 2 once re-used the hot/cold layer instead of
-    # mapping the z-scores, hence "a map of the z-scores themselves".
-    {"id": "crash-hotspots", "task": "T14",
-     "title": "Where serious crashes cluster in Chicago",
-     "blurb": "Chicago's Vision Zero plan targets the crashes that kill or seriously injure people. "
-              "This case takes five years of them, 2020 to 2024, and finds where they cluster, which "
-              "streets run through the clusters, and when they happen.",
-     "tags": ["hot spots", "Gi*", "Vision Zero", "temporal"],
-     "category": "Hypothesis testing",
-     "steps": [
-         {"label": "Count the crashes",
-          "prompt": "Count Chicago's serious crashes from 2020 to 2024 in each 500 m hexagon and "
-                    "map the counts. How many crashes fall in the grid, and which hexagon has the "
-                    "most?"},
-         {"label": "Are they clustered?",
-          "prompt": "Run Getis-Ord Gi* on those counts with binary queen contiguity, each hexagon "
-                    "in its own neighbourhood, and analytical z-scores. How many hexagons are hot "
-                    "spots (z > 1.96), and which hexagon has the highest z? Map the z-scores "
-                    "themselves, so the hot spots stand out."},
-         {"label": "Which streets?",
-          "prompt": "Using the street recorded with each crash (its street name; W and E Madison "
-                    "St are one street), which three streets have the most serious crashes inside "
-                    "the hot-spot hexagons, and how many each?"},
-         {"label": "When?",
-          "prompt": "What share of all the serious crashes happened at night, from 10 p.m. to 4 "
-                    "a.m. (crash_hour 22, 23, 0, 1, 2 or 3)? And over all the serious crashes, how "
-                    "many were there per year on average in 2020–2022 and in 2023–2024?"},
-     ]},
-    {"id": "schools-buffer", "task": "T02",
-     "title": "Schools within a mile of a site",
-     "blurb": "A development site in the Chicago Loop and the schools around it. The case asks which "
-              "schools are within a mile of the site and which one is closest.",
-     "tags": ["buffer", "spatial selection", "distance"],
-     "category": "Query and selection",
-     "steps": [{"label": "Count and nearest",
-                "prompt": "How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? "
-                          "Which one is nearest, and how far is it in metres?"},
-               {"label": "Show it on the map",
-                "prompt": "Show the site, its 1-mile buffer and the schools inside it on the map."}]},
     {"id": "zone-rates", "task": "T03",
      "title": "Incidents per 1,000 residents by zone",
      "blurb": "Incidents recorded across nine zones with very different populations. The zone with the "
@@ -186,7 +144,57 @@ CASES = [
 #   flood: 13-20 minutes for step 1, an 'Incomplete' banner and no 5 m layer in pass 2, and
 #     the land total changed every run (112.3, 126.8, 103.3 km2; the share held at 93-94%).
 #   ndvi-change: 'Map the loss' drew no layer in 2 of 3 passes (it pointed at the PNG).
+#   crash-hotspots and schools-buffer (taken off later the same day, after three more live
+#     rounds on e5e311f0): crash step 3 ('Which streets?') was wrong or partly wrong in 2 of 3
+#     rounds (round 2 re-ran Gi* and reported 321 hot spots right after its own step 2 said
+#     331; round 3 kept W/E prefixes on every street but Madison), and the map stayed zoomed on
+#     a stray one-point layer in 2 of 3. Schools step 2 ('Show it on the map') drew nothing in
+#     2 of 3: once step 1 left a schools layer on the map, the router chose 'done', taking
+#     'the buffer was computed' for 'the buffer is on the map' (all 10 prod traces that day:
+#     6 of 6 drew when step 1 drew nothing, 1 of 3 when step 1 drew a schools layer).
 RETIRED_CASES = [
+    # T14. The data is a pinned snapshot (datasets.CRASH_FILES), copied by datasets.build. The
+    # steps carry the three wordings T14's runs pinned: a street is its name (W and E Madison St
+    # are one), the night is crash_hour 22-3, the yearly averages count every crash in the file.
+    # Live 2026-10-15 every figure was right; step 2 once re-used the hot/cold layer instead of
+    # mapping the z-scores, hence "a map of the z-scores themselves".
+    {"id": "crash-hotspots", "task": "T14",
+     "title": "Where serious crashes cluster in Chicago",
+     "blurb": "Chicago's Vision Zero plan targets the crashes that kill or seriously injure people. "
+              "This case takes five years of them, 2020 to 2024, and finds where they cluster, which "
+              "streets run through the clusters, and when they happen.",
+     "tags": ["hot spots", "Gi*", "Vision Zero", "temporal"],
+     "category": "Hypothesis testing",
+     "steps": [
+         {"label": "Count the crashes",
+          "prompt": "Count Chicago's serious crashes from 2020 to 2024 in each 500 m hexagon and "
+                    "map the counts. How many crashes fall in the grid, and which hexagon has the "
+                    "most?"},
+         {"label": "Are they clustered?",
+          "prompt": "Run Getis-Ord Gi* on those counts with binary queen contiguity, each hexagon "
+                    "in its own neighbourhood, and analytical z-scores. How many hexagons are hot "
+                    "spots (z > 1.96), and which hexagon has the highest z? Map the z-scores "
+                    "themselves, so the hot spots stand out."},
+         {"label": "Which streets?",
+          "prompt": "Using the street recorded with each crash (its street name; W and E Madison "
+                    "St are one street), which three streets have the most serious crashes inside "
+                    "the hot-spot hexagons, and how many each?"},
+         {"label": "When?",
+          "prompt": "What share of all the serious crashes happened at night, from 10 p.m. to 4 "
+                    "a.m. (crash_hour 22, 23, 0, 1, 2 or 3)? And over all the serious crashes, how "
+                    "many were there per year on average in 2020–2022 and in 2023–2024?"},
+     ]},
+    {"id": "schools-buffer", "task": "T02",
+     "title": "Schools within a mile of a site",
+     "blurb": "A development site in the Chicago Loop and the schools around it. The case asks which "
+              "schools are within a mile of the site and which one is closest.",
+     "tags": ["buffer", "spatial selection", "distance"],
+     "category": "Query and selection",
+     "steps": [{"label": "Count and nearest",
+                "prompt": "How many schools are within 1 mile of the site at 41.8827 N, 87.6233 W? "
+                          "Which one is nearest, and how far is it in metres?"},
+               {"label": "Show it on the map",
+                "prompt": "Show the site, its 1-mile buffer and the schools inside it on the map."}]},
     # No upload and no harness task: the agent fetches the Loop's streets from OpenStreetMap
     # (overpass_search feature='road network', PR #139; before it, 'highway' meant motorways only
     # and the network came back as 34 pieces). Replaces T04's synthetic 6x6 UTM grid, whose
