@@ -11114,6 +11114,57 @@ end to end (the model choosing 'road network') is not measured here.
   each way's node ids, which would join exactly; they are not carried.
 
 
+### Stage S69.1 The routing guidance forbids joining nearby vertices
+
+**Why.** The first end-to-end run of the Loop question (2026-10-17 00:58 UTC, local agent on
+077e053a, Lumen deepseek-v4-flash, Chrome; round r58 of the GIS Assessment Log) fetched the
+network right: the model chose `feature='road network'` itself and got 1,521 ways. The route was
+wrong.
+- **No path at first.** The vertices nearest the two corners sat on one-way stubs that the box
+  cuts off, so the first Dijkstra found no path.
+- **Six steps on connectivity.** The model computed the strongly connected components and still
+  snapped the corners into the largest WEAKLY connected one.
+- **A 5 m join.** It then merged every pair of vertices within 5 m. That added 13 links no road
+  makes: 11 between Upper and Lower Wacker Drive (stacked levels) and 2 at expressway ramp
+  bridges.
+- **Result.** It answered 4.89 min / 4.22 km. The best legal route on the same file is 5.19 min /
+  4.21 km.
+
+`how_to_route` said "join on identical coordinates" once, as a how-to; nothing said not to snap.
+
+**What changed** (`agent_runtime/langchain_granular_tools.py`, `_road_network_result`):
+- **`how_to_route`, rewritten as rules.**
+  - Graph nodes are the exact vertex coordinates.
+  - Never merge, snap or buffer vertices that are merely close, and never add an edge the file
+    lacks. The reason is given: stacked roads, bridges and ramps lie within metres of roads they
+    do not meet, so any tolerance invents shortcuts.
+  - Snap the origin and destination to the nearest vertex in the largest STRONGLY connected
+    component (the weakly connected one is not enough), and report how far each moved.
+  - If there is still no path, say so rather than change the network.
+- **The tool description.** Both tools' road-network note now ends "joining ways only at shared
+  vertices".
+
+**Tests.** `test_routing_instructions_forbid_snapping_and_name_the_strong_component` pins the
+four rules. The 39 Stage 69 tests are unchanged.
+
+**Measured live,** 2026-10-17 01:12 UTC, same question, same model, same box, on this branch:
+- **Correct.** 5.19 min (5.1865) and 4.213 km. The endpoints were snapped into the largest
+  strongly connected component (about 158 m and 244 m). This is the same route and the same
+  figures as an independent build from the turn's own file: Ruble, Eisenhower Expressway, Ida B.
+  Wells, Dearborn, State, Upper Wacker, Upper Columbus.
+- **Cheaper.** 8 tool calls instead of 18, and 2 min 40 s instead of 6 min. No connectivity
+  detours.
+- **The route did not reach the map,** for an unrelated reason. The model's GeoJSON carried bare
+  `NaN` values (unnamed ways in a street-name list); `add_map_layer` wrote them through, and the
+  browser's `JSON.parse` rejected the file. The UI's download handler swallows that error
+  (`catch {}`), so nothing said so, while the answer said the route was on the map. Not fixed
+  here.
+
+**Not done.**
+- **Guidance only.** Nothing enforces these rules. A tool that marks each way's strong-component
+  membership, or a routing tool, would.
+- **The NaN layer drop** above.
+
 ## Stage 70 — Overpass keeps its last good answer {#stage-70}
 
 **Why.** From 2026-10-15 22:55 to 10-16 07:45 CDT all six public mirrors in `_DEFAULT_ENDPOINTS`

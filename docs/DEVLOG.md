@@ -5875,6 +5875,25 @@ rather than from the previous one.
 **Not fixed** Lists refresh on load, not live. There is no moderation queue: an admin publishes
   what they can open. Nothing reclaims the store beyond the per-account cap.
 
+## 2026-10-17 · M8.108 · The routing guidance forbids joining nearby vertices (architecture S69.1)
+
+**Change** `how_to_route` (the road-network result of `overpass_search`) now states rules:
+  - the graph's nodes are the exact vertices;
+  - never merge, snap or buffer nearby vertices, or add an edge the file lacks;
+  - snap the endpoints into the largest STRONGLY connected component;
+  - say so when there is no path.
+
+**Why** The first end-to-end Loop run (r58) merged vertices within 5 m and drove between Upper
+  and Lower Wacker Drive: 4.89 min against a legal 5.19.
+
+**Measured** On the same question it gave 5.19 min / 4.213 km, which matches the checker, in 8
+  tool calls (was 18) and 2 min 40 s (was 6 min).
+
+**Not fixed**
+  - The route's GeoJSON had bare NaN, so the browser could not parse it and the layer was
+    dropped silently.
+  - The rules are guidance; nothing enforces them.
+
 ## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
 
 - **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column
