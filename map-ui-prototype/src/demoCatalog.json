@@ -76,7 +76,7 @@
    },
    {
     "label": "Counts or rates?",
-    "prompt": "Which zone has the most incidents? Why is it not the zone with the highest rate, and how does the order of the zones change between counts and rates?"
+    "prompt": "Run code on the uploaded files that ranks the zones by incident count and by rate per 1,000, and show the two rankings side by side. Which zone has the most incidents, and why is it not the zone with the highest rate?"
    }
   ]
  },

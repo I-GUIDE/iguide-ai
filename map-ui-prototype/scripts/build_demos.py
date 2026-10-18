@@ -76,11 +76,17 @@ CASES = [
                 "prompt": "Compute each zone's incident rate per 1,000 residents. Which zone has "
                           "the highest rate, and what is it?"},
                # Step 1 already draws the rates (a choropleth comes with the answer), so step 2
-               # asks the question the case is built on instead of mapping it again.
+               # asks the question the case is built on instead of mapping it again. It asks for
+               # the two rankings to be computed: asked only "how does the order change", the
+               # router answered from step 1's table without running anything, and the answer
+               # writer re-sorted the zones by hand, getting the rank table wrong in 5 of 6 live
+               # runs on 2026-10-18 (ranks under 10 are exempt from the figures guard). Asked to
+               # run code, it ranked them in code and both tables were right (2 of 2).
                {"label": "Counts or rates?",
-                "prompt": "Which zone has the most incidents? Why is it not the zone with the "
-                          "highest rate, and how does the order of the zones change between "
-                          "counts and rates?"}]},
+                "prompt": "Run code on the uploaded files that ranks the zones by incident count "
+                          "and by rate per 1,000, and show the two rankings side by side. Which "
+                          "zone has the most incidents, and why is it not the zone with the "
+                          "highest rate?"}]},
     {"id": "facility-siting", "task": "T05",
      "title": "Where to put two facilities",
      "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new "
