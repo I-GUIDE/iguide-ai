@@ -19,6 +19,9 @@ export interface ChatMessage {
   layers?: { id: string; label: string; source: string }[];
   response?: any;
   streaming?: boolean;
+  /** Layers the agent sent this turn that did not draw, one sentence each (layerLoad.ts). On
+   *  the card because the answer may say they are on the map, and the trace is folded. */
+  mapWarnings?: string[];
   /** The sandbox run in progress, from its heartbeat; `at` is when that beat arrived. */
   progress?: CodeProgress & { at: number };
 }
@@ -443,10 +446,15 @@ function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: 
         </details>
       )}
       {m.streaming && m.progress && <CodeRunBar progress={m.progress} onStop={onStop} />}
-      {(hasBody || imgs.length > 0 || m.response) && (
+      {(hasBody || imgs.length > 0 || m.response || m.mapWarnings?.length) && (
         <div className="answer-card">
           {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
           {m.streaming && !m.html && <span className="cursor">▋</span>}
+          {m.mapWarnings?.length ? (
+            <div className="map-warn" role="status">
+              {m.mapWarnings.map((w, i) => <p key={i}>⚠ {w.replace(/^map: /, '')}</p>)}
+            </div>
+          ) : null}
           {imgs.length > 0 && (
             <div className="art-imgs">
               {imgs.map((f) => (

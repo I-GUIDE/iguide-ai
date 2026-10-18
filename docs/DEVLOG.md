@@ -5894,6 +5894,25 @@ rather than from the previous one.
     dropped silently.
   - The rules are guidance; nothing enforces them.
 
+## 2026-10-17 · M8.109 · A layer with NaN in its attributes still reaches the map (architecture stage 75)
+
+**Change** The download route serves every `.geojson` (≤ 64 MB) as strict JSON, writing
+  NaN/Infinity as null wherever they sit (`agent_runtime/strict_json.py`). SSE events are dumped
+  strict too. add_map_layer stores strict JSON and says how many values became null. In the map
+  UI a `map_layer` that fails to load adds a `warn` trace line and a note on the answer card,
+  instead of an empty `catch {}`.
+
+**Why** r59 (01:12 UTC): the Loop route was right (5.19 min) but its GeoJSON held bare NaN in a
+  `streets` list. GDAL kept the NaN through add_map_layer, `JSON.parse` threw in the browser, the
+  error was swallowed, and the answer said the route was on the map. Serve time was chosen
+  because every producer's layer passes through it, including a code peer's raw files and files
+  already stored.
+
+**Measured** 8 offline tests (strict parse, node `JSON.parse`); 3 fail with the helper patched
+  out. `npm run check:layers` 11 checks. Live (local, Lumen deepseek, Chrome): the Loop route drew
+  (5.4 min, 4.41 km; no S69.1 on this branch). An uploaded r59-shaped file with 6 NaN drew too,
+  stored with 0 NaN. The raw upload, fetched in the page, parsed with JSON.parse.
+
 ## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
 
 - **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column
