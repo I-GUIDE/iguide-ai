@@ -383,6 +383,9 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
                 # it, not cover it — and this dict is a fixed shape, so a flag the tool sets
                 # and the client honours still arrives as nothing unless it is named here.
                 "outline": bool(ml.get("outline")),
+                # How see-through the fill is (0..1) and whether the layer draws under the others:
+                # the model's call for a layer that frames other results (add_map_layer).
+                "beneath": bool(ml.get("beneath")),
                 # Whether the layer is a SUBSET is part of the layer, not a remark in the
                 # answer text: the client shows "shown/total" from these. Dropping them here
                 # silently turned every sampled layer into one that looked complete.
@@ -393,6 +396,12 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
             # no style column. The GeoJSON checks below have nothing to say about it, so it
             # returns here — leaving it to fall through would let a stricter QA downgrade it
             # to 'shapes' and the client would stop drawing it as a raster.
+            try:
+                fo = float(ml["fill_opacity"]) if ml.get("fill_opacity") is not None else None
+            except (TypeError, ValueError):
+                fo = None
+            if fo is not None and 0.0 <= fo <= 1.0:
+                out["fill_opacity"] = fo
             if render == "raster":
                 bounds = ml.get("bounds")
                 if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):

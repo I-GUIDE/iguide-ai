@@ -1,7 +1,7 @@
 // The thin renderer: LayerArtifact -> deck.gl layer. One switch, easy to test.
 import { BitmapLayer, GeoJsonLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
-import type { LayerArtifact } from './contracts';
+import type { LayerArtifact, RGBA } from './contracts';
 import type { Feature, Point } from 'geojson';
 import { routeEnds } from './routeGeometry';
 import { fillAndLine, resolveLegend } from './palette';
@@ -100,6 +100,22 @@ export function densityRadius(n: number): number {
   return n > 5000 ? 2 : n > 1500 ? 3 : n > 400 ? 4.5 : 6;
 }
 
+/** How opaque a vector layer's fill is drawn now (0..1): the agent's or the user's choice, or
+ *  the default the renderer would use. The layer panel's slider starts from it. */
+export function fillOpacityOf(a: LayerArtifact): number {
+  if (a.kind !== 'geojson') return a.opacity ?? 0.85;
+  if (typeof a.fillOpacity === 'number') return a.fillOpacity;
+  if (a.styleBy && a.render !== 'categories') return 200 / 255;   // the choropleth ramp's alpha
+  if (a.color) return Math.min(a.color[3], 190) / 255;            // fillAndLine's cap
+  return (a.style?.fill?.[3] ?? 120) / 255;
+}
+
+/** Whether a layer has a fill to make see-through: lines and density surfaces do not. */
+export function hasFill(a: LayerArtifact): boolean {
+  return a.kind === 'geojson' && !a.outline
+    && !['route', 'network', 'heatmap'].includes(a.render ?? '');
+}
+
 export function toDeckLayer(a: LayerArtifact) {
   // A raster is an image with a footprint, not geometry: deck.gl wants the bounds in
   // [left, bottom, right, top] order, which is the same order the agent sends.
@@ -152,6 +168,12 @@ export function toDeckLayer(a: LayerArtifact) {
 
   // Categorical first: a class-name column would ramp to NaN and come out one flat colour.
   const ramp = a.render === 'categories' ? categoricalFor(a) ?? rampFor(a) : rampFor(a);
+  // The agent's fill opacity, when it set one, replaces the fill's alpha (the outline keeps
+  // its own), so a framing layer shows the map and the results through it.
+  const alpha = typeof a.fillOpacity === 'number' ? Math.round(255 * a.fillOpacity) : null;
+  const withAlpha = (c: RGBA): RGBA => (alpha === null ? c : [c[0], c[1], c[2], alpha]);
+  const fillColor = alpha === null ? (ramp ?? fill)
+    : ramp ? (f: any) => withAlpha(ramp(f)) : withAlpha(fill);
   return new GeoJsonLayer({
     id: a.id,
     data: a.data,
@@ -164,7 +186,7 @@ export function toDeckLayer(a: LayerArtifact) {
     extruded: !!s.extruded,
     getElevation: s.elevation ?? 0,
     pointType: 'circle',
-    getFillColor: ramp ?? fill,
+    getFillColor: fillColor,
     // On a choropleth the FILL carries the number, so the outline must stay out of its way:
     // a 708-cell hex grid drawn with the standard 2px purple border read as an empty mesh —
     // the borders covered more pixels than the shaded interiors. Hairline grey instead.
@@ -176,7 +198,7 @@ export function toDeckLayer(a: LayerArtifact) {
     pointRadiusUnits: s.radiusUnits ?? 'pixels',
     opacity: s.opacity ?? 1,
     // expose source + props for the tooltip
-    updateTriggers: { getFillColor: [a.styleBy, a.data, a.render, a.legend, a.color],
+    updateTriggers: { getFillColor: [a.styleBy, a.data, a.render, a.legend, a.color, a.fillOpacity],
                       getLineColor: [a.color] },
   });
 }

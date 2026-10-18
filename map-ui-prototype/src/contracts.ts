@@ -72,6 +72,11 @@ export type LayerArtifact =
       // hides the raster: the embedded tract came back as a solid violet slab covering the
       // very pixel image it was framing.
       outline?: boolean;
+      // How see-through the fill is (0..1), and whether the layer draws beneath the others.
+      // The agent sets both for a layer that frames other results: a buffer drawn solid over
+      // the schools inside it hid them and the streets beneath (live, 2026-10-18).
+      fillOpacity?: number;
+      beneath?: boolean;
       partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
       // One colour for the whole layer, set by the agent only when the user asked for it ("the
