@@ -11411,6 +11411,33 @@ in the JSON body).
   - bad values;
   - the override file holds no user id.
 
+### Stage S74.2 One daily budget, in credits (2026-10-18)
+
+The user's rule: "The limit should be lumen coin + openai <= 3, so just call them credit to be
+consistent in case of the automatic model swap because of usage."
+
+- **Why one budget.** The default model moves from Lumen to OpenAI by itself when the Lumen pool
+  passes 90% (Stage 74's failover). With two budgets, 3 coins and separately $3, a user could not
+  know which one a turn would spend, and together they allowed 6 a day.
+- **The rule.** A credit is one Lumen coin or one dollar of OpenAI. The day's credits are coins
+  plus dollars, and the next turn is refused once they reach the limit (3).
+- **What the user sees.** "You have reached today's usage limit (3.05 of 3 credits). It resets at
+  midnight US Central time." It names no provider.
+- **What is kept apart.** The ledger still records coins and dollars, and the turn's
+  `usage.today` and the admin view report `credits`, `coins` and `usd`.
+- **Settings.** `AGENT_DAILY_CREDIT_LIMIT` (3; 0 disables it) replaces `AGENT_DAILY_COIN_LIMIT` and
+  `AGENT_DAILY_USD_LIMIT`. The VM set neither.
+- **Admins (S74.1).**
+  - `PUT` takes `creditLimit` with the same values as before.
+  - `coinLimit` and `usdLimit` are refused by name with a 400. Guessing which budget the caller
+    meant would set the wrong limit without a word.
+  - An override written before this change keeps working: its `coins` value is read as credits.
+- **Tests.**
+  - `test_lumen_failover_and_daily_limit.py`: a Lumen turn and an OpenAI turn add up, and the
+    message is pinned.
+  - `test_admin_usage_limits.py`: `creditLimit`, the retired keys, and an override from before
+    the change.
+
 **Not done.**
 - The map UI does not display the day's remaining budget yet.
 - The pool size is configured by hand and must follow the account if NCSA changes it.

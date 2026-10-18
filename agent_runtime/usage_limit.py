@@ -1,9 +1,13 @@
-"""Each signed-in user may spend at most 3 Lumen coins and, separately, $3 of OpenAI per day.
+"""Each signed-in user may spend at most 3 credits per day.
 
-The user's rule (2026-10-16). The two currencies are counted apart, because they are different
-money: hitting either limit refuses the user's next turn until the day resets at midnight US
-Central (``America/Chicago``). A turn already running finishes even if it crosses the limit,
-since its cost is known only when it ends; the refusal applies from the next turn.
+A credit is one Lumen coin or one dollar of OpenAI: the day's credits are the coins and the
+dollars added together (user, 2026-10-18). They used to be two limits, 3 coins and, separately,
+$3 (2026-10-16), but the default model moves between Lumen and OpenAI by itself when the Lumen
+pool runs low (lumen_failover), so a user could not know which budget a turn would spend, and
+two budgets gave them 6 a day. One budget in one unit is what the user sees. Reaching it refuses
+the user's next turn until the day resets at midnight US Central (``America/Chicago``). A turn
+already running finishes even if it crosses the limit, since its cost is known only when it ends;
+the refusal applies from the next turn.
 
 Only signed-in users are limited: a caller identified by nobody (the service key, dev and
 local modes, the harness) has no one to charge. What a turn cost comes from its ``usage``
@@ -13,8 +17,9 @@ The ledger is one small JSON file per day under the agent's file store, keyed by
 the user id, not the id itself, and written atomically under a lock. The deployment runs one
 gunicorn worker, so a process lock is the whole story. Files older than a month are pruned.
 
-Settings: ``AGENT_DAILY_COIN_LIMIT`` (3) and ``AGENT_DAILY_USD_LIMIT`` (3); a value of 0 or
-less disables that limit. ``AGENT_USAGE_TZ`` (America/Chicago) sets the day boundary.
+Settings: ``AGENT_DAILY_CREDIT_LIMIT`` (3); a value of 0 or less disables the limit.
+``AGENT_USAGE_TZ`` (America/Chicago) sets the day boundary. The ledger still records coins and
+dollars apart, for the admin view.
 """
 from __future__ import annotations
 
@@ -41,12 +46,8 @@ def _limit(name: str, default: float) -> Optional[float]:
     return value if value > 0 else None
 
 
-def coin_limit() -> Optional[float]:
-    return _limit("AGENT_DAILY_COIN_LIMIT", 3.0)
-
-
-def usd_limit() -> Optional[float]:
-    return _limit("AGENT_DAILY_USD_LIMIT", 3.0)
+def credit_limit() -> Optional[float]:
+    return _limit("AGENT_DAILY_CREDIT_LIMIT", 3.0)
 
 
 def _tz():
@@ -95,10 +96,15 @@ def _read(day: date) -> Dict[str, Dict[str, Any]]:
 
 
 def spent(owner: Optional[str], now: Optional[datetime] = None) -> Dict[str, float]:
-    """What this user has spent today: ``{"coins", "usd", "turns"}`` (zeros if nothing)."""
+    """What this user has spent today: ``{"credits", "coins", "usd", "turns"}`` (zeros if
+    nothing). ``credits`` is coins plus dollars."""
     row = _read(today(now)).get(_key(owner)) if owner else None
-    row = row or {}
-    return {"coins": float(row.get("coins") or 0.0), "usd": float(row.get("usd") or 0.0),
+    return _totals(row or {})
+
+
+def _totals(row: Mapping[str, Any]) -> Dict[str, Any]:
+    coins, usd = float(row.get("coins") or 0.0), float(row.get("usd") or 0.0)
+    return {"credits": round(coins + usd, 8), "coins": coins, "usd": usd,
             "turns": int(row.get("turns") or 0)}
 
 
@@ -123,7 +129,7 @@ def record(owner: Optional[str], usage: Optional[Mapping[str, Any]],
             tmp.write_text(json.dumps(data))
             tmp.replace(path)
             _prune(day)
-            return {"coins": row["coins"], "usd": row["usd"], "turns": row["turns"]}
+            return _totals(row)
     except Exception:  # noqa: BLE001 - accounting must never cost the turn
         logger.warning("could not record usage for a turn", exc_info=True)
         return None
@@ -144,10 +150,10 @@ def _prune(day: date) -> None:
 
 # --- per-user overrides, set by an admin ------------------------------------------------------
 #
-# An admin can give one user a different daily limit in either currency, or none, and can clear
-# that user's spending for the day. Overrides live beside the day files, keyed by the same
-# digest. A value is a number >= 0 (0 blocks that currency), or UNLIMITED; a currency with no
-# override follows the deployment default.
+# An admin can give one user a different daily credit limit, or none, and can clear that user's
+# spending for the day. Overrides live beside the day files, keyed by the same digest. A value is
+# a number >= 0 (0 blocks the user), or UNLIMITED; no override follows the deployment default.
+# A row written before credits (2026-10-18) holds "coins"/"usd"; its "coins" is read as credits.
 
 UNLIMITED = "unlimited"
 _UNLIMITED_STORED = -1.0
@@ -176,27 +182,26 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
 
 
 def override_for(owner: Optional[str]) -> Dict[str, Any]:
-    """The admin-set limits for this user, in the API's terms: ``{"coins": n | "unlimited"}``,
-    only the currencies that are overridden."""
+    """The admin-set limit for this user, in the API's terms: ``{"credits": n | "unlimited"}``,
+    or ``{}`` when the default applies."""
     if not owner:
         return {}
     row = _read_overrides().get(_key(owner)) or {}
     out: Dict[str, Any] = {}
-    for cur in ("coins", "usd"):
-        if cur in row:
-            out[cur] = UNLIMITED if float(row[cur]) == _UNLIMITED_STORED else float(row[cur])
-    if row.get("set_at"):
+    value = row.get("credits", row.get("coins"))
+    if value is not None:
+        out["credits"] = UNLIMITED if float(value) == _UNLIMITED_STORED else float(value)
+    if out and row.get("set_at"):
         out["set_at"] = row["set_at"]
     return out
 
 
 def limits_for(owner: Optional[str]) -> Dict[str, Optional[float]]:
-    """The limits that apply to this user now. None means no limit in that currency."""
-    limits: Dict[str, Optional[float]] = {"coins": coin_limit(), "usd": usd_limit()}
-    for cur, value in override_for(owner).items():
-        if cur in limits:
-            limits[cur] = None if value == UNLIMITED else float(value)
-    return limits
+    """The limit that applies to this user now: ``{"credits": n}``, None meaning no limit."""
+    value = override_for(owner).get("credits")
+    if value is None:
+        return {"credits": credit_limit()}
+    return {"credits": None if value == UNLIMITED else float(value)}
 
 
 def parse_limit(value: Any) -> Any:
@@ -214,25 +219,16 @@ def parse_limit(value: Any) -> Any:
     return number
 
 
-def set_override(owner: str, *, coins: Any = ..., usd: Any = ...,
-                 now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Set (or clear, with None) one user's limits. ``...`` leaves a currency as it is."""
+def set_override(owner: str, *, credits: Any, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Set one user's daily credit limit, or clear it (None) to return to the default."""
     stamp = (now or datetime.now(_tz())).isoformat()
     with _lock:
         data = _read_overrides()
-        row = dict(data.get(_key(owner)) or {})
-        for cur, value in (("coins", coins), ("usd", usd)):
-            if value is ...:
-                continue
-            if value is None:
-                row.pop(cur, None)
-            else:
-                row[cur] = _UNLIMITED_STORED if value == UNLIMITED else float(value)
-        if any(k in row for k in ("coins", "usd")):
-            row["set_at"] = stamp
-            data[_key(owner)] = row
-        else:
+        if credits is None:
             data.pop(_key(owner), None)
+        else:
+            data[_key(owner)] = {"credits": _UNLIMITED_STORED if credits == UNLIMITED
+                                 else float(credits), "set_at": stamp}
         _write_json(_overrides_path(), data)
     return override_for(owner)
 
@@ -257,8 +253,7 @@ def history(owner: Optional[str], days: int = 7,
         day = d - timedelta(days=i)
         row = _read(day).get(_key(owner))
         if row:
-            out.append({"day": day.isoformat(), "coins": float(row.get("coins") or 0.0),
-                        "usd": float(row.get("usd") or 0.0), "turns": int(row.get("turns") or 0)})
+            out.append({"day": day.isoformat(), **_totals(row)})
     return out
 
 
@@ -268,19 +263,13 @@ def refusal(owner: Optional[str], now: Optional[datetime] = None) -> Optional[Di
         return None
     used = spent(owner, now)
     limits = limits_for(owner)
-    over = []
-    # Said to the user, so in the user's terms: credits, not the provider or its coins (user,
-    # 2026-10-18: "(x of 3 credits)", no Lumen). The logs and the admin endpoint keep the names.
-    if limits["coins"] is not None and used["coins"] >= limits["coins"]:
-        over.append(f"{used['coins']:.2f} of {limits['coins']:g} credits")
-    if limits["usd"] is not None and used["usd"] >= limits["usd"]:
-        over.append(f"${used['usd']:.2f} of ${limits['usd']:g}")
-    if not over:
+    if limits["credits"] is None or used["credits"] < limits["credits"]:
         return None
     when = resets_at(now)
+    # In the user's terms: credits, not the provider that was spent (user, 2026-10-18).
     return {
-        "error": ("You have reached today's usage limit ("
-                  + " and ".join(over) + "). It resets at midnight US Central time."),
+        "error": (f"You have reached today's usage limit ({used['credits']:.2f} of "
+                  f"{limits['credits']:g} credits). It resets at midnight US Central time."),
         "reason": "daily_limit",
         "spent": used,
         "limits": limits,
@@ -288,6 +277,6 @@ def refusal(owner: Optional[str], now: Optional[datetime] = None) -> Optional[Di
     }
 
 
-__all__ = ["coin_limit", "usd_limit", "spent", "record", "refusal", "resets_at", "today",
+__all__ = ["credit_limit", "spent", "record", "refusal", "resets_at", "today",
            "UNLIMITED", "override_for", "limits_for", "parse_limit", "set_override",
            "reset_today", "history"]
