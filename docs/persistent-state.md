@@ -26,6 +26,7 @@ library. The VM then ran `prototype` at `23cfd02`, which includes the extraction
 | Conversations | OpenSearch index `chat_memory` | agent memory + the client's view | `owner_id` on the document | only its owner's delete (S9.13), which leaves a tombstone (S9.14) |
 | Turn traces | OpenSearch index `chat_traces` | raw events, one document per turn | `owner_id`, via the conversation | deleted with their conversation (S9.13) |
 | Files | Docker volume at `/app/agent_chat_files` | uploads, outputs, QGIS jobs | `owner_id` in the record | `AGENT_FILE_RETENTION_DAYS` (**disabled**) |
+| User examples | the same volume, `/app/agent_chat_files/examples/` | examples users wrote for the Spatial Analysis tab: definitions, their data files, each user's "Shared with me" list | `owner_id` on the definition; share token; `published` (Stage 73) | only the owner's delete; capped at `AGENT_EXAMPLES_MAX_PER_USER` |
 | Code workspaces | `/tmp/iguide_codeexec`, bind-mounted | one working dir per conversation | keyed by conversation and caller (S9.15) | 72-hour TTL |
 | Browser cache | IndexedDB `iguide-map-ui` | the client's own copy | `ownerId` on the record | never (per browser) |
 | Operational records | host journal; `/var/log/iguide-agent/incidents/` | container logs; one evidence bundle per watchdog incident | host access only | journal capped at 3 GB; newest 60 bundles |
@@ -470,6 +471,22 @@ instead of stacking a byte-identical copy.
 
 `AGENT_FILE_RETENTION_DAYS` drives the sweep. **It is `0` on the deployment, which disables it
 entirely** — nothing here is ever deleted. ~7.3 GB, of which `outputs/` is 6.6 GB.
+
+### User examples (since 2026-10-16, Stage 73)
+
+`examples/` on the same volume holds the examples users author for the map UI's Spatial Analysis
+tab (`agent_runtime/user_examples.py`). These are not file-store records:
+
+```
+examples/defs/<ex_id>.json       definition: owner_id, title, steps, files, share_token, published
+examples/files/<ex_id>/<name>    its data files
+examples/shared/<digest>.json    one user's "Shared with me" list (sha256 of the user id)
+```
+
+The retention sweep does not touch it: it walks `uploads/` and `outputs/` only. Running an
+example uploads copies of its files into the runner's own conversation, as ordinary `uploads/`
+records owned by the runner. Deleting an example removes its definition and files. Copies already
+uploaded into conversations stay, like any upload.
 
 ---
 
