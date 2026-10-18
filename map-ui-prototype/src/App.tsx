@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadDemoFiles, type DemoCase } from './demos';
-import { DemoPanel } from './components/DemoPanel';
+import { DemoPanel, type ExampleIdentity } from './components/DemoPanel';
+import { type UserExample, isUserExample, loadUserExampleFiles, shareTokenFrom,
+  withoutShareToken } from './userExamples';
 import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
@@ -121,7 +123,10 @@ export default function App() {
   const resizingRef = useRef(false);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
-  const [tab, setTab] = useState<AppTab>('chat');
+  // A share link (`?example=<token>`) opens the Spatial Analysis tab on the example it names.
+  // The token stays in state until the panel has opened it, then leaves the address bar too.
+  const [shareToken, setShareToken] = useState<string | null>(() => shareTokenFrom());
+  const [tab, setTab] = useState<AppTab>(() => (shareTokenFrom() ? 'demos' : 'chat'));
   // A demo step on its way to the composer (see ChatPanel's `seed`).
   const [demoSeed, setDemoSeed] = useState<{ text: string; n: number; send: boolean } | null>(null);
   // The Demos sidebar can fold to a rail. On a narrow window it is a drawer over the chat, so it
@@ -218,14 +223,18 @@ export default function App() {
   // the role, the permitted flag and the reason are what the account badge needs to say where
   // someone stands BEFORE they spend a question finding out.
   const [me, setMe] = useState<WhoAmI | null>(null);
+  // What the examples panel needs to know about identity: whether it may offer to write and
+  // share examples. 'unknown' until /agent/ui-config (and in token mode /agent/whoami) answers.
+  const [exampleIdentity, setExampleIdentity] = useState<ExampleIdentity>('unknown');
   const [viewer, setViewer] = useState<string | null>(null);
   const viewerRef = useRef<string | null>(null);
   useEffect(() => { viewerRef.current = viewer; }, [viewer]);
   useEffect(() => {
-    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); return; }
+    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); setExampleIdentity('unknown'); return; }
     let live = true;
     void fetchUiConfig(asAgentConfig()).then((c) => {
       if (!live) return;
+      setExampleIdentity(c?.mode === 'token' ? 'unknown' : 'none');
       const demo = !!c?.demo_mode;
       setDemoMode(demo);
       setTokenMode(c?.mode === 'token');
@@ -234,6 +243,7 @@ export default function App() {
           if (!live) return;
           setMe(who);
           setViewer(who?.user?.id ?? null);
+          setExampleIdentity(who?.signedIn && who.permitted ? 'signed-in' : 'signed-out');
         });
       } else {
         // Dev and demo identify nobody, so there is no badge and no owner to scope by.
@@ -1049,15 +1059,20 @@ export default function App() {
   // The Demos tab: a case runs in a NEW conversation, so an earlier question's files and layers
   // cannot leak into it, with its data attached through the same upload path as a file the
   // visitor picked by hand. The map opens because every case ends on it.
-  const startDemo = useCallback(async (c: DemoCase) => {
+  //
+  // A user's example runs the same way: its files come from the agent (with this page's
+  // credentials) instead of the static catalogue, and are uploaded into the new conversation
+  // like any other file, so they land in the runner's own file store.
+  const startDemo = useCallback(async (c: DemoCase | UserExample) => {
+    // Fetched BEFORE the reset, so a file that cannot be read leaves the current conversation
+    // as it was instead of an empty one that says the example started.
+    const files = !c.files.length ? []
+      : isUserExample(c) ? await loadUserExampleFiles(c, asAgentConfig()) : await loadDemoFiles(c);
     resetConversation();
     setMapVisible(true);
-    pushMsg({ role: 'agent', text: `${c.title}. ${c.blurb}` });
-    if (c.files.length) {
-      const files = await loadDemoFiles(c);
-      await onUpload(files);
-    }
-  }, [resetConversation, pushMsg, onUpload]);
+    pushMsg({ role: 'agent', text: c.blurb ? `${c.title}. ${c.blurb}` : `${c.title}.` });
+    if (files.length) await onUpload(files);
+  }, [resetConversation, pushMsg, onUpload, asAgentConfig]);
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}${REPLAY_KEY ? ' replay-capture' : ''}`}>
@@ -1142,7 +1157,12 @@ export default function App() {
             {/* Hidden, not unmounted, when folded: the open case and the steps already asked
                 are the panel's own state, and folding must not throw them away. */}
             <div hidden={!demoOpen}>
-              <DemoPanel busy={busy} live={mode === 'live'}
+              <DemoPanel busy={busy} live={mode === 'live'} cfg={asAgentConfig()} identity={exampleIdentity}
+                shareToken={shareToken}
+                onShareHandled={() => {
+                  setShareToken(null);
+                  try { history.replaceState(history.state, '', withoutShareToken()); } catch { /* */ }
+                }}
                 onStart={async (c) => { await startDemo(c); foldIfNarrow(); }}
                 onRun={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: true })); foldIfNarrow(); }}
                 onStage={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: false })); foldIfNarrow(); }}

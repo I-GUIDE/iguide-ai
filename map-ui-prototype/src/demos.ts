@@ -41,7 +41,8 @@ export const DEMO_CATEGORIES = [
 /** The cases grouped by category, in DEMO_CATEGORIES order, each group in catalogue order. A
  *  category with no case is left out; a case whose category is not listed goes last, under its
  *  own name, rather than disappearing. */
-export function demosByCategory(cases: DemoCase[] = DEMOS): { category: string; cases: DemoCase[] }[] {
+export function demosByCategory<T extends { category: string } = DemoCase>(
+    cases: T[] = DEMOS as unknown as T[]): { category: string; cases: T[] }[] {
   const known: string[] = [...DEMO_CATEGORIES];
   const extra = [...new Set(cases.map((c) => c.category).filter((c) => !known.includes(c)))];
   return [...known, ...extra]
@@ -55,7 +56,7 @@ export function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function demoBytes(c: DemoCase): number {
+export function demoBytes(c: { files: { bytes: number }[] }): number {
   return c.files.reduce((s, f) => s + f.bytes, 0);
 }
 
@@ -73,7 +74,7 @@ export async function loadDemoFiles(c: DemoCase, base: string = import.meta.env.
 }
 
 /** The step to highlight: the first one not yet asked. */
-export function nextStep(c: DemoCase, done: ReadonlySet<number>): number | null {
+export function nextStep(c: { steps: unknown[] }, done: ReadonlySet<number>): number | null {
   const i = c.steps.findIndex((_, k) => !done.has(k));
   return i < 0 ? null : i;
 }
