@@ -52,6 +52,79 @@ def test_local_executor_timeout():
     assert r.timed_out is True and not r.ok
 
 
+def test_timeout_after_printing_returns_text_not_a_crash():
+    """A run that printed and THEN timed out raised TypeError out of execute().
+
+    ``TimeoutExpired`` carries the partial output as bytes even with ``text=True``, and the
+    first ``"..." in stderr`` after the run raised "a bytes-like object is required, not
+    'str'", failing the code peer outright (GIS harness T16, 2026-10-16, twice). A run that
+    printed nothing passed, because the empty output became "" — which is why
+    test_local_executor_timeout never caught it.
+    """
+    code = ("import sys, time\n"
+            "print('zone crs EPSG:4326', flush=True)\n"
+            "print('a warning', file=sys.stderr, flush=True)\n"
+            "time.sleep(10)\n")
+    r = LocalSubprocessExecutor().execute(code, timeout=2)
+    assert r.timed_out is True and not r.ok
+    assert isinstance(r.stdout, str) and "zone crs EPSG:4326" in r.stdout
+    assert isinstance(r.stderr, str) and "a warning" in r.stderr
+    assert "b'" not in r.stdout                       # decoded, not repr'd
+
+
+def test_docker_timeout_output_is_decoded(monkeypatch, tmp_path):
+    """A docker run that printed and then timed out: text out, and the CONTAINER killed.
+
+    The exec phase is supervised now (code_execution._supervise: Popen + a polling loop, so a
+    Stop, the heartbeat and the review can act during the run), so the fake is a process that
+    writes and then never exits until `docker kill` names its container."""
+    import subprocess
+
+    import agent_runtime.code_execution as ce
+
+    calls = []
+    state = {"killed": False}
+
+    class FakeProc:
+        def __init__(self, argv, stdout=None, stderr=None, **kwargs):
+            stdout.write("Waikīkī\n".encode())
+            stderr.write(b"UserWarning: geographic CRS\n")
+            stdout.flush()
+            stderr.flush()
+
+        def wait(self, timeout=None):
+            if state["killed"]:
+                return 137
+            raise subprocess.TimeoutExpired("docker", timeout)
+
+        def kill(self):
+            state["killed"] = True
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["docker", "kill"] and "--signal" not in argv:
+            state["killed"] = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(ce.fork_safe, "run", fake_run)
+    monkeypatch.setattr(ce.fork_safe, "popen", FakeProc)
+    exit_code, stdout, stderr, timed_out, error = DockerCodeExecutor(image="img:test")._run(
+        tmp_path, 1)
+    assert (exit_code, timed_out, error) == (None, True, "execution timed out")
+    assert stdout == "Waikīkī\n" and stderr == "UserWarning: geographic CRS\n"
+    assert any(c[:2] == ["docker", "kill"] and "--signal" not in c for c in calls)
+
+
+def test_timed_out_output_handles_every_shape():
+    import subprocess
+
+    from agent_runtime.code_execution import _timed_out_output
+
+    assert _timed_out_output(subprocess.TimeoutExpired("x", 1)) == ("", "")
+    assert _timed_out_output(subprocess.TimeoutExpired("x", 1, output="a", stderr="b")) == ("a", "b")
+    assert _timed_out_output(subprocess.TimeoutExpired("x", 1, output=b"\xff")) == ("\ufffd", "")
+
+
 def test_local_executor_persists_artifacts(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
     r = LocalSubprocessExecutor().execute("open('result.txt', 'w').write('data')")

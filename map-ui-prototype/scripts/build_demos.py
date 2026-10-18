@@ -36,6 +36,11 @@ RELIABILITY = {
     "T05": "25 of 25 harness runs", "T07": "25 of 25 harness runs",
     "T08": "29 of 29 harness runs", "T11": "25 of 25 harness runs",
     "T12": "25 of 26 harness runs", "T13": "3 of 3 harness runs",
+    # 2026-10-16/17, deepseek-v4-flash, validation OFF as deployed (the figures above were
+    # measured with it on). T14: runs on its final wording only (39d9bf0a); three earlier runs
+    # missed only through wording the prompt has since pinned. T15: every validation-off run (its
+    # wording never changed); with validation on it was 2 of 3, one turn re-checked past the cap.
+    "T14": "3 of 3 harness runs", "T15": "6 of 6 harness runs",
 }
 
 CASES = [
@@ -60,6 +65,37 @@ CASES = [
           "prompt": "Group the 77 community areas into 6 contiguous regions with similar violent "
                     "crime rates using SKATER. Map the regions and give each one's community "
                     "areas, population and mean rate."},
+     ]},
+    # T14. The data is a pinned snapshot (datasets.CRASH_FILES), copied by datasets.build. The
+    # steps carry the three wordings T14's runs pinned: a street is its name (W and E Madison St
+    # are one), the night is crash_hour 22-3, the yearly averages count every crash in the file.
+    # Live 2026-10-15 every figure was right; step 2 once re-used the hot/cold layer instead of
+    # mapping the z-scores, hence "a map of the z-scores themselves".
+    {"id": "crash-hotspots", "task": "T14",
+     "title": "Where serious crashes cluster in Chicago",
+     "blurb": "Chicago's Vision Zero plan targets the crashes that kill or seriously injure people. "
+              "This case takes five years of them, 2020 to 2024, and finds where they cluster, which "
+              "streets run through the clusters, and when they happen.",
+     "tags": ["hot spots", "Gi*", "Vision Zero", "temporal"],
+     "category": "Hypothesis testing",
+     "steps": [
+         {"label": "Count the crashes",
+          "prompt": "Count Chicago's serious crashes from 2020 to 2024 in each 500 m hexagon and "
+                    "map the counts. How many crashes fall in the grid, and which hexagon has the "
+                    "most?"},
+         {"label": "Are they clustered?",
+          "prompt": "Run Getis-Ord Gi* on those counts with binary queen contiguity, each hexagon "
+                    "in its own neighbourhood, and analytical z-scores. How many hexagons are hot "
+                    "spots (z > 1.96), and which hexagon has the highest z? Map the z-scores "
+                    "themselves, so the hot spots stand out."},
+         {"label": "Which streets?",
+          "prompt": "Using the street recorded with each crash (its street name; W and E Madison "
+                    "St are one street), which three streets have the most serious crashes inside "
+                    "the hot-spot hexagons, and how many each?"},
+         {"label": "When?",
+          "prompt": "What share of all the serious crashes happened at night, from 10 p.m. to 4 "
+                    "a.m. (crash_hour 22, 23, 0, 1, 2 or 3)? And over all the serious crashes, how "
+                    "many were there per year on average in 2020–2022 and in 2023–2024?"},
      ]},
     {"id": "schools-buffer", "task": "T02",
      "title": "Schools within a mile of a site",
@@ -87,31 +123,6 @@ CASES = [
                 "prompt": "Which zone has the most incidents? Why is it not the zone with the "
                           "highest rate, and how does the order of the zones change between "
                           "counts and rates?"}]},
-    # No upload and no harness task: the agent fetches the Loop's streets from OpenStreetMap
-    # (overpass_search feature='road network', PR #139; before it, 'highway' meant motorways only
-    # and the network came back as 34 pieces). Replaces T04's synthetic 6x6 UTM grid, whose
-    # correct route followed no real street. Live 2026-10-16 (deepseek-v4-flash): 1.71 min,
-    # 1,378 m (Jackson Blvd east, Michigan Ave north); reference from the same 1,521 ways 1.713
-    # min / 1,378.4 m; step 2: 262 intersections, reference 261. Overpass is a shared public
-    # service and can be down for hours; the demo fails with it.
-    {"id": "fastest-route", "task": None,
-     "title": "Fastest drive across the Loop",
-     "blurb": "Union Station to the Art Institute by car, on the Loop's real streets. With nothing "
-              "to upload, the agent fetches the street network from OpenStreetMap, follows one-way "
-              "streets and speed limits, and finds the fastest way across downtown Chicago.",
-     "tags": ["network analysis", "routing", "OpenStreetMap", "no upload"],
-     "category": "Optimisation",
-     "steps": [{"label": "Fastest drive",
-                "prompt": "What is the fastest driving time in minutes from Canal St & Jackson Blvd"
-                          " (41.8780 N, 87.6393 W) to Michigan Ave & Adams St (41.8794 N, 87.6243 "
-                          "W) in Chicago's Loop? Use OpenStreetMap's drivable streets inside "
-                          "41.866–41.889 N, 87.645–87.618 W, follow one-way streets, and drive at "
-                          "each street's posted maxspeed, or 30 mph where none is posted. Map the "
-                          "route."},
-               {"label": "Two minutes out",
-                "prompt": "Following the same rules, how many street intersections (points where "
-                          "three or more road segments meet) can be reached within 2 minutes of the"
-                          " start? Map them."}]},
     {"id": "facility-siting", "task": "T05",
      "title": "Where to put two facilities",
      "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new "
@@ -126,41 +137,6 @@ CASES = [
                {"label": "Map the service areas",
                 "prompt": "Map the demand points coloured by the chosen site that serves each "
                           "one, and mark the two chosen sites."}]},
-    # No upload and no harness task: admin_boundary(city) -> dem_for_region(clip to the city) ->
-    # inundation_at_level. Replaces T07's synthetic tile. The city boundary is ~80% open water,
-    # which a bathtub calls flooded (asked about "the city", 98.7%); the question asks about
-    # land on purpose and leaves the water to the agent (user, 2026-10-15). Reference from the
-    # 3DEP frame the agent fetched (water <= 0 m): 110.7 km2 of 117.7 km2 land, 94.1%; 3 m 84.4%,
-    # 2 m 60.4%. Live, the land question can run long (one run chased OSM water and coastline
-    # for 14 minutes before it was stopped).
-    {"id": "flood", "task": None,
-     "title": "Galveston under a 5 m flood",
-     "blurb": "Galveston, Texas sits on a low barrier island on the Gulf of Mexico and has been "
-              "flooded by hurricane storm surges many times. With nothing to upload, the agent "
-              "fetches the city's boundary and USGS elevation itself, and asks how much of the city"
-              " lies at or below 5 m.",
-     "tags": ["elevation", "inundation", "no upload"],
-     "category": "Transformation",
-     "steps": [{"label": "Land at or below 5 m",
-                "prompt": "How much land in the city of Galveston, Texas lies at or below 5 m above"
-                          " sea level? Use USGS elevation for the city boundary, count land only "
-                          "(open water is not land), and treat it as a simple bathtub: every land "
-                          "cell at or below 5 m counts. Give the area in km² and as a share of the "
-                          "city's land."},
-               {"label": "Lower water",
-                "prompt": "How do the land area and the share change if the water reaches only 2 m,"
-                          " or 3 m?"}]},
-    {"id": "ndvi-change", "task": "T08",
-     "title": "Vegetation change from two scenes",
-     "blurb": "Two satellite scenes of the same area, from 2020 and 2024. The case measures how green "
-              "the area was on each date and how much of it lost vegetation in between.",
-     "tags": ["raster", "remote sensing", "change detection"],
-     "category": "Transformation",
-     "steps": [{"label": "NDVI and loss",
-                "prompt": "Compute NDVI for 2020 and 2024. What is the mean NDVI on each date, and "
-                          "how many hectares lost more than 0.2 NDVI between them?"},
-               {"label": "Map the loss",
-                "prompt": "Map where NDVI fell by more than 0.2 between the two dates."}]},
     {"id": "suitability", "task": "T11",
      "title": "Site suitability from three layers",
      "blurb": "Three aligned layers for one area: slope, distance to the nearest road, and land cover. "
@@ -197,6 +173,105 @@ CASES = [
      "tags": ["live data", "projections", "geodesic distance"],
      "category": "Measurement",
      "steps": [{"label": "Area and distance", "prompt": None}]},
+]
+
+# Taken off the panel 2026-10-18 after three live passes of every case in Chrome on prod
+# (e561e071, deepseek-v4-flash; GIS Assessment Log rounds r60-r96). Kept here, unbuilt, so a case
+# can come back once its failure is fixed:
+#   fastest-route: pass 2 said the route was on the map and drew nothing; the 2-minute
+#     intersection count came out 264, 262, 242; it fails whenever Overpass is down.
+#   cooling-centres: every figure exact, but step 1 took 5-8 minutes, one solver run took
+#     118 s of the 180 s code limit (the solver it picks varies), and step 2 once left 1,332
+#     Cook County tracts over the map.
+#   flood: 13-20 minutes for step 1, an 'Incomplete' banner and no 5 m layer in pass 2, and
+#     the land total changed every run (112.3, 126.8, 103.3 km2; the share held at 93-94%).
+#   ndvi-change: 'Map the loss' drew no layer in 2 of 3 passes (it pointed at the PNG).
+RETIRED_CASES = [
+    # No upload and no harness task: the agent fetches the Loop's streets from OpenStreetMap
+    # (overpass_search feature='road network', PR #139; before it, 'highway' meant motorways only
+    # and the network came back as 34 pieces). Replaces T04's synthetic 6x6 UTM grid, whose
+    # correct route followed no real street. Live 2026-10-16 (deepseek-v4-flash): 1.71 min,
+    # 1,378 m (Jackson Blvd east, Michigan Ave north); reference from the same 1,521 ways 1.713
+    # min / 1,378.4 m; step 2: 262 intersections, reference 261. Overpass is a shared public
+    # service and can be down for hours; the demo fails with it.
+    {"id": "fastest-route", "task": None,
+     "title": "Fastest drive across the Loop",
+     "blurb": "Union Station to the Art Institute by car, on the Loop's real streets. With nothing "
+              "to upload, the agent fetches the street network from OpenStreetMap, follows one-way "
+              "streets and speed limits, and finds the fastest way across downtown Chicago.",
+     "tags": ["network analysis", "routing", "OpenStreetMap", "no upload"],
+     "category": "Optimisation",
+     "steps": [{"label": "Fastest drive",
+                "prompt": "What is the fastest driving time in minutes from Canal St & Jackson Blvd"
+                          " (41.8780 N, 87.6393 W) to Michigan Ave & Adams St (41.8794 N, 87.6243 "
+                          "W) in Chicago's Loop? Use OpenStreetMap's drivable streets inside "
+                          "41.866–41.889 N, 87.645–87.618 W, follow one-way streets, and drive at "
+                          "each street's posted maxspeed, or 30 mph where none is posted. Map the "
+                          "route."},
+               {"label": "Two minutes out",
+                "prompt": "Following the same rules, how many street intersections (points where "
+                          "three or more road segments meet) can be reached within 2 minutes of the"
+                          " start? Map them."}]},
+    # T15. Pinned snapshot (datasets.COOLING_FILES). Live 2026-10-15, step 3 ("How many residents
+    # does each serve?") was answered from memory with no tool call, and wrongly; it now asks for
+    # the count from the assignment, which is one groupby on the agent's own file.
+    {"id": "cooling-centres", "task": "T15",
+     "title": "Libraries as heat-emergency cooling centres",
+     "blurb": "In a heat emergency Chicago opens its public libraries as cooling centres. If only 6 "
+              "of the 82 branches can stay open late, this case finds the 6 that keep residents "
+              "closest, using 2020 census population.",
+     "tags": ["location-allocation", "p-median", "census"],
+     "category": "Optimisation",
+     "steps": [
+         {"label": "Pick 6 branches",
+          "prompt": "In a heat emergency Chicago can keep only 6 library branches open late as "
+                    "cooling centres. Which 6 minimise the total population-weighted straight-line "
+                    "distance from each block group to its nearest open branch? Measure distance in "
+                    "metres in UTM zone 16N (EPSG:26916) and solve it exactly (it is a 6-median "
+                    "problem). Report the 6 branches, the average distance per resident in km, and "
+                    "the share of residents more than 2 km from their nearest open branch."},
+         {"label": "Map the service areas",
+          "prompt": "Map the block groups coloured by the branch that serves them, and mark the 6 "
+                    "branches."},
+         {"label": "Who is served?",
+          "prompt": "Count how many residents each of the 6 branches serves, by summing the "
+                    "population of the block groups assigned to it."},
+     ]},
+    # No upload and no harness task: admin_boundary(city) -> dem_for_region(clip to the city) ->
+    # inundation_at_level. Replaces T07's synthetic tile. The city boundary is ~80% open water,
+    # which a bathtub calls flooded (asked about "the city", 98.7%); the question asks about
+    # land on purpose and leaves the water to the agent (user, 2026-10-15). Reference from the
+    # 3DEP frame the agent fetched (water <= 0 m): 110.7 km2 of 117.7 km2 land, 94.1%; 3 m 84.4%,
+    # 2 m 60.4%. Live, the land question can run long (one run chased OSM water and coastline
+    # for 14 minutes before it was stopped).
+    {"id": "flood", "task": None,
+     "title": "Galveston under a 5 m flood",
+     "blurb": "Galveston, Texas sits on a low barrier island on the Gulf of Mexico and has been "
+              "flooded by hurricane storm surges many times. With nothing to upload, the agent "
+              "fetches the city's boundary and USGS elevation itself, and asks how much of the city"
+              " lies at or below 5 m.",
+     "tags": ["elevation", "inundation", "no upload"],
+     "category": "Transformation",
+     "steps": [{"label": "Land at or below 5 m",
+                "prompt": "How much land in the city of Galveston, Texas lies at or below 5 m above"
+                          " sea level? Use USGS elevation for the city boundary, count land only "
+                          "(open water is not land), and treat it as a simple bathtub: every land "
+                          "cell at or below 5 m counts. Give the area in km² and as a share of the "
+                          "city's land."},
+               {"label": "Lower water",
+                "prompt": "How do the land area and the share change if the water reaches only 2 m,"
+                          " or 3 m?"}]},
+    {"id": "ndvi-change", "task": "T08",
+     "title": "Vegetation change from two scenes",
+     "blurb": "Two satellite scenes of the same area, from 2020 and 2024. The case measures how green "
+              "the area was on each date and how much of it lost vegetation in between.",
+     "tags": ["raster", "remote sensing", "change detection"],
+     "category": "Transformation",
+     "steps": [{"label": "NDVI and loss",
+                "prompt": "Compute NDVI for 2020 and 2024. What is the mean NDVI on each date, and "
+                          "how many hectares lost more than 0.2 NDVI between them?"},
+               {"label": "Map the loss",
+                "prompt": "Map where NDVI fell by more than 0.2 between the two dates."}]},
 ]
 
 CHICAGO_VIOLENT = ("HOMICIDE", "ASSAULT", "BATTERY", "ROBBERY", "CRIMINAL SEXUAL ASSAULT")

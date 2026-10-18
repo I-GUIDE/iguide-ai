@@ -5874,3 +5874,78 @@ rather than from the previous one.
   - The route's GeoJSON had bare NaN, so the browser could not parse it and the layer was
     dropped silently.
   - The rules are guidance; nothing enforces them.
+
+## 2026-10-17 · M8.110 · Map layers say what they are (architecture stage 76)
+
+- **Cooling-centre map:** `add_map_layer(render="auto", column=...)` now colours by the column
+  (class names → categories, numbers → choropleth); before, 2,158 points became a heatmap. The
+  tool description now lists `categories`.
+- **Invented place names:** new `reverse_geocode` tool (Nominatim `/reverse`), plus a rule in both
+  peers and the synthesizer that a place named for a coordinate must come from a tool or the data.
+  Live, the Loop hexagon is now "in the Loop", not "around Wrigleyville".
+- **Routes:** `route` and `network` renders. The route is a cased blue line with green start and
+  red end markers on top; the network is muted slate lines beneath. The OSM road network arrives
+  as `network`.
+- **Colours:** the client owns the category palette (`palette.ts`). The agent sends a colour only
+  when the user asked (`add_map_layer` `color` / `class_colors`, names or hex) or when it means
+  something (Gi*, LISA). The tool result says which colours were set, so the answer names only
+  real ones.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py`;
+  `npm run check:route`; `npm run check:palette`.
+
+## 2026-10-17 · M8.111 · Recolouring restyles the layer it names (architecture S76.1)
+
+- **The fault:** asked to recolour two branches, the agent copied the layer's file, added a
+  `color` column and drew the copy, so the map showed the layer twice.
+- **The fix:** `add_map_layer` now treats a file that is a recorded parent plus only colour or
+  style columns as that parent, so the redraw replaces the parent's layer. A copy that adds a
+  result column keeps its own layer.
+- **The second path:** each styled copy `add_map_layer` writes now records which layer it stands
+  for, so redrawing that copy (the second live try) restyles the same layer.
+- **What the model is told:** the tool says to recolour by redrawing the same file_id with
+  `color` / `class_colors`.
+- **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
+
+## 2026-10-17 · M8.113 · A code run can be watched, stopped and reviewed while it runs (architecture stage 78)
+
+- **The fault:** T16 on production lost three of six runs to a 60 s limit on correct but slow
+  code. The model saw only "execution timed out", and Stop left the container running.
+- **Limit:** 180 s by default, capped at 600.
+- **Supervision:** runs are supervised (heartbeat, Stop, review) instead of one blocking call.
+- **Timeouts:** a timed-out run names the line it was on, from a faulthandler stack taken before
+  the kill.
+- **Rules before the run:** slow constructs, and a stated value the code never uses.
+- **Model review during the run:** starts after 5 s, with a live stack sample and vertex
+  counts. It stops the run only on a critical verdict the code backs (the quote is on the line;
+  a performance claim is where the stack is, and waits for 30 s and a re-check; a parameter
+  claim quotes the task).
+- **Stop:** `POST /agent/chat/cancel` with the stream's `turn` id kills the container and stops
+  the agent at its next step.
+- **Map UI:** a run bar with the elapsed time and the review state, and a Stop offer after 90 s.
+- **Vertex counts:** `inspect_vector` reports them.
+- **Tests:** `rag_pipeline/tests/test_code_watch.py`, plus `test_code_execution.py` (Docker
+  timeout through the new loop).
+
+## 2026-10-17 · M8.114 · The trace says what each step does (architecture S78.1)
+
+- **The fault:** production T16's trace showed rule hints on 2-second runs, raw `execute_code({'code': …})` calls and "Code ready".
+- **Hints:** performance hints appear only for slow runs (5 s in the trace, 10 s in the result). Stated-parameter checks are shown on every run.
+- **Purpose:** the model's own sentence beside its tool calls (it was being dropped) is the step's purpose (`tool_plan`). Both peers are asked for it, and `execute_code` takes `purpose`.
+- **Actions:** each of 88 tools reads as words, with file names. The raw calls are behind "Show raw calls".
+- **Arguments:** tool-call events now carry their arguments as a dict.
+- **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
+- **Tests:** `test_code_watch.py`; `npm run check:coderun`.
+
+## 2026-10-18 · M8.116 · One daily budget, in credits (architecture S74.2)
+
+- **The rule (user):** Lumen coins plus OpenAI dollars, at most 3 a day, called credits. The model swaps provider by itself when the Lumen pool runs low, so two separate budgets (3 coins, $3) were neither predictable nor the intended total.
+- **Message:** "You have reached today's usage limit (3.05 of 3 credits). It resets at midnight US Central time." It names no provider.
+- **Setting:** `AGENT_DAILY_CREDIT_LIMIT` (3) replaces the two per-currency settings. Admins send `creditLimit`; `coinLimit` and `usdLimit` are refused by name.
+- **Tests:** `test_lumen_failover_and_daily_limit.py`, `test_admin_usage_limits.py`.
+
+## 2026-10-18 · M8.117 · A layer that frames others stays out of their way (architecture S76.2)
+
+- **The fault:** live, the schools example drew its 1-mile buffer in an unasked blue at the colour cap, over the schools inside it; the view was one blue disc.
+- **The model decides:** `add_map_layer` takes `outline`, `fill_opacity` (0 to 1) and `beneath`. The description asks for a frame (buffer, service area, boundary) to be an outline or a light fill drawn beneath. `outline` on a fill-carrying render is refused.
+- **The viewer decides too:** clicking a vector layer's name opens a fill-opacity slider, and the map applies the fill alpha the model or the viewer chose.
+- **Tests:** `test_layer_framing.py`, `palette.check.ts`. Live locally, the buffer came out at 0.15, beneath, with no colour.

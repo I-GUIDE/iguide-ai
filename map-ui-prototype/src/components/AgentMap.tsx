@@ -39,6 +39,13 @@ function getTooltip({ object }: any) {
   return { text: `${name}${extra}${score}` };
 }
 
+function drawRank(a: LayerArtifact): number {
+  if (a.kind !== 'geojson') return 1;
+  // A layer the agent put beneath (a buffer framing the schools inside it) sits over the
+  // road network but under every other result.
+  return a.render === 'network' ? 0 : a.render === 'route' ? 2 : a.beneath ? 0.5 : 1;
+}
+
 function DeckOverlay({ layers, onFeatureClick }: { layers: any[]; onFeatureClick: (feature: any, layerId: string) => void }) {
   const onClick = (info: any) => { if (info && info.object) onFeatureClick(info.object, info.layer?.id ?? ''); };
   const overlay = useControl(() => new MapLibreOverlay({ interleaved: true, layers, getTooltip, onClick }));
@@ -178,8 +185,13 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
   // the map mounts with layers already in props. deck layers are immutable descriptors, so new
   // instances are what make the overlay draw them again.
   const [mapReady, setMapReady] = useState(false);
+  // A road network goes beneath everything and a route on top, whatever order they arrived in:
+  // the route is what the user asked for, and a network drawn over it hides it. The sort is
+  // stable, so every other layer keeps its place.
   const deckLayers = useMemo(
-    () => layers.map((a) => toDeckLayer(a)),
+    () => [...layers]
+      .sort((x, y) => drawRank(x) - drawRank(y))
+      .flatMap((a) => toDeckLayer(a)),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mapReady is a redraw trigger
     [layers, mapReady],
   );

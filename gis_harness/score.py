@@ -120,8 +120,12 @@ def _within(v: float, e: float, rel: float, abs_: float) -> bool:
 
 
 def match_number(text: str, expected: float, unit: Optional[str], rel: float,
-                 abs_: float) -> Optional[str]:
+                 abs_: float, unitless: bool = False) -> Optional[str]:
+    """The first number within tolerance, after unit conversion. *unitless* (counts): a number
+    written with a unit is a quantity, not a count, so "10 minutes" does not answer "10 hotels"."""
     for n in numbers(text):
+        if unitless and n.unit:
+            continue
         v = n.value
         if unit and n.unit and n.unit in UNITS and unit in UNITS:
             dim_e, f_e = UNITS[unit]
@@ -174,7 +178,8 @@ def check_value(check: Check, expected: Dict[str, Any], answer: str) -> Dict[str
     exp = expected.get(check.name)
     found: Optional[str] = None
     if check.kind in ("number", "count"):
-        found = match_number(text, float(exp), check.unit, check.rel_tol, check.abs_tol)
+        found = match_number(text, float(exp), check.unit, check.rel_tol, check.abs_tol,
+                             unitless=check.kind == "count")
     elif check.kind == "text":
         for p in _text_variants(str(exp)):
             m = p.search(text)

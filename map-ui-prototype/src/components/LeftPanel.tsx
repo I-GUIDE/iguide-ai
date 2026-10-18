@@ -1,3 +1,6 @@
+import { useState } from 'react';
+import { resolveLegend } from '../palette';
+import { fillOpacityOf, hasFill } from '../toDeckLayer';
 import type { LayerArtifact } from '../contracts';
 
 export interface SelectedFeature {
@@ -29,6 +32,10 @@ function fmtValue(v: any): string {
 }
 
 export function LeftPanel(p: Props) {
+  // The layer whose name was clicked last: it shows its fill slider. A polygon drawn over other
+  // results (a buffer over the schools inside it) can hide them; the slider lets the viewer see
+  // through it whatever the agent chose.
+  const [open, setOpen] = useState<string | null>(null);
   return (
     <aside className="leftpanel">
       <section className="lp-layers">
@@ -43,27 +50,36 @@ export function LeftPanel(p: Props) {
             return (
               <li key={l.id} className={visible ? '' : 'off'}>
                 <button className="eye" title={visible ? 'Hide' : 'Show'} onClick={() => p.onToggleLayer(l.id)}>{visible ? '👁' : '⦰'}</button>
-                <span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />
+                <span className="dot" style={{ background: l.kind === 'geojson' && l.color
+                  ? `rgb(${l.color[0]},${l.color[1]},${l.color[2]})` : SOURCE_COLORS[l.source] ?? '#888' }} />
                 {/* The name is clipped to the panel width, so the title carries it in full —
                     otherwise two layers whose names differ past the ellipsis are unreadable. */}
                 <button className="lname" title={`${l.label}\nZoom to layer`}
-                  onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
+                  onClick={() => { p.onFitLayer(l.id); setOpen((o) => (o === l.id ? null : l.id)); }}>{l.label}</button>
                 <span className="cnt" title={partial ? `sample of ${partial.total}` : undefined}>
                   {partial ? `${partial.shown}/${partial.total}` : (n ?? "img")}
                 </span>
                 <button className="x" title="Remove" onClick={() => p.onRemoveLayer(l.id)}>×</button>
-                {l.kind === 'raster' && p.onSetOpacity && (
-                  <label className="lp-opacity" title="Layer opacity">
+                {p.onSetOpacity && (l.kind === 'raster' || (open === l.id && hasFill(l))) && (
+                  <label className="lp-opacity" title={l.kind === 'raster' ? 'Layer opacity' : 'Fill opacity'}>
                     <input type="range" min={0} max={1} step={0.05}
-                      value={l.opacity ?? 0.85}
+                      aria-label={`${l.label} opacity`}
+                      value={fillOpacityOf(l)}
                       onChange={(e) => p.onSetOpacity!(l.id, Number(e.target.value))} />
                   </label>
                 )}
                 {/* A cluster map is unreadable without its key: "High-High" is a colour on the
                     map and nowhere else. Only categorical layers carry one. */}
+                {/* A route's two markers mean nothing without a key either. */}
+                {l.kind === 'geojson' && l.render === 'route' && !l.legend?.length && (
+                  <ul className="lp-legend">
+                    <li><span className="swatch" style={{ background: 'rgb(52,168,83)' }} /><span className="llabel">Start</span></li>
+                    <li><span className="swatch" style={{ background: 'rgb(234,67,53)' }} /><span className="llabel">End</span></li>
+                  </ul>
+                )}
                 {l.kind === 'geojson' && !!l.legend?.length && (
                   <ul className="lp-legend">
-                    {l.legend.map((e) => (
+                    {resolveLegend(l.legend).map((e) => (
                       <li key={e.label}>
                         <span className="swatch" style={{ background: `rgba(${e.color[0]},${e.color[1]},${e.color[2]},${e.color[3] / 255})` }} />
                         <span className="llabel" title={e.label}>{e.label}</span>

@@ -1448,11 +1448,9 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
 # --- zonal embeddings: pixels inside a polygon, aggregated ----------------------
 _ZONAL_TIMEOUT_S = float(os.getenv("RS_EMBED_ZONAL_TIMEOUT_S", "900"))
-# Distinct, colour-blind-safe hues for cluster classes (Okabe-Ito, alpha added).
-_CLUSTER_COLORS = [
-    [0, 114, 178, 190], [230, 159, 0, 190], [0, 158, 115, 190], [204, 121, 167, 190],
-    [86, 180, 233, 190], [213, 94, 0, 190], [240, 228, 66, 190], [120, 120, 120, 190],
-]
+# The most look-alike groups a zone map makes: past eight, groups stop being tellable apart on
+# the map. Their colours are the map client's (palette.ts); the layer sends group names only.
+_MAX_CLUSTERS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -1877,7 +1875,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                 "start": _iso_date(start),
                                 "end": _iso_date(end, month_end=True),
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
-                                "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                                "clusters": max(2, min(int(clusters), _MAX_CLUSTERS)),
                                 "image": True})
         if not res.get("ok"):
             # Logged, because the trace does not show tool RESULTS — only calls. A failure and
@@ -1918,7 +1916,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                         "zone_id_field": zone_id_field,
                         # What the caller ASKED for. len(present) is the count that came back,
                         # which a swallowed tile error changes without changing the request.
-                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                        "clusters": max(2, min(int(clusters), _MAX_CLUSTERS)),
                         "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
 
         # --- CSV of per-zone vectors: the artifact an ML step consumes ---
@@ -2030,9 +2028,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                  f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
                              "source": "analysis", "count": len(keep),
-                             "legend": [{"label": g,
-                                         "color": _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)]}
-                                        for i, g in enumerate(present)]}
+                             # Group names only: a look-alike group's colour means nothing,
+                             # so the map client's palette (palette.ts) draws them.
+                             "legend": [{"label": g} for g in present]}
         except Exception as exc:  # noqa: BLE001
             cluster_note = f"zones computed but not mapped: {type(exc).__name__}: {exc}"[:200]
         if layer is None and cluster_note is None:

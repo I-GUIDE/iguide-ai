@@ -87,6 +87,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
+| 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
+| 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -11460,9 +11462,326 @@ in the JSON body).
   - bad values;
   - the override file holds no user id.
 
+### Stage S74.2 One daily budget, in credits (2026-10-18)
+
+The user's rule: "The limit should be lumen coin + openai <= 3, so just call them credit to be
+consistent in case of the automatic model swap because of usage."
+
+- **Why one budget.** The default model moves from Lumen to OpenAI by itself when the Lumen pool
+  passes 90% (Stage 74's failover). With two budgets, 3 coins and separately $3, a user could not
+  know which one a turn would spend, and together they allowed 6 a day.
+- **The rule.** A credit is one Lumen coin or one dollar of OpenAI. The day's credits are coins
+  plus dollars, and the next turn is refused once they reach the limit (3).
+- **What the user sees.** "You have reached today's usage limit (3.05 of 3 credits). It resets at
+  midnight US Central time." It names no provider.
+- **What is kept apart.** The ledger still records coins and dollars, and the turn's
+  `usage.today` and the admin view report `credits`, `coins` and `usd`.
+- **Settings.** `AGENT_DAILY_CREDIT_LIMIT` (3; 0 disables it) replaces `AGENT_DAILY_COIN_LIMIT` and
+  `AGENT_DAILY_USD_LIMIT`. The VM set neither.
+- **Admins (S74.1).**
+  - `PUT` takes `creditLimit` with the same values as before.
+  - `coinLimit` and `usdLimit` are refused by name with a 400. Guessing which budget the caller
+    meant would set the wrong limit without a word.
+  - An override written before this change keeps working: its `coins` value is read as credits.
+- **Tests.**
+  - `test_lumen_failover_and_daily_limit.py`: a Lumen turn and an OpenAI turn add up, and the
+    message is pinned.
+  - `test_admin_usage_limits.py`: `creditLimit`, the retired keys, and an override from before
+    the change.
+
 **Not done.**
 - The map UI does not display the day's remaining budget yet.
 - The pool size is configured by hand and must follow the account if NCSA changes it.
 - The daily ledger is per process and per host. A second worker or host would need a shared
   store.
 
+## Stage 76 — Map layers say what they are {#stage-76}
+
+**Why.** Three faults showed live on 2026-10-17, while the crash hot-spot and cooling-centre
+examples (#150) and the Loop drive were checked step by step.
+- **Cooling centres, step 2** ("map the block groups coloured by the branch that serves them").
+  The 2,158 block-group points arrived as a heatmap, a yellow blob, and the answer said they were
+  coloured by branch. `add_map_layer` with `render="auto"` ignored the `column` it was given:
+  every point set over 2,000 became a density surface. The tool description the model reads also
+  listed every render except `categories`, which existed only in the function's docstring.
+- **Crash hot spots.** Hexagon H1852 at -87.622, 41.887 was described as "on Chicago's North Side
+  ... around Wrigleyville". It is in the Loop (New East Side), 7 km south. Nothing could have
+  named the place: the agent had a forward geocoder (`geocode_places`) and no reverse one, so the
+  name came from the model's memory, and the synthesizer passed the peer's sentence through.
+- **The Loop drive.** The fastest route and the 1,521 ways it was found on were drawn with the
+  same 2–3 px line. The answer could not be told apart from its input.
+
+**Change.**
+- **`render="auto"` with a `column`** (`langchain_geo_tools._auto_render`). Class names (and
+  booleans) give `categories`, numbers give `choropleth`. With no column it is unchanged: a
+  heatmap above 2,000 points, otherwise points or shapes. The tool description now lists
+  `categories`, `route` and `network`, and says what `auto` does.
+- **`reverse_geocode`** (`langchain_granular_tools.reverse_geocode_tool`,
+  `opengeodata_new.reverse_geocode_point`).
+  - It calls Nominatim `/reverse`, sharing the forward geocoder's 1 request/second limiter and
+    User-Agent, cached per point.
+  - It returns the neighbourhood, suburb and city that OpenStreetMap records, the nearest road,
+    and the full address. At most 10 points per call.
+  - It is bound wherever `geocode_places` is (both peers), and the source catalogue lists it
+    under Nominatim.
+  - Points are echoed as `point: [lat, lon]`, not as lat/lon fields. The map UI previews any
+    result object with lat/lon, and in the first live check the two queried points became two
+    stray layers beside the route.
+- **A rule on place names.** `PLACE_NAMES_RULE` is appended to both peers' prompts: say where a
+  result lies only from `reverse_geocode` or a name column in the data. `SYNTHESIS_PROMPT` rule 9
+  drops any place named for a coordinate that no result names.
+- **Routes and networks** (`map-ui-prototype`: `toDeckLayer`, `routeGeometry`, `AgentMap`).
+  - Two renders join the layer contract: `route` and `network`.
+  - A route is drawn as a 6 px blue line on an 11 px white casing, with rounded joins.
+  - Its start (green) and end (red) are marked. The ends are the path's two odd-degree vertices,
+    so a route written one edge per feature, in any order or direction, still gets its ends; a
+    set of lines that is not one path gets no markers rather than wrong ones.
+  - A network is drawn as 1.5 px slate lines the basemap reads through.
+  - The map stacks networks under everything and routes on top, whatever order they arrived in.
+  - The layer list shows a Start/End key for a route.
+  - `overpass_search(feature='road network')` now sends `render: "network"`.
+  - `add_map_layer` refuses `route`/`network` for anything that is not lines.
+
+**Colours: the map owns the palette, the agent sets a colour only when asked** (follow-up, same
+stage, user 2026-10-17).
+- **The question.** Should the categorical palette move to the client? Moved outright, a request
+  like "highlight the crimes in red" could never reach the map. It could not before either:
+  `add_map_layer` had no colour argument, the client coloured single-colour layers by source,
+  and the agent's fixed palette gave the first class red whatever was asked. The answer could
+  still say "in red".
+- **The client owns the defaults.** `palette.ts` holds the qualitative palette (the same twelve
+  hues, in the same order, so maps look as before), and `resolveLegend` fills every class that
+  arrives without a colour. A hue the agent set explicitly is not reused for another class.
+- **The agent sends colours only with a reason.**
+  - **Meaning:** Gi* hot and cold spots, and LISA classes, keep their colours, which are part of
+    the statistic's reading.
+  - **Arbitrary:** `add_map_layer`'s generic categories, `regionalize`'s regions and rs-embed's
+    look-alike zone groups now send class names only.
+  - **The user asked:** `add_map_layer` gains `color` (the whole layer: points, shapes, route,
+    network, or the heatmap's hue) and `class_colors` ({class: colour} for categories). Both
+    take names or hex, resolved on the server by `map_layers.parse_colour`.
+  - **What is refused, with the way that works:** a bad colour; `color` on a categories layer
+    (use `class_colors`); `color` on a choropleth (its colour is the value scale); a
+    `class_colors` class the column does not hold.
+- **The colour wins.** At the boundary, `build_map_layer` keeps a legend entry's colour as
+  optional and carries `color`. On the client an agent colour beats the source colour, the route
+  blue, the network slate and the heatmap ramp, and the layer list's dot shows it.
+- **The answer can only name colours that are real.** The tool result echoes `colours_set`, and
+  `colour_note` says to name a colour only if it was set here, or not to name colours at all.
+
+**Recolouring restyles the layer it names** (S76.1, user 2026-10-17).
+- **The fault.** Live, asked to colour two branches, the code peer copied the layer's file,
+  added a `color` column, and drew the copy with `class_colors`. The map keeps one layer per
+  source file (Stage 67), so the copy came up as a second service-area layer over the first.
+- **The structural fix.** `langchain_geo_tools.styling_parent` checks the input's recorded
+  lineage parents (`file_store` keeps them, Stage 56). If the input is one of its parents plus
+  nothing but colour or style columns (`color`, `fill`, `hex`, `style` …), with the same rows,
+  the same geometry and the same values in every shared column, `add_map_layer` keys the layer
+  by that parent. The redraw then replaces the parent's layer.
+  - A copy that adds a result column (a LISA class, a rate) is a new result, and keeps its own
+    layer.
+  - So does a coloured file with no recorded parent.
+  - The check reads no parent unless the input has a colour or style column, so ordinary code
+    outputs pay nothing.
+- **The second path.** On a second live try, the model redrew the styled copy that
+  `add_map_layer` had itself written for the first draw. That copy was keyed by its own content,
+  so it too came up as a new layer. `add_map_layer` now records on each copy it writes the
+  source key of the layer it stands for (`file_store` `layer_source_key`).
+  `layer_source_key_for` resolves a draw in this order: a recorded key, then a styling parent
+  (through that parent's own recorded key), then the file's own content. A copy of a copy lands
+  on the same layer too.
+- **What the model is told.** The tool description and `colour_note` say to recolour by calling
+  `add_map_layer` on the SAME file_id with new `color`/`class_colors`, never by writing a colour
+  column or a copy. A redraw the fix caught says so in `restyled`, naming the file to use next
+  time.
+
+**Verified.**
+- Offline: `test_map_roles_and_place_names.py` (9) and `routeGeometry.check.ts`; recolouring:
+  five more tests (a colour copy restyles its parent's layer, a redraw of add_map_layer's own
+  copy and a copy of that copy do too, a result copy and an unparented file stay separate, the
+  description says how); colours:
+  `palette.check.ts`, six more tests in `test_map_roles_and_place_names.py`, and
+  `test_map_layers.py` (an entry needs a label, its colour is optional); the full suite
+  passed: 4,659 tests, with one deselected test that fails on prototype too, a networkx pin that
+  differs on the Mac.
+- Live on a local agent (Lumen deepseek-v4-flash, validation off):
+  - **Cooling step 1** drew the service areas coloured by branch, with a six-branch key.
+  - **Crash step 1** called `reverse_geocode` and placed H1852 "in the Loop".
+  - **The Loop drive** drew the network as context and the route as a cased blue line from Union
+    Station to Michigan & Adams, with its ends marked, named "West Loop Gate" and "Jewelers Row /
+    Loop" from `reverse_geocode`.
+
+**Not changed.** That Loop-drive turn drew the right path but reported 2.45 miles and 4.9 minutes,
+against 1,378 m and 1.71 minutes: its route code mis-summed the length. Another run looped on its
+own routing script until the no-progress stop. These are routing correctness, not drawing.
+
+**A layer that frames others stays out of their way** (S76.2, user 2026-10-18).
+- **The fault.** Live, on the schools example's step 2 ("show the site, its 1-mile buffer and the
+  schools inside it"), `add_map_layer` drew the buffer in a blue the agent picked unasked. That
+  colour fills at the cap (190/255, `fillAndLine`), and the buffer sat over the 20 schools inside
+  it. The map then fitted to the buffer, so the whole view was one blue disc, with the streets
+  hidden and the schools tinted.
+- **Why not a rule.** Whether a layer IS the answer (a choropleth) or a frame around it (a buffer,
+  a service area, a study area) depends on what it is for. Only the model knows that, so the user
+  asked that the LLM decide.
+- **What the model can now say.** `add_map_layer` takes three new arguments:
+  - `outline` (boundary only);
+  - `fill_opacity` (0 to 1);
+  - `beneath` (draw under the other analysis layers, above a road network).
+
+  The tool description tells the model to keep the default for a layer whose fill is the answer.
+  A frame should be an outline, or a light fill (about 0.15) drawn beneath. `outline` with
+  choropleth, categories or heatmap is refused: those carry their values in the fill. A
+  `fill_opacity` outside 0 to 1 is refused.
+- **On the wire.** `build_map_layer` carries `beneath` and a valid `fill_opacity`.
+  - The client replaces the fill's alpha with `fill_opacity`, a choropleth ramp's included; the
+    outline keeps its own.
+  - `AgentMap.drawRank` puts a `beneath` layer at 0.5, over the network and under every other
+    result.
+  - The fields ride on the stored layer, so a restored session keeps them.
+- **And the viewer can decide too.** Clicking a vector layer's name in the layers panel (which
+  still zooms to it) opens a fill-opacity slider. It sets the same `fillOpacity`, starting from
+  what is drawn. Rasters keep their existing slider. The model's choice is the first view, and
+  the slider covers the times it chooses badly.
+- **Verified.**
+  - `test_layer_framing.py` (7 tests): the choice reaches the event, an unset layer is
+    unchanged, bad values and outline-on-a-fill render are refused, and the description says
+    the choice is the model's.
+  - `palette.check.ts`: alpha 0.15 gives 38; the outline keeps 255; no choice keeps the 190 cap;
+    a ramp takes the chosen alpha.
+  - Live on a local agent (Lumen deepseek-v4-flash, prod settings): the schools step 2 drew the
+    buffer at `fill_opacity` 0.15 and `beneath`, with no colour, so the streets and all 20
+    schools read through it.
+  - In the browser: a zones upload's fill slider at 0.1 left the outlines and the basemap
+    visible.
+
+
+## Stage 78 — A code run can be watched, stopped and reviewed while it runs {#stage-78}
+
+**Why.** On production (2026-10-17, prototype 66248542) T16 lost three of six code runs to the
+60 s limit. Each was a correct program that was too slow:
+- 9,843 buildings tested against one unprepared 97,315-vertex polygon: 86 s as written, 7 s
+  prepared;
+- a Python loop over 23,382 road nodes for each building: 8.4 s, 0.2 s with a KD-tree.
+
+The model learned only "execution timed out". `inspect_vector` had called the polygon "1 feature".
+The browser showed a spinner for a minute. And Stop aborted only the fetch: the worker thread, the
+container and the following model calls carried on.
+
+The user asked for all of it (2026-10-17), adding two requirements. A model should review the
+code *while it executes*, and interrupt and correct a critical problem. A rule-based check should
+run as well.
+
+**Change.**
+- **Time limit** (`code_execution`). 180 s by default (`AGENT_CODE_EXEC_TIMEOUT`), and never more
+  than `AGENT_CODE_EXEC_MAX_TIMEOUT` (600) whatever `timeout_seconds` asks; a clamp is said in
+  the result.
+- **Supervised runs** (`code_execution._supervise`). The exec phase is a `fork_safe.popen` and a
+  polling loop instead of one blocking `run`. Output goes to files, so a live tail can be read
+  without draining a pipe. Each tick checks the turn's Stop, the time limit and the watcher. The
+  Docker backend signals and kills the named container, not the CLI.
+- **Where it stuck** (`code_watch.SITECUSTOMIZE`, `parse_stack`, `stack_report`).
+  - **How:** each run gets a `sitecustomize.py` first on `PYTHONPATH` that registers
+    faulthandler on SIGUSR1 into `.iguide_rt/stack.txt`. The program's line numbers are
+    untouched, and its stderr stays the model's. Docker's tini forwards the signal.
+  - **On a timeout:** before the kill, the host asks for the stack. The result's `stuck_at` names
+    the program line (mapped back through the invariant gate's prologue) and the library call it
+    was inside. `stderr` opens with `[timed out at line N: …]` and the matching rule finding.
+- **Rules before the run** (`code_watch.precheck`).
+  - **Constructs flagged:** an unprepared predicate against one geometry, nested row loops,
+    `iterrows`, a geometry method in a row-wise `apply`, and unions, file reads or `distance` inside
+    loops.
+  - **Stated parameters:** a distance or time the task states next to a parameter word (buffer,
+    radius, within…) that no number in the code equals in any unit. This is the "buffer 2500 m,
+    used 1000" issue.
+  - **Effect:** none of this blocks a run. The findings come back as `performance_hints`, go to
+    the reviewer as leads, and explain a stuck line.
+- **The review during the run** (`code_watch.RunWatch`).
+  - **When it starts:** once a run passes `AGENT_CODE_REVIEW_AFTER_S` (5 s). A thread sends one
+    model call carrying the task (the peer's brief without its data-source catalogue), the
+    numbered code, the inputs with feature *and vertex* counts, the rule findings, a live stack
+    sample and the stdout tail.
+  - **Cost:** a run that ends first waits for nothing, and the review is dropped.
+  - **What a stop needs:** a critical verdict stops the container only after `accept_verdict`
+    checks it against what the reviewer cannot invent. The quote must be on the cited line, and
+    a fix must be given. A performance claim must point at where the live stack is (the line or a
+    loop around it). A parameter claim must quote the task.
+  - **Performance stops are held.** A "too slow" verdict waits until the run has gone
+    `AGENT_CODE_REVIEW_PERF_FLOOR_S` (30 s), then re-samples the stack and stops only if the
+    program is still there. Live, the review stopped an `sjoin` at 7.7 s that had finished in
+    12 s one run earlier.
+  - **What the agent gets:** the stop returns `interrupted: "review"` with the line, problem and
+    fix. The code peer, which owns the code, applies it; the reviewer never runs code.
+  - **Modes:** `AGENT_CODE_REVIEW=observe` reports but never stops, and `off` makes no model
+    call.
+- **Stop** (`turn_control`, `POST /agent/chat/cancel`).
+  - **The handle:** every stream's first event is `turn` with an id, and the UI's Stop posts it
+    (owner-checked).
+  - **Where it acts:** the code run's loop kills the container within a second. The streaming
+    callback handler raises `TurnCancelled` at the next model call or tool start.
+  - **Why `TurnCancelled` is a `BaseException`:** so the tool node, the callback manager and the
+    supervisor's containment wrappers cannot turn it into an observation and carry on. The two
+    wrappers that catch `BaseException` re-raise it by name.
+  - **Disconnects:** a stream closed before its turn ends (a closed tab) cancels it too
+    (`AGENT_CANCEL_ON_DISCONNECT`).
+  - **Recording:** the turn is recorded as stopped.
+- **Heartbeat and UI.** `code_progress` (every 5 s) and `code_review` events are status tier. The
+  map UI shows a run bar: the label, the elapsed time against the limit, and the review's state.
+  After 90 s it offers a Stop of its own. Rule hints, review verdicts and stops appear in the
+  trace.
+- **Vertex counts** (`code_watch.geometry_size`). `inspect_vector` reports `vertex_count`,
+  `max_vertices_per_feature`, `max_parts_per_feature`, and a `size_note` above 10,000 vertices
+  in one feature.
+- **Prompt** (`PERFORMANCE_RULE`, both peers). Check sizes; prepare or `sjoin`; use KD-trees,
+  not nested loops; work on whole columns; read files and build unions once; fix `stuck_at`
+  rather than raise the limit; apply a review's fix.
+
+**Verified.**
+- **Unit tests:** `test_code_watch.py` (44), including real local runs for the timeout line,
+  review stop, held stop, dropped hold, Stop and the cap.
+- **Docker** (`iguide-codeexec:latest` and `python:3.11-slim`): the timeout names the line with
+  the gate on and off, the review stops the container, and no container is left.
+- **Live reviewer** (Lumen deepseek-v4-flash, real Waikīkī files). It stopped the unprepared
+  overlay at 12.9 s with the `shapely.prepare` fix (it would have run about 90 s).
+- **In the browser** (local agent from this branch):
+  - the run bar and the rule hints showed;
+  - the review stopped a row-wise predicate at 9.5 s and the agent rewrote it with `sjoin`;
+  - the answer was 909 / 324, both exactly the T16 reference;
+  - Stop during a run logged the cancel, killed the container, and no model call followed.
+
+### S78.1 — The trace says what each step does {#stage-78-1}
+
+**Why.** Production T16 (2026-10-17, e3e7673d, the user watching in Chrome):
+- **Rule hints on every run.** "nested loop" and "rowwise geometry" appeared even on runs that took 1.8 s, beside runs that took 46 s. Shown on every run, they read as noise.
+- **Raw calls.** Every step read `execute_code({'code': 'import geopandas as gpd\nimport pandas…)` or `inspect_vector({'file_id': 'file_885af7d38fd5'})`.
+- **"Code ready".** The step that runs analyses said this when it finished, as if code had been written and was waiting.
+
+The user asked for each step's action and purpose by default, with the raw records behind a debug switch, and for the purpose to come from the model's own decision.
+
+**Change.**
+- **Quiet hints** (`code_watch`):
+  - **Trace:** performance rule hints appear only once a run has gone `AGENT_CODE_HINTS_AFTER_S` (5 s).
+  - **Result:** they go back to the model only when the run took `AGENT_CODE_HINTS_RESULT_AFTER_S` (10 s) or more, timed out, or was stopped.
+  - **Unchanged:** the stated-parameter check is about correctness, so it is still shown and returned on every run, now as `parameter_checks`.
+- **The purpose comes from the decision** (`streaming_trace.on_llm_end`).
+  - **The sentence was already there:** the text the model writes beside its tool calls says what it is about to do and why. deepseek wrote one unasked in 6 of 6 probes.
+  - **It was dropped:** that text was discarded along with the duplicate calls. It is now emitted as `tool_plan`, before the calls it introduces.
+  - **Other models:** `NARRATE_STEPS_RULE` asks both peers for that sentence, for models that do not volunteer it.
+  - **Per run:** `execute_code` gains an optional `purpose`, a phrase completing "Executing code to …".
+- **Actions in words** (map UI, `toolPhrases.ts`):
+  - **Every one of the 88 tools** has a phrase built from its own arguments, e.g. "Inspecting buildings.geojson" or "Joining buildings.geojson with slr_exposure_3_2ft.geojson (intersects)".
+  - **File names:** file ids are resolved from the uploads and artifacts the page has seen.
+  - **Unknown tools** (MCP, or added later) read as their name in words plus their most telling argument.
+  - **Run bar:** it uses the same purpose.
+- **Arguments as data.** Tool-call events used to carry the arguments as `str()` of a dict, a Python repr that JSON cannot read. They now carry the dict itself (`inputs`), falling back to `ast.literal_eval`.
+- **Detailed and debug modes.**
+  - **Detailed (default):** each trace row keeps its words in `text`.
+  - **Debug:** the raw call is kept in `raw` and shown by "Show raw calls", a per-browser switch in the Reasoning panel. It is there rather than in the settings panel, which production hides in token mode.
+- **The code step says what it did.** It starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
+
+**Verified.**
+- **Tests:** `test_code_watch.py` (hint gating, `tool_plan`, argument dicts, step summary). `check:coderun` covers the phrases, and checks that no tool's phrase leaks raw-call syntax.
+- **Live,** local agent from this branch, Lumen deepseek, hotels × evacuation zone:
+  - the trace read: the plan sentence, "Executing code to count hotels inside tsunami evacuation zone…", "ok · 3.36 s", "Code step finished: 1 run";
+  - "Show raw calls" switched to `execute_code({...})` and back;
+  - the answer was 65, which matches the T16 reference.

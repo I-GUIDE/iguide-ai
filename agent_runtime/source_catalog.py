@@ -73,11 +73,11 @@ CATALOG: Tuple[Source, ...] = (
                   "maps.mail.ru", "z.overpass-api.de", "lz4.overpass-api.de"),
            aliases=("OpenStreetMap", "OSM", "Overpass")),
     Source("osm_nominatim", "OpenStreetMap Nominatim", "geocoding",
-           covers="coordinates for place names and addresses",
+           covers="coordinates for place names and addresses, and the place named at coordinates",
            excludes="exact building positions for many addresses; ambiguous names resolve to "
                     "one candidate",
            extent="global", licence="ODbL (© OpenStreetMap contributors)",
-           tools=("geocode_places",), hosts=("nominatim.openstreetmap.org",),
+           tools=("geocode_places", "reverse_geocode"), hosts=("nominatim.openstreetmap.org",),
            aliases=("Nominatim", "OpenStreetMap")),
     Source("usgs_3dep", "USGS 3DEP", "elevation",
            covers="bare-earth elevation, 1 m to 30 m depending on place",
