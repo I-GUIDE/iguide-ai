@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { resolveLegend } from '../palette';
+import { fillOpacityOf, hasFill } from '../toDeckLayer';
 import type { LayerArtifact } from '../contracts';
 
 export interface SelectedFeature {
@@ -30,6 +32,10 @@ function fmtValue(v: any): string {
 }
 
 export function LeftPanel(p: Props) {
+  // The layer whose name was clicked last: it shows its fill slider. A polygon drawn over other
+  // results (a buffer over the schools inside it) can hide them; the slider lets the viewer see
+  // through it whatever the agent chose.
+  const [open, setOpen] = useState<string | null>(null);
   return (
     <aside className="leftpanel">
       <section className="lp-layers">
@@ -49,15 +55,16 @@ export function LeftPanel(p: Props) {
                 {/* The name is clipped to the panel width, so the title carries it in full —
                     otherwise two layers whose names differ past the ellipsis are unreadable. */}
                 <button className="lname" title={`${l.label}\nZoom to layer`}
-                  onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
+                  onClick={() => { p.onFitLayer(l.id); setOpen((o) => (o === l.id ? null : l.id)); }}>{l.label}</button>
                 <span className="cnt" title={partial ? `sample of ${partial.total}` : undefined}>
                   {partial ? `${partial.shown}/${partial.total}` : (n ?? "img")}
                 </span>
                 <button className="x" title="Remove" onClick={() => p.onRemoveLayer(l.id)}>×</button>
-                {l.kind === 'raster' && p.onSetOpacity && (
-                  <label className="lp-opacity" title="Layer opacity">
+                {p.onSetOpacity && (l.kind === 'raster' || (open === l.id && hasFill(l))) && (
+                  <label className="lp-opacity" title={l.kind === 'raster' ? 'Layer opacity' : 'Fill opacity'}>
                     <input type="range" min={0} max={1} step={0.05}
-                      value={l.opacity ?? 0.85}
+                      aria-label={`${l.label} opacity`}
+                      value={fillOpacityOf(l)}
                       onChange={(e) => p.onSetOpacity!(l.id, Number(e.target.value))} />
                   </label>
                 )}

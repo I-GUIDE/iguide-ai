@@ -123,6 +123,70 @@ CASES = [
                 "prompt": "Which zone has the most incidents? Why is it not the zone with the "
                           "highest rate, and how does the order of the zones change between "
                           "counts and rates?"}]},
+    {"id": "facility-siting", "task": "T05",
+     "title": "Where to put two facilities",
+     "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new "
+              "facilities. The case finds the pair of sites that keeps people closest to a facility "
+              "overall.",
+     "tags": ["location-allocation", "optimisation"],
+     "category": "Optimisation",
+     "steps": [{"label": "Choose the sites",
+                "prompt": "Choose the 2 candidate sites that minimise the total population-weighted"
+                          " straight-line distance from each demand point to its nearest chosen "
+                          "site. Which two sites, and what is that total in person-kilometres?"},
+               {"label": "Map the service areas",
+                "prompt": "Map the demand points coloured by the chosen site that serves each "
+                          "one, and mark the two chosen sites."}]},
+    {"id": "suitability", "task": "T11",
+     "title": "Site suitability from three layers",
+     "blurb": "Three aligned layers for one area: slope, distance to the nearest road, and land cover. "
+              "The case finds the land that is flat, near a road and not water or wetland, and the "
+              "single best spot.",
+     "tags": ["raster", "multi-criteria"],
+     "category": "Transformation",
+     "steps": [{"label": "Score the cells",
+                "prompt": "A cell is suitable if its slope is under 8 degrees, its road distance is"
+                          " at most 500 m, and its land cover is not water or wetland. Score each "
+                          "suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the"
+                          " total suitable area in hectares, and what are the centre coordinates of"
+                          " the highest-scoring cell?"},
+               {"label": "Map the score", "prompt": "Map the suitability score."}]},
+    {"id": "aftershocks", "task": "T12",
+     "title": "Aftershocks of the 2019 Ridgecrest earthquake",
+     "blurb": "In July 2019 a magnitude 7.1 earthquake struck near Ridgecrest, California, followed by "
+              "thousands of aftershocks. The case counts those in the following week within 25 km and "
+              "maps them by magnitude.",
+     "tags": ["spatio-temporal", "point data"],
+     "category": "Query and selection",
+     "steps": [{"label": "Count the aftershocks",
+                "prompt": "What was the magnitude of the largest event in the July 2019 Ridgecrest "
+                          "sequence? How many events occurred within 7 days after it and within 25 "
+                          "km of its epicentre, and how many of those were magnitude 4 or greater?"},
+               {"label": "Map them",
+                "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with "
+                          "the mainshock marked."}]},
+    {"id": "measure", "task": "T01",
+     "title": "Measuring area and distance correctly",
+     "blurb": "Two measurements with nothing to upload: the area of Champaign County, Illinois, whose "
+              "boundary the agent fetches itself, and the distance from Trafalgar Square in London to "
+              "Notre-Dame in Paris.",
+     "tags": ["live data", "projections", "geodesic distance"],
+     "category": "Measurement",
+     "steps": [{"label": "Area and distance", "prompt": None}]},
+]
+
+# Taken off the panel 2026-10-18 after three live passes of every case in Chrome on prod
+# (e561e071, deepseek-v4-flash; GIS Assessment Log rounds r60-r96). Kept here, unbuilt, so a case
+# can come back once its failure is fixed:
+#   fastest-route: pass 2 said the route was on the map and drew nothing; the 2-minute
+#     intersection count came out 264, 262, 242; it fails whenever Overpass is down.
+#   cooling-centres: every figure exact, but step 1 took 5-8 minutes, one solver run took
+#     118 s of the 180 s code limit (the solver it picks varies), and step 2 once left 1,332
+#     Cook County tracts over the map.
+#   flood: 13-20 minutes for step 1, an 'Incomplete' banner and no 5 m layer in pass 2, and
+#     the land total changed every run (112.3, 126.8, 103.3 km2; the share held at 93-94%).
+#   ndvi-change: 'Map the loss' drew no layer in 2 of 3 passes (it pointed at the PNG).
+RETIRED_CASES = [
     # No upload and no harness task: the agent fetches the Loop's streets from OpenStreetMap
     # (overpass_search feature='road network', PR #139; before it, 'highway' meant motorways only
     # and the network came back as 34 pieces). Replaces T04's synthetic 6x6 UTM grid, whose
@@ -148,20 +212,6 @@ CASES = [
                 "prompt": "Following the same rules, how many street intersections (points where "
                           "three or more road segments meet) can be reached within 2 minutes of the"
                           " start? Map them."}]},
-    {"id": "facility-siting", "task": "T05",
-     "title": "Where to put two facilities",
-     "blurb": "Forty neighbourhoods with known populations and eight possible sites for two new "
-              "facilities. The case finds the pair of sites that keeps people closest to a facility "
-              "overall.",
-     "tags": ["location-allocation", "optimisation"],
-     "category": "Optimisation",
-     "steps": [{"label": "Choose the sites",
-                "prompt": "Choose the 2 candidate sites that minimise the total population-weighted"
-                          " straight-line distance from each demand point to its nearest chosen "
-                          "site. Which two sites, and what is that total in person-kilometres?"},
-               {"label": "Map the service areas",
-                "prompt": "Map the demand points coloured by the chosen site that serves each "
-                          "one, and mark the two chosen sites."}]},
     # T15. Pinned snapshot (datasets.COOLING_FILES). Live 2026-10-15, step 3 ("How many residents
     # does each serve?") was answered from memory with no tool call, and wrongly; it now asks for
     # the count from the assignment, which is one groupby on the agent's own file.
@@ -222,42 +272,6 @@ CASES = [
                           "how many hectares lost more than 0.2 NDVI between them?"},
                {"label": "Map the loss",
                 "prompt": "Map where NDVI fell by more than 0.2 between the two dates."}]},
-    {"id": "suitability", "task": "T11",
-     "title": "Site suitability from three layers",
-     "blurb": "Three aligned layers for one area: slope, distance to the nearest road, and land cover. "
-              "The case finds the land that is flat, near a road and not water or wetland, and the "
-              "single best spot.",
-     "tags": ["raster", "multi-criteria"],
-     "category": "Transformation",
-     "steps": [{"label": "Score the cells",
-                "prompt": "A cell is suitable if its slope is under 8 degrees, its road distance is"
-                          " at most 500 m, and its land cover is not water or wetland. Score each "
-                          "suitable cell as 0.5*(1 - slope/8) + 0.5*(1 - distance/500). What is the"
-                          " total suitable area in hectares, and what are the centre coordinates of"
-                          " the highest-scoring cell?"},
-               {"label": "Map the score", "prompt": "Map the suitability score."}]},
-    {"id": "aftershocks", "task": "T12",
-     "title": "Aftershocks of the 2019 Ridgecrest earthquake",
-     "blurb": "In July 2019 a magnitude 7.1 earthquake struck near Ridgecrest, California, followed by "
-              "thousands of aftershocks. The case counts those in the following week within 25 km and "
-              "maps them by magnitude.",
-     "tags": ["spatio-temporal", "point data"],
-     "category": "Query and selection",
-     "steps": [{"label": "Count the aftershocks",
-                "prompt": "What was the magnitude of the largest event in the July 2019 Ridgecrest "
-                          "sequence? How many events occurred within 7 days after it and within 25 "
-                          "km of its epicentre, and how many of those were magnitude 4 or greater?"},
-               {"label": "Map them",
-                "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with "
-                          "the mainshock marked."}]},
-    {"id": "measure", "task": "T01",
-     "title": "Measuring area and distance correctly",
-     "blurb": "Two measurements with nothing to upload: the area of Champaign County, Illinois, whose "
-              "boundary the agent fetches itself, and the distance from Trafalgar Square in London to "
-              "Notre-Dame in Paris.",
-     "tags": ["live data", "projections", "geodesic distance"],
-     "category": "Measurement",
-     "steps": [{"label": "Area and distance", "prompt": None}]},
 ]
 
 CHICAGO_VIOLENT = ("HOMICIDE", "ASSAULT", "BATTERY", "ROBBERY", "CRIMINAL SEXUAL ASSAULT")

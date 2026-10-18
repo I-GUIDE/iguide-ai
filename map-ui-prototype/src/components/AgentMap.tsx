@@ -41,7 +41,9 @@ function getTooltip({ object }: any) {
 
 function drawRank(a: LayerArtifact): number {
   if (a.kind !== 'geojson') return 1;
-  return a.render === 'network' ? 0 : a.render === 'route' ? 2 : 1;
+  // A layer the agent put beneath (a buffer framing the schools inside it) sits over the
+  // road network but under every other result.
+  return a.render === 'network' ? 0 : a.render === 'route' ? 2 : a.beneath ? 0.5 : 1;
 }
 
 function DeckOverlay({ layers, onFeatureClick }: { layers: any[]; onFeatureClick: (feature: any, layerId: string) => void }) {

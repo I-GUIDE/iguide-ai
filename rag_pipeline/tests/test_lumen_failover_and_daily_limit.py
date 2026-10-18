@@ -4,8 +4,9 @@ Two rules from the user (2026-10-16):
 - When 90% of the Lumen coin pool (100 coins) is used, the process default switches to OpenAI
   gpt-5.6-luna, and it returns to Lumen once usage is back below 80%. The gap stops the default
   flipping on every turn while the balance hovers at one threshold.
-- Each signed-in user may spend at most 3 Lumen coins and, separately, $3 of OpenAI per day,
-  the day ending at midnight US Central. Over either, the next turn is refused.
+- Each signed-in user may spend at most 3 credits a day, the day ending at midnight US Central;
+  past it the next turn is refused. A credit is one Lumen coin or one dollar of OpenAI, added
+  together (user, 2026-10-18: the model swaps provider by itself, so one budget, one unit).
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ CENTRAL = ZoneInfo("America/Chicago")
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(file_store, "storage_root", lambda: tmp_path)
     for name in ("AGENT_LUMEN_FAILOVER", "AGENT_LUMEN_POOL_COINS", "AGENT_LUMEN_SWITCH_AT",
-                 "AGENT_LUMEN_RETURN_AT", "AGENT_DAILY_COIN_LIMIT", "AGENT_DAILY_USD_LIMIT",
+                 "AGENT_LUMEN_RETURN_AT", "AGENT_DAILY_CREDIT_LIMIT",
                  "AGENT_USAGE_TZ", "AGENT_LUMEN_FALLBACK_MODEL", "AGENT_LUMEN_FALLBACK_PROVIDER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AGENT_LLM_PROVIDER", "lumen")
@@ -105,21 +106,26 @@ ALICE = "http://cilogon.org/serverE/users/137206"
 NOON = datetime(2026, 10, 16, 12, 0, tzinfo=CENTRAL)
 
 
-def test_coins_and_dollars_are_limited_separately():
-    ul.record(ALICE, {"cost_coins": 2.9, "cost_usd": 2.9}, now=NOON)
+def test_coins_and_dollars_share_one_budget_of_credits():
+    # A turn on Lumen, then the failover moves the default to OpenAI: both count.
+    ul.record(ALICE, {"cost_coins": 1.9, "cost_usd": None}, now=NOON)
+    ul.record(ALICE, {"cost_coins": None, "cost_usd": 0.9}, now=NOON)
+    assert ul.spent(ALICE, now=NOON)["credits"] == pytest.approx(2.8)
     assert ul.refusal(ALICE, now=NOON) is None
-    ul.record(ALICE, {"cost_coins": 0.2, "cost_usd": None}, now=NOON)
+    ul.record(ALICE, {"cost_coins": None, "cost_usd": 0.25}, now=NOON)
     refused = ul.refusal(ALICE, now=NOON)
-    assert refused["reason"] == "daily_limit" and "Lumen coins" in refused["error"]
-    assert "OpenAI" not in refused["error"]
-    assert refused["spent"]["usd"] == pytest.approx(2.9)
+    assert refused["reason"] == "daily_limit"
+    assert refused["error"] == ("You have reached today's usage limit (3.05 of 3 credits). "
+                                "It resets at midnight US Central time.")
+    assert refused["spent"]["coins"] == pytest.approx(1.9)
+    assert refused["spent"]["usd"] == pytest.approx(1.15)
 
 
 def test_the_day_resets_at_midnight_central():
     late = datetime(2026, 10, 16, 23, 59, tzinfo=CENTRAL)
     after = datetime(2026, 10, 17, 0, 1, tzinfo=CENTRAL)
     ul.record(ALICE, {"cost_usd": 3.5}, now=late)
-    assert ul.refusal(ALICE, now=late) is not None
+    assert "(3.50 of 3 credits)" in ul.refusal(ALICE, now=late)["error"]
     assert ul.refusal(ALICE, now=after) is None
     assert ul.resets_at(late).startswith("2026-10-17T00:00:00-05:00")
 
@@ -137,7 +143,7 @@ def test_the_ledger_holds_a_digest_not_the_user_id(tmp_path):
 
 
 def test_a_limit_of_zero_disables_it(monkeypatch):
-    monkeypatch.setenv("AGENT_DAILY_USD_LIMIT", "0")
+    monkeypatch.setenv("AGENT_DAILY_CREDIT_LIMIT", "0")
     ul.record(ALICE, {"cost_usd": 50}, now=NOON)
     assert ul.refusal(ALICE, now=NOON) is None
 
@@ -151,8 +157,8 @@ def test_a_turn_charges_the_signed_in_user_and_reports_the_day(monkeypatch):
         out = _charge_turn({"llm_calls": 2, "cost_coins": 0.5, "cost_usd": None})
     finally:
         identity.reset_user(token)
-    assert out["today"]["coins"] == pytest.approx(0.5) and out["today"]["turns"] == 1
-    assert out["today"]["limits"] == {"coins": 3.0, "usd": 3.0}
+    assert out["today"]["credits"] == pytest.approx(0.5) and out["today"]["turns"] == 1
+    assert out["today"]["limits"] == {"credits": 3.0}
 
 
 def test_the_routes_refuse_a_spent_user_before_running_a_turn(monkeypatch):

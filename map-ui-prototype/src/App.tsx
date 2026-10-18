@@ -585,7 +585,10 @@ export default function App() {
     setLayers((prev) => prev.filter((l) => l.id !== id));
   }, []);
   const setLayerOpacity = useCallback((id: string, opacity: number) => {
-    setLayers((prev) => prev.map((l) => (l.id === id && l.kind === 'raster' ? { ...l, opacity } : l)));
+    // A raster's opacity is the whole image's; a vector layer's is its fill's, so its outline
+    // stays crisp. The same field the agent sets for a layer that frames others.
+    setLayers((prev) => prev.map((l) => (l.id !== id ? l
+      : l.kind === 'raster' ? { ...l, opacity } : { ...l, fillOpacity: opacity })));
   }, []);
   const fitLayer = useCallback((id: string) => {
     const l = layersRef.current.find((x) => x.id === id);
@@ -796,6 +799,8 @@ export default function App() {
             // Dropped here once already: the flag reached the client and died in this call,
             // so the zone came back as a violet slab over its own pixel image.
             outline: layer.outline === true ? true : undefined,
+            fillOpacity: layer.fillOpacity,
+            beneath: layer.beneath === true ? true : undefined,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,

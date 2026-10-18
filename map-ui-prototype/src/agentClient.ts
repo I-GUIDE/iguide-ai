@@ -326,6 +326,8 @@ export interface MapLayerEvent {
   url?: string;                 // fetch instead of inlining (large layers)
   render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes' | 'network' | 'route'
   outline?: boolean;            // boundary only, so anything drawn beneath stays visible
+  fillOpacity?: number;         // 0..1, the model's choice for a layer that frames others
+  beneath?: boolean;            // draw under the other analysis layers
   styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
   legend?: { label: string; color?: [number, number, number, number] }[];
   color?: [number, number, number, number]; // the whole layer's colour, set when the user asked
@@ -647,6 +649,7 @@ export async function streamChat(
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
             legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
+            fillOpacity: _share(layer.fill_opacity), beneath: layer.beneath === true,
             sampled: !!layer.sampled, total: layer.total,
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
@@ -666,6 +669,7 @@ export async function streamChat(
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
             legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
+            fillOpacity: _share(layer.fill_opacity), beneath: layer.beneath === true,
             sampled: !!layer.sampled, total: layer.total,
           });
         }
@@ -757,6 +761,12 @@ export async function streamChat(
 // can show KB/spatial results if the backend surfaces coordinates (defensive: the
 // current contract usually does NOT include element geometry -- see agent-api-contract).
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
+
+/** A share from 0 to 1, or undefined: an out-of-range opacity is ignored, not clamped. */
+function _share(v: any): number | undefined {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : undefined;
+}
 
 function _rgba(c: any): [number, number, number, number] | undefined {
   if (!Array.isArray(c) || c.length < 3 || !c.slice(0, 4).every((v: any) => Number.isFinite(Number(v)))) return undefined;
