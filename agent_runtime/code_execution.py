@@ -1490,7 +1490,8 @@ class CodeExecutor:
         deps, rejected = _sanitize_deps(dependencies)
         # Rules before the run (code_watch.precheck): instant, never blocking. They go back with
         # the result, to the concurrent review as leads, and to the stuck-line report.
-        findings = code_watch.precheck(source_for_deps, brief=(watch.brief if watch else ""))
+        findings = code_watch.precheck(source_for_deps, brief=(watch.brief if watch else ""),
+                                       earlier=(watch.earlier_code if watch else ()))
         info = _RunInfo(watch=watch, script=(entrypoint or "script.py"),
                         code_lines=len(source_for_deps.splitlines()))
         if watch is not None:

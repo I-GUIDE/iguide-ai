@@ -11667,3 +11667,41 @@ The user asked for each step's action and purpose by default, with the raw recor
   - the trace read: the plan sentence, "Executing code to count hotels inside tsunami evacuation zone…", "ok · 3.36 s", "Code step finished: 1 run";
   - "Show raw calls" switched to `execute_code({...})` and back;
   - the answer was 65, which matches the T16 reference.
+
+### S78.2 — The stated-parameter check asks only runs that apply a value {#stage-78-2}
+
+**Why.** A live sweep of all 12 Spatial Analysis examples on 2026-10-18 (e561e071, 3 passes, 81 turns, Lumen deepseek-v4-flash) found that the S78.1 stated-parameter rule fired on 25 runs in 9 turns. Every firing was wrong:
+- **Inspection runs.** Most were the turn's first runs, which read a CSV head or raster metadata. For example, SUIT got "the task states “500 m”, and no number in the code equals it in any unit" three times, on runs that printed CRS, bounds and class counts. The run that applied the threshold (`dist <= 500.0`) was never flagged.
+- **Runs after the value was used.** The others came after the value had already been applied: a bubble map built from rows that a 25 km filter had already selected, a "does the GeoJSON exist" check, a MILP solve that has no distance cutoff (COOLING's "more than 2 km" is a later metric).
+- **The cost.** The finding goes to the trace, to the model in the run's result (`parameter_checks`), and to the concurrent reviewer as a lead. On an inspection run it is noise that invites putting a number into code that has no use for one.
+
+**Change** (`agent_runtime/code_watch.py`).
+- **Only runs that apply a value are checked** (`applies_values`). A run applies a distance or a time when it has one of these:
+  - a call that takes one (`buffer`, `dwithin`, `query_ball_point`, `ego_graph`, `single_source_dijkstra`, …);
+  - a keyword argument whose name carries one (`max_distance=`, `radius=`, `cutoff=`, …);
+  - a number assigned to a name that says it is one (`RADIUS_M = 2.5 * 1000`);
+  - a threshold comparison against something named as one (`dist_km <= 25`, `nearest > 2000.0`).
+
+  Reading, printing, writing a layer and checking that a file exists apply nothing. Bare `m` and `d` are deliberately not in the name list: COOLING's `x[n*m:] > 0.5` is a solver's variable, not a distance.
+- **An earlier run of the turn counts.** `precheck(..., earlier=)` receives the code of the turn's earlier `execute_code` calls. `langchain_exec_tools._earlier_code` reads them from the turn log, which records each call before it runs, and they reach the check through `RunWatch.earlier_code`. Once a run has used the stated value, the runs after it (the map, the export) are not asked again. An earlier run that used a *different* value gives no credit.
+- **Unchanged.** A computing run that uses another value is still flagged, in the trace and in the result: "buffer 2,500 m" with `sites.buffer(1000)`, `dist_m <= 1000` or `max_distance=1000`.
+
+**Rejected alternative.** Checking once at answer time, against every run of the turn, would also have cleared the COOLING and QUAKES cases. It was not chosen for two reasons. A check at answer time comes too late for the code step to fix the run: today the finding goes back with the run's result, so the next run can fix it. And a value can also be applied by a non-code tool (a buffer or isochrone tool), which an answer-time check that reads only code would miss.
+
+**Verified.**
+- **Offline replay** of the archived `execute_code` runs (`gis_harness_runs_archive/live-examples-e561e071/lumen_deepseek-v4-flash/*.events.jsonl`):
+  - **Coverage.** The trace cuts tool arguments at 3,000 characters, so 19 of the 213 calls have unreadable code; 194 runs in 66 turns are replayed.
+  - **The 19 cut runs.** None of them fired live. The new rule only adds conditions to the old one, so it fires on a subset of the old rule's runs and cannot fire on them either. Leaving them out only removes earlier-run credit, so the replay is conservative.
+  - **Results.** On the 194 runs, the old rule reproduces the live firings on all 194; the new rule fires on 0.
+  - The live brief (task plus plan) is not archived. Where the query alone does not produce the figure the live rule quoted (COOLING "2 km", which the plan text put next to "distance"), that figure is appended to the replay brief as a plan line.
+- **The four named inspection runs** (SUIT.p3.s1, QUAKES.p3.s1, COOLING.p3.s1 and ROUTE.p2.s2, each run 0): old rule 1 finding each, new rule 0, and `applies_values` is False for all four.
+- **Recall on real computing code.** Every archived run whose code contains a stated value had that value swapped for a wrong one (×0.4, in every unit), with no earlier-run credit. 20 of 24 were caught. The 4 misses are COOLING's `**2` exponents, which only matched "2 km" by number and are not uses of it. So 20 of 20 genuine uses were caught.
+- **Tests.** `rag_pipeline/tests/test_code_watch.py` covers:
+  - inspection-only runs (a verbatim SUIT first run, a CSV head, a file-exists check);
+  - computing runs with the wrong value (a buffer, a threshold, `max_distance`);
+  - earlier-run credit, including no credit for a wrong value;
+  - an `applies_values` table;
+  - `_earlier_code` reading the turn log.
+
+  Results: 68 passed. The neighbouring code-execution suites: 220 passed.
+- **Not deployed.**

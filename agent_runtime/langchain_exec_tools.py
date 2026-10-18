@@ -198,6 +198,31 @@ def _task_text() -> str:
     return brief.split("Data sources reachable here", 1)[0].strip()
 
 
+def _earlier_code() -> List[str]:
+    """The code of this turn's execute_code calls so far (the turn log records a call before it
+    runs, so the current one is among them; it is the same code, so that changes nothing). A
+    stated value one of them used is not asked of the runs after it (code_watch)."""
+    try:
+        from agent_runtime import turn_log
+        log = turn_log.active()
+        if log is None:
+            return []
+        out: List[str] = []
+        for call in log.calls():
+            args = call.get("args")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    continue
+            if call.get("tool") == "execute_code" and isinstance(args, dict) \
+                    and isinstance(args.get("code"), str):
+                out.append(args["code"])
+        return out
+    except Exception:  # noqa: BLE001 - a missing log only costs the earlier-run credit
+        return []
+
+
 def _run_watch(executor: Any, staging: List[Dict[str, str]], label: Optional[str],
                purpose: Optional[str] = None) -> Any:
     """A code_watch.RunWatch for this run, or None for an executor that cannot take one."""
@@ -224,7 +249,7 @@ def _run_watch(executor: Any, staging: List[Dict[str, str]], label: Optional[str
     # code and timeout are filled in by the executor, which knows the source it really runs
     # (an entrypoint's file) and the limit after the cap.
     return code_watch.RunWatch(code="", timeout=0, label=str(label or ""), brief=_task_text(),
-                               inputs=inputs, purpose=_clean_purpose(purpose))
+                               earlier_code=_earlier_code(), inputs=inputs, purpose=_clean_purpose(purpose))
 
 
 def _clean_purpose(purpose: Optional[str]) -> str:
@@ -656,8 +681,8 @@ def make_code_execution_tools(
             "\"count buildings in the flood zone\"); give it every run. `timeout_seconds`: "
             "default 180, max 600. A reviewer reads the code while it runs; `interrupted: "
             "\"review\"` means it found a critical problem: apply its `fix` and re-run. Slow "
-            "runs return `performance_hints`; `parameter_checks` names a stated value the code "
-            "never uses; a timeout's `stuck_at` names the line it was on. "
+            "runs return `performance_hints`; `parameter_checks` names a stated value a run that "
+            "applies distances or times never uses; a timeout's `stuck_at` names the line it was on. "
             + (_EXTRACTION_NOTE if extraction_enabled() else "")
             # Network in the run phase, or the tool bridge: said only while one is really on.
             + sandbox_capability_note()
