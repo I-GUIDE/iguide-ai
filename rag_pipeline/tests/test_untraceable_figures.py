@@ -92,3 +92,43 @@ def test_code_run_summary_counts_successes_and_names_failures():
     ok, failures = _code_run_summary(FAILED_RUNS)
     assert ok == 1
     assert failures.count("timed out") == 2 and failures.count("IndexError") == 2
+
+
+# Production, 2026-10-18 (zone rates, step 2): a follow-up restated the table the previous turn
+# computed and ran no tool. Its figures were in the conversation, not in this turn's results,
+# and the guard replaced a correct answer. The earlier answer counts as a source.
+ZONES_STEP1 = ("Zone Z2 has the highest incident rate: 22.89 per 1,000 residents (19 incidents, "
+               "population 830).\nZ2 830 19 22.89\nZ5 7,400 66 8.92\nZ1 5,200 41 7.88\n"
+               "Z4 2,600 18 6.92\nZ6 3,900 25 6.41\nZ8 6,100 37 6.07\nZ7 1,500 9 6.00\n"
+               "Z3 4,100 22 5.37\nZ9 2,800 14 5.00\n251 of the 256 incidents fell inside a zone.")
+ZONES_STEP2 = ("Z5 has the most incidents, 66, but with 7,400 residents its rate is 8.92 per "
+               "1,000. Z2 has only 19 incidents among 830 residents, a rate of 22.89. By count "
+               "the order is Z5 (66), Z1 (41), Z8 (37), Z6 (25), Z3 (22), Z2 (19), Z4 (18), "
+               "Z9 (14), Z7 (9); by rate Z2 (22.89), Z5 (8.92), Z1 (7.88), Z4 (6.92), Z6 (6.41), "
+               "Z8 (6.07), Z7 (6.00), Z3 (5.37), Z9 (5.00).")
+
+
+def test_a_follow_up_restating_the_previous_answer_is_untouched():
+    from agent_runtime.supervisor.graph import _raw_history_text
+
+    history = [{"role": "user", "content": "Compute each zone's incident rate per 1,000 residents."},
+               {"role": "assistant", "content": ZONES_STEP1}]
+    facts = turn_facts.build(results=[], query="Which zone has the most incidents?",
+                             history=_raw_history_text(history))
+    answer, info = _guard_untraceable_figures(ZONES_STEP2, facts, [])
+    assert info is None and answer == ZONES_STEP2
+
+
+def test_without_the_history_the_same_follow_up_would_be_cut():
+    facts = turn_facts.build(results=[], query="Which zone has the most incidents?")
+    _answer, info = _guard_untraceable_figures(ZONES_STEP2, facts, [])
+    assert info is not None
+
+
+def test_history_does_not_launder_a_fabricated_answer():
+    history = [{"role": "user", "content": "Tell me about Waikiki."},
+               {"role": "assistant", "content": "Waikiki is on Oahu's south shore."}]
+    from agent_runtime.supervisor.graph import _raw_history_text
+    facts = turn_facts.build(results=FAILED_RUNS, query=QUERY, history=_raw_history_text(history))
+    _answer, info = _guard_untraceable_figures(FABRICATED, facts, FAILED_RUNS)
+    assert info is not None and info["untraceable"] >= 8

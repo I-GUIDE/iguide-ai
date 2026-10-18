@@ -201,9 +201,16 @@ def _walk_strings(node: Any, out: List[str], depth: int = 0, key: str = "") -> N
 
 
 def build(*, log: Any = None, results: Sequence[Dict[str, Any]] = (), query: str = "",
-          evidence: Sequence[Any] = (), prior_rows: Sequence[Any] = ()) -> FactSet:
+          evidence: Sequence[Any] = (), prior_rows: Sequence[Any] = (),
+          history: str = "") -> FactSet:
     """Every number the turn recorded. Typed facts carry a unit and a source; the rest carry
-    the unit written beside them, if any."""
+    the unit written beside them, if any.
+
+    `history` is the conversation so far. A follow-up ("which zone has the most incidents?")
+    restates figures an earlier turn computed and answered; that answer passed these same checks
+    when it was made, so its figures are sources too. Without them the Stage 77 guard replaced
+    a correct follow-up on production (zone rates, step 2, 2026-10-18): 35 of its 39 figures
+    were in the previous answer and in no result of this turn."""
     fs = FactSet()
     for f in (log.facts() if log is not None else []):
         try:
@@ -230,6 +237,8 @@ def build(*, log: Any = None, results: Sequence[Dict[str, Any]] = (), query: str
     for row in prior_rows or []:
         for value, unit, context in _numbers_in(json.dumps(row, default=str)):
             fs.add(value, unit=unit, source="earlier turn", label=context)
+    for value, unit, context in _numbers_in(history or ""):
+        fs.add(value, unit=unit, source="earlier answer", label=context)
     return fs
 
 
