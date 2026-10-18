@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadDemoFiles, type DemoCase } from './demos';
-import { DemoPanel } from './components/DemoPanel';
+import { DemoPanel, type ExampleIdentity } from './components/DemoPanel';
+import { type UserExample, isUserExample, loadUserExampleFiles, shareTokenFrom,
+  withoutShareToken } from './userExamples';
 import type { CSSProperties } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
@@ -28,6 +30,7 @@ import { unavailableChoice } from './modelChoice';
 import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
 import { layerVerdicts, type ReplayMeta } from './replay';
+import { loadLayerData, undrawnLine } from './layerLoad';
 import {
   deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, rerenderMessages, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -121,7 +124,10 @@ export default function App() {
   const resizingRef = useRef(false);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
-  const [tab, setTab] = useState<AppTab>('chat');
+  // A share link (`?example=<token>`) opens the Spatial Analysis tab on the example it names.
+  // The token stays in state until the panel has opened it, then leaves the address bar too.
+  const [shareToken, setShareToken] = useState<string | null>(() => shareTokenFrom());
+  const [tab, setTab] = useState<AppTab>(() => (shareTokenFrom() ? 'demos' : 'chat'));
   // A demo step on its way to the composer (see ChatPanel's `seed`).
   const [demoSeed, setDemoSeed] = useState<{ text: string; n: number; send: boolean } | null>(null);
   // The Demos sidebar can fold to a rail. On a narrow window it is a drawer over the chat, so it
@@ -218,14 +224,18 @@ export default function App() {
   // the role, the permitted flag and the reason are what the account badge needs to say where
   // someone stands BEFORE they spend a question finding out.
   const [me, setMe] = useState<WhoAmI | null>(null);
+  // What the examples panel needs to know about identity: whether it may offer to write and
+  // share examples. 'unknown' until /agent/ui-config (and in token mode /agent/whoami) answers.
+  const [exampleIdentity, setExampleIdentity] = useState<ExampleIdentity>('unknown');
   const [viewer, setViewer] = useState<string | null>(null);
   const viewerRef = useRef<string | null>(null);
   useEffect(() => { viewerRef.current = viewer; }, [viewer]);
   useEffect(() => {
-    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); return; }
+    if (mode !== 'live') { setDemoMode(false); setTokenMode(false); setExampleIdentity('unknown'); return; }
     let live = true;
     void fetchUiConfig(asAgentConfig()).then((c) => {
       if (!live) return;
+      setExampleIdentity(c?.mode === 'token' ? 'unknown' : 'none');
       const demo = !!c?.demo_mode;
       setDemoMode(demo);
       setTokenMode(c?.mode === 'token');
@@ -234,6 +244,7 @@ export default function App() {
           if (!live) return;
           setMe(who);
           setViewer(who?.user?.id ?? null);
+          setExampleIdentity(who?.signedIn && who.permitted ? 'signed-in' : 'signed-out');
         });
       } else {
         // Dev and demo identify nobody, so there is no badge and no owner to scope by.
@@ -699,6 +710,10 @@ export default function App() {
     const layerLoads: Promise<unknown>[] = [];
     const tracked = (draw: (layer: MapLayerEvent) => Promise<void>) =>
       (layer: MapLayerEvent) => { layerLoads.push(draw(layer)); };
+    // Layers the agent sent that did not draw, one sentence each. Shown on the answer card, not
+    // only in the trace: the trace is folded once the turn ends, and the answer above it may say
+    // the layer is on the map.
+    const undrawn: string[] = [];
     setBusy(true);
     // A drawn region becomes spatial context for the agent (the API has no geometry
     // field, so it rides along in the prompt). The user bubble keeps the original text.
@@ -751,23 +766,20 @@ export default function App() {
             addTrace({ text: `map: raster — ${layer.label}`, kind: 'tool' });
             return;
           }
-          // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths).
-          let fc = layer.geojson;
-          if (!fc && layer.url) {
-            try {
-              const res = await fetchAgentFile(resolveUrl(layer.url), asAgentConfig(),
-                                               { signal: ctl.signal });
-              if (res.ok) fc = await res.json();
-              else {
-                // Say so. A refused download used to vanish here without a word, beside an
-                // answer saying the layer was on the map.
-                const why = await res.json().then((j) => j?.reason || '').catch(() => '');
-                addTrace({ text: `map: ${layer.label} could not be loaded (HTTP ${res.status}`
-                  + `${why ? `, ${why}` : ''}), so it is not on the map`, kind: 'warn' });
-              }
-            } catch { /* leave it undelivered rather than guess */ }
+          // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths). Every
+          // way it can fail to draw is SAID, in the trace and on the answer card: an empty
+          // `catch {}` here once swallowed a JSON.parse error on a file holding NaN, and the
+          // answer beside the empty map said the route was on it (r59, 2026-10-17).
+          const loaded = await loadLayerData(layer.geojson, layer.url,
+            (u) => fetchAgentFile(resolveUrl(u), asAgentConfig(), { signal: ctl.signal }));
+          if ('aborted' in loaded) return;
+          if ('problem' in loaded) {
+            const line = undrawnLine(layer.label || 'a layer', loaded.problem);
+            undrawn.push(line);
+            addTrace({ text: line, kind: 'warn' });
+            return;
           }
-          if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;
+          const fc = loaded.fc;
           const heat = layer.render === 'heatmap';
           const green = layer.source === 'overpass';
           // A categorical layer (LISA classes, Gi* bands, region ids) must keep that render:
@@ -857,6 +869,7 @@ export default function App() {
         addTrace({ text: `map: a layer was still downloading ${LAYER_WAIT_MS / 1000} s after the reply; `
           + 'the turn was saved without it', kind: 'warn' });
       }
+      if (undrawn.length) patch({ mapWarnings: [...undrawn] });
       setBusy(false); abortRef.current = null; turnIdRef.current = null; setTurnsEnded((n) => n + 1);
     }
     // runLive no longer calls snapshotSession, so it cannot hold a stale one. When it did,
@@ -1049,15 +1062,20 @@ export default function App() {
   // The Demos tab: a case runs in a NEW conversation, so an earlier question's files and layers
   // cannot leak into it, with its data attached through the same upload path as a file the
   // visitor picked by hand. The map opens because every case ends on it.
-  const startDemo = useCallback(async (c: DemoCase) => {
+  //
+  // A user's example runs the same way: its files come from the agent (with this page's
+  // credentials) instead of the static catalogue, and are uploaded into the new conversation
+  // like any other file, so they land in the runner's own file store.
+  const startDemo = useCallback(async (c: DemoCase | UserExample) => {
+    // Fetched BEFORE the reset, so a file that cannot be read leaves the current conversation
+    // as it was instead of an empty one that says the example started.
+    const files = !c.files.length ? []
+      : isUserExample(c) ? await loadUserExampleFiles(c, asAgentConfig()) : await loadDemoFiles(c);
     resetConversation();
     setMapVisible(true);
-    pushMsg({ role: 'agent', text: `${c.title}. ${c.blurb}` });
-    if (c.files.length) {
-      const files = await loadDemoFiles(c);
-      await onUpload(files);
-    }
-  }, [resetConversation, pushMsg, onUpload]);
+    pushMsg({ role: 'agent', text: c.blurb ? `${c.title}. ${c.blurb}` : `${c.title}.` });
+    if (files.length) await onUpload(files);
+  }, [resetConversation, pushMsg, onUpload, asAgentConfig]);
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}${resizing ? ' resizing' : ''}${REPLAY_KEY ? ' replay-capture' : ''}`}>
@@ -1142,7 +1160,12 @@ export default function App() {
             {/* Hidden, not unmounted, when folded: the open case and the steps already asked
                 are the panel's own state, and folding must not throw them away. */}
             <div hidden={!demoOpen}>
-              <DemoPanel busy={busy} live={mode === 'live'}
+              <DemoPanel busy={busy} live={mode === 'live'} cfg={asAgentConfig()} identity={exampleIdentity}
+                shareToken={shareToken}
+                onShareHandled={() => {
+                  setShareToken(null);
+                  try { history.replaceState(history.state, '', withoutShareToken()); } catch { /* */ }
+                }}
                 onStart={async (c) => { await startDemo(c); foldIfNarrow(); }}
                 onRun={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: true })); foldIfNarrow(); }}
                 onStage={(t) => { setDemoSeed((s) => ({ text: t, n: (s?.n ?? 0) + 1, send: false })); foldIfNarrow(); }}

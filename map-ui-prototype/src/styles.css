@@ -269,6 +269,10 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 
 /* answer card */
 .answer-card { border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: var(--shadow); padding: 6px 18px 14px; }
+/* A layer the agent sent that did not draw. Beside the answer, because the answer may say it is on the map. */
+.answer-card .map-warn { margin: 10px 0 2px; padding: 8px 12px; border-radius: 8px; background: #fbeeec; color: #a4453a; font-size: 13px; }
+.answer-card .map-warn p { margin: 0; }
+.answer-card .map-warn p + p { margin-top: 4px; }
 .cursor { color: var(--brand); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -657,6 +661,35 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .demoexplain:hover:not(:disabled), .demosend:hover:not(:disabled) { background: #fdeec9; border-color: #c98a1a; }
 .demoexplain:disabled, .demosend:disabled { opacity: .45; cursor: default; }
 .demoexplain:focus-visible, .demosend:focus-visible { outline: 2px solid #c98a1a; outline-offset: 2px; }
+/* User-authored examples (stage 73): their groups, actions and the editor. */
+.exgrouphead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.exbadge { margin-left: 6px; font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px;
+           background: #eef1f4; color: #3b4046; vertical-align: 1px; }
+.exnotice { font-size: 12px; color: #1f5f45; background: #eef8f3; border: 1px solid #cfe9dc; border-radius: 8px;
+            padding: 6px 9px; margin: 8px 0; }
+.exactions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.exactions .demoback:disabled { opacity: .5; cursor: default; }
+.exconfirm { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #8a2a1a; }
+.exdanger { border-color: #e2a596; color: #8a2a1a; }
+.exlink { width: 100%; font-size: 11.5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px;
+          background: var(--soft); color: var(--ink); box-sizing: border-box; }
+.exampleform .exfield { display: flex; flex-direction: column; gap: 3px; margin-top: 10px; font-size: 12px;
+                        font-weight: 600; color: #3b4046; }
+.exampleform .exfield small { font-weight: 400; color: #8a9097; }
+.exampleform input:not([type=file]), .exampleform textarea, .exampleform select {
+  font: inherit; font-size: 12.5px; font-weight: 400; padding: 5px 7px; border: 1px solid var(--line);
+  border-radius: 6px; background: #fff; color: var(--ink); width: 100%; box-sizing: border-box; }
+.exampleform textarea { resize: vertical; line-height: 1.4; }
+.exicon { flex: none; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 6px;
+          background: #fff; cursor: pointer; font-size: 12px; line-height: 1; color: #3b4046; }
+.exicon:disabled { opacity: .35; cursor: default; }
+.exaddfile { display: inline-block; margin-top: 6px; font-size: 12px; cursor: pointer; }
+.exaddfile input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.exaddfile span { padding: 2px 8px; border: 1px dashed #c98a1a; border-radius: 999px; color: #8a5d05; }
+.exaddfile:focus-within span { outline: 2px solid #c98a1a; outline-offset: 2px; }
+.exsteps { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 10px; }
+.exsteprow { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.exstepn { flex: none; width: 18px; font-size: 12px; color: #8a9097; }
 
 /* A sandbox run in progress (CodeRunBar): its clock against its limit, the review's state, and
    after 90 s a Stop of its own. Quiet until it needs attention. */

@@ -87,6 +87,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 71 | [A chat-only client gets no graph or agent-KB search](#stage-71) | 2026-10-16 | for the platform (chat-only) the Neo4j and agent-KB tools are not bound, and the Neo4j query runners, the Text2Cypher search, the agent-KB search, block read and KB join refuse for the turn; the map UI keeps both |
 | 72 | [The platform searches only what it can show](#stage-72) | 2026-10-16 | a chat-only turn searches keyword, semantic and spatial (the platform OpenSearch index) and OpenGeoData only; web, Overpass and the search agents are off; the evidence sent keeps only platform element types |
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
+| 75 | [A layer with NaN in its attributes still reaches the map](#stage-75) | 2026-10-17 | every `.geojson` the download route serves, and every SSE event, is strict JSON (NaN/Infinity written as null); add_map_layer stores strict JSON too; a layer that fails to draw is named in the trace and on the answer card |
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
@@ -11115,6 +11116,57 @@ end to end (the model choosing 'road network') is not measured here.
   each way's node ids, which would join exactly; they are not carried.
 
 
+### Stage S69.1 The routing guidance forbids joining nearby vertices
+
+**Why.** The first end-to-end run of the Loop question (2026-10-17 00:58 UTC, local agent on
+077e053a, Lumen deepseek-v4-flash, Chrome; round r58 of the GIS Assessment Log) fetched the
+network right: the model chose `feature='road network'` itself and got 1,521 ways. The route was
+wrong.
+- **No path at first.** The vertices nearest the two corners sat on one-way stubs that the box
+  cuts off, so the first Dijkstra found no path.
+- **Six steps on connectivity.** The model computed the strongly connected components and still
+  snapped the corners into the largest WEAKLY connected one.
+- **A 5 m join.** It then merged every pair of vertices within 5 m. That added 13 links no road
+  makes: 11 between Upper and Lower Wacker Drive (stacked levels) and 2 at expressway ramp
+  bridges.
+- **Result.** It answered 4.89 min / 4.22 km. The best legal route on the same file is 5.19 min /
+  4.21 km.
+
+`how_to_route` said "join on identical coordinates" once, as a how-to; nothing said not to snap.
+
+**What changed** (`agent_runtime/langchain_granular_tools.py`, `_road_network_result`):
+- **`how_to_route`, rewritten as rules.**
+  - Graph nodes are the exact vertex coordinates.
+  - Never merge, snap or buffer vertices that are merely close, and never add an edge the file
+    lacks. The reason is given: stacked roads, bridges and ramps lie within metres of roads they
+    do not meet, so any tolerance invents shortcuts.
+  - Snap the origin and destination to the nearest vertex in the largest STRONGLY connected
+    component (the weakly connected one is not enough), and report how far each moved.
+  - If there is still no path, say so rather than change the network.
+- **The tool description.** Both tools' road-network note now ends "joining ways only at shared
+  vertices".
+
+**Tests.** `test_routing_instructions_forbid_snapping_and_name_the_strong_component` pins the
+four rules. The 39 Stage 69 tests are unchanged.
+
+**Measured live,** 2026-10-17 01:12 UTC, same question, same model, same box, on this branch:
+- **Correct.** 5.19 min (5.1865) and 4.213 km. The endpoints were snapped into the largest
+  strongly connected component (about 158 m and 244 m). This is the same route and the same
+  figures as an independent build from the turn's own file: Ruble, Eisenhower Expressway, Ida B.
+  Wells, Dearborn, State, Upper Wacker, Upper Columbus.
+- **Cheaper.** 8 tool calls instead of 18, and 2 min 40 s instead of 6 min. No connectivity
+  detours.
+- **The route did not reach the map,** for an unrelated reason. The model's GeoJSON carried bare
+  `NaN` values (unnamed ways in a street-name list); `add_map_layer` wrote them through, and the
+  browser's `JSON.parse` rejected the file. The UI's download handler swallows that error
+  (`catch {}`), so nothing said so, while the answer said the route was on the map. Not fixed
+  here.
+
+**Not done.**
+- **Guidance only.** Nothing enforces these rules. A tool that marks each way's strong-component
+  membership, or a routing tool, would.
+- **The NaN layer drop** above.
+
 ## Stage 70 — Overpass keeps its last good answer {#stage-70}
 
 **Why.** From 2026-10-15 22:55 to 10-16 07:45 CDT all six public mirrors in `_DEFAULT_ENDPOINTS`
@@ -11292,6 +11344,95 @@ search agents refused. Stage 63/71 tests updated: Overpass and web are no longer
   chat-only answer has none to cite.
 - `opengeodata_results` is shown however the platform shows it; unchanged here.
 
+
+## Stage 73 — Users write and share their own Spatial Analysis examples {#stage-73}
+
+**Why.** The Spatial Analysis tab (the old Demos tab, renamed in PR #146) offered only the
+built-in catalogue, which is generated by `map-ui-prototype/scripts/build_demos.py` and served as
+static files. Adding an example meant a code change and a deploy. The user (2026-10-16) asked for
+users to author their own (data plus ordered steps) and share them, and decided the shape: any
+signed-in user may create one; it is stored on the agent server under the creator's account, so it
+follows them across browsers; it is private by default and shareable.
+
+**What changed.**
+- **Store** (`agent_runtime/user_examples.py`). One JSON definition per example plus its data
+  files, under `<AGENT_FILE_STORAGE_ROOT>/examples/` (`defs/`, `files/<id>/`, and `shared/<user
+  digest>.json` for each user's "Shared with me" list). The file-store volume was chosen over the
+  agent's Postgres and the OpenSearch cluster: it is the agent's own, it survives rebuilds, it
+  exists in every mode including local, and the definitions sit next to the data they describe.
+  OpenSearch belongs to the website, and Postgres runs only under the `extraction` profile.
+  Writes are atomic (temp file + `os.replace`) under a thread lock plus `flock` on a lock file.
+- **Who sees what.** The owner; anyone, once an admin publishes it; and a signed-in user who
+  opened its share link. That last entry stores the token it was opened with, so revoking or
+  rotating the link takes the example away from everyone it reached. Only the owner edits,
+  deletes or makes the link. Publishing needs a platform role at or below
+  `AGENT_EXAMPLES_PUBLISH_ROLE` (default 2, Admin). That is deliberately a separate number from
+  `AGENT_MIN_ROLE` (default 4, Contributor), which is who may use the agent at all; under it,
+  every user could publish. An owner may unpublish their own. An edit by a non-admin owner
+  unpublishes, because the admin approved what it said then, not what it says after the edit.
+  Everything else is a 404 with the words an unknown id gets, as for files and conversations: a
+  403 would confirm the id. The owner's platform id (a CILogon URL, which names a person) never
+  leaves the server, and only the owner is sent the share token.
+- **Routes** (`api/server.py`). `GET/POST /agent/examples` (list as `mine`/`shared`/`published`,
+  each example in one group only, plus `canCreate`, `canPublish`, `limits`; create),
+  `GET/PUT/DELETE /agent/examples/<id>`, `GET …/files/<name>`, `POST/DELETE …/share`
+  (`rotate: true` replaces the token), `POST /agent/examples/open` (the token goes in the body, not
+  the path, to keep it out of access logs), `DELETE …/shared`, `POST …/copy`,
+  `POST/DELETE …/publish`. Identity, then the key, as on the upload route.
+- **No identity, no owner.** Dev, demo and service-key callers list the published examples. Every
+  write answers 403 `examples_need_sign_in`. They are never given one shared owner to write as,
+  for the same reason the file store falls back to session scoping (AGENTS.md "Who is calling").
+- **Files reach the runner's conversation the way built-in files do.** The page fetches them from
+  `/agent/examples/<id>/files/<name>` and uploads them through `/agent/files/upload` into the new
+  conversation, the same path a built-in example takes from `public/demos/`. So they are stamped
+  with the runner as owner and with the runner's thread. The file store's scoping is unchanged,
+  and an example's files are not file-store records. The brief suggested copying server-side. The
+  round trip was chosen because the client draws its own map preview from the File objects it
+  uploads, so a server-side copy would have needed a second path that loses that preview.
+- **Limits** (env, defaults): 50 examples per account (copies count), 20 steps, 20 files, 100 MB
+  of data per example (an edit counts the kept files), plus field lengths. Uploads stream in 1 MB
+  chunks and stop at the budget. A refused upload leaves no file behind.
+- **UI** (`DemoPanel.tsx`, `ExampleEditor.tsx`, `userExamples.ts`). "My examples" (with
+  "+ New example") and "Shared with me" sit above the built-in categories, and a published
+  example is filed under its category with a "Community" badge. The editor has title,
+  description, category (the `DEMO_CATEGORIES` list), comma-separated topics, data files
+  (add/remove), and ordered steps (label + question; add, move up/down, delete). The owner gets
+  Edit, Share/Copy link/Stop sharing, and Delete (with an inline confirm). Others get "Copy to my
+  examples" and "Remove from my list", and admins get Publish/Unpublish. `?example=<token>` opens
+  the tab on that example once identity is known, then leaves the address bar. A signed-out
+  visitor is told to sign in, and the token is kept.
+
+**Measured.**
+- 31 offline route tests (`rag_pipeline/tests/test_user_examples.py`): create with files and
+  JSON-only; validation naming the field; the 404 wall on every route for a non-owner; edit
+  with keep/replace/prune; delete; path traversal; share, open, revoke and rotate; signed-out and
+  no-identity refusals; owner opening their own link; forget; copy outliving the original;
+  publish limited to admins and configurable; the edit-unpublishes rule; size, file, step and
+  per-account limits leaving nothing behind.
+- `npm run check:examples`: 28 client checks (draft, form body, step moves, share link). All 13
+  `check:*` scripts and `tsc --noEmit` pass.
+- Driven in Chrome against a local token-mode agent (throwaway signing secret, no `.env`, shared
+  stores pointed at a dead local port) with three test users, Alice (role 4), Bob (role 4) and
+  an admin (role 2), on two origins. Alice created an example (one GeoJSON, two steps, reordered)
+  and started it. The file was uploaded into her new conversation as her record, and step 1 on
+  Lumen `deepseek-v4-flash` inspected it and drew the sized point layer. Alice shared it. Bob,
+  signed out, was told to sign in. Signed in, he opened it. It landed in "Shared with me" with
+  no edit controls, and starting it stored the file as Bob's. He copied it into "My examples".
+  Alice stopped sharing: Bob's shared entry went, the old link answered "revoked", and his copy
+  stayed. Alice shared again and the admin opened and published it. Bob then saw it under
+  Measurement with the badge. Alice's edit (new title, file removed) unpublished it and said so.
+  Her delete removed the definition and its files from disk.
+
+**Not fixed.**
+- A list is refreshed when the panel loads and after the viewer's own changes. Another user's
+  revoke or publish shows on their next load.
+- Published examples are visible to every caller of a deployment, including dev and demo, which
+  identify nobody, as the built-in ones are.
+- No moderation queue: an admin publishes what they can open, so the owner has to share the link
+  with an admin first.
+- Nothing reclaims the store beyond the per-account cap. Deleting an account on the platform
+  leaves its examples.
+
 ## Stage 74 — Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget {#stage-74}
 
 **Why.** Stage 59 priced every turn in dollars, so the VM's default model, NCSA Lumen
@@ -11444,6 +11585,82 @@ consistent in case of the automatic model swap because of usage."
 - The pool size is configured by hand and must follow the account if NCSA changes it.
 - The daily ledger is per process and per host. A second worker or host would need a shared
   store.
+
+## Stage 75 — A layer with NaN in its attributes still reaches the map {#stage-75}
+
+**Why.** Round r59 of the GIS assessment log (2026-10-17 01:12 UTC, Lumen deepseek-v4-flash)
+answered the Loop routing question correctly, 5.19 min, and drew no route. execute_code wrote the
+route GeoJSON with Python's `json`, and its `streets` list held five bare `NaN` (pandas NaN for
+unnamed ways). add_map_layer re-wrote the file through GDAL, which writes a NaN scalar as null
+but copies a list property through as raw JSON, so the NaN survived into `file_75ef8ade64a3`.
+The download route served it with a 200. The map's `JSON.parse` threw "Unexpected token 'N'",
+`onMapLayer` swallowed that in an empty `catch {}`, and the answer told the user the route was on
+the map. Nothing anywhere said otherwise.
+
+**What changed.**
+- **`agent_runtime/strict_json.py`.** `strict_json_bytes` rewrites JSON text holding `NaN`,
+  `Infinity` or `-Infinity` (or a number too large for a float) with null in their place,
+  wherever they sit: a scalar property, inside a list, inside a nested object. Text without
+  either token is answered by a substring test and never parsed. Text that is not JSON is left
+  alone. `strict_dumps` is `json.dumps(allow_nan=False)` that nulls non-finite floats instead
+  of raising.
+- **Where: serve time, with write time as well for add_map_layer.** The download route
+  (`GET /agent/files/<id>/download`) sends every `.geojson` up to 64 MB through
+  `strict_json_bytes`. That is the one place every layer passes. It covers add_map_layer, a
+  code peer's raw files (`map_layers.layers_for_artifacts` points the map straight at them, so
+  no tool ever re-writes them), any other tool's file, and the files already in the store. Fixing
+  each producer would have left the peer path and the existing files broken. The stored bytes are
+  not edited: a file's bytes can be its content key, and the record should stay what the
+  producer wrote. add_map_layer also rewrites its own output strict before storing it
+  (`sanitize_json_file`), since it re-serializes anyway and its copy is read by layer_qa and by
+  later tools. Its result says how many values became null (`nonfinite_as_null`).
+- **SSE events.** `_sse_event` uses `strict_dumps`. A `map_layer` event can carry its GeoJSON
+  inline (`map_layers.build_map_layer`), and one NaN made the client's parse of the whole event
+  fail, so the layer arrived with no data.
+- **Map UI.** `src/layerLoad.ts` `loadLayerData` loads a `map_layer` event's GeoJSON and returns
+  either the collection or a sentence saying why it cannot draw: HTTP refusal (wording kept),
+  network failure, invalid JSON (the parser's own message), not a FeatureCollection, no features,
+  or an event with neither data nor a url. Stop (AbortError) is not reported. `onMapLayer` adds
+  each failure as a `warn` trace line, `map: <label> could not be loaded (<why>), so it is not on
+  the map`. At the end of the turn it puts the same lines on the answer card (`mapWarnings`, red
+  note under the answer). The card is where the reader sees them: the trace is folded once the
+  turn ends, and the answer above it may say the layer is on the map.
+
+**Not done.** The answer's text is not rewritten. Checking the "on the map" claim against what
+drew would need the server to know what the client drew, and it does not: the server's own
+`delivers_map_layer` judges the descriptor, not the browser. The note beside the answer is the
+check the reader gets. A `.geojson` over 64 MB is served as stored. The artifact fallback
+(`loadVectorArtifacts`, for turns with no `map_layer` event) still skips an unreadable file
+quietly, because those files were never claimed to be on the map.
+
+**Measured.** `rag_pipeline/tests/test_strict_geojson_layers.py`, 8 offline tests, each parsing
+what a browser receives with a strict parser (`json.loads` with `parse_constant` raising, and
+node's `JSON.parse` where node is installed):
+- the helper on scalars, lists, nested objects, `-Infinity`, `1e999`; strict text and non-JSON
+  left alone;
+- a raw r59-shaped file served strict while the stored bytes stay unchanged;
+- add_map_layer storing and serving strict JSON, with `nonfinite_as_null` set;
+- an inline `map_layer` SSE event.
+
+With the helper patched out, the three end-to-end tests fail. `npm run check:layers`: 11 checks,
+including the r59 body (a NaN inside `streets`) giving the warn line.
+
+**Measured live** (2026-10-17, local agent from this branch, `AGENT_MODE=local`, Lumen
+deepseek-v4-flash, Chrome, a new tab per test):
+- **The Loop question.** The route drew: a layer "Fastest route SW→NE Loop", 1 feature, and no
+  warning. The answer was 5.4 min and 4.41 km, not r59's 5.19 min and 4.21 km. This branch does
+  not carry S69.1 (#152), the routing rules r59 ran with. This run's route file held no NaN, so
+  it shows only that nothing regressed.
+- **The r59 shape, forced.** A route GeoJSON written by Python's `json` with 6 bare NaN (5 in
+  `streets`, 1 scalar) was uploaded and the agent asked to map it. add_map_layer's stored copy had
+  0 NaN, with null in their place, and the line drew ("loop route nan", 1 feature). The answer
+  quoted 5.19 min and 4.21 km from the attributes.
+- **The raw upload, fetched with the browser's own `JSON.parse`.** No tool rewrote this file.
+  It parsed, with null where the NaN were. The server logged `Served file_… with 6 non-finite
+  value(s) written as null`, and the stored bytes still hold the NaN.
+
+The answer-card note did not appear live, because nothing failed. It is covered by
+`check:layers` and the type check.
 
 ## Stage 76 — Map layers say what they are {#stage-76}
 
@@ -11766,3 +11983,41 @@ The user asked for each step's action and purpose by default, with the raw recor
   - the trace read: the plan sentence, "Executing code to count hotels inside tsunami evacuation zone…", "ok · 3.36 s", "Code step finished: 1 run";
   - "Show raw calls" switched to `execute_code({...})` and back;
   - the answer was 65, which matches the T16 reference.
+
+### S78.2 — The stated-parameter check asks only runs that apply a value {#stage-78-2}
+
+**Why.** A live sweep of all 12 Spatial Analysis examples on 2026-10-18 (e561e071, 3 passes, 81 turns, Lumen deepseek-v4-flash) found that the S78.1 stated-parameter rule fired on 25 runs in 9 turns. Every firing was wrong:
+- **Inspection runs.** Most were the turn's first runs, which read a CSV head or raster metadata. For example, SUIT got "the task states “500 m”, and no number in the code equals it in any unit" three times, on runs that printed CRS, bounds and class counts. The run that applied the threshold (`dist <= 500.0`) was never flagged.
+- **Runs after the value was used.** The others came after the value had already been applied: a bubble map built from rows that a 25 km filter had already selected, a "does the GeoJSON exist" check, a MILP solve that has no distance cutoff (COOLING's "more than 2 km" is a later metric).
+- **The cost.** The finding goes to the trace, to the model in the run's result (`parameter_checks`), and to the concurrent reviewer as a lead. On an inspection run it is noise that invites putting a number into code that has no use for one.
+
+**Change** (`agent_runtime/code_watch.py`).
+- **Only runs that apply a value are checked** (`applies_values`). A run applies a distance or a time when it has one of these:
+  - a call that takes one (`buffer`, `dwithin`, `query_ball_point`, `ego_graph`, `single_source_dijkstra`, …);
+  - a keyword argument whose name carries one (`max_distance=`, `radius=`, `cutoff=`, …);
+  - a number assigned to a name that says it is one (`RADIUS_M = 2.5 * 1000`);
+  - a threshold comparison against something named as one (`dist_km <= 25`, `nearest > 2000.0`).
+
+  Reading, printing, writing a layer and checking that a file exists apply nothing. Bare `m` and `d` are deliberately not in the name list: COOLING's `x[n*m:] > 0.5` is a solver's variable, not a distance.
+- **An earlier run of the turn counts.** `precheck(..., earlier=)` receives the code of the turn's earlier `execute_code` calls. `langchain_exec_tools._earlier_code` reads them from the turn log, which records each call before it runs, and they reach the check through `RunWatch.earlier_code`. Once a run has used the stated value, the runs after it (the map, the export) are not asked again. An earlier run that used a *different* value gives no credit.
+- **Unchanged.** A computing run that uses another value is still flagged, in the trace and in the result: "buffer 2,500 m" with `sites.buffer(1000)`, `dist_m <= 1000` or `max_distance=1000`.
+
+**Rejected alternative.** Checking once at answer time, against every run of the turn, would also have cleared the COOLING and QUAKES cases. It was not chosen for two reasons. A check at answer time comes too late for the code step to fix the run: today the finding goes back with the run's result, so the next run can fix it. And a value can also be applied by a non-code tool (a buffer or isochrone tool), which an answer-time check that reads only code would miss.
+
+**Verified.**
+- **Offline replay** of the archived `execute_code` runs (`gis_harness_runs_archive/live-examples-e561e071/lumen_deepseek-v4-flash/*.events.jsonl`):
+  - **Coverage.** The trace cuts tool arguments at 3,000 characters, so 19 of the 213 calls have unreadable code; 194 runs in 66 turns are replayed.
+  - **The 19 cut runs.** None of them fired live. The new rule only adds conditions to the old one, so it fires on a subset of the old rule's runs and cannot fire on them either. Leaving them out only removes earlier-run credit, so the replay is conservative.
+  - **Results.** On the 194 runs, the old rule reproduces the live firings on all 194; the new rule fires on 0.
+  - The live brief (task plus plan) is not archived. Where the query alone does not produce the figure the live rule quoted (COOLING "2 km", which the plan text put next to "distance"), that figure is appended to the replay brief as a plan line.
+- **The four named inspection runs** (SUIT.p3.s1, QUAKES.p3.s1, COOLING.p3.s1 and ROUTE.p2.s2, each run 0): old rule 1 finding each, new rule 0, and `applies_values` is False for all four.
+- **Recall on real computing code.** Every archived run whose code contains a stated value had that value swapped for a wrong one (×0.4, in every unit), with no earlier-run credit. 20 of 24 were caught. The 4 misses are COOLING's `**2` exponents, which only matched "2 km" by number and are not uses of it. So 20 of 20 genuine uses were caught.
+- **Tests.** `rag_pipeline/tests/test_code_watch.py` covers:
+  - inspection-only runs (a verbatim SUIT first run, a CSV head, a file-exists check);
+  - computing runs with the wrong value (a buffer, a threshold, `max_distance`);
+  - earlier-run credit, including no credit for a wrong value;
+  - an `applies_values` table;
+  - `_earlier_code` reading the turn log.
+
+  Results: 68 passed. The neighbouring code-execution suites: 220 passed.
+- **Not deployed.**
