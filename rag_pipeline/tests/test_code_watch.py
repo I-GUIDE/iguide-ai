@@ -111,6 +111,91 @@ def test_a_figure_with_no_parameter_word_is_not_a_parameter():
     assert "stated_parameter" not in _rules("x = 1\n", "the river is 300 km long")
 
 
+# The live sweep of 2026-10-18 (e561e071, 81 turns): the rule fired on 25 runs in 9 turns and
+# every firing was a run that applied no value at all. These two are verbatim first runs.
+SUIT_INSPECT = """import rasterio
+import numpy as np
+
+for fid, name in [("file_8e70a128a6cc","landcover"), ("file_532cf5817959","road_distance"), ("file_7f6644667746","slope")]:
+    with rasterio.open(fid) as src:
+        print(f"=== {name} ===")
+        print("CRS:", src.crs)
+        print("Bounds:", src.bounds)
+        print("Resolution:", src.res)
+        data = src.read(1)
+        print("min/max:", np.nanmin(data), np.nanmax(data))
+        print("unique sample:", np.unique(data)[:20])
+"""
+SUIT_BRIEF = ("A cell is suitable if its slope is under 8 degrees, its road distance is at most "
+              "500 m, and its land cover is not water or wetland.")
+CSV_HEAD = ("import pandas as pd\ndf = pd.read_csv('file_0123456789ab')\nprint(df.head())\n"
+            "print(df.dtypes)\nprint(len(df), df.columns.tolist())\n")
+
+
+@pytest.mark.parametrize("code,brief", [
+    (SUIT_INSPECT, SUIT_BRIEF),
+    (CSV_HEAD, "Map the aftershocks within 25 km and 7 days, sized by magnitude"),
+    ("import os\nprint(os.path.exists('aftershocks.geojson'))\n", "aftershocks within 25 km"),
+])
+def test_a_run_that_only_inspects_is_not_asked_for_the_stated_value(code, brief):
+    assert code_watch.stated_parameters(brief)          # the task does state one
+    assert not code_watch.applies_values(code)
+    assert "stated_parameter" not in _rules(code, brief)
+
+
+@pytest.mark.parametrize("code", [
+    "import geopandas as gpd\nsites = gpd.read_file('s.geojson')\nzone = sites.buffer(1000)\n",
+    "import pandas as pd\ndf = pd.read_csv('h.csv')\nnear = df[df['dist_m'] <= 1000]\n",
+    "near = pts.sjoin_nearest(sites, max_distance=1000)\n",
+])
+def test_a_computing_run_that_uses_another_value_is_still_flagged(code):
+    """The real miss: the task says 2,500 m and the code that computes uses 1,000."""
+    found = code_watch.precheck(code, brief="buffer the sites by 2,500 m and count the homes")
+    assert [f for f in found if f["rule"] == "stated_parameter" and "2,500 m" in f["message"]]
+
+
+def test_a_value_an_earlier_run_of_the_turn_used_is_not_asked_again():
+    brief = "Map the aftershocks within 25 km and 7 days"
+    filt = "q = df[df['dist_km'] <= 25]\nq.to_file('a.geojson')\n"
+    later = "m = folium.Map()\nfor r in q.itertuples():\n    folium.Circle(radius=r.mag * 400).add_to(m)\n"
+    assert "stated_parameter" in _rules(later, brief)          # alone, it applies a radius
+    assert "stated_parameter" not in [
+        f["rule"] for f in code_watch.precheck(later, brief=brief, earlier=[filt])]
+    # an earlier run with the WRONG value is no credit
+    wrong = "q = df[df['dist_km'] <= 10]\n"
+    assert "stated_parameter" in [
+        f["rule"] for f in code_watch.precheck(later, brief=brief, earlier=[wrong])]
+
+
+@pytest.mark.parametrize("code,applies", [
+    ("open_fac = np.where(x[n*m:] > 0.5)[0]\n", False),     # a MILP solve (COOLING)
+    ("main = df[df['mag'] >= 7]\n", False),
+    ("share = (pop[nearest > 2000.0]).sum() / total\n", True),
+    ("g = nx.ego_graph(G, start, radius=120, distance='travel_time')\n", True),
+    ("ok = df[df.travel_min < LIMIT]\n", True),
+    ("RADIUS_M = 2.5 * 1000\n", True),                       # a declared parameter
+    ("t0 = time.time()\n", False),
+])
+def test_what_counts_as_applying_a_value(code, applies):
+    assert code_watch.applies_values(code) is applies
+
+
+def test_the_watch_gets_the_turns_earlier_code_from_the_turn_log():
+    from agent_runtime import langchain_exec_tools, turn_log
+
+    assert langchain_exec_tools._earlier_code() == []          # outside a turn
+    log = turn_log.new_log()
+    with turn_log.bind(log, "code", "the task") as b:
+        log.record_call(peer="code", run=b.run, name="execute_code",
+                        args={"code": "q = d[d.dist_km <= 25]\n"}, call_id="c1")
+        log.record_call(peer="code", run=b.run, name="other_tool", args={"code": "x"},
+                        call_id="c2")
+        log.record_call(peer="code", run=b.run, name="execute_code",
+                        args=json.dumps({"code": "print(q.head())\n"}), call_id="c3")
+        assert langchain_exec_tools._earlier_code() == ["q = d[d.dist_km <= 25]\n",
+                                                        "print(q.head())\n"]
+
+
 def test_syntax_errors_and_empty_code_yield_nothing():
     assert code_watch.precheck("def (:\n") == []
     assert code_watch.precheck("") == []

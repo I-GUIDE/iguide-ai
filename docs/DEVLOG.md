@@ -5936,6 +5936,14 @@ rather than from the previous one.
 - **Code step:** it starts with "Analysing in code" and ends with "Code step finished: N runs, M failed".
 - **Tests:** `test_code_watch.py`; `npm run check:coderun`.
 
+## 2026-10-18 · M8.115 · The stated-parameter check asks only runs that apply a value (architecture S78.2)
+
+**Change** `code_watch.applies_values` decides whether a run applies a distance or a time: a buffer, radius or cutoff call, a keyword argument that carries one, a number assigned to a distance- or time-named variable, or a threshold comparison on something named as one. The stated-parameter rule checks only those runs. A value used by an earlier `execute_code` run of the turn counts as used: the turn log supplies that code through `langchain_exec_tools._earlier_code` and `RunWatch.earlier_code`.
+**Why** In the live sweep of 2026-10-18 (e561e071, 81 turns, Lumen deepseek-v4-flash) the rule fired on 25 runs in 9 turns, and every firing was a false positive. They were runs that read a CSV head or raster metadata, checked a file existed, or drew the map after the filter had already been applied.
+**Measured** Offline replay of 194 archived runs (19 more are unreadable because the trace cuts arguments at 3,000 characters; none of them fired live, and the new rule fires on a subset of the old rule's runs): the old rule matches the live firings on 194 of 194 runs. Firings went from 25 runs / 9 turns to 0. Recall check, with each stated value swapped for a wrong one in the real computing runs: 20 of 20 genuine uses caught (the 4 other swaps were `**2` exponents). Tests: `test_code_watch.py` 68 passed; code-execution suites 220 passed.
+**Surprised by** COOLING's "2 km" is not in the query's parameter window. The live rule found it only because the plan text put it next to "distance", so a replay that uses only the query under-counts.
+**Next** Not deployed. The rule still matches by number alone, so a `**2` in an earlier run counts as using "2 km". A unit-aware match would close that gap.
+
 ## 2026-10-18 · M8.116 · One daily budget, in credits (architecture S74.2)
 
 - **The rule (user):** Lumen coins plus OpenAI dollars, at most 3 a day, called credits. The model swaps provider by itself when the Lumen pool runs low, so two separate budgets (3 coins, $3) were neither predictable nor the intended total.
