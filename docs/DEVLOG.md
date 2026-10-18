@@ -5944,6 +5944,16 @@ rather than from the previous one.
   `color` / `class_colors`.
 - **Tests:** `rag_pipeline/tests/test_map_roles_and_place_names.py` (recolouring).
 
+## 2026-10-17 · M8.112 · An answer whose figures no result holds is not shipped (architecture stage 77)
+
+- **The fault:** on production with validation off, T16 reported nine invented figures after
+  five of six code runs failed.
+- **The guard:** always on, deterministic, no re-run. When at least 3 figures are stated and 60%
+  or more match nothing the turn recorded, those statements are removed and the answer says they
+  could not be computed, naming the failed runs.
+- **Measured:** replayed on the archive, it touched 0 of 352 correct answers.
+- **Tests:** `rag_pipeline/tests/test_untraceable_figures.py`.
+
 ## 2026-10-17 · M8.113 · A code run can be watched, stopped and reviewed while it runs (architecture stage 78)
 
 - **The fault:** T16 on production lost three of six runs to a 60 s limit on correct but slow

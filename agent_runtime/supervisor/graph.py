@@ -1297,6 +1297,81 @@ def _cut_unproducible_figures(answer: str, fact_set: Any, producers_fn: Callable
     return answer, dropped, kept, resolutions, producers
 
 
+# --- an answer whose figures no result holds (always on) ------------------------------------
+#
+# Live 2026-10-17, production (T16 Waikiki, validation off): five of six code runs failed (two
+# IndexErrors, three 60 s timeouts); the one that succeeded printed only which blocks could not
+# reach the exit. The answer still reported nine figures (17,205 residents, 24 hotels, a 7.9 min
+# median, 1,847 buildings ...), all wrong, none in any result, under "the analysis was performed
+# using the exact uploaded file IDs". With validation off the number scan above does not run, so
+# nothing stood between the writer's guesses and the user.
+#
+# This check needs no model call and no re-run, so it stays on whatever the validation setting:
+# when most of an answer's figures resolve to nothing the turn recorded, those statements are
+# taken out and the answer says plainly that they could not be computed, naming the code runs
+# that failed. A correct answer resolves nearly all of its figures and is never touched.
+_UNTRACEABLE_MIN_FIGURES = 3
+_UNTRACEABLE_SHARE = 0.6
+
+
+def _code_run_summary(results: Any) -> Tuple[int, List[str]]:
+    """`(successful runs, short reasons for the failed ones)` over the turn's execute_code
+    results."""
+    ok, failures = 0, []
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("name") or r.get("tool_name") or "") != "execute_code":
+            continue
+        payload = r.get("content", r.get("output", r.get("result")))
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = None
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("timed_out") is True:
+            failures.append("timed out")
+        elif payload.get("ok") is False or payload.get("exit_code") not in (None, 0):
+            err = str(payload.get("error") or payload.get("stderr") or "").strip()
+            m = re.search(r"\b([A-Z][A-Za-z]*(?:Error|Exception))\b", err)
+            failures.append(m.group(1) if m else (err.splitlines()[-1][:60] if err else "failed"))
+        else:
+            ok += 1
+    return ok, failures
+
+
+def _guard_untraceable_figures(answer: str, fact_set: Any, results: Any) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """*answer*, with its untraceable statements replaced by a plain account, when most of its
+    figures resolve to nothing the turn recorded; otherwise *answer* unchanged and None."""
+    resolutions = turn_facts.resolve(answer, fact_set)
+    claims = [r for r in resolutions if turn_facts.is_claim(r.quantity)]
+    unresolved = [r for r in claims if not r.resolved]
+    if (len(claims) < _UNTRACEABLE_MIN_FIGURES
+            or len(unresolved) < _UNTRACEABLE_SHARE * len(claims)):
+        return answer, None
+    sentences = list(dict.fromkeys(r.quantity.sentence for r in unresolved if r.quantity.sentence))
+    remainder, dropped = _drop_claims(answer, sentences) if sentences else (answer, [])
+    ok, failures = _code_run_summary(results)
+    if failures:
+        counts = {k: failures.count(k) for k in dict.fromkeys(failures)}
+        runs = (f" {len(failures)} of the {len(failures) + ok} code runs failed ("
+                + ", ".join(f"{n} {k}" if n > 1 else k for k, n in counts.items()) + ").")
+    else:
+        runs = ""
+    notice = (f"**I could not compute this reliably.** {len(unresolved)} of the {len(claims)} "
+              f"figures I was about to report do not appear in any result the analysis "
+              f"produced, so I have left them out rather than state numbers that were not "
+              f"computed.{runs} Please ask again; a narrower question, or one part at a time, "
+              f"gives the code a better chance to finish.")
+    kept = remainder.strip()
+    resolved_left = any(r.quantity.text in kept for r in claims if r.resolved)
+    final = notice + (f"\n\n{kept}" if kept and resolved_left else "")
+    return final, {"figures": len(claims), "untraceable": len(unresolved),
+                   "dropped": dropped, "code_ok": ok, "code_failed": failures}
+
+
 # After a re-grounding pass the answer is about to reach a user who never saw the draft it
 # replaced. Live, 2026-10-08: "those figures were in the earlier rejected answer". Applied only
 # on the pass after a re-run, and only to phrasings that cannot be about the conversation's
@@ -6464,6 +6539,21 @@ def build_supervisor_graph(
                     "grounding_retries": state.get("grounding_retries", 0) + 1,
                     "reground": True,
                 }
+            # Always on (see _guard_untraceable_figures): an answer most of whose figures no
+            # result holds is not shipped as if it were computed.
+            answer, _untraceable = _guard_untraceable_figures(answer, fact_set, _results)
+            if _untraceable:
+                resolutions = turn_facts.resolve(answer, fact_set)
+                kept_unresolved = []
+                scan_findings.append(turn_verdict.Finding(
+                    "untraceable_figures", turn_verdict.UNVERIFIABLE,
+                    f"{_untraceable['untraceable']} of {_untraceable['figures']} figures were in "
+                    "no tool result, the question or the evidence; they were left out",
+                    evidence=[d[:120] for d in _untraceable["dropped"][:6]]))
+                _LEDGER_LOG.warning("untraceable figures: %d of %d; answer replaced (code runs "
+                                    "ok=%d failed=%s)", _untraceable["untraceable"],
+                                    _untraceable["figures"], _untraceable["code_ok"],
+                                    _untraceable["code_failed"])
             if kept_unresolved:
                 shown = list(dict.fromkeys(r.quantity.text.strip() for r in kept_unresolved))
                 scan_findings.append(turn_verdict.Finding(

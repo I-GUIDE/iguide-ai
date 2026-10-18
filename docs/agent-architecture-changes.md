@@ -89,6 +89,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 74 | [Lumen turns cost coins, the default leaves a low pool, and each user has a daily budget](#stage-74) | 2026-10-16 | Lumen calls priced in coins at Lumen's published rate; default fails over to gpt-5.6-luna at 90% of the pool used and returns below 80%; 3 coins and $3 per signed-in user per day |
 | 75 | [A layer with NaN in its attributes still reaches the map](#stage-75) | 2026-10-17 | every `.geojson` the download route serves, and every SSE event, is strict JSON (NaN/Infinity written as null); add_map_layer stores strict JSON too; a layer that fails to draw is named in the trace and on the answer card |
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
+| 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
@@ -11821,6 +11822,37 @@ own routing script until the no-progress stop. These are routing correctness, no
   - In the browser: a zones upload's fill slider at 0.1 left the outlines and the basemap
     visible.
 
+## Stage 77 — An answer whose figures no result holds is not shipped {#stage-77}
+
+**Why.** On production (2026-10-17, prototype 66248542, validation off), T16 Waikīkī was asked in
+the browser.
+- **What the code did.** Five of six code runs failed: two `IndexError`s and three 60 s
+  timeouts. The one that succeeded printed only which blocks could not reach outside the zone.
+- **What the answer said.** It reported nine figures as results, all wrong and none in any
+  result (17,205 residents for 20,294; 24 hotels for 65; a 7.9 min median for 3.91; 1,847
+  buildings for 909), under "the analysis was performed using the exact uploaded file IDs".
+- **Why nothing caught it.** With validation off (Stage 66), the number scan (Stage 44) does not
+  run, so nothing stood between the writer's guesses and the user.
+
+**Change** (`supervisor/graph.py`, `_guard_untraceable_figures`, `_code_run_summary`).
+- **It always runs**, after the number scan and whatever the validation setting. It needs no
+  model call and no re-run.
+- **When it fires.** An answer that states at least 3 figures (`facts.is_claim`: with a unit, or
+  not a small whole number), 60% or more of which `facts.resolve` cannot match to the turn's
+  record. The record is tool results, the question and evidence.
+- **What it does.** The untraceable statements are taken out (`_drop_claims`). The answer opens
+  with a plain account: those figures were not computed, and N of M code runs failed (timed out,
+  IndexError …). Statements whose figures did resolve stay.
+- **What it records.** An `untraceable_figures` finding (unverifiable), and a log line with the
+  counts.
+
+**Measured.** The guard was replayed on every archived harness turn (`validators_bench`'s
+replay of the recorded tool results).
+- **False alarms:** none of the 352 correct answers was touched.
+- **Wrong answers:** 1 of 98 was caught. The rest state figures that were really computed, only
+  wrong, which is not what this guard is for.
+- **The live T16 answer:** in the tests (`test_untraceable_figures.py`) it is replaced by an
+  account naming 4 failed runs of 5 (2 timeouts, 2 IndexErrors).
 
 ## Stage 78 — A code run can be watched, stopped and reviewed while it runs {#stage-78}
 
