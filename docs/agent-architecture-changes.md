@@ -12123,3 +12123,62 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 89 — The evidence rerank judges a short list and answers with numbers {#stage-89}
+
+**The fault.** On 2026-10-19 a platform question ("What's the state of the art of geospatial data-intensive emergency management research?", conversation f5dba41c) took 20 min 25 s on the VM (18:03:15→18:23:40 UTC). The VM journal, a py-spy dump and the turn's usage record put about 18 of those minutes in one place: Lumen generating the evidence rerank (`rerank_documents`, called from `search_node`).
+- **Uncapped input.** `search_node` merges every hit the search peer gathered, about 190 documents, with no cap. `_rerank_prompt` showed all of them at 400-character excerpts, about 25k input tokens.
+- **Long output.** It asked for `{doc_id, score, reason}` for every document. The output was 9,983 and 8,740 tokens in that turn, and 6,513 twice in another.
+- **Most of it was thrown away.** `top_k` (`AGENT_SUPERVISOR_TOP_K`, 8) was applied only after the model had ranked everything.
+- **Slow at the wrong hour.** deepseek-v4-flash generated about 27 tok/s at 18:10–18:23, against about 90 tok/s at 18:56, so one rerank took about 6 minutes. One attempt returned HTTP 500 after 6 min 13 s and was retried.
+- **Twice per turn.** Both slow turns searched twice, and each search step reranked the whole merged list again.
+- **Stage 85 raised the stakes.** Every model call now has a 240 s request timeout and 1 retry, and the rerank is a non-streamed `llm.invoke`. So a rerank needing more than 240 s would time out twice, about 8 minutes, before falling back to RRF.
+
+**Change** (`agent_runtime/evidence_quality.py`, `agent_runtime/supervisor/graph.py`).
+- **Bounded input.** `rerank_documents` puts the candidates in reciprocal-rank-fusion order (`rrf_order`, the rerank's fallback order since 5ef3878a) first. Only the head goes to the model.
+  - **Cap.** `rerank_candidate_cap(top_k)` returns 3 × top_k, so 24 at the default top_k of 8, or 24 when the caller passes no top_k. `AGENT_RERANK_MAX_CANDIDATES` sets it outright; `0`/`off` shows every candidate, the old behaviour. Callers can also pass `max_candidates=`.
+  - **Order.** The model's picks come first. Candidates it left out follow in RRF order, then every document beyond the cap, also in RRF order. Then `top_k` truncates.
+  - **Recall is unchanged.** Retrieval is untouched (`AGENT_SEARCH_TOP_K` still decides how many hits each method returns), and every document is still in the returned list. Only fewer are judged.
+  - **Why RRF for the cut.** In merge order every catalog hit sits at the end, behind the keyword hits (the finding behind 5ef3878a). RRF interleaves the sources by their own ranks, so the model sees each source's best.
+- **Short output.** The candidates are numbered, and the prompt asks for `{"ranking": [3, 1, 2]}`: the numbers, best first, with no scores and no reasons. Each number costs one or two tokens, against about 20 to copy back a 36-character doc_id. The doc_ids are no longer in the prompt at all.
+  - **Parsing** (`_parse_ranking`) also accepts a bare array, number strings (`"3"`, `"[3]"`, `"#3"`), and the old `{doc_id, score, reason}` objects. A string that is a candidate's doc_id is read as that document before it is read as a number. Numbers out of range and repeats are dropped.
+- **Fallback unchanged.** On any failure the result is the RRF order, truncated to `top_k`, with a warning naming the cause. Failures are: an exception, including Stage 85's `LLMCallTimeout`, which subclasses the client's `APITimeoutError`; a reply with no usable ranking; or a reply whose every entry is out of range.
+- **A second search step judges only what is new** (`_rerank_new_documents`). A second search step used to rerank everything it returned. Most of that was the first step's list again, because the completeness sweep (`_direct_search_sweep`) repeats the same keyword+semantic query.
+  - **What is remembered.** `search_node` now keeps `rerank_seen = {query, keys}`: 12-hex digests of `_doc_key` for every document an earlier step this turn gave the rerank.
+  - **Rule.** A document seen before has already been placed against the same query. It is in the evidence, or it lost its place to the documents that are, so judging it again could at best re-add what is already held.
+    - Nothing new: no model call, and nothing is added. `search_empty_streak` advances, as it did when a repeat rerank kept only held documents.
+    - Some new: only they are reranked, and the best `top_k` of them are added.
+  - **Bound.** Evidence still grows by at most `top_k` per search step. That is the same bound as before, when a step whose documents were all new added its top `top_k`.
+  - **Behaviour change.** A step that returns old and new documents together now adds its best new ones without making them out-rank the documents already kept. Before, a re-returned kept document could take one of the `top_k` places and push a new one out.
+  - **Scope.** The memory is keyed by the query: a clarified query (the clarify gate rewrites `query`) starts afresh. It is cleared in `synthesize`, like `action_rows`, so it never reaches the client payload; a re-grounding search after synthesis judges everything again.
+  - **Not done.** Reusing the first step's judgements to merge the two rankings. The model's numbers are positions inside one list, not scores comparable across two calls.
+
+**Measured.** The candidate list is the 190-document synthetic list the new tests use: four sources with their own score scales and 800-character KB-length excerpts. A second list is 172 real documents de-duplicated from the harness archive's traces (keyword 75, web 42, opengeodata 38, overpass 16, semantic 1). Tokens are counted with tiktoken o200k_base. The "expected output" for the old format is every document's `{doc_id, score, reason}` with a one-line reason; it lands in the range observed on the VM (6,513–9,983).
+
+| | candidates judged | prompt | expected output |
+|---|---|---|---|
+| before, 190 synthetic | 190 | 104,250 chars, 21,400 tok | 8,554 tok |
+| after, 190 synthetic | 24 | 12,193 chars, 2,219 tok | 75 tok |
+| before, 172 real | 172 | 72,005 chars, 17,781 tok | 7,781 tok |
+| after, 172 real | 24 | 8,249 chars, 1,915 tok | 75 tok |
+
+**Live, Lumen deepseek-v4-flash, 2026-10-19 19:57 UTC**, on the 172 real documents and the f5dba41c question, through a `ChatOpenAI` built with `client_limits("lumen")`, outside the agent:
+- **After, 3 calls.** 1,951 prompt tokens and 76 output tokens each; 1.6 s, 1.6 s and 1.8 s; 24/24 numbers parsed every time. The first six picks were identical in all three, and the junk web hits ("GREAT | English meaning", "Great-circle distance") ranked last.
+- **Before, 1 call, same hour.** The old prompt over all 172 documents: 17,991 prompt tokens and 7,489 output tokens in 97.0 s, about 77 tok/s, which is a fast hour. The reply held 173 entries for 172 documents, one of them repeated.
+- **Ratio.** 99× fewer output tokens and 57× less wall time at the same hour. The output token count is what the incident's minutes scale with.
+
+At the incident's slow-hour 27 tok/s, 76 output tokens is about 3 s against about 6 minutes, and nowhere near the 240 s timeout.
+
+**Tests** (offline).
+- `rag_pipeline/tests/test_evidence_quality.py`, 14 new:
+  - parsing: numbers, a bare array, number strings, out-of-range and repeated numbers, the old doc_id format;
+  - the prompt has numbers and no doc_ids;
+  - the RRF fallback on 5 garbled replies and on an `LLMCallTimeout`;
+  - the 3 × top_k cap and its setting;
+  - the order beyond the cap: judged picks, then judged-but-unranked in RRF order, then the unjudged in RRF order, all 190 returned;
+  - the model sees the RRF head, not the merge order;
+  - the 190-document prompt stays under 13,000 characters.
+- `rag_pipeline/tests/test_supervisor_graph.py`, 3 new: a second search with nothing new makes no rerank call; one with new documents reranks only them and adds their best `top_k`; `rerank_seen` is cleared before the state is returned.
+- Full offline suite: `rag_pipeline/tests/`: 4,685 passed, 19 skipped, 1 failed. The failure is `test_the_installed_networkx_matches_the_pin`, an environment check: the Mac has networkx 3.4.2 against the pinned 3.6.1, and this change does not touch it. `tests/`: 170 passed, 3 skipped.
+
+**Not deployed.**
