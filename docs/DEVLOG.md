@@ -6019,3 +6019,13 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.125 · Every model call has a timeout (architecture stage 85)
+
+- **The fault:** chat models were built with no request timeout and 2 automatic retries. On prod (2026-10-09), Lumen returned 500 after about 6 min, three times per call, and stalled turns for 18–45 min. AnvilGPT 504'd at its 300 s gateway and was retried twice.
+- **Change:** `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT) and `AGENT_LLM_MAX_RETRIES` (1) reach every construction site through `llm_timeout.client_limits`.
+  - A timeout surfaces as `LLMCallTimeout`: "Model call timed out after N s with no answer from <model> (<host>) …".
+  - The supervisor treats it as fatal and answers with what it has, instead of re-routing to the stalled model.
+  - No `max_tokens`.
+- **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
+- **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).

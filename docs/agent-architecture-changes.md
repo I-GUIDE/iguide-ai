@@ -91,6 +91,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
+| 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12079,4 +12080,46 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
   - a code result with no answer falls back to the record.
 
   The existing writer tests pass unchanged.
+- **Not deployed.**
+
+## Stage 85 — Every model call has a timeout {#stage-85}
+
+**The fault.** `executor_factory` built every chat model with no request timeout. langchain passes `timeout=None` to the openai SDK, which means no limit at all, and the SDK's default of 2 automatic retries applied. A stalled model looked exactly like progress: the socket stayed open, SSE keepalives kept flowing, and nothing gave up.
+- **Prod, 2026-10-09** (Lumen deepseek-v4-flash, browser sweep on 23cfd02). Long-context calls got HTTP 500 "Upstream error" after about 6 minutes, and each was retried twice (6 + 6 + 6 min). T06 took 28 minutes; T05L and T09L ran past 45. The analyze peer then failed, and the supervisor routed straight back to analyze.
+- **2026-10-01, AnvilGPT qwen3.8:27b.** The nginx gateway returned 504 at 300 s, then the client retried twice more.
+- **Earlier.** A GeoAnalystBench run wedged for 2 h 23 m in one model call.
+
+The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii demo.
+
+**Change.**
+- **Settings** (`agent_runtime/llm_timeout.py`). `client_limits(provider)` returns `timeout` and `max_retries`, and every construction site spreads it:
+  - the 5 `ChatOpenAI` calls in `build_default_llm` and `build_llm`;
+  - the `ChatAnthropic` call;
+  - the 2 SDK clients that `_use_bearer_client` swaps in for a subscription token. Before this, the swap would have dropped the limits.
+- **`AGENT_LLM_TIMEOUT_SECONDS`.** The default is 240 s, or 280 s on AnvilGPT. 280 s is under AnvilGPT's 300 s gateway, so the error is ours and says what it is, not a 504 page. `0`/`off` restores no timeout.
+  - **Why 240.** On the deployment on 2026-10-19 (295 Lumen deepseek-v4-flash calls, all 200 OK), the longest gap between two completions inside a turn was 44 s, and p99 was 33 s. That gap bounds each call's duration from above, so 240 s is more than 5× the longest real call. It still ends a 6-minute stall at 4.
+  - **Read timeout, not wall-clock.** It is httpx's timeout. A non-streamed call that sends nothing ends at it. A streamed reply that is still sending chunks is never cut.
+- **`AGENT_LLM_MAX_RETRIES`.** Default 1 (clamped 0..5); it was the SDK's 2. The worst case for a stalled call goes from 3 × 6 min to 2 × 240 s plus backoff.
+- **A timeout says what it was.** `ReasoningPreservingChatOpenAI` (used by every ChatOpenAI path) catches timeouts in `_generate`, `_agenerate`, `_stream` and `_astream` and re-raises them as `LLMCallTimeout`. The message reads: "Model call timed out after 240 s with no answer from deepseek-v4-flash (lumen.ncsa.illinois.edu), after 1 automatic retry. The model did not respond in time; retry the turn, or pick another model."
+  - `LLMCallTimeout` subclasses the SDK's `APITimeoutError`, so code that treats that as retryable still does. It sets its own attributes instead of calling the parent constructor, whose signature differs between openai 2.x (Mac) and 3.x (image).
+  - A stream that stalls after its first chunk raises httpx's `ReadTimeout`, not the SDK's error, because the SDK only wraps what happens before the headers. That case is caught too, and its message does not claim retries that never ran.
+- **The turn ends; it does not loop.** `_is_fatal_peer_error` now counts `LLMCallTimeout` as fatal, as it already did for an unreachable Claude CLI. After one timed-out peer, the supervisor goes to `done`, and synthesis answers from what the turn has. If synthesis times out too, its existing containment writes the deterministic answer with the reason. Every peer calls the same model, so re-routing would only wait again.
+- **Deliberately not `max_tokens`.** A ceiling cuts a reasoning model's thinking and returns empty content (measured; AGENTS.md).
+
+**Lumen failover (Stage 74).** Failover is driven by coins, not by errors, and that is unchanged: a Lumen timeout does not switch the default to luna. The failover model is built through `build_llm(provider="openai")`, so it gets the same limits. That is tested.
+
+**Not covered.**
+- `LLM_PROVIDER=claude-cli`, a dev-only override with its own subprocess timeout.
+- `rag_pipeline/llm_utils.call_llm`, which already sends `timeout=60`.
+- The CLI code peers, which have their own run timeouts.
+- `ChatAnthropic` timeouts keep the SDK's own message. That provider is picker-only.
+
+**Verified.**
+- **Tests.** `rag_pipeline/tests/test_llm_request_timeout.py` (36), offline: the stalled server is a socket on 127.0.0.1 that the test opens. It covers:
+  - an AST scan that fails if any `ChatOpenAI`/`ChatAnthropic`/SDK-factory call in `executor_factory` lacks `**client_limits(...)`;
+  - the built clients carry the limits on every path: the default for lumen, anvilgpt and openai, the failover model, each picked provider, and anthropic with a key or a bearer token;
+  - a server that never answers ends at 0.5 s with exactly 2 requests (1 retry), and with 1 request when retries are 0;
+  - a stream that stalls after one chunk, an async call and a `bind_tools` call each end as `LLMCallTimeout`;
+  - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
+- **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**

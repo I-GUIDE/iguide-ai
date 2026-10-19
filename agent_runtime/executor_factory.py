@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent_runtime.tool_policy import collect_tools as _collect_tools
+from agent_runtime.llm_timeout import client_limits
 from agent_runtime.streaming_trace import attach_streaming_callbacks
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,13 @@ def _reasoning_text(choice: Any) -> str:
 
 def _reasoning_preserving_chat_openai() -> Any:
     """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message."""
+    import httpx
+    import openai
     from langchain_openai import ChatOpenAI
+
+    from agent_runtime import llm_timeout
+
+    _timeouts = (openai.APITimeoutError, httpx.TimeoutException)
 
     class ReasoningPreservingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
         def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
@@ -258,6 +265,35 @@ def _reasoning_preserving_chat_openai() -> Any:
             except Exception:  # noqa: BLE001 - never fail a turn over a provider quirk
                 return result
             return result
+
+        # A timeout reaches the turn saying what it was (Stage 85): the client's own
+        # APITimeoutError reads "Request timed out." and names neither the limit nor the model.
+        # A stream that stalls AFTER its first chunk raises httpx's ReadTimeout instead: the
+        # openai client only wraps what happens before the response headers.
+        def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return super()._generate(*args, **kwargs)
+            except _timeouts as exc:
+                raise llm_timeout.from_client_timeout(exc, self) from exc
+
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await super()._agenerate(*args, **kwargs)
+            except _timeouts as exc:
+                raise llm_timeout.from_client_timeout(exc, self) from exc
+
+        def _stream(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                yield from super()._stream(*args, **kwargs)
+            except _timeouts as exc:
+                raise llm_timeout.from_client_timeout(exc, self) from exc
+
+        async def _astream(self, *args: Any, **kwargs: Any) -> Any:
+            try:
+                async for chunk in super()._astream(*args, **kwargs):
+                    yield chunk
+            except _timeouts as exc:
+                raise llm_timeout.from_client_timeout(exc, self) from exc
 
     return ReasoningPreservingChatOpenAI
 
@@ -289,10 +325,11 @@ def build_default_llm() -> Any:
 
     anvil = _anvilgpt_settings()
     if anvil:
-        return ChatOpenAI(temperature=0.0, **anvil)
+        return ChatOpenAI(temperature=0.0, **anvil, **client_limits("anvilgpt"))
     lumen = _lumen_settings()
     if lumen:
-        return ChatOpenAI(temperature=0.0, **lumen)     # no max_tokens: see build_llm's branch
+        # No max_tokens: see build_llm's branch. A timeout, though (Stage 85).
+        return ChatOpenAI(temperature=0.0, **lumen, **client_limits("lumen"))
     fb = _lumen_fallback()
     if fb:
         # The Lumen pool is running low (lumen_failover): the default moves to the fallback
@@ -324,7 +361,7 @@ def build_default_llm() -> Any:
         kwargs["reasoning_effort"] = forced
     if base_url:
         kwargs["base_url"] = base_url
-    return ChatOpenAI(**kwargs)
+    return ChatOpenAI(**kwargs, **client_limits("openai"))
 
 
 # --- explicit per-request provider/model selection ------------------------------------
@@ -550,7 +587,8 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         # No max_tokens: qwen3.x reasons before it answers, so a ceiling truncates the thinking
         # and returns an EMPTY content rather than a short answer.
         return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.8:27b",
-                          api_key=key, base_url=base_url, temperature=0.0)
+                          api_key=key, base_url=base_url, temperature=0.0,
+                          **client_limits("anvilgpt"))
     if prov == "lumen":
         if not lumen_offered():
             raise ValueError(
@@ -566,7 +604,8 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         # No max_tokens, for the reason AnvilGPT gets none: every Lumen text model reports
         # supports_reasoning, and a ceiling cuts the thinking short into an empty answer.
         return ChatOpenAI(model=model or os.getenv("LUMEN_MODEL") or _LUMEN_DEFAULT_MODEL,
-                          api_key=key, base_url=_lumen_base_url(), temperature=0.0)
+                          api_key=key, base_url=_lumen_base_url(), temperature=0.0,
+                          **client_limits("lumen"))
     if prov == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY")
         token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
@@ -594,7 +633,8 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
                             or _ANTHROPIC_DEFAULT_MODEL,
                             api_key=key or "unused-when-bearer",
                             max_tokens=8192,
-                            default_headers=_OAUTH_BETA_HEADER if not key else None)
+                            default_headers=_OAUTH_BETA_HEADER if not key else None,
+                            **client_limits("anthropic"))
         if not key:
             _use_bearer_client(llm, token)
         return llm
@@ -619,7 +659,7 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         if effort and sending != effort:
             logger.info("reasoning_effort %r not usable with tools on %s; sent %r",
                         effort, kwargs["model"], sending)
-        return ChatOpenAI(**kwargs)
+        return ChatOpenAI(**kwargs, **client_limits("openai"))
     raise ValueError(
         f"unknown provider {provider!r}; expected 'openai', 'anthropic', 'anvilgpt' or 'lumen'")
 
@@ -653,7 +693,9 @@ def _use_bearer_client(llm: Any, token: str) -> None:
             raise ValueError(
                 f"this langchain-anthropic exposes no {attr}; a subscription token cannot be "
                 "attached. Set ANTHROPIC_API_KEY instead, or pin langchain-anthropic.")
-        setattr(llm, attr, factory(auth_token=token, default_headers=_OAUTH_BETA_HEADER))
+        # The replacement clients keep the limits the model was built with (Stage 85).
+        setattr(llm, attr, factory(auth_token=token, default_headers=_OAUTH_BETA_HEADER,
+                                   **client_limits("anthropic")))
 
 
 _ANTHROPIC_FALLBACK_MODELS = (
