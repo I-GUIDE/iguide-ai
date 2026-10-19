@@ -138,7 +138,9 @@ def _llm_chat(messages: List[Dict[str, str]]) -> str:
     try:
         from langchain_openai.chat_models.base import BaseChatOpenAI
 
-        if isinstance(llm, BaseChatOpenAI):
+        from agent_runtime.model_client_langchain import OwnChatModel
+
+        if isinstance(llm, (BaseChatOpenAI, OwnChatModel)):
             # Forwarded to the OpenAI SDK as a per-request timeout, not into the JSON body.
             kwargs["timeout"] = _LLM_TIMEOUT_SEC
     except ImportError:  # pragma: no cover - build_default_llm needs it anyway

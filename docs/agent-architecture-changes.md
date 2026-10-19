@@ -91,6 +91,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
+| 88 | [The agent's own model client](#stage-88) | 2026-10-19 | `AGENT_MODEL_CLIENT=own` (default `langchain`) puts the agent's own OpenAI-compatible client under every model call, behind a `BaseChatModel` adapter that sends `ChatOpenAI`'s exact body: a deadline per attempt (`AGENT_LLM_TIMEOUT_SECONDS`), Stop mid-call with the socket shut, bounded retries (`AGENT_LLM_MAX_RETRIES`), streaming, the reasoning carry-over and stage 59's cost accounting unchanged |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12080,3 +12081,67 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 88 — The agent's own model client {#stage-88}
+
+**Why.** Phase 1 of the agent's own framework (user brief, 2026-10-17). LangChain's `ChatOpenAI` sat under every model call, and four of its limits kept being routed around:
+- **No timeout or cancel of our own.** The openai SDK waits up to 600 s per attempt and retries twice. On 2026-10-09 Lumen answered long-context calls with an "Upstream error" 500 after about 6 minutes, so each such call cost about 18 minutes of a turn. Stop took effect only at the next step.
+- **Reasoning text dropped.** langchain_openai keeps no `reasoning_content`, so a subclass (`ReasoningPreservingChatOpenAI`) had to.
+- **Callback errors swallowed.** That is why `TurnCancelled` had to become a `BaseException` (stage 78).
+- **Cost by configure hook.** Per-turn cost rides a ContextVar configure hook that has to be carried into threads by hand.
+
+A full rewrite was rejected. Phase 1 replaces the client only. The supervisor graph and the checkpointer stay LangGraph, and phase 2 (the code peer's own tool loop) is not started.
+
+**Change.**
+- **`agent_runtime/model_client.py`: the transport.** It is `POST {base_url}/chat/completions` on httpx, and it imports nothing from LangChain. httpx is 0.28.1 on the Mac and in the image, while the openai SDK is 2.45 on the Mac and 3.14 deployed.
+  - **A deadline per attempt**, `AGENT_LLM_TIMEOUT_SECONDS` (default 180 s). That is below AnvilGPT's 300 s gateway and short of Lumen's ~6-minute 500.
+  - **Stop mid-call.** The request runs on a helper thread. The calling thread waits in 0.2 s slices and checks `turn_control.cancel_requested()` and the deadline between slices.
+  - **An abort shuts the socket.** Each attempt leases its own connection pool, and the pool records the sockets it opens (`_TrackingBackend`). An abort calls `shutdown(SHUT_RDWR)`, which wakes a blocked read on Linux, where `close()` from another thread does not. A pool goes back for reuse after a clean finish, so ordinary calls keep their keep-alive connection.
+  - **Bounded retries**, `AGENT_LLM_MAX_RETRIES` (default 1). It retries the statuses the SDK retries (408/409/425/429/5xx), connection failures and its own timeouts. It honours `Retry-After` up to 30 s, and its backoff sleep also honours Stop. A 400/401/404/422 is never retried.
+  - **Errors** keep the SDK's `Error code: <status> - <body>` text, with the provider's own message.
+  - **Streaming.** `stream_options.include_usage` is set. The deadline applies between chunks (an idle timeout). A stream is retried only before its first chunk, because after that a retry would replay text the caller already has.
+- **`agent_runtime/model_client_langchain.py`: `OwnChatModel`,** a `BaseChatModel`. It takes `ChatOpenAI`'s constructor arguments (`model`, `api_key`, `base_url`, `temperature`, `reasoning_effort`), so no caller changes. It keeps three things as they were:
+  - **The wire body.** Messages are converted by langchain_openai's rules, tools are formatted and `tool_choice` translated as `bind_tools` does, and the same parameters are sent or left out. The tests compare the JSON the two clients send, as a stub server received it.
+  - **The reasoning carry-over.** `reasoning_content` / `reasoning` / `thinking` is kept on `additional_kwargs`. On a tool-calling step with empty `content`, its tail is promoted into `content`, as before. It is never sent back as a field.
+  - **Cost accounting.** `usage_metadata` is shaped as langchain_openai shapes it. The invocation params carry `model` and `base_url`, which is all `UsageCallbackHandler` reads to price a call and to recognise Lumen's (stage 59).
+- **The switch: `AGENT_MODEL_CLIENT=own|langchain`, default `langchain`.** `_reasoning_preserving_chat_openai()` returns `OwnChatModel` when the variable is `own`. All six OpenAI-compatible construction sites in `build_default_llm` / `build_llm` go through it, so it is the one switch and the one rollback. When selected, the server logs `model client: own` once, `active_llm_description()` gains `client`, and the harness's `server.log` header records `AGENT_MODEL_CLIENT`.
+- **Text2Cypher.** `rag_pipeline/search/agents.py` passes its own per-call `timeout` to `OwnChatModel` too, as it did to `ChatOpenAI`.
+
+**Not changed.** The Anthropic path (`ChatAnthropic`) and the Claude CLI model. The checkpointer, the supervisor graph and `create_agent`. The configure-hook cost handler: it still works and is still needed by `ChatAnthropic`, and removing it belongs to a later phase.
+
+**Verified.**
+- **Tests** (`rag_pipeline/tests/test_model_client.py`, 30), against a stub server that can stall, fail or stream:
+  - a stalled call ends at its deadline (1.0 s → 1.1 s), and the server sees the hang-up, so the socket is shut and not abandoned;
+  - a stalled call is retried once, then fails;
+  - Stop ends a 60 s call in under 1.5 s, with no retry;
+  - a 500 then a 200 succeeds; a 429 waits its `Retry-After`; a 400 is not retried and keeps the provider's message; retries are bounded;
+  - a silent stream ends at its idle timeout without a retry;
+  - **parity with `ChatOpenAI`:** the request body for a seven-message tool-calling conversation, `tool_choice` in four forms, gpt-5.6's `reasoning_effort` with no temperature, the reply in five shapes (carry-over, own text, final answer, no reasoning, plain), what `UsageCallbackHandler` records (model, Lumen, tokens, reasoning and cached tokens), and a `create_agent` turn. The carried-over plan is sent back as `content`, never as `reasoning_content`;
+  - the flag, and the httpx hook the hard abort depends on.
+- **On Linux with the deployed versions** (`iguide-replica:deeb331-freeze`: langchain-core 1.6.3, openai 3.14.1, httpx 0.28.1): the new tests plus the reasoning carry-over and Lumen provider tests, 58 passed, including the hang-up check.
+- **The whole suite.** It runs with the default client, as before. Forced to `own`, 13 tests fail because they pin the old client by its class name, its private `_create_chat_result`, or the openai SDK's `Completions.create`. Under `own` the three SDK-intercepting Text2Cypher tests also sent real requests, with their fake keys, to Lumen and OpenAI. `conftest.py` now clears `AGENT_MODEL_CLIENT`, so the suite stays on the default client, offline, whatever the shell holds.
+- **One live call each on Lumen deepseek-v4-flash** (tool-bound): the same tool call, the same 304 input / 49 output tokens, and the same 6.7e-05 coins recorded.
+- **A stalled endpoint, end to end.** A local agent server on the own client (`AGENT_LLM_TIMEOUT_SECONDS=5`, `AGENT_LLM_MAX_RETRIES=1`) was pointed at a stub that accepts the request and never answers. The whole turn ended in 63 s: 4 model calls × 2 attempts, each cut at 5.1–5.6 s. The answer said "I could not compose an answer: ModelCallTimeout …".
+- **Harness, one trial per client, lumen:deepseek-v4-flash, same commit (44bc2dd7), two servers side by side**, 17 tasks (T01–T12 with T02L, U01–U04; T13–T16 left out to spare coins):
+
+  | | langchain | own |
+  |---|---|---|
+  | correct (solvable) | 12/13 | 12/13 |
+  | refused (unsolvable) | 4/4 | 4/4 |
+  | strict | 10/17 | 9/17 |
+  | zero unproductive | 11/17 | 9/17 |
+  | unproductive steps (dup / failed) | 14 (1 / 13) | 32 (8 / 24) |
+  | model calls | 200 | 253 |
+  | input / output tokens | 4.28 M / 104 K | 5.05 M / 109 K |
+  | Lumen coins (from tokens) | 0.73 | 0.86 |
+  | seconds | 4,190 | 4,798 |
+  | model-call errors, timeouts, retries | 0 | 0 |
+
+  Every model request in both runs answered 200 (own: 228 to Lumen and 25 to OpenAI, equal to its 253 recorded calls).
+  - **Where the difference comes from.** Per task the two go both ways: own was leaner on T05, T07, T08 and U03 and heavier on T03, T04, T10 and U04. langchain got T10 wrong and own got it right; own made T09 strict and langchain did not. Most of the extra steps are one task, T06. There the model wrote slow pysheds code 24 times, against 5 times in the langchain run. The stage 78 reviewer stopped 14 of 23 reviews against 3 of 5, the same per-review rate (61% vs 60%), and the turn hit the harness's 1,200 s cap.
+  - **Against the archive.** Over the 263 earlier deepseek turns on these tasks (older code, all on `ChatOpenAI`), the strict rate is 37%, and both runs are above it.
+  - **Reading.** The request bytes are identical and no call failed, timed out or retried, so the model saw the same input at every step. The spread is deepseek's run-to-run variation, which one trial cannot separate from a 1-task strict difference. A three-trial rerun of T03/T04/T06/T10/U04 per client would cost about 1.5 coins.
+  - **Not only Lumen.** On the Mac the code-run reviewer builds the process default, which is OpenAI gpt-5.6-luna unless `AGENT_LLM_PROVIDER=lumen` is set. So both runs made a few OpenAI calls ($0.004 and $0.011), and in the own run those went through the own client too.
+- **Not deployed.** The default stays `langchain`.
+
+**Coordination.** `AGENT_LLM_TIMEOUT_SECONDS` and `AGENT_LLM_MAX_RETRIES` are the names the "LLM calls get a request timeout" change (`claude/llm-request-timeout`) is adding to the current client, so one setting governs whichever client runs. Its defaults are to be reconciled when it merges.

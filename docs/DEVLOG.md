@@ -6019,3 +6019,20 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.128 · The agent's own model client (architecture stage 88)
+
+- **Why:** phase 1 of the own framework (user brief 10-17). `ChatOpenAI` gave no timeout or cancel of ours: a Lumen 500 after ~6 min cost ~18 min of a turn (10-09), and Stop waited for the next step. It also dropped reasoning text (hence a subclass), swallowed callback errors, and carried per-turn cost on a configure hook.
+- **Change:** `agent_runtime/model_client.py`, an httpx `/chat/completions` client with no LangChain imports:
+  - a deadline per attempt, `AGENT_LLM_TIMEOUT_SECONDS` (default 180);
+  - Stop mid-call, and an abort that shuts the socket;
+  - bounded retries, `AGENT_LLM_MAX_RETRIES` (default 1), on 408/409/425/429/5xx, connection failures and timeouts;
+  - streaming with an idle timeout.
+- **Adapter:** `agent_runtime/model_client_langchain.OwnChatModel`, a `BaseChatModel` with `ChatOpenAI`'s constructor and request body, the same reasoning carry-over, and usage the stage 59 handler prices unchanged.
+- **Switch:** `AGENT_MODEL_CLIENT=own` (default `langchain`) in `_reasoning_preserving_chat_openai()`, which every OpenAI-compatible construction site goes through. `active_llm_description()` gains `client`. The harness's `server.log` header records the variable. `conftest.py` clears it, so SDK-intercepting tests stay offline.
+- **Verified:**
+  - Tests: 30 against a stub server, covering the stall, Stop, retries, streaming, and parity of the request JSON, the replies and the recorded usage with `ChatOpenAI`. 58 passed in the deployed-version replica.
+  - A stalled endpoint ended a whole server turn in 63 s (5 s deadline, 1 retry).
+  - Harness, 17 tasks, one trial each, lumen:deepseek-v4-flash: correct 12/13 vs 12/13, refused 4/4 vs 4/4, strict 10/17 (langchain) vs 9/17 (own). Model calls 200 vs 253, coins 0.73 vs 0.86. 0 model-call errors in either run. The extra steps are mostly one T06 reviewer-stop loop, at the same per-review stop rate.
+- **Not deployed.**
+

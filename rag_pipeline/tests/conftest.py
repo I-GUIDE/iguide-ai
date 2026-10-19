@@ -179,6 +179,11 @@ _CLEARED = (
     "PLATFORM_SIGNIN_URL",
     "PLATFORM_REFRESH_URL",
     "PLATFORM_CHECK_TOKENS_URL",
+    # Which model client builds the chat models (stage 88). Several tests intercept the openai
+    # SDK, which only the default client goes through: with AGENT_MODEL_CLIENT=own inherited from
+    # a shell, those calls left the machine with the tests' fake keys. test_model_client.py sets
+    # it where it means to.
+    "AGENT_MODEL_CLIENT",
 )
 
 for _name in ([] if _LIVE else _CLEARED):
