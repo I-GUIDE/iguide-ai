@@ -177,7 +177,7 @@ def run_web_search(
     denied = WU.charge_search()
     if denied:
         logger.info("web search refused: %s", denied)
-        return {"query": query, "error": denied, "count": 0, "results": []}
+        return {"query": query, **denied.fields(), "count": 0, "results": []}
 
     engine_query = web_query(query)
     if not engine_query:

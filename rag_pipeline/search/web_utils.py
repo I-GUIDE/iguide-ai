@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -192,28 +193,70 @@ def budget() -> WebBudget:
     return current
 
 
-def charge_search() -> Optional[str]:
-    """Claim one search from the budget; returns an error message when exhausted."""
+class Refusal(str):
+    """A refusal that no retry within this turn can change: a spent budget or the kill switch.
+
+    It IS its message, so every caller that treated the old return value as a string still
+    does. It also carries the reason as a code, and ``fields()`` is what a tool result puts
+    beside its ``error``. The turn log reads those fields (agent_runtime/turn_log.py,
+    ``refused_for``) and answers every later call of the tool from this result instead of
+    running it. Live, 2026-10-16 (sess-da4493c7): "web search budget exhausted for this turn
+    (3/3)" came back again and again, because each new query was a new call and nothing in
+    the result said the next one would fare the same.
+    """
+
+    reason: str
+
+    def __new__(cls, message: str, reason: str) -> "Refusal":
+        obj = super().__new__(cls, message)
+        obj.reason = reason
+        return obj
+
+    def fields(self) -> Dict[str, Any]:
+        return {"error": str(self), "reason": self.reason, "retryable": False,
+                "refused_for": "turn"}
+
+
+# The check and the increment are one step. A model that asks for three pages in one message
+# has them run on parallel threads, and two threads that both read fetches=2 would both take
+# the last fetch.
+_CHARGE_LOCK = threading.Lock()
+
+
+def charge_search() -> Optional[Refusal]:
+    """Claim one search from the budget; returns the refusal when exhausted."""
     if not web_enabled():
-        return "web access is disabled on this deployment (AGENT_WEB_ENABLED=false)"
+        return Refusal("web access is disabled on this deployment (AGENT_WEB_ENABLED=false)",
+                       "web_disabled")
     current = budget()
     limit = max_searches_per_turn()
-    if current.searches >= limit:
-        return f"web search budget exhausted for this turn ({current.searches}/{limit})"
-    current.searches += 1
+    with _CHARGE_LOCK:
+        if current.searches >= limit:
+            return Refusal(f"web search budget exhausted for this turn ({current.searches}/{limit})",
+                           "budget_exhausted")
+        current.searches += 1
     return None
 
 
-def charge_fetch() -> Optional[str]:
-    """Claim one page fetch from the budget; returns an error message when exhausted."""
+def charge_fetch() -> Optional[Refusal]:
+    """Claim one page fetch from the budget; returns the refusal when exhausted."""
     if not web_enabled():
-        return "web access is disabled on this deployment (AGENT_WEB_ENABLED=false)"
+        return Refusal("web access is disabled on this deployment (AGENT_WEB_ENABLED=false)",
+                       "web_disabled")
     current = budget()
     limit = max_fetches_per_turn()
-    if current.fetches >= limit:
-        return f"web fetch budget exhausted for this turn ({current.fetches}/{limit})"
-    current.fetches += 1
+    with _CHARGE_LOCK:
+        if current.fetches >= limit:
+            return Refusal(f"web fetch budget exhausted for this turn ({current.fetches}/{limit})",
+                           "budget_exhausted")
+        current.fetches += 1
     return None
+
+
+def read_this_turn(url: Any) -> bool:
+    """Whether this turn has already read the page at *url* (its canonical form)."""
+    canonical = canonical_url(str(url or ""))
+    return bool(canonical) and canonical in budget().fetched
 
 
 def record_urls(urls: Any, *, fetched: bool = False) -> None:
@@ -259,6 +302,7 @@ def budget_snapshot() -> Dict[str, Any]:
 __all__ = [
     "WebBudget",
     "WebHit",
+    "Refusal",
     "allowed_urls",
     "begin_turn",
     "budget",
@@ -270,6 +314,7 @@ __all__ = [
     "fetch_max_chars",
     "max_fetches_per_turn",
     "max_searches_per_turn",
+    "read_this_turn",
     "record_urls",
     "search_snippet_chars",
     "web_enabled",

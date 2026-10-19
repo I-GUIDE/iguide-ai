@@ -588,20 +588,30 @@ def _fetch_and_extract(url: str, *, focus: Optional[str] = None) -> Dict[str, An
         validate_url(url)
     except BlockedURL as exc:
         logger.warning("web fetch blocked: %s", exc)
-        return {"url": url, "error": str(exc), "blocked": True, "budget": WU.budget_snapshot()}
+        return {"url": url, "error": str(exc), "blocked": True, "retryable": False,
+                "budget": WU.budget_snapshot()}
 
     canonical = WU.canonical_url(url)
     cached = _cache_get(canonical) if canonical else None
     if cached is not None:
-        # A cache hit costs no network and no budget. Only the URL actually fetched becomes
-        # citable — never the caller's spelling of it.
+        # The budget counts PAGES THIS TURN READS, not network requests. Re-reading a page this
+        # turn already read is free. A page only another turn read is new to this one, and the
+        # cache (process-wide, 15 minutes) used to hand it over free whatever the budget said:
+        # live, 2026-10-16 (sess-da4493c7), "web_fetch succeeded on attempt 3 — the first failed
+        # with: web fetch budget exhausted for this turn (3/3)".
+        if not (WU.read_this_turn(canonical) or WU.read_this_turn(cached.get("url"))):
+            denied = WU.charge_fetch()
+            if denied:
+                logger.info("web fetch refused: %s", denied)
+                return {"url": url, **denied.fields(), "budget": WU.budget_snapshot()}
+        # Only the URL actually fetched becomes citable — never the caller's spelling of it.
         WU.record_urls([cached.get("url") or canonical], fetched=True)
         return {**cached, "cached": True, "budget": WU.budget_snapshot()}
 
     denied = WU.charge_fetch()
     if denied:
         logger.info("web fetch refused: %s", denied)
-        return {"url": url, "error": denied, "budget": WU.budget_snapshot()}
+        return {"url": url, **denied.fields(), "budget": WU.budget_snapshot()}
 
     try:
         response, final_url = _http_get(url, fetch_session())

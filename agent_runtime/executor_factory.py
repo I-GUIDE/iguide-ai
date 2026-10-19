@@ -1825,10 +1825,24 @@ def _make_repeat_call_middleware() -> Any:
         peer, run = turn_log.active_peer() or "peer", turn_log.active_run()
         try:
             key = turn_log.call_key(name, args)
-            earlier = log.earlier_answer(key)
+            closed = log.refusal_for_turn(name)
+            earlier = closed or log.earlier_answer(key)
             log.record_call(peer=peer, run=run, name=str(name), args=args, call_id=call_id)
         except Exception:  # noqa: BLE001 - a broken log must never cost the tool call
             return handler(request)
+        if closed is not None:
+            # The tool said no for the rest of the turn (a spent budget, the kill switch), so
+            # any arguments get the same answer. Stage 82: the peer kept asking with new queries.
+            note = (f"[{name} was refused for the rest of this turn by {closed.get('call_id')}, "
+                    "so this call was not run: every call of it this turn gets the same answer. "
+                    f"Do not call {name} again this turn; continue with what you have.]\n")
+            content = str(closed.get("content") or "")[:_REPEAT_RESULT_CHARS]
+            log.record_result(peer=peer, run=run, name=str(name), args=args, call_id=call_id,
+                              content=note + content, memo_of=closed.get("seq"))
+            logger.info("tool refused for the turn answered from the log: %s (= %s)",
+                        name, closed.get("call_id"))
+            return ToolMessage(content=note + content, tool_call_id=call_id, name=name,
+                               additional_kwargs={"repeat_of": closed.get("call_id")})
         if earlier is not None:
             content = str(earlier.get("content") or "")
             if len(content) > _REPEAT_RESULT_CHARS:
@@ -1836,9 +1850,12 @@ def _make_repeat_call_middleware() -> Any:
                            + f" … [cut here; the full result is the tool message for "
                              f"{earlier.get('call_id')}]")
             what = "failed" if not earlier.get("ok") else "returned"
+            why = ("the tool marked that refusal final for these arguments"
+                   if earlier.get("retryable") is False
+                   else "nothing it depends on has changed since")
             note = (f"[Same call, same arguments as {earlier.get('call_id')}, which already "
-                    f"{what} this turn. It was not run again: nothing it depends on has changed "
-                    "since, so it would return exactly this. Its earlier result follows.]\n")
+                    f"{what} this turn. It was not run again: {why}, so it would return "
+                    "exactly this. Its earlier result follows.]\n")
             log.record_result(peer=peer, run=run, name=str(name), args=args, call_id=call_id,
                               content=note + content, memo_of=earlier.get("seq"))
             logger.info("repeat tool call answered from the turn log: %s (= %s)",
