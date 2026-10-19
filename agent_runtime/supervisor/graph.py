@@ -2229,6 +2229,10 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     old rule caught; an analyze, code, analyze, code alternation passed it until the per-peer
     run cap. Whether a run added anything is read from the turn log, so it holds for any route
     to the peer: a decision, a queued need, or a re-grounding pass.
+
+    Stage 87: a run the fetch-stall rule ended (it kept fetching and produced nothing from
+    it) counts as one that added nothing. Running the peer again for the same need would probe
+    the same sources again.
     """
     if nxt in ("analyze", "code") and _last_run_added_nothing(nxt, state):
         return True
@@ -2248,7 +2252,7 @@ def _last_run_added_nothing(peer: str, state: SupervisorState) -> bool:
     if log is None:
         return False
     run = log.last_run(peer)
-    return run is not None and not log.run_was_productive(run)
+    return run is not None and (not log.run_was_productive(run) or log.run_stalled(run))
 
 
 # --- the plan: what the turn is for, owned by the agent -----------------------------------

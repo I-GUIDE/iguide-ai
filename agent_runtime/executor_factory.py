@@ -1881,6 +1881,13 @@ def _make_progress_middleware() -> Any:
     peer returns as its answer, so the turn continues with what was recorded instead of losing
     the run to an exception.
 
+    Stage 87 adds the second way a run ends: `turn_log.fetch_stall_limit()` steps that fetched
+    from a URL since the run last produced anything (a new output file, map layer or evidence
+    document). A code peer staging ArcGIS queries that never held the two sites it wanted
+    passed the rule above at every step, since each fetch and each read of it was new, and ran
+    27 steps in 10 minutes. Its closing message says what the run tried, so the answer can say
+    what was not found.
+
     Also renders the turn's brief (the task and the plan) into the system message.
     """
     from langchain.agents.middleware import wrap_model_call
@@ -1902,6 +1909,10 @@ def _make_progress_middleware() -> Any:
                     f"[Stopped: the last {turn_log.PROGRESS_LIMIT} steps added nothing new to "
                     "this turn's record (each call repeated an earlier one or failed the same "
                     "way). The results recorded above are what this run produced.]"))
+            if log.stalled(run):
+                logger.warning("peer run %s ended: %d fetching steps produced nothing",
+                               run, turn_log.fetch_stall_limit())
+                return AIMessage(content=log.stall_note(run))
             brief = turn_log.active_brief()
             if brief:
                 system = getattr(request, "system_message", None)
