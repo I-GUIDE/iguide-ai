@@ -36,7 +36,7 @@ From a worktree under `.claude/worktrees/`, either way reads the **main checkout
 
 ## What each script tests
 
-- **test_keyword.py** — BM25 `match` query over OpenSearch (`contents` field). Verifies connectivity, hit shape, and score ordering.
+- **test_keyword.py** — BM25 `multi_match` query over OpenSearch (`title^3` + `contents`). Verifies connectivity, hit shape, and score ordering.
 - **test_semantic.py** — Dense kNN query via FLASK_EMBEDDING_URL → OpenSearch `knn` on `contents-embedding`. Tests the embedding service + vector index.
 - **test_neo4j.py** — Keyword search and pattern detection against the Neo4j graph. Tests connection, Cypher execution, and title/tag matching.
 - **test_spatial.py** — Full spatial pipeline: spaCy NER → Google Maps geocoding → OpenSearch `geo_shape` query.

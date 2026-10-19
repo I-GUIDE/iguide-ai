@@ -36,6 +36,19 @@ def _os_index(default: Optional[str] = None) -> str:
     return index
 
 
+# Fields the keyword query matches, with their boosts. `contents` alone missed elements whose body
+# never repeats their title: "Chicago Crime data 2026" says neither Chicago, crime nor data in its
+# contents, so the agent could not find by name what the platform's own UI finds by title. The
+# title is boosted because a word in it is a much stronger statement of the subject.
+KEYWORD_FIELDS = ("title^3", "contents")
+
+
+def keyword_query_dsl(query: str) -> Dict[str, Any]:
+    """The OpenSearch query clause for a keyword search over title and contents."""
+    return {"multi_match": {"query": query, "fields": list(KEYWORD_FIELDS),
+                            "type": "best_fields"}}
+
+
 def get_keyword_search_results(
     user_query: str,
     size: Optional[int] = None,
@@ -61,7 +74,7 @@ def get_keyword_search_results(
     # default used to be a hardcoded 12, a third independent window alongside the
     # wrapper's 8 and the tools' 8.
     size = max(1, min(int(size or default_top_k()), 100))
-    body = {"size": size, "query": {"match": {"contents": query}}}
+    body = {"size": size, "query": keyword_query_dsl(query)}
 
     os_client = client or _os_client()
     os_index = _os_index(index)
@@ -135,4 +148,4 @@ def run_keyword_search(
     )
 
 
-__all__ = ["get_keyword_search_results", "run_keyword_search", "retrieve_keyword"]
+__all__ = ["KEYWORD_FIELDS", "keyword_query_dsl", "get_keyword_search_results", "run_keyword_search", "retrieve_keyword"]

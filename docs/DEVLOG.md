@@ -6019,3 +6019,10 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.126 · A follow-up that changes only the method keeps its subject (architecture stage 86)
+
+- **The fault:** trace 2026-10-06, deepseek-v4-flash. After "Use I-GUIDE keyword search only", the peer's `keyword_search('Chicago crime data')` found the eight Chicago documents. Then the sweep and the rerank ran on the literal sentence and kept the search tutorials. The answer said "no direct crime datasets", and the audit passed against that wrong evidence.
+- **Change:** the sweep runs on the peer's own queries plus a standalone request. A method-only follow-up resolves to the newest earlier user message with a subject. The rerank (and poor-results check, refinement, summary, web query) judges against that request. Keyword search is a `multi_match` on `title^3` + `contents`, so "Chicago Crime data 2026" is found by its title.
+- **Tests:** `test_search_followup_subject.py` (two-turn conversation; fails on prototype with the tutorials kept), `test_keyword_dsl.py`.
+- **Next:** not deployed. The sweep still adds semantic hits after "keyword search only".
