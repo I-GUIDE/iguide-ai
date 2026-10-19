@@ -64,13 +64,9 @@ const CHAT_W_DEFAULT = 460;   // the width the remote-sensing row was tuned agai
 const CHAT_W_MIN = 380;       // below this the composer's three 42px circles crowd the textarea out
 const MAP_W_MIN = 360;        // .leftpanel floats over the map and needs 312 (288 + gutters)
 
-// The first thing anyone reads, and it has to be actionable by the person reading it. The
-// default points at the settings gear; DEMO_MODE hides that gear, so pointing at it there tells
-// a visitor to click something that is not on their screen. The demo greeting says what is
-// already true instead — spatial tools are on, and forced on below, since nothing can turn them
-// off once the gear is gone.
-const GREETING = "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-click or right-drag on it to select a region.";
-const GREETING_DEMO = "Hi — I'm the I-GUIDE agent. Ask me anything — spatial tools are on, so I can search geodata and open datasets. The map appears on its own when I return geometry, or hit Map — then right-click or right-drag on it to select a region.";
+// The first thing anyone reads, and it has to be actionable by the person reading it. It names
+// nothing that DEMO_MODE hides (the settings gear), so the same text serves both modes.
+const GREETING = "Explore spatial data and analysis with I-GUIDE AI by asking questions and interacting directly with maps. The map opens automatically when you share location-related information, or select Map to open it yourself. Then, right-click or right-drag to select an area.";
 
 function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean; chatW: number } {
   try {
@@ -252,11 +248,6 @@ export default function App() {
         setViewer(null);
       }
       if (!demo) return;
-      // The config arrives after the first paint, so the greeting is already on screen and has
-      // to be replaced — but only while it is still the whole conversation. A restored session,
-      // or a visitor who typed before the answer came back, keeps what it has.
-      setMessages((m) => (m.length === 1 && m[0].role === 'agent' && m[0].text === GREETING
-        ? [{ ...m[0], text: GREETING_DEMO }] : m));
       // Nothing can turn these back on with the gear hidden, and a returning visitor who once
       // switched them off would otherwise be stuck with a crippled demo and no way out of it.
       setSpatial(true);
