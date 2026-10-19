@@ -21,6 +21,15 @@ It also answers the two questions the step bounds never could:
   success whose content has not been seen this turn, or a failure whose error class has not.
   Two unproductive steps in a row end a peer run (`PROGRESS_LIMIT`). A count of steps measures
   how long a loop has run; this measures whether it is going anywhere.
+* **Is fetching getting anywhere?** (stage 83) "New" is a low bar for a run that fetches: every
+  fetch returns fresh bytes and every look at them prints fresh text, so a peer probing a
+  service for something that is not there adds something new at every step. A step that calls
+  out to a URL is judged by what the run has *produced* since: a new output file or map layer,
+  or a new evidence document. A file fetched from a URL is input, not output, and the copy of
+  its own source `execute_code` saves is not output either. `fetch_stall_limit()` fetching
+  steps since the run last produced anything end it, with a summary of what it tried. Steps
+  that fetch nothing are not counted: a run computing on what it already holds prints its
+  answer rather than writing a file, and is judged by the progress rule above.
 
 The log lives for one turn. It is found through the state (`turn_log_id`) by nodes, and through
 a context variable by the middleware, which the node sets before it invokes a peer.
@@ -29,16 +38,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import uuid
 from collections import OrderedDict
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 # Two consecutive steps that add nothing end a peer run. One unproductive step is always
 # allowed: a model that reads a result and then decides is not looping.
 PROGRESS_LIMIT = 2
+
+# Steps that fetch from a URL since the run last produced anything (a new output file, map layer
+# or evidence document) before the run ends (stage 83). Replayed through this log, the 806
+# archived harness peer runs give: at most 2 in a run of a correctly answered turn (only 14 such
+# runs fetched at all, so that is thin evidence), up to 11 in failing ones (STAC probing,
+# keyless Census API retries). The live turn behind the rule (2026-10-16, a code peer staging
+# ~40 ArcGIS queries that never held the two sites it wanted) went well past this. A run that
+# downloads more than this many files one step at a time before making anything from them is
+# cut too; parallel calls in one step count once. AGENT_FETCH_STALL_STEPS overrides; 0 is off.
+FETCH_STALL_LIMIT = 8
+
+
+def fetch_stall_limit() -> int:
+    try:
+        return max(0, int(os.getenv("AGENT_FETCH_STALL_STEPS", "") or FETCH_STALL_LIMIT))
+    except ValueError:
+        return FETCH_STALL_LIMIT
+
 
 # A failed call may be retried with identical arguments once (an Overpass mirror that 504s can
 # answer the second time); after that, the failure itself is the answer.
@@ -48,6 +77,12 @@ _ID_RE = re.compile(r"\b(?:file|layer|run|call|toolu|chatcmpl)[_-][0-9a-zA-Z_-]{
 _QUOTED_RE = re.compile(r"(['\"]).*?\1")
 _PATH_RE = re.compile(r"(?:/[\w.@-]+){2,}")
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+_ARTIFACT_RE = re.compile(r"\b(?:file|layer)_[0-9a-f]{8,}\b")
+_DOC_ID_RE = re.compile(r'"doc_id"\s*:\s*"([^"]+)"')
+# An `artifacts` entry for the source execute_code saved, found by pattern as well, so a result
+# that is not whole JSON (cut by a trace, or wrapped) still does not count its script as output.
+_SOURCE_ENTRY_RE = re.compile(
+    r'\{[^{}]*"file_id"\s*:\s*"((?:file)_[0-9a-f]{8,})"[^{}]*"kind"\s*:\s*"source"[^{}]*\}')
 
 
 def call_key(name: Any, args: Any) -> str:
@@ -100,8 +135,45 @@ def parse_result(content: Any, status: Optional[str] = None) -> Dict[str, Any]:
             error = str(body.get("stderr") or body.get("error") or text)
     elif isinstance(text, str) and re.match(r"\s*(?:Error|Traceback)\b", text):
         ok, error = False, text
-    artifacts = sorted(set(re.findall(r"\b(?:file|layer)_[0-9a-f]{8,}\b", text or "")))
+    artifacts = sorted(set(_ARTIFACT_RE.findall(text or "")))
     return {"ok": ok, "error": error, "artifacts": artifacts}
+
+
+def fetched_hosts(args: Any) -> List[str]:
+    """Hosts of the http(s) URLs a call's arguments name: the call fetches from the web."""
+    values = list(args.values()) if isinstance(args, dict) else []
+    hosts = []
+    for v in values:
+        for item in (v if isinstance(v, list) else [v]):
+            if isinstance(item, str) and re.match(r"\s*https?://", item, re.I):
+                hosts.append((urlparse(item.strip()).hostname or "?").lower())
+    return hosts
+
+
+def produced(content: Any, args: Any = None) -> List[str]:
+    """What a successful result made that later work can use: output file and layer ids, and
+    evidence document ids (stage 83).
+
+    Not counted: anything a call fetched from a URL (the file is an input; whether it holds
+    what was wanted is only known once something is made from it), the copy of its own source
+    that `execute_code` saves on every run (`artifacts[].kind == "source"`), and the files a
+    call was given (`input_files`)."""
+    if fetched_hosts(args):
+        return []
+    text = content if isinstance(content, str) else json.dumps(content, default=str)
+    body: Any = content if isinstance(content, dict) else None
+    if body is None and isinstance(text, str) and text.lstrip().startswith("{"):
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+    ids = set(_ARTIFACT_RE.findall(text or "")) - set(_SOURCE_ENTRY_RE.findall(text or ""))
+    if isinstance(body, dict):
+        for key, only_source in (("artifacts", True), ("input_files", False)):
+            for item in body.get(key) or []:
+                if isinstance(item, dict) and (not only_source or item.get("kind") == "source"):
+                    ids.discard(str(item.get("file_id") or ""))
+    return sorted(ids) + [f"doc:{d}" for d in dict.fromkeys(_DOC_ID_RE.findall(text or ""))]
 
 
 def typed_outputs(content: Any) -> List[Dict[str, Any]]:
@@ -138,6 +210,7 @@ class TurnLog:
         self._seen_errors: set = set()
         self._call_ids: set = set()
         self._artifacts: set = set()
+        self._produced: set = set()
         # Advances when a step adds something new. A memoised answer is valid only while it
         # has not moved since that answer's step: anything new may have changed what the same
         # call would return (a listing after a write, a read after an edit).
@@ -157,7 +230,7 @@ class TurnLog:
         run_id = f"{peer}#{sum(1 for e in self.events if e['kind'] == 'run_started') + 1}"
         with self._lock:
             self._runs[run_id] = {"peer": peer, "steps": 0, "unproductive": 0, "productive": 0,
-                                  "pending": []}
+                                  "fetching": 0, "pending": []}
         self.append("run_started", peer=peer, run=run_id)
         return run_id
 
@@ -192,12 +265,16 @@ class TurnLog:
                 new = cls not in self._seen_errors
                 self._seen_errors.add(cls)
             self._artifacts.update(parsed["artifacts"])
+            outputs = ([x for x in produced(content, args) if x not in self._produced]
+                       if parsed["ok"] and memo_of is None else [])
+            self._produced.update(outputs)
             in_step = run in self._runs
             if not in_step and new and parsed["ok"]:
                 self.world += 1         # outside a step there is nothing to batch with
             event = self.append("tool_result", peer=peer, run=run, tool=name,
                                 key=call_key(name, args), call_id=call_id, ok=parsed["ok"],
                                 error=parsed["error"], artifacts=parsed["artifacts"], new=new,
+                                produced=outputs, fetched=fetched_hosts(args),
                                 world=self.world, memo_of=memo_of, content=text)
             if in_step:
                 self._runs[run]["pending"].append(event)
@@ -288,13 +365,55 @@ class TurnLog:
             r["unproductive"] = 0
         else:
             r["unproductive"] += 1
+        if any(e.get("produced") for e in pending):
+            r["fetching"] = 0
+        elif any(e.get("fetched") for e in pending):
+            r["fetching"] += 1
         self.append("step", run=run, peer=r["peer"], productive=productive,
-                    consecutive_unproductive=r["unproductive"])
+                    consecutive_unproductive=r["unproductive"],
+                    fetching_since_output=r["fetching"])
         return productive
 
     def exhausted(self, run: Optional[str]) -> bool:
         r = self._runs.get(run or "")
         return bool(r) and r["unproductive"] >= PROGRESS_LIMIT
+
+    def stalled(self, run: Optional[str]) -> bool:
+        """`fetch_stall_limit()` steps fetched since the run last produced anything (stage 83)."""
+        r = self._runs.get(run or "")
+        limit = fetch_stall_limit()
+        return bool(r) and limit > 0 and r["fetching"] >= limit
+
+    def run_stalled(self, run_id: str) -> bool:
+        """Whether *run_id* was ended by the stall rule (read after the run has ended too)."""
+        return any(e["kind"] == "run_ended" and e.get("run") == run_id and e.get("stalled")
+                   for e in self.events) or self.stalled(run_id)
+
+    def stall_note(self, run: Optional[str]) -> str:
+        """What a stalled run ends with, as its answer: that it stopped, why, and what it
+        tried, so the answer can say what was looked for and not found instead of guessing."""
+        calls = [e for e in self.events if e["kind"] == "tool_call" and e.get("run") == run]
+        tools: Dict[str, int] = {}
+        hosts: Dict[str, int] = {}
+        for e in calls:
+            tools[e["tool"]] = tools.get(e["tool"], 0) + 1
+            for h in fetched_hosts(e.get("args")):
+                hosts[h] = hosts.get(h, 0) + 1
+
+        def counted(d: Dict[str, int]) -> str:
+            top = sorted(d.items(), key=lambda kv: -kv[1])
+            text = ", ".join(f"{k} x{n}" for k, n in top[:6])
+            return text + (f", and {len(top) - 6} more" if len(top) > 6 else "")
+
+        tried = f"Calls in this run: {counted(tools)}." if tools else ""
+        if hosts:
+            tried += f" Fetched from: {counted(hosts)}."
+        return (f"[Stopped: this run fetched from the web in {fetch_stall_limit()} steps "
+                "without producing anything this turn can use from what it fetched: no new "
+                "output file, map layer or evidence document. " + tried +
+                " Whatever these calls were looking for was not found by them. The answer "
+                "should say what was looked for and not found, and what was tried, rather "
+                "than guess a value.]")
 
     def run_was_productive(self, run_id: str) -> bool:
         """A run is productive when it added a new successful result, a new answer, or a new
@@ -445,6 +564,8 @@ class bind:
 
     def __exit__(self, *exc: Any) -> None:
         self.log.close_step(self.run)
-        self.log.end_run(self.run, stopped=self.log.exhausted(self.run))
+        stalled = self.log.stalled(self.run)
+        self.log.end_run(self.run, stopped=self.log.exhausted(self.run) or stalled,
+                         stalled=stalled)
         for var, tok in zip((_ACTIVE, _ACTIVE_RUN, _ACTIVE_PEER, _ACTIVE_BRIEF), self._tokens):
             var.reset(tok)

@@ -91,6 +91,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
+| 83 | [A run that keeps fetching without producing anything ends](#stage-83) | 2026-10-19 | 8 steps that fetch from a URL (any tool, any host) since the run last produced an output file, map layer or evidence document end the run with a note of what it tried; a fetched file is input; steps that fetch nothing are not counted; the supervisor does not re-run a peer the rule ended |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12080,3 +12081,58 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 83 — A run that keeps fetching without producing anything ends {#stage-83}
+
+**The fault.** Live on production, 2026-10-16 (Lumen deepseek-v4-flash), a user asked which direction to travel from one HRSA health-center site to another, giving both BPHC site IDs. After the supervisor routed to the code peer at 20:41, that peer ran 27+ steps in 10 minutes:
+- about 40 `stage_url` calls against one public ArcGIS REST host (five layers, each queried several ways) and the agency's download pages;
+- `execute_code` reads of the staged files in between.
+
+Most fetches returned a file, so each counted as a success. The files held empty query results or service metadata, never the two sites. The turn was still running 31 minutes after it started. No trace was saved (the turn never finished), so the offline test rebuilds the run's shape.
+
+**Why no bound fired.** Stage 42's rule ends a run after `PROGRESS_LIMIT` (2) steps in a row that add nothing new to the turn log: a repeated call, or a failure of a class already seen. Here every fetch returned fresh bytes and every read printed fresh text. Each step was "new", so the rule never fired, and the 60-step recursion limit was the only bound left.
+
+**The rule** (`agent_runtime/turn_log.py`). It counts **steps that fetch from a URL since the run last produced anything**. When the count reaches `FETCH_STALL_LIMIT` (8; `AGENT_FETCH_STALL_STEPS` overrides, 0 turns it off), the run ends.
+- **A fetch** is any call with an `http(s)://` argument (`fetched_hosts`): `stage_url`, `fetch_public_data` and `web_fetch` today, and any future tool that takes a URL. Parallel fetches in one step count once.
+- **Produced** (`produced`) means a new output file id or layer id, or a new evidence document id, that a call returned. Three things are excluded:
+  - a file a call fetched from a URL (it is input; whether it held what was wanted shows only once something is made from it);
+  - the copy of its own source that `execute_code` saves on every run (`artifacts[].kind == "source"`, also matched by pattern, so a result that is not whole JSON is handled the same way);
+  - the files a call was given (`input_files`).
+- **Steps that fetch nothing are not counted.** That is what the measurement below forced.
+
+**How the run ends.** The progress middleware (`executor_factory._make_progress_middleware`) does not call the model again. The run ends with `TurnLog.stall_note`, which says that it stopped, why, and what it tried: the calls by tool, and the hosts it fetched from with counts. It also tells the answer to say what was looked for and not found rather than guess a value. The peer returns that note as its answer, so the turn continues with what was recorded.
+
+**The supervisor** (`supervisor/graph.py`, `_last_run_added_nothing`). A run the rule ended counts as one that added nothing, so the same peer is not sent back to probe the same sources for the same need.
+
+**Measured.** All 806 archived harness peer runs (581 turn files in `gis_harness_runs_archive`) were replayed through the real `TurnLog`, segmented by `node_started` and model step.
+
+| Count tried | Runs of correctly answered turns that would be cut | Failing runs cut |
+|---|---|---|
+| Steps since the last output, failed steps neutral (limit 10) | **5 of 444**: DEM and watershed runs that compute for 10–18 steps, printing figures and writing no file | 2 |
+| **Fetching steps since the last output (limit 8)** | **0 of 444** (longest streak: 2) | 2 |
+
+- The two cut failing runs: T03L code (keyless Census API retries), cut at step 17 of 18; and T08L analyze (Planetary Computer probing, 44 fetches), cut at step 37 of 63.
+- A first replay parsed the trace's Python-repr tool results wrongly. That made every `execute_code` source file count as an output and showed the first rule as safe. Parsing them properly (2,243 of 2,249 results are whole JSON; 6 are cut at 20,000 characters) is what exposed the 5 false cuts.
+
+**Limits.**
+- Only 14 runs of correctly answered turns fetched anything at all, so "longest streak 2" rests on thin evidence. The limit of 8 is set well above it.
+- A run that downloads more than 8 files one step at a time, making nothing from them in between, is cut. Parallel calls in one step count once.
+- The rule lives in the LangChain middleware, so CLI code peers (Claude, opencode) are not covered.
+- A run that writes a scratch file after every fetch resets the count.
+- A per-host fetch budget was measured too (most from one host in a correct run: 3; failing runs: up to 12). It is not added: the fetch-step count already covers the incident and the archive's failing cases.
+
+**Tests.** `rag_pipeline/tests/test_fetch_stall_rule.py` (12, offline, driving the real `create_agent` and middleware) covers:
+- the incident's shape stops after 8 fetching steps, names `stage_url x8` and the host, and the Stage 42 rule had judged every step productive;
+- `fetch_public_data` file ids do not reset the count;
+- 24 steps that each write an output run to the end;
+- fetch, inspect, write rounds run to the end;
+- 20 steps of computing without fetching run to the end;
+- edit and fail debugging runs to the end;
+- search documents reset the count;
+- the env override and off switch;
+- a run the rule ended blocks a re-run of the same peer;
+- `produced()` and `fetched_hosts()`.
+
+The Stage 42 tests (`test_repeat_tool_calls.py`, `test_turn_event_log.py`) and `test_supervisor_graph.py` pass unchanged.
+
+**Not deployed.**
