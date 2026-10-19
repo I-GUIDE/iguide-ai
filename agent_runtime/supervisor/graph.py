@@ -2230,7 +2230,7 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     run cap. Whether a run added anything is read from the turn log, so it holds for any route
     to the peer: a decision, a queued need, or a re-grounding pass.
 
-    Stage 87: a run the fetch-stall rule ended (it kept fetching and produced nothing from
+    Stage 83: a run the fetch-stall rule ended (it kept fetching and produced nothing from
     it) counts as one that added nothing. Running the peer again for the same need would probe
     the same sources again.
     """

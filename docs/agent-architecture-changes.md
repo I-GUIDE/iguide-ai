@@ -91,7 +91,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
-| 87 | [A run that keeps fetching without producing anything ends](#stage-87) | 2026-10-19 | 8 steps that fetch from a URL (any tool, any host) since the run last produced an output file, map layer or evidence document end the run with a note of what it tried; a fetched file is input; steps that fetch nothing are not counted; the supervisor does not re-run a peer the rule ended |
+| 83 | [A run that keeps fetching without producing anything ends](#stage-83) | 2026-10-19 | 8 steps that fetch from a URL (any tool, any host) since the run last produced an output file, map layer or evidence document end the run with a note of what it tried; a fetched file is input; steps that fetch nothing are not counted; the supervisor does not re-run a peer the rule ended |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12082,7 +12082,7 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
   The existing writer tests pass unchanged.
 - **Not deployed.**
 
-## Stage 87 — A run that keeps fetching without producing anything ends {#stage-87}
+## Stage 83 — A run that keeps fetching without producing anything ends {#stage-83}
 
 **The fault.** Live on production, 2026-10-16 (Lumen deepseek-v4-flash), a user asked which direction to travel from one HRSA health-center site to another, giving both BPHC site IDs. After the supervisor routed to the code peer at 20:41, that peer ran 27+ steps in 10 minutes:
 - about 40 `stage_url` calls against one public ArcGIS REST host (five layers, each queried several ways) and the agency's download pages;

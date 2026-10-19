@@ -6020,7 +6020,7 @@ rather than from the previous one.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
 
-## 2026-10-19 · M8.127 · A run that keeps fetching without producing anything ends (architecture stage 87)
+## 2026-10-19 · M8.123 · A run that keeps fetching without producing anything ends (architecture stage 83)
 
 **Change** `turn_log.py`: each step records what its results `produced` (new output file or layer ids, new evidence documents; not fetched files, not `execute_code`'s saved source, not `input_files`) and which hosts its calls `fetched` from. `close_step` counts the fetching steps since the last output. At `FETCH_STALL_LIMIT` (8, `AGENT_FETCH_STALL_STEPS`) `_make_progress_middleware` ends the run with `stall_note`, which lists the calls and the hosts. `_last_run_added_nothing` treats a run ended this way as one that added nothing.
 **Why** Live on prod on 2026-10-16, a code peer staged about 40 ArcGIS queries that never held the two health-center sites it wanted, over 27+ steps, and the turn was still going after 31 minutes. Every fetch and every read was "new", so Stage 42's rule (2 steps that add nothing) never fired.

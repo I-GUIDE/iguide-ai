@@ -21,7 +21,7 @@ It also answers the two questions the step bounds never could:
   success whose content has not been seen this turn, or a failure whose error class has not.
   Two unproductive steps in a row end a peer run (`PROGRESS_LIMIT`). A count of steps measures
   how long a loop has run; this measures whether it is going anywhere.
-* **Is fetching getting anywhere?** (stage 87) "New" is a low bar for a run that fetches: every
+* **Is fetching getting anywhere?** (stage 83) "New" is a low bar for a run that fetches: every
   fetch returns fresh bytes and every look at them prints fresh text, so a peer probing a
   service for something that is not there adds something new at every step. A step that calls
   out to a URL is judged by what the run has *produced* since: a new output file or map layer,
@@ -52,7 +52,7 @@ from urllib.parse import urlparse
 PROGRESS_LIMIT = 2
 
 # Steps that fetch from a URL since the run last produced anything (a new output file, map layer
-# or evidence document) before the run ends (stage 87). Replayed through this log, the 806
+# or evidence document) before the run ends (stage 83). Replayed through this log, the 806
 # archived harness peer runs give: at most 2 in a run of a correctly answered turn (only 14 such
 # runs fetched at all, so that is thin evidence), up to 11 in failing ones (STAC probing,
 # keyless Census API retries). The live turn behind the rule (2026-10-16, a code peer staging
@@ -152,7 +152,7 @@ def fetched_hosts(args: Any) -> List[str]:
 
 def produced(content: Any, args: Any = None) -> List[str]:
     """What a successful result made that later work can use: output file and layer ids, and
-    evidence document ids (stage 87).
+    evidence document ids (stage 83).
 
     Not counted: anything a call fetched from a URL (the file is an input; whether it holds
     what was wanted is only known once something is made from it), the copy of its own source
@@ -379,7 +379,7 @@ class TurnLog:
         return bool(r) and r["unproductive"] >= PROGRESS_LIMIT
 
     def stalled(self, run: Optional[str]) -> bool:
-        """`fetch_stall_limit()` steps fetched since the run last produced anything (stage 87)."""
+        """`fetch_stall_limit()` steps fetched since the run last produced anything (stage 83)."""
         r = self._runs.get(run or "")
         limit = fetch_stall_limit()
         return bool(r) and limit > 0 and r["fetching"] >= limit

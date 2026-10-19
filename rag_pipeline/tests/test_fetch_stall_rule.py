@@ -1,4 +1,4 @@
-"""Stage 87: a run that keeps fetching without producing anything ends, and says what it tried.
+"""Stage 83: a run that keeps fetching without producing anything ends, and says what it tried.
 
 The live turn behind this (production, 2026-10-16 20:41 UTC, Lumen deepseek-v4-flash): asked
 for the bearing between two HRSA health-center sites, the code peer ran 27+ steps in ten
@@ -6,7 +6,7 @@ minutes: about 40 `stage_url` calls against one ArcGIS REST host (five layers, e
 several ways) and its download pages, interleaved with `execute_code` reads of the staged
 files. The files held empty query results or service metadata, never the two sites. Stage 42's
 rule ends a run after two steps that add nothing new, but every fetch returned fresh bytes and
-every read printed fresh text, so it never fired. Stage 87 counts the steps that fetch from a
+every read printed fresh text, so it never fired. Stage 83 counts the steps that fetch from a
 URL since the run last PRODUCED something: a new output file, map layer or evidence document.
 A fetched file is input. Steps that fetch nothing are not counted.
 
