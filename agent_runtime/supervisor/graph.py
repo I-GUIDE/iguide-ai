@@ -131,6 +131,8 @@ class SupervisorState(TypedDict, total=False):
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
     searched_queries: List[str]    # every query string actually searched (incl. refinements)
+    rerank_seen: Dict[str, Any]    # {query, keys}: documents an earlier search step this turn
+                                   # already gave the rerank; see _rerank_new_documents
     peer_failures: List[Dict[str, Any]]   # peers that raised; see _run_peer
     checkpoint_thread_id: str             # this RUN's checkpoint namespace; see run_supervisor
     action_rows: List[Dict[str, Any]]  # ledger rows the peers produced THIS turn (see
@@ -197,6 +199,52 @@ def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
         seen[key] = len(merged)
         merged.append(d)
     return merged
+
+
+def _rerank_key(doc: Any) -> str:
+    """A short digest of ``_doc_key``: the rerank's memory travels in the state, which is
+    checkpointed, so it holds 12 hex characters per document rather than the key itself."""
+    import hashlib
+
+    return hashlib.sha1(_doc_key(doc).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _rerank_new_documents(query: str, docs: List[Any], state: "SupervisorState", *,
+                          top_k: Optional[int], llm: Any) -> Tuple[List[Any], Dict[str, Any]]:
+    """Rerank this search step's documents, judging only those no earlier step this turn gave
+    the rerank for the same query. Returns ``(documents to merge, new rerank_seen)``.
+
+    A second search step used to rerank everything it returned, and most of that was the first
+    step's list again: the completeness sweep repeats the same keyword+semantic query, so on
+    2026-10-19 both slow turns paid for the same rerank twice. A document seen before has
+    already been placed against this query: it is in the evidence, or it lost its place to the
+    documents that are. Judging it again could at best re-add what is already held. So:
+
+    * nothing new: no model call, and nothing to add (``search_empty_streak`` advances, as it
+      did when the repeat rerank kept only held documents);
+    * some new: only they are reranked, and the best ``top_k`` of them are added. Evidence grows
+      by at most ``top_k`` per step, the same bound as before, when a step that found entirely
+      new documents added its top ``top_k``.
+    """
+    prior = state.get("rerank_seen") or {}
+    seen = set(prior.get("keys") or []) if prior.get("query") == query else set()
+    keys = [_rerank_key(d) for d in docs]
+    fresh = [d for d, k in zip(docs, keys) if k not in seen] if seen else list(docs)
+    remembered = {"query": query, "keys": sorted(seen.union(keys))}
+    if seen:
+        emit_trace_event(
+            "node_started",
+            {"stage": "search",
+             "message": (f"Ranking {len(fresh)} new of {len(docs)} results; the rest were "
+                         "ranked by an earlier search this turn") if fresh else
+                        f"All {len(docs)} results were ranked by an earlier search this turn"},
+            node="search",
+        )
+    if not fresh:
+        return [], remembered
+    if len(fresh) == 1:
+        return fresh, remembered
+    return rerank_documents(query, fresh, top_k=top_k, llm=llm), remembered
 
 
 def _focus_terms(query: str) -> List[str]:
@@ -6176,8 +6224,10 @@ def build_supervisor_graph(
         # Skip rerank/top_k for a two-bucket related-element result: reranking would interleave
         # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
         has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in docs)
+        rerank_seen: Optional[Dict[str, Any]] = None
         if do_rerank and len(docs) > 1 and not has_provenance:
-            docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
+            # operator bundled into search
+            docs, rerank_seen = _rerank_new_documents(q, docs, state, top_k=top_k, llm=llm)
         before = len(state.get("evidence") or [])
         merged = _merge_dedup(state.get("evidence") or [], docs)
         added = len(merged) - before
@@ -6198,6 +6248,8 @@ def build_supervisor_graph(
             # checkpointed and shipped to the client.
             "action_rows": [*(state.get("action_rows") or []), *new_rows],
         }
+        if rerank_seen is not None:
+            update["rerank_seen"] = rerank_seen
         enq = _enqueue_needs(state.get("needs"), needs, "search")
         if enq is not None:
             update["needs"] = enq
@@ -6715,7 +6767,7 @@ def build_supervisor_graph(
         return {"answer": final, "final_answer": final, "audit": audit, "action_rows": [],
                 # Cleared so a second synthesize cannot re-route, and so the gaps do not leak
                 # into the client payload or a later turn's state.
-                "reground": False, "grounding_gaps": [],
+                "reground": False, "grounding_gaps": [], "rerank_seen": {},
                 "verdict": {"findings": [f.to_dict() for f in verdict_findings],
                             "numbers": number_links},
                 "distilled": {**_distill(merged), "answer": final}}

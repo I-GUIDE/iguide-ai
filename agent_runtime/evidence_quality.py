@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 LLMLike = Union[Any, Callable[[str], str]]
@@ -167,20 +168,119 @@ def _extract_json_object(text: str) -> Optional[Any]:
 # Rerank
 # ---------------------------------------------------------------------------
 
+# How many candidates the model judges. The supervisor's search step merges every hit its peer
+# gathered with no cap, and on 2026-10-19 that was about 190 documents: a 25k-token prompt asking
+# for {doc_id, score, reason} on each, answered with 6,500-10,000 output tokens. At Lumen's
+# slow-hour 27 tok/s that is about 6 minutes per rerank, and the turn reranked twice (20 min 25 s,
+# about 18 of it here). Only ``top_k`` (8) of those judgements were ever used.
+#
+# So the candidates are put in reciprocal-rank-fusion order first and only the head goes to the
+# model; the rest keep their RRF order behind it. Retrieval is untouched: every document is still
+# fetched and still in the list, only fewer are judged. 3 x top_k leaves the model room to pull a
+# document up from well below the cut, without paying to rank documents it could never keep.
+RERANK_CANDIDATES_PER_KEPT = 3
+# The cap when the caller keeps everything (top_k None): 3 x the supervisor's default top_k of 8.
+DEFAULT_RERANK_CANDIDATES = 24
+_EXCERPT_CHARS = 400
+
+
+def rerank_candidate_cap(top_k: Optional[int] = None) -> Optional[int]:
+    """How many candidates the model is shown; None means all of them.
+
+    ``AGENT_RERANK_MAX_CANDIDATES`` sets it outright (``0`` or ``off`` sends every candidate, the
+    old behaviour); otherwise 3 x ``top_k``, or 24 when there is no ``top_k``.
+    """
+    raw = (os.getenv("AGENT_RERANK_MAX_CANDIDATES") or "").strip().lower()
+    if raw in ("0", "off", "none", "all"):
+        return None
+    if raw:
+        try:
+            return max(2, int(raw))
+        except ValueError:
+            pass
+    if top_k is not None and top_k > 0:
+        return max(2, RERANK_CANDIDATES_PER_KEPT * int(top_k))
+    return DEFAULT_RERANK_CANDIDATES
+
+
 def _rerank_prompt(query: str, docs: List[Dict[str, Any]]) -> str:
+    # Candidates are NUMBERED and the model answers with numbers only. A reason per document was
+    # most of the old output (and never read), and copying a 36-character doc_id back costs about
+    # 20 tokens where a number costs one or two.
     items = "\n\n".join(
-        f"{i+1}. doc_id={d['doc_id']}\ntitle={d['title']}\nexcerpt={(d['contents'] or 'No excerpt available.')[:400]}"
+        f"[{i+1}] {d['title']}\n{(d['contents'] or 'No excerpt available.')[:_EXCERPT_CHARS]}"
         for i, d in enumerate(docs)
     )
     return (
         "You are an expert relevance judge for a retrieval-augmented QA system.\n"
-        "Re-rank the candidate documents by true semantic relevance to the query.\n"
-        "Assign each a score in [0,1] with meaningful variance; reward documents that\n"
-        "directly answer the query, penalize off-topic/redundant ones.\n"
-        "Return JSON ONLY: {\"ranking\": [{\"doc_id\": \"<id>\", \"score\": <float>, "
-        "\"reason\": \"<brief>\"}, ...]} including every doc_id exactly once.\n\n"
+        "Rank the numbered candidate documents by how directly each one helps answer the query:\n"
+        "documents that answer it first, background next, off-topic or redundant ones last.\n"
+        "Return JSON ONLY: the candidate numbers, best first, each number once, e.g.\n"
+        "{\"ranking\": [3, 1, 2]}\n"
+        "No scores, no reasons, no other text.\n\n"
         f"User query:\n{query}\n\nCandidate documents:\n{items}\n"
     )
+
+
+def _extract_json_array(text: str) -> Optional[List[Any]]:
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+_NUMBER_RE = re.compile(r"^\s*(?:\[|#)?\s*(\d+)\s*\]?\s*$")
+
+
+def _parse_ranking(text: str, docs: List[Dict[str, Any]]) -> List[int]:
+    """Candidate positions (0-based) in the model's order; empty when the reply is unusable.
+
+    The asked-for shape is ``{"ranking": [3, 1, 2]}``. Also taken: a bare array, numbers as
+    strings ("3", "[3]", "#3"), and items that are objects carrying ``doc_id`` / ``id`` / ``n``
+    with or without a score, which is the old format. A string that is one of the candidates'
+    doc_ids is read as that document before it is read as a number. Numbers out of range and
+    repeats are dropped; anything else in the reply is ignored rather than guessed at.
+    """
+    if not text:
+        return []
+    parsed = _extract_json_object(text)
+    ranking = parsed.get("ranking") if isinstance(parsed, dict) else None
+    if ranking is None:
+        ranking = parsed if isinstance(parsed, list) else _extract_json_array(text)
+    if not isinstance(ranking, list):
+        return []
+    by_id = {}
+    for i, d in enumerate(docs):
+        by_id.setdefault(str(d["doc_id"]), i)
+    n = len(docs)
+    out: List[int] = []
+    seen = set()
+    for item in ranking:
+        if isinstance(item, dict):
+            item = next((item[k] for k in ("doc_id", "id", "n", "number", "doc", "candidate")
+                         if item.get(k) not in (None, "")), None)
+        index: Optional[int] = None
+        if isinstance(item, bool) or item is None:
+            continue
+        if isinstance(item, (int, float)):
+            if float(item).is_integer() and 1 <= int(item) <= n:
+                index = int(item) - 1
+        elif isinstance(item, str):
+            key = item.strip()
+            if key in by_id:
+                index = by_id[key]
+            else:
+                m = _NUMBER_RE.match(key)
+                if m and 1 <= int(m.group(1)) <= n:
+                    index = int(m.group(1)) - 1
+        if index is not None and index not in seen:
+            seen.add(index)
+            out.append(index)
+    return out
 
 
 def rerank_documents(
@@ -189,27 +289,33 @@ def rerank_documents(
     *,
     top_k: Optional[int] = None,
     llm: Optional[LLMLike] = None,
+    max_candidates: Optional[int] = None,
 ) -> List[Any]:
     """Reorder *documents* by LLM-judged relevance to *query*.
 
-    Returns the original document objects, reordered (and truncated to ``top_k``).
-    A failed/unparseable LLM call leaves the order unchanged. <=1 doc is a no-op.
+    Returns the original document objects, reordered (and truncated to ``top_k``). The documents
+    are first put in reciprocal-rank-fusion order; the model judges the first
+    ``max_candidates`` (default :func:`rerank_candidate_cap`) and the rest follow in RRF order.
+    A failed, timed-out or unparseable LLM call leaves the RRF order. <=1 doc is a no-op.
     """
     if not isinstance(documents, list) or len(documents) <= 1 or not (query or "").strip():
         return documents
 
-    normalized = [_normalize_document(entry, i) for i, entry in enumerate(documents)]
-    by_id = {d["doc_id"]: d for d in normalized}
+    fused = rrf_order(documents)
+    cap = rerank_candidate_cap(top_k) if max_candidates is None else max_candidates
+    head = fused[:cap] if cap and cap > 0 else list(fused)
+    tail = fused[len(head):]
+    normalized = [_normalize_document(entry, i) for i, entry in enumerate(head)]
 
     failure = ""
+    picks: List[int] = []
+    started = time.monotonic()
     try:
         raw = _invoke_llm(llm, _rerank_prompt(query, normalized))
-        parsed = _extract_json_object(raw) or {}
-        ranking = parsed.get("ranking") if isinstance(parsed, dict) else None
-        if not isinstance(ranking, list) or not ranking:
+        picks = _parse_ranking(raw, normalized)
+        if not picks:
             failure = "the model returned no usable ranking"
-    except Exception as exc:
-        ranking = None
+    except Exception as exc:  # LLMCallTimeout included: it is the client's APITimeoutError
         failure = f"{type(exc).__name__}: {exc}"
 
     if failure:
@@ -220,25 +326,16 @@ def rerank_documents(
             "Evidence rerank unavailable (%s); falling back to reciprocal rank fusion over %d docs",
             failure, len(documents),
         )
-        fused = rrf_order(documents)
         return fused[:top_k] if top_k is not None else fused
 
-    ordered: List[Any] = []
-    seen = set()
-    for item in ranking:
-        if not isinstance(item, dict):
-            continue
-        doc_id = str(item.get("doc_id") or "").strip()
-        d = by_id.get(doc_id)
-        if not d or doc_id in seen:
-            continue
-        seen.add(doc_id)
-        ordered.append(d.get("_entry", d))
-    # Append any documents the model omitted, preserving their original order.
-    for d in normalized:
-        if d["doc_id"] not in seen:
-            ordered.append(d.get("_entry", d))
-
+    logger.info("Evidence rerank: judged %d of %d candidates in %.1f s",
+                len(head), len(documents), time.monotonic() - started)
+    chosen = set(picks)
+    # Candidates the model left out keep their RRF order after the ones it ranked, and documents
+    # beyond the cap follow both.
+    ordered = [head[i] for i in picks]
+    ordered += [entry for i, entry in enumerate(head) if i not in chosen]
+    ordered += tail
     if top_k is not None:
         ordered = ordered[:top_k]
     return ordered
@@ -780,4 +877,4 @@ def _recompute_verdict(parsed: Dict[str, Any]) -> Dict[str, Any]:
     return parsed
 
 
-__all__ = ["rerank_documents", "audit_answer_grounding"]
+__all__ = ["rerank_documents", "rerank_candidate_cap", "audit_answer_grounding"]
