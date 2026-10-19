@@ -235,8 +235,27 @@ def _reasoning_text(choice: Any) -> str:
     return ""
 
 
+# Once per process: which client a run's model calls went through is part of its evidence.
+_OWN_CLIENT_LOGGED: List[bool] = []
+
+
 def _reasoning_preserving_chat_openai() -> Any:
-    """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message."""
+    """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message.
+
+    ``AGENT_MODEL_CLIENT=own`` returns the agent's own client instead (stage 88,
+    ``model_client_langchain.OwnChatModel``): same constructor, same wire body, same carry-over,
+    plus a deadline per attempt, Stop mid-call and bounded retries. Every OpenAI-compatible
+    construction site below goes through here, so this is the one switch.
+    """
+    from agent_runtime.model_client import client_choice
+
+    if client_choice() == "own":
+        from agent_runtime.model_client_langchain import OwnChatModel
+
+        if not _OWN_CLIENT_LOGGED:
+            _OWN_CLIENT_LOGGED.append(True)
+            logger.info("model client: own (AGENT_MODEL_CLIENT=own, model_client.py)")
+        return OwnChatModel
     from langchain_openai import ChatOpenAI
 
     class ReasoningPreservingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
@@ -826,6 +845,12 @@ def active_llm_description() -> Dict[str, Any]:
     A silent fallback to OpenAI looks exactly like success, so make the choice inspectable
     rather than inferring it from whether a call worked.
     """
+    from agent_runtime.model_client import client_choice
+
+    return {**_active_llm_description(), "client": client_choice()}
+
+
+def _active_llm_description() -> Dict[str, Any]:
     anvil = _anvilgpt_settings()
     if anvil:
         return {"provider": "anvilgpt", "model": anvil["model"],
