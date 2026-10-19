@@ -6,6 +6,7 @@
 import type { AuthReason } from './auth';
 import { AuthError, authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
   withTokenRetry } from './auth';
+import type { MapState } from './mapState';
 export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
@@ -470,6 +471,9 @@ export interface StreamOpts {
   conversationName?: string;
   includeMcpTools?: boolean;              // spatial toggle -> MCP geo tools on/off
   enabledSearchMethods?: string[] | null; // spatial toggle -> restrict retrieval tools
+  /** What the map holds as this message is sent (mapState.ts). The agent believes it over its
+   *  own record of what it sent; absent, the agent keeps that record (Stage 81). */
+  mapState?: MapState;
 }
 
 export async function streamChat(
@@ -491,6 +495,7 @@ export async function streamChat(
     agent_dev: opts.agentDev ?? true, // detailed trace so the map can react to tool events
     file_ids: (opts.fileIds || []).filter((id) => id && !id.startsWith('tmp:')),
     enabled_search_methods: opts.enabledSearchMethods ?? null,
+    ...(opts.mapState ? { map_state: opts.mapState } : {}),
     verbose: false,
     // Only sent when chosen: absent model AND provider means the agent uses its configured
     // default (OpenAI gpt-4o here), which is what every older client does.

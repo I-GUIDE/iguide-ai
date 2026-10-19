@@ -9,6 +9,7 @@ from uuid import uuid4
 from . import identity, thread_scope
 from .file_store import get_file_record
 from .graph_runtime import run_agent_query, stream_agent_query_events
+from .map_state import normalize as normalize_map_state
 from .runtime_utils import sanitize_answer_links
 from .session_memory import (
     append_session_files,
@@ -301,6 +302,7 @@ def run_agent_chat(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    map_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     effective_thread_id, agent_thread_id = _thread_ids(thread_id, memory_id)
     effective_memory_id = memory_id or thread_id
@@ -358,6 +360,7 @@ def run_agent_chat(
         code_peer_model=code_peer_model,
         unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
+        map_state=normalize_map_state(map_state),
     )
 
     answer = sanitize_answer_links(_extract_agent_answer(result))
@@ -490,6 +493,7 @@ def stream_agent_chat_events(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    map_state: Optional[Mapping[str, Any]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     effective_thread_id, agent_thread_id = _thread_ids(thread_id, memory_id)
     effective_memory_id = memory_id or thread_id
@@ -596,6 +600,7 @@ def stream_agent_chat_events(
         unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
         trace_recorder=_record,
+        map_state=normalize_map_state(map_state),
     )):
         if isinstance(event, BaseException):
             # `_guard_stream` hands the exception back instead of letting it unwind, so the

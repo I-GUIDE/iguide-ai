@@ -91,6 +91,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
+| 81 | [The browser says what is on the map](#stage-81) | 2026-10-19 | the map UI sends `map_state` with every turn (layers with label, render, feature count, visibility, opacity, source; layers that failed to load and why; viewport; drawn region; no geometry, capped at 40/20 with totals); the router, every peer and the answer writer read it as "WHAT IS ON THE USER'S MAP NOW", and it overrides the ledger's record of what was sent; a first 'done' on a request to show named items (buffer, site, route, boundary, …) the browser lacks goes to analyze instead |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12079,4 +12080,71 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
   - a code result with no answer falls back to the record.
 
   The existing writer tests pass unchanged.
+- **Not deployed.**
+
+## Stage 81 — The browser says what is on the map {#stage-81}
+
+**The fault.** The agent cannot see the user's map. `streamChat` sent the text, the thread, file ids and settings. A drawn region rode along only as a bbox hint in the text, and no layer list or viewport was sent at all. The agent therefore inferred the map from its own ledger of the layers it had *sent* (`_visible_state_lines`, `_visible_state_note`, and the `map_layer` fields in `prior_turns_in_this_conversation`). Live on 2026-10-18 that inference was wrong in two ways.
+
+1. **Layers that never drew.** Both suitability layers failed in the browser with 401 `token_expired`. The next turn's answer still said the score was "available on your interactive map", beside an empty map. The ledger records what was sent, not what arrived.
+2. **Things computed but never drawn.** In the schools demo, step 2 asks "Show the site, its 1-mile buffer and the schools inside it on the map." Across all 10 prod traces of that step that day (e5e311f0), it depended on step 1:
+
+   | What step 1 left on the map | What step 2 did |
+   |---|---|
+   | no layer | drew site, buffer and schools 6 of 6 times |
+   | a schools-only layer | the router's first decision was `done` 2 of 3 times |
+
+   In the second case the router took "the buffer was computed" for "the buffer is on the map". The demo was retired over it (#164).
+
+**Change.**
+
+- **The client reports the map** (`map-ui-prototype/src/mapState.ts`, `App.tsx`, `agentClient.ts`). Every turn sends `map_state`:
+  - `layers`: id, label, kind, render, feature count, visible, opacity and source for each layer. No geometry.
+  - `undrawn`: each layer that failed to load, with the reason the layer-load path (`layerLoad.ts`) gave. The list is kept for the whole conversation, keyed by layer id. A later successful draw of the same id removes its entry, and a new or restored conversation starts empty.
+  - `viewport` and the drawn `region`, as bboxes.
+  - Caps of 40 layers and 20 failures. When a list is cut, `truncated` carries the totals, so the payload says it was capped.
+- **The server carries it** from `api/server.py` (`map_state` or `mapState`, documented in both OpenAPI blocks) through `agent_chat_service`, `graph_runtime`, `build_orchestrator_graph` and `OrchestrationConfig` into `run_supervisor`. It enters the supervisor state only when sent. `agent_runtime/map_state.normalize` validates and caps it.
+- **The supervisor believes it over the ledger** (`supervisor/graph.py`).
+  - `_prior_actions(state)` is the one loader of the ledger, so it reconciles there (`map_state.reconcile_rows`). A ledger label the browser does not hold moves from `map_layer` to `map_layer_absent`, as `{label, why}`, where `why` is the browser's failure reason or "not in the browser". Every consumer of the rows then agrees:
+    - the `[on the map as …]` annotation, which becomes `[sent to the map but NOT on it: …]`;
+    - the auditor's map amnesty (`_map_delivered_earlier`);
+    - the router's `prior_turns_in_this_conversation`.
+
+    The session ledger itself is never changed.
+  - `_prior_actions_note(rows, map_state)` puts **"WHAT IS ON THE USER'S MAP NOW (reported by the browser)"** in place of the ledger-derived "WHAT THE USER IS LOOKING AT". The section lists what is on the map, each failure with its reason, each ledger layer the browser lacks, the viewport and the region. With a report but an empty ledger, the section is sent on its own. All three peers and the answer writer read it through `_ledger_note_for(state)`, and the auditor gets the same lines.
+  - The router's payload gains `user_map_now` and a note saying it overrides `prior_turns_in_this_conversation` about the map.
+- **One deterministic rule** (`map_state.unmapped_requested_items`, applied in `supervisor_node`). It applies only to the turn's first decision, when that decision is `done` and a report was sent. If the request asks to put named drawable items on the map and no reported layer shows them, the route becomes `analyze`, and that peer is told which items are missing (`draw_directive`).
+  - **Requests.** Only a request phrased as "… on/to the map" counts, and an item counts only if it is the head of what is to be shown. "Show the site, its 1-mile buffer and the schools" names `site` and `buffer`. "Show the schools within 1 mile of the site" names neither, because there the site only locates the schools.
+  - **Layers.** A layer shows the item at the head of its label. "1-mile buffer around site" shows `buffer`, "site_1mi_buffer" shows `buffer`, "Site (41.88, −87.62)" shows `site`, and "Schools within 1 mile of the site" shows none of them.
+  - **Vocabulary.** buffer, site, route, boundary, isochrone/service area, network, centroid. Anything else ("the schools") is left to the router. The rule is kept that narrow on purpose.
+- **Without `map_state`** (older clients, the JSON endpoint, the harness), none of this runs. The note given to every peer is byte-identical to before; a test asserts this.
+
+**Why a report and not a better inference.** Both failures were failures of inference, and no amount of ledger logic can see a 401 that happened in the browser, or a layer the user removed. The browser is the only party that knows. Sending what it knows costs about 500 bytes for a typical map and about 5 KB at the 40-layer cap.
+
+**Verified.**
+- **Tests.** `rag_pipeline/tests/test_map_state.py` has 28 tests. They cover:
+  - normalisation, capping and garbage input;
+  - request and label parsing;
+  - the four cases asked for, each in a whole supervisor turn: schools-only plus the step-2 request is not `done` (analyze runs, told `site, buffer`); all three on the map is `done`; no report leaves the turn unchanged; a question is left to the router;
+  - a failed layer, which the writer's note states as NOT on the map, never "on the map as", and for which the auditor's amnesty is lost;
+  - the router seeing the report;
+  - the server and the service carrying the field.
+
+  Two source-pinning tests in `test_action_ledger.py` were updated to the new helper. The frontend has a new `check:mapstate` (14 checks).
+- **Live** (local stack on this branch, Lumen deepseek-v4-flash, Chrome, the retired schools example restored locally and not committed). The second column is the router's first decision on step 2, from the server log.
+
+  | Run | Before step 2 | Step 2 first decision | Step 2 drew |
+  |---|---|---|---|
+  | 1 | step 1 drew no agent layer | `analyze` | site, 1-mile buffer, 20 schools |
+  | 2 | step 1 drew no agent layer | `analyze` | site, 1-mile buffer, 20 schools |
+  | 3 | step 1 drew no agent layer | `analyze` | site, 1-mile buffer, 20 schools |
+  | A | an extra turn drew a schools-only layer | `analyze` | site and buffer, reusing the schools layer |
+  | control | step 1 drew all three, the user removed site and buffer, **no `map_state` sent** | `done` | nothing; the answer said all three were "already displayed on your interactive map" |
+  | treatment | the same tab and state, `map_state` sent | `analyze` | site and buffer ("since the browser currently only has the two schools layers") |
+
+  Standard runs 1–3 drew site, buffer and schools 3 of 3 times. The control reproduced the prod failure word for word, and the paired treatment fixed it in the same state.
+
+  The deterministic rule never had to fire live: with the report, the router chose `analyze` by itself in all five with-report step-2 turns. The rule is the backstop, covered by the tests above.
+
+  The failed-layer case (401) was checked by tests only, not live.
 - **Not deployed.**

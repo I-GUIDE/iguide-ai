@@ -43,6 +43,9 @@ class OrchestrationConfig:
     code_peer: Optional[str] = None
     # Model for that peer when it is a CLI backend; None falls back to its own env default.
     code_peer_model: Optional[str] = None
+    # What the browser reports is on the user's map (agent_runtime.map_state.normalize), or
+    # None for a client that sends no report — then the ledger's view stands (Stage 81).
+    map_state: Optional[Dict[str, Any]] = None
 
 
 # (query, chat_history, cfg) -> orchestration result dict (OrchestratorState keys)

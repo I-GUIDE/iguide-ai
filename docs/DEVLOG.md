@@ -6019,3 +6019,26 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.121 · The browser says what is on the map (architecture stage 81)
+
+- **The fault.** The agent inferred the map from its own ledger of layers it had sent, and on 2026-10-18 it was wrong both ways.
+  - Two layers that failed with 401 `token_expired` were still "available on your interactive map" in the next answer.
+  - Schools step 2 chose `done` 2 of 3 times after step 1 had drawn a schools-only layer. It took "buffer computed" for "buffer on the map".
+- **Change.**
+  - The map UI sends `map_state` with every turn: layers with no geometry, failed layers with the reason, viewport and region, capped with totals (`mapState.ts`).
+  - The server carries it into the supervisor state (`agent_runtime/map_state.py`).
+  - The ledger is reconciled against it in `_prior_actions`, so a layer the browser lacks reads as NOT on the map everywhere.
+  - The router, the peers, the writer and the auditor read "WHAT IS ON THE USER'S MAP NOW (reported by the browser)".
+  - One narrow rule: a first `done` on "show X on the map" goes to `analyze` when a named item (buffer, site, route, boundary, …) is not among the reported layers.
+  - With no `map_state` sent, nothing changes; the note is byte-identical.
+- **Verified live** (local, Lumen deepseek-v4-flash).
+  - Schools step 1 → step 2, run 3 times: step 2 drew site, buffer and schools 3 of 3, and its first decision was `analyze` 3 of 3.
+  - A paired check in one state (site and buffer removed, the ledger saying delivered):
+    - without the report: `done`, nothing drawn, and a false "already displayed" answer;
+    - with the report: `analyze`, and site and buffer redrawn.
+  - The rule never had to fire live.
+- **Tests.**
+  - `test_map_state.py`: 28 tests.
+  - Two source pins in `test_action_ledger.py` were updated.
+  - Frontend: `check:mapstate` (14 checks). tsc, the build and every check pass.

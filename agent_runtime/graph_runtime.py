@@ -105,6 +105,7 @@ def run_agent_query(
     code_peer_model: Optional[str] = None,
     unified_peer: Optional[bool] = None,
     input_file_ids: Optional[List[str]] = None,
+    map_state: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Run one query through the hybrid orchestrator graph."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -126,6 +127,7 @@ def run_agent_query(
         code_peer_model=code_peer_model,
         unified_peer=unified_peer,
         input_file_ids=input_file_ids,
+        map_state=map_state,
     )
     web_utils.begin_turn()  # reset the per-turn open-web budget (see note in the streaming path)
     # The streaming path collects model calls inside trace_context; this one has none, so it
@@ -192,6 +194,7 @@ def stream_agent_query_events(
     unified_peer: Optional[bool] = None,
     input_file_ids: Optional[List[str]] = None,
     trace_recorder: Optional[Any] = None,
+    map_state: Optional[Dict[str, Any]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
@@ -267,6 +270,7 @@ def stream_agent_query_events(
                     code_peer_model=code_peer_model,
                     unified_peer=unified_peer,
                     input_file_ids=input_file_ids,
+                    map_state=map_state,
                 )
                 final_state = graph.invoke(
                     {

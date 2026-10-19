@@ -31,6 +31,7 @@ import type { AppTab } from './uiVariant';
 import { REPLAY_KEY, ReplayStrip, type ReplayVerdict } from './components/ReplayStrip';
 import { layerVerdicts, type ReplayMeta } from './replay';
 import { loadLayerData, undrawnLine } from './layerLoad';
+import { buildMapState, type UndrawnLayer } from './mapState';
 import {
   deleteLocalCopies, deleteSession, listSessions, loadSession, newSessionId, rerenderMessages, saveSession, titleFor,
   toStoredLayer, type SessionSummary, type StoredSession,
@@ -102,6 +103,10 @@ function viewportPolygon(): Polygon | null {
     return bboxPolygon([b.getWest(), b.getSouth()], [b.getEast(), b.getNorth()]);
   } catch { return null; }
 }
+function viewportBBox(): [number, number, number, number] | null {
+  const p = viewportPolygon();
+  return p ? polygonBBox(p) : null;
+}
 function polygonBBox(poly: Polygon): [number, number, number, number] {
   const ring = poly.coordinates[0]; const lons = ring.map((c) => c[0]); const lats = ring.map((c) => c[1]);
   return [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
@@ -162,6 +167,11 @@ export default function App() {
   const pendingFileIds = useRef<string[]>([]);
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
+  // Layers the agent sent that did not draw, across the whole conversation, keyed by layer id:
+  // the next turn's map_state reports them, so the agent stops saying they are on the map.
+  // A later successful draw of the same id removes its entry; a new or restored conversation
+  // starts empty (Stage 81).
+  const undrawnLayers = useRef<Map<string, UndrawnLayer>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
   // The running turn's server id (the stream's first event), so Stop can end it there too.
   const turnIdRef = useRef<string | null>(null);
@@ -477,6 +487,7 @@ export default function App() {
     for (const id of rec.fileIds || []) layerSourceFiles.current.add(id);
     setMessages(rerenderMessages(rec.messages || [], resolveUrl));
     setLayers([]);
+    undrawnLayers.current.clear();
     autoRevealed.current = false;
     // Geometry was never stored — re-fetch each layer from the file store, which keeps its
     // files indefinitely. A layer with no sourceUrl (a local upload preview, a mock preview)
@@ -526,6 +537,7 @@ export default function App() {
     pendingFileIds.current = [];
     uploadContext.current = '';
     setLayers([]);
+    undrawnLayers.current.clear();
     setDrawnRegion(null);
     autoRevealed.current = false;
     setMapVisible(false);
@@ -723,8 +735,12 @@ export default function App() {
     const regionHint = hints.length ? `\n\n(${hints.join(' ')})` : '';
     try {
       abortRef.current = ctl;
+      // What the map holds right now, failures included — read from refs, so a turn started
+      // from a callback memoised renders ago still reports the map as it is (Stage 81).
+      const mapState = buildMapState(layersRef.current, [...undrawnLayers.current.values()],
+                                     viewportBBox(), drawnRegion ? polygonBBox(drawnRegion) : null);
       const res = await streamChat(text + regionHint, {
-        signal: ctl.signal,
+        signal: ctl.signal, mapState,
         threadId: threadRef.current, memoryId: memoryRef.current,
         fileIds: pendingFileIds.current, agentDev: true,
         includeMcpTools: spatial,
@@ -754,6 +770,7 @@ export default function App() {
           // parse the PNG as JSON, fail, and silently deliver nothing.
           if (layer.render === 'raster' && layer.url && layer.bounds) {
             const bounds = layer.bounds;
+            undrawnLayers.current.delete(layer.id);
             putLayer({
               kind: 'raster', id: layer.id, source: (layer.source as any) || 'analysis',
               label: layer.label, url: resolveUrl(layer.url), bounds,
@@ -776,10 +793,13 @@ export default function App() {
           if ('problem' in loaded) {
             const line = undrawnLine(layer.label || 'a layer', loaded.problem);
             undrawn.push(line);
+            undrawnLayers.current.set(layer.id || layer.label || line,
+              { id: layer.id, label: layer.label || 'a layer', reason: loaded.problem });
             addTrace({ text: line, kind: 'warn' });
             return;
           }
           const fc = loaded.fc;
+          undrawnLayers.current.delete(layer.id);
           const heat = layer.render === 'heatmap';
           const green = layer.source === 'overpass';
           // A categorical layer (LISA classes, Gi* bands, region ids) must keep that render:
@@ -912,7 +932,7 @@ export default function App() {
   const runLocal = useCallback(async (text: string) => {
     pushMsg({ role: 'user', text });
     const intent = parseIntent(text);
-    if (intent.kind === 'clear') { setLayers([]); pushMsg({ role: 'agent', text: 'Cleared all layers.' }); return; }
+    if (intent.kind === 'clear') { setLayers([]); undrawnLayers.current.clear(); pushMsg({ role: 'agent', text: 'Cleared all layers.' }); return; }
     if (intent.kind === 'help') { pushMsg({ role: 'agent', text: 'Offline demo. Try: “find flood datasets”, “show hospitals here”, “features that intersect the upload”, “buffer 2 km”, “heatmap”. Switch to the live agent (⚙ Connection) for the full toolkit.' }); return; }
     if (intent.kind === 'kb') {
       const region = intent.useRegion ? (drawnRegion ?? viewportPolygon()) : drawnRegion;

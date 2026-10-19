@@ -456,6 +456,9 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # Per-request A/B of the orchestration shape. Without this the two architectures could
     # only be compared by restarting the deployment between arms.
     unified_peer = _coalesce(data.get("unifiedPeer"), data.get("unified_peer"))
+    # What the browser says is on the user's map (Stage 81, agent_runtime.map_state). Absent
+    # from older clients, and then the agent keeps inferring the map from its own ledger.
+    map_state = _coalesce(data.get("mapState"), data.get("map_state"))
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -480,6 +483,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
         "unified_peer": (str(unified_peer).strip().lower() in {"1", "true", "yes", "on"}
                          if unified_peer is not None else None),
+        "map_state": map_state if isinstance(map_state, dict) else None,
         # FORCED in demo mode and DROPPED in token mode, neither of them merely defaulted. The
         # control that would let anyone change the model is the settings panel, and both modes
         # hide it — so a value left in a returning visitor's localStorage would pin them to a
@@ -2516,6 +2520,12 @@ def agent_chat():
               type: boolean
               description: Snake_case alias for `usePersistentMemory`.
               example: true
+            map_state:
+              type: object
+              nullable: true
+              description: >-
+                What the client's map holds when the message is sent (Stage 81). `layers`: [{id, label, kind, render, features, visible, opacity, source}], no geometry; `undrawn`: [{id, label, reason}] for layers that failed to load; `viewport` and `region`: [minLon, minLat, maxLon, maxLat]; `truncated`: {layers, undrawn} totals when the client capped the lists. When present it overrides the agent's own record of what is on the map; omit it to keep that record. `mapState` is accepted as an alias.
+              example: {"layers": [{"id": "schools", "label": "Schools within 1 mile", "kind": "geojson", "render": "geojson", "features": 20, "visible": true, "source": "analysis"}], "undrawn": [], "viewport": [-87.65, 41.87, -87.6, 41.9]}
             smartToolRouting:
               type: boolean
               default: true
@@ -2922,6 +2932,7 @@ def agent_chat():
                 code_peer=normalized.get("code_peer"),
                 unified_peer=normalized.get("unified_peer"),
                 code_peer_model=normalized.get("code_peer_model"),
+                map_state=normalized.get("map_state"),
                 llm_provider=normalized.get("llm_provider"),
                 llm_model=normalized.get("llm_model"),
                 reasoning_effort=normalized.get("reasoning_effort"),
@@ -3255,6 +3266,12 @@ def agent_chat_stream():
               type: boolean
               description: Snake_case alias for `usePersistentMemory`.
               example: true
+            map_state:
+              type: object
+              nullable: true
+              description: >-
+                What the client's map holds when the message is sent (Stage 81). `layers`: [{id, label, kind, render, features, visible, opacity, source}], no geometry; `undrawn`: [{id, label, reason}] for layers that failed to load; `viewport` and `region`: [minLon, minLat, maxLon, maxLat]; `truncated`: {layers, undrawn} totals when the client capped the lists. When present it overrides the agent's own record of what is on the map; omit it to keep that record. `mapState` is accepted as an alias.
+              example: {"layers": [{"id": "schools", "label": "Schools within 1 mile", "kind": "geojson", "render": "geojson", "features": 20, "visible": true, "source": "analysis"}], "undrawn": [], "viewport": [-87.65, 41.87, -87.6, 41.9]}
             smartToolRouting:
               type: boolean
               default: true
@@ -3535,6 +3552,7 @@ def agent_chat_stream():
                     code_peer=normalized.get("code_peer"),
                     unified_peer=normalized.get("unified_peer"),
                     code_peer_model=normalized.get("code_peer_model"),
+                    map_state=normalized.get("map_state"),
                     llm_provider=normalized.get("llm_provider"),
                     llm_model=normalized.get("llm_model"),
                     reasoning_effort=normalized.get("reasoning_effort"),
