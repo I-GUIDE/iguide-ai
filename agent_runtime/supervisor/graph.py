@@ -150,6 +150,10 @@ class SupervisorState(TypedDict, total=False):
     bound_tool_docs: Dict[str, str]   # bound tool -> its one-line description (_producing_tools)
     verdict: Dict[str, Any]        # {status, findings, numbers}: the single verdict (stage 44)
     clarify: Dict[str, Any]        # the clarification gate's decision (AGENT_CLARIFY_POLICY=ask)
+    map_state: Optional[Dict[str, Any]]  # what the BROWSER says is on the map (Stage 81,
+                                         # agent_runtime.map_state); absent from older clients
+    map_missing: List[str]         # items the request asked to show that the browser lacks;
+                                   # set by the supervisor's show-request rule for the peer
 
 
 
@@ -856,6 +860,12 @@ def _ledger_line(r: Dict[str, Any]) -> str:
                         else f"[produced {r['outputs']}]")
         if r.get("map_layer"):
             bits.append(f"[on the map as {_layer_phrase(r['map_layer'])}]")
+        # Set only by map_state.reconcile_rows, i.e. only when the browser reported its map: a
+        # layer this call sent that the browser does not have (Stage 81).
+        if r.get("map_layer_absent"):
+            bits.append("[sent to the map but NOT on it: " + ", ".join(
+                f"{a.get('label')!r} ({a.get('why')})" if isinstance(a, dict) else str(a)
+                for a in r["map_layer_absent"]) + "]")
     return "- " + " ".join(bits)
 
 
@@ -1521,8 +1531,13 @@ def _can_reground(state: SupervisorState) -> bool:
     return _reground_target(state) is not None
 
 
-def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
+def _prior_actions_note(rows: List[Dict[str, Any]],
+                        map_state: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """The ledger as a line-per-action note for the ANSWERING model.
+
+    With ``map_state`` (the browser's report, Stage 81) the visible-state section is the
+    BROWSER'S list instead of the one derived from the ledger, and it is there even when the
+    ledger is empty: what is on the screen is worth saying either way.
 
     Injected into synthesis as well as into routing, because the two failures are separate.
     Routing waste is expensive; an answer that says "the available evidence does not specify
@@ -1531,7 +1546,7 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     """
     lines = _ledger_lines(rows)
     if not lines:
-        return None
+        return _map_state_note(rows, map_state) or None
     preamble = (f"{_LEDGER_HEADING}:\n"
                 "These are facts about work already done — if the user is asking about it, answer "
                 "from here rather than saying the information is unavailable, and do not re-derive "
@@ -1546,7 +1561,8 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     # and the visible-state section is trimmed rather than dropped: telling the answerer what is
     # on the user's screen is the thing it was added for.
     body = "\n".join(lines)
-    visible = _visible_state_note(rows)
+    visible = (("\n\n" + _map_state_note(rows, map_state)) if isinstance(map_state, dict)
+               else _visible_state_note(rows))
     room = _LEDGER_MAX_CHARS - len(body)
     if visible and len(visible) > room:
         marker = " …"
@@ -1554,6 +1570,36 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
         if visible:
             visible += marker
     return preamble + body + visible
+
+
+def _ledger_layer_labels(rows: List[Dict[str, Any]]) -> List[str]:
+    """Every layer label the ledger says an earlier call sent, delivered or not — including
+    those map_state.reconcile_rows moved to ``map_layer_absent``."""
+    out: List[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("failed"):
+            continue
+        absent = [a.get("label") for a in row.get("map_layer_absent") or [] if isinstance(a, dict)]
+        for label in [*_layer_labels(row.get("map_layer")), *_layer_labels(absent)]:
+            if label not in out:
+                out.append(label)
+    return out
+
+
+def _map_state_note(rows: List[Dict[str, Any]], map_state: Optional[Dict[str, Any]]) -> str:
+    """The browser's report as a section, or "" without one. ``rows`` may be reconciled (see
+    _prior_actions): the labels moved to ``map_layer_absent`` still count as sent, so the
+    section can name each one the browser does not have."""
+    if not isinstance(map_state, dict):
+        return ""
+    from agent_runtime import map_state as _ms
+
+    return _ms.render_note(map_state, _ledger_layer_labels(rows))
+
+
+def _ledger_note_for(state: "SupervisorState") -> Optional[str]:
+    """The note every peer reads: the ledger, plus the browser's map report when sent."""
+    return _prior_actions_note(_prior_actions(state), state.get("map_state"))
 
 
 def _visible_state_note(rows: List[Dict[str, Any]]) -> str:
@@ -1574,9 +1620,17 @@ def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
     try:
         from agent_runtime.session_memory import get_session_actions
 
-        return get_session_actions(str(thread_id))
+        rows = get_session_actions(str(thread_id))
     except Exception:  # noqa: BLE001 - a missing ledger must never break routing
         return []
+    # The browser's report wins over the ledger's record of what was SENT (Stage 81): a layer
+    # that failed to load, or that the user removed, stops reading as on the map everywhere
+    # these rows go. Without a report the rows are returned untouched.
+    if isinstance(state.get("map_state"), dict):
+        from agent_runtime import map_state as _ms
+
+        rows = _ms.reconcile_rows(rows, state["map_state"])
+    return rows
 
 
 def _merge_rows(earlier: List[Any], later: List[Any], id_key: str) -> List[Any]:
@@ -1814,7 +1868,24 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
                 "record of past turns, NOT as inputs to reuse blindly: check the args match "
                 "what the user is asking about now.")}
            if for_decision and _prior_actions(state) else {}),
+        # What the BROWSER says is on the map (Stage 81). Without it the decider inferred the
+        # map from prior_turns' "map_layer" fields, which record what was SENT: a layer that
+        # failed to load read as drawn, and a buffer that was computed read as shown.
+        **({"user_map_now": _ms_lines(state["map_state"], state),
+            "user_map_now_note": (
+                "Reported by the user's browser with this message; it overrides "
+                "prior_turns_in_this_conversation about what is on the map. A layer not listed "
+                "under 'on the map now' is NOT on the map, even if an earlier turn computed or "
+                "sent it. If the user asks to see something that is not listed, it still has to "
+                "be drawn — that is not 'done'.")}
+           if for_decision and isinstance(state.get("map_state"), dict) else {}),
     }
+
+
+def _ms_lines(map_state: Dict[str, Any], state: SupervisorState) -> List[str]:
+    from agent_runtime import map_state as _ms
+
+    return _ms.render_lines(map_state, _ledger_layer_labels(_prior_actions(state)))
 
 
 _CAPABILITIES = ("search", "analyze", "code")
@@ -4330,7 +4401,7 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         # router sends the follow-up here. That is how "what resolution was that" became a sweep for
         # SoilGrids soil clay while scale_m sat in the previous turn's tool result.
         _retrieval_q = _as_retrieval_request(query)
-        _search_note = _prior_actions_note(_prior_actions(state))
+        _search_note = _ledger_note_for(state)
         if _search_note:
             _retrieval_q = f"{_retrieval_q}\n\n{_search_note}"
         # `_reground_target` routes a RETRIEVED answer back here, so this peer needs the
@@ -5069,9 +5140,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         # the ledger, "now embed those zones" still went geocode_places -> embed_region (a
         # rectangle) on both gpt-4o and gpt-5.6-luna — because this peer had no idea the
         # polygon existed. It cannot call embed_zones(file_id=...) for a file it never heard of.
-        _ledger_note = _prior_actions_note(_prior_actions(state))
+        _ledger_note = _ledger_note_for(state)
         if _ledger_note:
             q = f"{q}\n\n{_ledger_note}"
+        # Why the supervisor's show-request rule sent this peer (Stage 81).
+        if state.get("map_missing"):
+            from agent_runtime import map_state as _ms
+
+            q = f"{q}\n\n{_ms.draw_directive(state['map_missing'])}"
         # A re-grounding pass has to say WHAT was ungrounded, or the peer re-runs blind and
         # most likely repeats the same unsupported answer. Appended to the task text like the
         # ledger note above, which is the channel this peer already reads.
@@ -5639,7 +5715,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # The workspace listing above says what FILES exist; the ledger says what was DONE
         # and with what — the county already fetched, the model and dates already used. The
         # code peer re-derives both without it.
-        _code_note = _prior_actions_note(_prior_actions(state))
+        _code_note = _ledger_note_for(state)
         if _code_note:
             parts.append(_code_note)
         # Same reason as the analyze peer: a re-grounding pass that does not say WHAT was
@@ -5976,6 +6052,7 @@ def build_supervisor_graph(
 
         failures = state.get("peer_failures") or []
         decided: Any = None
+        map_missing: Optional[List[str]] = None
         if any(f.get("fatal") for f in failures):
             # The model backend itself is unreachable. Every remaining peer would pay its full
             # latency to fail the same way, and so would a re-route.
@@ -6024,6 +6101,26 @@ def build_supervisor_graph(
                 nxt, why = "done", "search exhausted"
             elif nxt == "search" and _work_delivered_without_retrieval(state):
                 nxt, why = "done", "map delivered; nothing asked to retrieve"
+            # A request to SHOW things the browser says are not on the map is not done (Stage
+            # 81). Schools demo, step 2, "Show the site, its 1-mile buffer and the schools
+            # inside it on the map" — prod, 2026-10-18, all 10 traces: when step 1 had drawn
+            # nothing, step 2 drew all three 6 of 6 times; when step 1 had drawn a schools-only
+            # layer, this first decision was 'done' 2 of 3 times, taking "the buffer was
+            # computed" for "the buffer is on the map". Only the FIRST decision of a turn, only
+            # with a browser report, and only for the named drawable items map_state knows
+            # (buffer, site, route, boundary, …); the peer is told which ones are missing.
+            if (nxt == "done" and why == "decision" and not actions
+                    and isinstance(state.get("map_state"), dict)):
+                from agent_runtime import map_state as _ms
+
+                _missing = _ms.unmapped_requested_items(state.get("query", ""),
+                                                        state["map_state"])
+                if _missing and "analyze" in _available_actions(state):
+                    nxt, why = "analyze", ("asked to show " + ", ".join(_missing)
+                                           + " — not on the user's map")
+                    map_missing = _missing
+                    _LEDGER_LOG.info("supervisor step=%s show-request rule: %s not on the "
+                                     "user's map -> analyze", step, ",".join(_missing))
         # A VETO, not a hint: _available_actions only shapes the menu the decider is shown,
         # and it answered `done` at step 0 anyway. Measured on the merged shape — "Find flood
         # risk datasets on I-GUIDE" finished without retrieving and replied "I couldn't find
@@ -6076,6 +6173,8 @@ def build_supervisor_graph(
             update["plan"] = _initial_plan(state)
         if len(failures) != len(state.get("peer_failures") or []):
             update["peer_failures"] = failures
+        if map_missing:
+            update["map_missing"] = map_missing
         return update
 
     def search_node(state: SupervisorState) -> Dict[str, Any]:
@@ -6448,7 +6547,12 @@ def build_supervisor_graph(
             # THE single rendering, and the auditor gets the visible-state summary too: "the
             # layer is on your map" is precisely the claim it used to flag as unsupported,
             # because nothing in its evidence said a layer from an earlier turn still exists.
-            _ledger_text = "\n".join([*_ledger_lines(_rows), *_visible_state_lines(_rows)])
+            # With the browser's report (Stage 81) the auditor reads the SAME map section as the
+            # writer: a layer the browser lacks is not "still on the map" for either of them.
+            _ms_note = _map_state_note(_rows, state.get("map_state"))
+            _ledger_text = "\n".join([*_ledger_lines(_rows),
+                                      *(_ms_note.splitlines() if _ms_note
+                                        else _visible_state_lines(_rows))])
             # What the CLIENT does, stated only when a layer really is on it — see
             # _map_environment_lines. It travels as its own exec_ctx key rather than inside
             # prior_actions, whose heading says "from EARLIER TURNS": an environment fact filed
@@ -6457,7 +6561,7 @@ def build_supervisor_graph(
             # covers the map, and the gap being closed here is the auditor's alone.
             _map_env = _map_environment_lines(_map_layer_was_delivered(
                 {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
-            _note = _prior_actions_note(_rows)
+            _note = _prior_actions_note(_rows, state.get("map_state"))
             # THE FACTS (stage 44): every number the turn recorded, typed ones listed for the
             # writer with their units and where they were measured. The answer is then held to
             # them, number by number, by a deterministic scan.
@@ -6800,6 +6904,7 @@ def run_supervisor(
     thread_id: Optional[str] = None,
     max_steps: int = DEFAULT_MAX_STEPS,
     unified_peer: Optional[bool] = None,
+    map_state: Optional[Dict[str, Any]] = None,
     **graph_kwargs: Any,
 ) -> Dict[str, Any]:
     """Build + run the supervisor graph; return the full final state."""
@@ -6829,6 +6934,9 @@ def run_supervisor(
         "max_steps": max_steps,
         "turn_log_id": log.id,
     }
+    # Only when the browser sent one: without it every consumer keeps the ledger's view.
+    if isinstance(map_state, dict):
+        initial["map_state"] = map_state
     try:
         state = graph.invoke(initial, config)
     except Exception:

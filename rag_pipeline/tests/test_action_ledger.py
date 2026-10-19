@@ -236,7 +236,10 @@ def test_every_peer_and_the_router_see_the_ledger():
     from agent_runtime.supervisor import graph
 
     for fn in (graph.default_search_fn, graph.default_analyze_fn, graph.default_code_fn):
-        assert "_prior_actions_note(_prior_actions(state))" in inspect.getsource(fn), fn.__name__
+        # _ledger_note_for(state) is _prior_actions_note(_prior_actions(state), map_state):
+        # one helper since Stage 81, so the browser's map report reaches every peer as well.
+        assert "_ledger_note_for(state)" in inspect.getsource(fn), fn.__name__
+    assert "_prior_actions_note(_prior_actions(state)" in inspect.getsource(graph._ledger_note_for)
     # the router gets the structured rows; synthesis renders the note AND hands the same
     # lines to the grounding auditor as part of the execution record.
     src = inspect.getsource(graph)
@@ -810,7 +813,9 @@ def test_the_auditor_sees_the_visible_state_too():
     import inspect
 
     src = inspect.getsource(g.build_supervisor_graph)
-    assert "*_visible_state_lines(_rows)" in src, "the auditor's rendering must include it"
+    # Without a browser report the ledger's visible-state lines; with one, the browser's
+    # map section in their place (Stage 81). Either way the auditor reads what the writer reads.
+    assert "else _visible_state_lines(_rows)" in src, "the auditor's rendering must include it"
 
 
 def test_a_malformed_row_is_harmless():

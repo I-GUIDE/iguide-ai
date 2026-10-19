@@ -79,6 +79,7 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         # respects a request that excluded web_search.
         enabled_search_methods=cfg.enabled_search_methods,
         unified_peer=getattr(cfg, "unified_peer", None),
+        map_state=getattr(cfg, "map_state", None),
     )
     emit_trace_event(
         "node_completed",
