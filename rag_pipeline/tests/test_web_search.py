@@ -170,6 +170,27 @@ def test_budget_exhaustion_returns_an_error_not_an_empty_result(monkeypatch):
     assert "budget exhausted" in spent["error"]
 
 
+def test_a_spent_budget_says_it_is_final_for_the_turn(monkeypatch):
+    """Stage 82: the refusal carries a code and says no retry this turn can change it, so the
+    turn log can stop the next call instead of matching the message."""
+    monkeypatch.setenv("AGENT_WEB_MAX_SEARCHES_PER_TURN", "0")
+    spent = W.run_web_search("dams")
+    assert spent["reason"] == "budget_exhausted"
+    assert spent["retryable"] is False and spent["refused_for"] == "turn"
+    monkeypatch.setenv("AGENT_WEB_ENABLED", "false")
+    off = W.run_web_search("dams")
+    assert off["reason"] == "web_disabled" and off["refused_for"] == "turn"
+
+
+def test_the_tool_passes_the_refusal_fields_to_the_model(monkeypatch):
+    from agent_runtime.langchain_granular_tools import web_search_tool
+
+    monkeypatch.setenv("AGENT_WEB_MAX_SEARCHES_PER_TURN", "0")
+    payload = json.loads(web_search_tool("dams"))
+    assert payload["reason"] == "budget_exhausted"
+    assert payload["retryable"] is False and payload["refused_for"] == "turn"
+
+
 def test_begin_turn_resets_the_budget(monkeypatch):
     _stub_provider(monkeypatch, _raw(1))
     for _ in range(WU.max_searches_per_turn()):

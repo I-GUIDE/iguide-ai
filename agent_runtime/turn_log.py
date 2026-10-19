@@ -16,7 +16,12 @@ It also answers the two questions the step bounds never could:
 
 * **Has this exact call already been answered?** An identical `(tool, args)` call is answered
   from the log, with no tool execution, unless the world changed in between (a call produced a
-  new file) or the earlier answer was a first failure (an outage can recover once).
+  new file) or the earlier answer was a first failure (an outage can recover once). A failure
+  the tool marked `retryable: false` is not retried even once: the same arguments get the same
+  refusal (stage 82).
+* **Has this tool been refused for the rest of the turn?** A result marked
+  `refused_for: "turn"` (a spent web budget, the web kill switch) answers EVERY later call of
+  that tool, whatever its arguments, because none of them can get a different answer.
 * **Did this step add anything?** A step is productive when one of its results is new: a
   success whose content has not been seen this turn, or a failure whose error class has not.
   Two unproductive steps in a row end a peer run (`PROGRESS_LIMIT`). A count of steps measures
@@ -88,6 +93,11 @@ def parse_result(content: Any, status: Optional[str] = None) -> Dict[str, Any]:
             body = None
     ok = True
     error = None
+    # A refusal says, in fields, when no retry can change it (web_utils.Refusal, overpass
+    # no_location). Read from the fields, never from the message: prose changes, codes do not.
+    retryable = not (isinstance(body, dict) and body.get("retryable") is False)
+    refused_for = (str(body.get("refused_for")) if isinstance(body, dict)
+                   and body.get("refused_for") else None)
     if status == "error":
         ok, error = False, text
     elif isinstance(body, dict):
@@ -101,7 +111,10 @@ def parse_result(content: Any, status: Optional[str] = None) -> Dict[str, Any]:
     elif isinstance(text, str) and re.match(r"\s*(?:Error|Traceback)\b", text):
         ok, error = False, text
     artifacts = sorted(set(re.findall(r"\b(?:file|layer)_[0-9a-f]{8,}\b", text or "")))
-    return {"ok": ok, "error": error, "artifacts": artifacts}
+    if ok:
+        retryable, refused_for = True, None    # only a failure can be final
+    return {"ok": ok, "error": error, "artifacts": artifacts, "retryable": retryable,
+            "refused_for": refused_for}
 
 
 def typed_outputs(content: Any) -> List[Dict[str, Any]]:
@@ -198,7 +211,9 @@ class TurnLog:
             event = self.append("tool_result", peer=peer, run=run, tool=name,
                                 key=call_key(name, args), call_id=call_id, ok=parsed["ok"],
                                 error=parsed["error"], artifacts=parsed["artifacts"], new=new,
-                                world=self.world, memo_of=memo_of, content=text)
+                                world=self.world, memo_of=memo_of, content=text,
+                                retryable=parsed["retryable"],
+                                refused_for=parsed["refused_for"])
             if in_step:
                 self._runs[run]["pending"].append(event)
         if parsed["ok"] and memo_of is None:
@@ -323,6 +338,10 @@ class TurnLog:
         if not real:
             return None
         last = real[-1]
+        if not last.get("ok") and last.get("retryable") is False:
+            # Final for these arguments, whatever has happened since (stage 82). The FIRST
+            # failure used to be re-run on the chance it was an outage; this one says it is not.
+            return last
         if last.get("world") != self.world:
             return None
         if not last.get("ok"):
@@ -330,6 +349,20 @@ class TurnLog:
             if len(failures) <= FAILED_RETRIES:
                 return None
         return last
+
+    def refusal_for_turn(self, name: Any) -> Optional[Dict[str, Any]]:
+        """The result that closed tool *name* for the rest of this turn, or None.
+
+        A spent budget refuses the next call whatever it asks (stage 82): a new query is a new
+        call key, so the identical-call memo never caught it, and the peer spent step after
+        step on "web search budget exhausted for this turn (3/3)".
+        """
+        with self._lock:
+            for e in reversed(self.events):
+                if (e["kind"] == "tool_result" and e.get("tool") == name
+                        and e.get("memo_of") is None and e.get("refused_for") == "turn"):
+                    return e
+        return None
 
     # ------------------------------------------------------------------ views
 

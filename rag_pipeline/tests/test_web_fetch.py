@@ -352,6 +352,87 @@ def test_a_cache_hit_costs_no_budget(monkeypatch):
     assert len(calls) == 1
 
 
+def test_a_page_another_turn_read_counts_against_this_turns_budget(monkeypatch):
+    """Stage 82. The cache is process-wide, so a page another turn read came back free, and a
+    turn whose budget was spent read one more page anyway (live, 2026-10-16: "web_fetch
+    succeeded on attempt 3 — the first failed with: web fetch budget exhausted"). The budget
+    counts pages a turn reads, wherever the bytes come from."""
+    page = lambda: _Resp(status=200, headers={"Content-Type": "text/html"},
+                         body=b"<html><body><p>health center site</p></body></html>")
+    responses = [page() for _ in range(8)]
+    session, calls = _session_returning(*responses)
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+
+    assert "error" not in WF.fetch_and_extract("https://example.com/site")   # an earlier turn
+    WU.begin_turn()
+    for i in range(WU.max_fetches_per_turn()):
+        assert "error" not in WF.fetch_and_extract(f"https://example.com/p{i}")
+    spent = WF.fetch_and_extract("https://example.com/site")
+    assert "budget exhausted" in spent["error"]
+    assert spent["reason"] == "budget_exhausted"
+    assert spent["retryable"] is False and spent["refused_for"] == "turn"
+    assert "text" not in spent
+    assert spent["budget"]["fetches"] == WU.max_fetches_per_turn()
+    assert "https://example.com/site" not in WU.allowed_urls()
+
+
+def test_a_cached_page_from_another_turn_is_charged_while_budget_remains(monkeypatch):
+    session, calls = _session_returning(
+        _Resp(status=200, headers={"Content-Type": "text/html"}, body=b"<p>a</p>"))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    WF.fetch_and_extract("https://example.com/a")
+    WU.begin_turn()
+    again = WF.fetch_and_extract("https://example.com/a")
+    assert again["cached"] is True and again["budget"]["fetches"] == 1
+    assert len(calls) == 1                      # still no second network request
+
+
+def test_rereading_a_page_this_turn_read_stays_free_after_the_budget_is_spent(monkeypatch):
+    page = lambda: _Resp(status=200, headers={"Content-Type": "text/html"}, body=b"<p>x</p>")
+    session, calls = _session_returning(*[page() for _ in range(4)])
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    for i in range(WU.max_fetches_per_turn()):
+        WF.fetch_and_extract(f"https://example.com/p{i}")
+    again = WF.fetch_and_extract("https://example.com/p0?utm_source=x", focus="x")
+    assert "error" not in again and again["cached"] is True
+    assert again["budget"]["fetches"] == WU.max_fetches_per_turn()
+
+
+def test_parallel_fetches_cannot_overspend_the_budget(monkeypatch):
+    """A model that asks for several pages in one message has them run on parallel threads.
+    The check and the charge are one step, so no two threads take the last fetch."""
+    import threading
+
+    gate = threading.Barrier(8)
+
+    class _S:
+        def get(self, url, **kwargs):
+            return _Resp(status=200, headers={"Content-Type": "text/html"}, body=b"<p>y</p>")
+
+    monkeypatch.setattr(WF, "fetch_session", lambda: _S())
+    real_budget = WU.budget
+    shared = real_budget()
+    monkeypatch.setattr(WU, "budget", lambda: shared)    # one ledger, as one turn's threads share
+    results = []
+
+    def one(i):
+        gate.wait()
+        results.append(WF.fetch_and_extract(f"https://example.com/par{i}"))
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(1 for r in results if "error" not in r) == WU.max_fetches_per_turn()
+    assert shared.fetches == WU.max_fetches_per_turn()
+
+
+def test_a_blocked_url_says_a_retry_cannot_change_it():
+    result = WF.fetch_and_extract("http://127.0.0.1/")
+    assert result["blocked"] is True and result["retryable"] is False
+
+
 # --- extraction and passage selection --------------------------------------------
 
 

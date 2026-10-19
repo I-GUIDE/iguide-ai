@@ -6019,3 +6019,24 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.122 · A refusal no retry can change is given once; a retry cannot read past the budget (architecture stage 82)
+
+- **The fault:** live on 2026-10-16 (sess-da4493c7, deepseek-v4-flash, a 30+ minute turn), the trace showed "retrying web_search after: web search budget exhausted for this turn (3/3)" again and again, "retrying overpass_search after: no_location", and "web_fetch succeeded on attempt 3 — the first failed with: web fetch budget exhausted".
+- **Why:** nothing wraps tools in retries. The model re-called them, and the turn log's repeat guard let those calls through:
+  - a new query is a new call key, so it was never caught;
+  - an identical failure got one retry in case it was an outage.
+  - The budget is per turn and correctly shared, but a `web_fetch` cache hit (process-wide cache) cost nothing, so a page another turn had read came free after the budget was spent.
+- **Change:**
+  - `web_utils.Refusal` (still a `str`) carries `reason`, `retryable: false` and `refused_for: "turn"`; `no_location` and blocked URLs carry `retryable: false`.
+  - `turn_log` reads those fields. A `refused_for: "turn"` result answers every later call of that tool; a `retryable: false` failure answers the identical call, with no retry.
+  - The budget counts pages this turn reads: a cached page this turn has not read is charged.
+  - The charge is locked.
+- **Measured:**
+  - Offline, the model asked for four budget-refused searches with different queries. Before the change 3 ran (the progress guard stopped the fourth, but only because nothing else in that run was productive; live, the refusals kept coming). After, 1 runs.
+  - An identical `no_location` call ran 2 times before and 1 time after.
+  - A cached page fetched after the budget was spent was served before and is refused after.
+  - On origin/prototype, 10 of the 14 new tests fail.
+  - Tests: `test_refusals_not_retried.py` (7), `test_web_fetch.py` +5, `test_web_search.py` +2.
+- **Surprised by:** the production turn is not in `chat_traces` (it never finished), so which URL the late `web_fetch` read cannot be confirmed. The cache is the only path by which it could succeed.
+- **Next:** not deployed. The trace's retry and recovery lines are keyed by tool name only, so a call with different arguments that succeeds reads as a "recovery".

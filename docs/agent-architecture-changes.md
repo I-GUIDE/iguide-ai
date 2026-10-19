@@ -12080,3 +12080,61 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 82 — A refusal no retry can change is given once, and a retry cannot read past the budget {#stage-82}
+
+**The fault.** Live on 2026-10-16 (prod, turn sess-da4493c7, Lumen deepseek-v4-flash, "What direction would you travel from BPHC site BPS-H80-031470 to BPHC site BPS-H80-017740"), the turn ran for more than 30 minutes without answering. Its trace showed two things:
+- "retrying web_search after: web search budget exhausted for this turn (3/3)", again and again, and "retrying overpass_search after: no_location";
+- "web_fetch succeeded on attempt 3 — the first failed with: web fetch budget exhausted for this turn (3/3)".
+
+**Cause 1: nothing said a refusal was final.** No wrapper retries tool calls. The "retrying" line is the trace (`streaming_trace.on_tool_start`) noting that the model called a tool again after it failed. The only thing that can stop such a call is the turn log's repeat guard (`executor_factory._make_repeat_call_middleware`, `turn_log.earlier_answer`, Stage 42), and it missed both cases:
+- **A spent budget.** The guard answers only identical `(tool, args)` calls. Each new query was a new call key, so each one ran and came back with the same refusal.
+- **An identical `no_location` call.** A first failure is run once more (`FAILED_RETRIES`), because an Overpass mirror that answered 504 can answer the second time. `no_location` cannot: `geocode_place` caches a miss (and a failure) for the life of the process.
+
+The tools put the refusal in an `error` string, so the only way to tell a refusal from an outage was to match the prose.
+
+**Cause 2: the page cache was outside the budget.** `web_fetch` keeps a process-wide page cache (15 minutes, keyed by canonical URL), and a cache hit cost "no network and no budget". A page that another turn had read was therefore free to this turn, even after its budget was spent. A spent budget refused the next uncached URL, and a later call reading a cached page then "succeeded". The budget itself was keyed correctly: one `WebBudget` per turn in a ContextVar, reset by `begin_turn()` on the turn's worker thread and shared by every copied context. The cache was the only way past it. Separately, the check and the charge were two steps with no lock between them, so parallel fetches from one model message could each take the last fetch.
+
+The production turn was never saved to `chat_traces`, because it never finished. So which URL that `web_fetch` read is not on record. The cache hit is the only path in the code by which a `web_fetch` succeeds once the budget is spent.
+
+**Change.**
+- **Refusals say so, in fields** (`rag_pipeline/search/web_utils.py`, `Refusal`).
+  - `charge_search` and `charge_fetch` return a `Refusal`. It is a `str` (its message), so existing callers are unchanged, and it carries a `reason` code (`budget_exhausted`, `web_disabled`).
+  - `Refusal.fields()` puts `error`, `reason`, `retryable: false` and `refused_for: "turn"` on the tool result.
+  - `web_search_tool` now carries those keys through to the model as well.
+  - `overpass_search` and the road-network path mark `no_location` as `retryable: false`. So does `web_fetch` for a URL its guard blocks.
+- **The turn log reads the fields, never the message** (`agent_runtime/turn_log.py`). `parse_result` returns `retryable` and `refused_for`. Only a failure can carry them; a success is never final.
+  - **An identical call after a `retryable: false` failure** gets that failure without running. It does not get the one retry an outage gets, and it gets it even if the world has changed since.
+  - **Any call of a tool after a `refused_for: "turn"` result** gets that result without running, whatever its arguments. This is `TurnLog.refusal_for_turn`, checked first in the repeat middleware. The answer opens with "[web_search was refused for the rest of this turn by call_N, so this call was not run … Do not call web_search again this turn; continue with what you have.]".
+  - **Both are recorded as memo answers,** so they add nothing to the turn, and two such steps in a row end the peer run (`PROGRESS_LIMIT`). The log is per turn and spans peers and runs, so a re-dispatched peer is answered the same way.
+- **The budget counts pages a turn reads, wherever the bytes come from** (`rag_pipeline/search/web_fetch.py`).
+  - A page this turn already read (`WebBudget.fetched`, via `read_this_turn`) stays free to read again, from the cache.
+  - A cached page this turn has not read is charged like a network fetch, and refused when the budget is spent. It still costs no network request.
+  - The check and the charge are one step under `_CHARGE_LOCK`.
+
+**Not changed.**
+- Retryable failures (an Overpass 504, an HTTP error) still get their one identical retry.
+- `no_location` closes the call, not the tool: the same tool with a place or bbox added runs.
+- The supervisor's deterministic web fallback (`graph._web_fallback`) does not go through the middleware. It already returns nothing when refused.
+- The trace's "retrying"/"Recovered" lines are still keyed by tool name only, so a success with different arguments reads as a recovery. That is a separate fix.
+
+**Verified.** Offline tests, using the real `create_agent`, the real middleware stack, and the real budget and Overpass refusals (no network):
+- `rag_pipeline/tests/test_refusals_not_retried.py` (7):
+  - a budget-refused `web_search` with four different queries runs once, and the rest are answered from the log until the progress guard ends the run;
+  - through the agent loop, a `web_fetch` of a page another turn cached is refused once the budget is spent, the calls after it do not run, and no request goes past the budget;
+  - an identical `no_location` call runs once;
+  - adding a bbox still runs;
+  - a 504 still gets its retry;
+  - the fields are read from fields, not prose;
+  - a refusal closes only its own tool.
+- `test_web_fetch.py` +5:
+  - a page another turn read counts against this turn's budget, and is refused when it is spent;
+  - such a page is charged while the budget remains;
+  - a page this turn already read stays free after the budget is spent;
+  - parallel fetches cannot overspend;
+  - a blocked URL is `retryable: false`.
+- `test_web_search.py` +2: the refusal carries its code and fields, and the tool passes them to the model.
+- On origin/prototype, 10 of the 14 new tests fail. The other four pass there too: the parallel-fetch test (the race is not reliably provoked), and three that pin behaviour that must stay as it was.
+- Full `rag_pipeline/tests`: 4,647 passed, 1 failed. The failure is the Mac's networkx 3.4.2 against the 3.6.1 pin (`test_the_installed_networkx_matches_the_pin`), not this change.
+
+**Not deployed.**

@@ -315,6 +315,7 @@ def _road_network_result(feature: str, place: str = "", bbox: str = "",
     except Refused as exc:
         err = "no_location" if "give a place" in str(exc) else "overpass_failed"
         return {"error": err, "message": str(exc), "features": [], "count": 0,
+                **({"retryable": False} if err == "no_location" else {}),
                 "source": "overpass", "query": {"feature": feature, "osm_filter": osm_filter}}
 
     lines, points = [], 0
@@ -529,7 +530,10 @@ def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = No
     # Carry the refusal/observability fields through. Without ``error``, an exhausted budget or a
     # provider outage would read to the model as "the web has nothing", and it would answer as if
     # that were a finding.
-    for key in ("error", "search_query", "provider", "candidates_found", "filtered_out", "budget"):
+    # `reason`, `retryable` and `refused_for` say a refusal is final for this turn
+    # (web_utils.Refusal), which is what stops the turn log from running the next call.
+    for key in ("error", "reason", "retryable", "refused_for", "search_query", "provider",
+                "candidates_found", "filtered_out", "budget"):
         value = result.get(key)
         if value is not None:
             payload[key] = value

@@ -836,11 +836,13 @@ def overpass_search(
     osm_filter = _resolve_filter(feature)
     region = _resolve_bbox(place, bbox)
     if region is None:
+        # Final for these arguments: geocode_place caches a miss (and a failure) for the life
+        # of the process, so the identical call cannot find a location the first one did not.
         return {
             "error": "no_location",
             "message": "Provide a `place` (e.g. 'Cook County, Illinois') or a `bbox` "
                        "as 'minLon,minLat,maxLon,maxLat' to bound the OSM query.",
-            "features": [], "count": 0,
+            "features": [], "count": 0, "retryable": False,
         }
 
     minlon, minlat, maxlon, maxlat = region
