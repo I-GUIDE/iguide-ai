@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -348,6 +349,65 @@ def build_map_layers(tool_name: str, output: Any, *, qa: bool = True) -> List[Di
     return [one] if one else []
 
 
+def _finite(v: Any, lo: float = -math.inf, hi: float = math.inf) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and lo <= f <= hi else None
+
+
+def _styling_fields(ml: Dict[str, Any]) -> Dict[str, Any]:
+    """add_map_layer's point size, highlight, labels and line options (Stage 80), re-checked.
+
+    Named here for the reason `outline` and `sampled` are: build_map_layer rebuilds a FIXED
+    shape, so a field the tool sets and the client reads arrives as nothing unless it is copied.
+    Each is copied only when it is well formed; a malformed one is dropped, which leaves the
+    layer drawn as it was before these options existed.
+    """
+    out: Dict[str, Any] = {}
+    sb = ml.get("size_by")
+    if isinstance(sb, dict) and sb.get("column"):
+        lo_v, hi_v = _finite(sb.get("min")), _finite(sb.get("max"))
+        rng = sb.get("range")
+        if (lo_v is not None and hi_v is not None and isinstance(rng, (list, tuple))
+                and len(rng) == 2 and all(_finite(r, 0.5, 60) is not None for r in rng)):
+            out["size_by"] = {"column": str(sb["column"]), "min": lo_v, "max": hi_v,
+                              "range": [float(rng[0]), float(rng[1])]}
+    ps = _finite(ml.get("point_size"), 0.5, 60) if ml.get("point_size") is not None else None
+    if ps is not None:
+        out["point_size"] = ps
+    hl = ml.get("highlight")
+    if (isinstance(hl, dict) and hl.get("column")
+            and hl.get("op") in {"eq", "in", "gte", "lte", "gt", "lt"} and "value" in hl):
+        entry = {"column": str(hl["column"]), "op": hl["op"], "value": hl["value"],
+                 "numeric": bool(hl.get("numeric")),
+                 "label": str(hl.get("label") or hl["column"]),
+                 "color": parse_colour(hl.get("color")) or [255, 193, 7, 255]}
+        if isinstance(hl.get("count"), int):
+            entry["count"] = hl["count"]
+        out["highlight"] = entry
+    lb = ml.get("labels")
+    if isinstance(lb, dict) and isinstance(lb.get("items"), list):
+        items = []
+        for it in lb["items"][:50]:
+            pos = it.get("position") if isinstance(it, dict) else None
+            if (isinstance(pos, (list, tuple)) and len(pos) == 2
+                    and all(_finite(c) is not None for c in pos) and it.get("text") is not None):
+                items.append({"position": [float(pos[0]), float(pos[1])],
+                              "text": str(it["text"])[:60]})
+        if items:
+            out["labels"] = {"column": str(lb.get("column") or ""), "items": items,
+                             "scope": "highlighted" if lb.get("scope") == "highlighted" else "all"}
+    lw = _finite(ml.get("line_width"), 0.1, 40) if ml.get("line_width") is not None else None
+    if lw is not None:
+        out["line_width"] = lw
+    lc = parse_colour(ml.get("line_color")) if ml.get("line_color") is not None else None
+    if lc:
+        out["line_color"] = lc
+    return out
+
+
 def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional[Dict[str, Any]]:
     """Return a ``LayerArtifact``-shaped dict for a geometry-bearing tool result, else None.
 
@@ -444,6 +504,7 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
             colour = parse_colour(ml.get("color")) if ml.get("color") is not None else None
             if colour:
                 out["color"] = colour
+            out.update(_styling_fields(ml))
 
             # INVARIANT: a 'categories' render is meaningless without its palette. The client
             # maps class NAMES through the legend; with no legend it falls back to the NUMERIC

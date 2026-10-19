@@ -15,6 +15,32 @@ export interface Legend {
   color?: RGBA;
 }
 
+// What the agent chose to show of a layer's features (add_map_layer, Stage 80). Named options
+// only, validated on the server against the data; the tool result states what they draw, so the
+// answer can describe the map rather than the request. No free-form deck.gl style comes this way.
+export interface SizeBy {
+  column: string;
+  min: number;                 // the column's range in the layer as sent
+  max: number;
+  range: [number, number];     // pixels: radius = lo + (hi - lo) * sqrt(t)
+}
+
+export interface Highlight {
+  column: string;
+  op: 'eq' | 'in' | 'gte' | 'lte' | 'gt' | 'lt';
+  value: unknown;
+  numeric: boolean;            // compare as numbers (numeric column) or as text
+  label: string;               // the legend entry
+  color: RGBA;
+  count?: number;              // how many features it picks out, as the server counted
+}
+
+export interface Labels {
+  column: string;
+  scope: 'all' | 'highlighted';
+  items: { position: [number, number]; text: string }[];   // at most 50, placed by the server
+}
+
 export interface DeckStyle {
   fill?: RGBA;
   line?: RGBA;
@@ -82,6 +108,15 @@ export type LayerArtifact =
       // One colour for the whole layer, set by the agent only when the user asked for it ("the
       // crimes in red"). It wins over the source colour, the route blue and the heatmap ramp.
       color?: RGBA;
+      // Per-point size by a column, or one size in pixels; without either, every point is one
+      // density-dependent size (densityRadius).
+      sizeBy?: SizeBy;
+      pointSize?: number;
+      // Features matching one predicate, drawn larger, on top, in a stand-out colour.
+      highlight?: Highlight;
+      labels?: Labels;
+      lineWidth?: number;          // pixels
+      lineColor?: RGBA;
       fitBounds?: boolean;
       visible?: boolean;
       // Where `data` was fetched from. Not used to render — it exists so a saved session can

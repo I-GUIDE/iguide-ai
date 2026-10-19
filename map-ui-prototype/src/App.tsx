@@ -664,7 +664,9 @@ export default function App() {
 
   const onFeatureClick = useCallback((feature: any, layerId: string) => {
     const props = (feature && feature.properties) || {};
-    const layer = layersRef.current.find((l) => l.id === layerId);
+    // A sublayer (`<id>--highlight`) belongs to its layer.
+    const base = layerId.split('--')[0];
+    const layer = layersRef.current.find((l) => l.id === layerId || l.id === base);
     const name = props.name || props.title || props.id || props.doc_id || '(feature)';
     setSelected({ name: String(name), layerLabel: layer?.label || layerId, properties: props });
   }, []);
@@ -794,6 +796,9 @@ export default function App() {
             outline: layer.outline === true ? true : undefined,
             fillOpacity: layer.fillOpacity,
             beneath: layer.beneath === true ? true : undefined,
+            // What the agent chose to show of the features (Stage 80); absent, nothing changes.
+            sizeBy: layer.sizeBy, pointSize: layer.pointSize, highlight: layer.highlight,
+            labels: layer.labels, lineWidth: layer.lineWidth, lineColor: layer.lineColor,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,

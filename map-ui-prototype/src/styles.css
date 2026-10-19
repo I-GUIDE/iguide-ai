@@ -410,6 +410,10 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .lp-layers .lp-legend li { display: flex; align-items: center; gap: 6px; padding: 1px 0; border: 0; }
 .lp-layers .lp-legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto;
   border: 1px solid rgba(0, 0, 0, 0.25); }
+.lp-layers .lp-legend .swatch.dotted { border-radius: 50%; box-shadow: 0 0 0 1px #212121; }
+.lp-layers .lp-legend .swatch.sized { width: 12px; height: 12px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(124,58,237,.75) 0 28%, transparent 30%),
+              radial-gradient(circle, rgba(124,58,237,.35) 0 68%, transparent 70%); }
 .lp-layers .lp-legend .llabel { font-size: 11px; opacity: 0.85; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 

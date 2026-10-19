@@ -87,6 +87,28 @@ export function LeftPanel(p: Props) {
                     ))}
                   </ul>
                 )}
+                {/* What the agent singled out, and what point size means: without these the
+                    gold dot and the big circles are unexplained (Stage 80). */}
+                {l.kind === 'geojson' && (l.highlight || l.sizeBy) && (
+                  <ul className="lp-legend">
+                    {l.highlight && (
+                      <li>
+                        <span className="swatch dotted" style={{ background: `rgb(${l.highlight.color[0]},${l.highlight.color[1]},${l.highlight.color[2]})` }} />
+                        <span className="llabel" title={l.highlight.label}>
+                          {l.highlight.label}{typeof l.highlight.count === 'number' ? ` (${l.highlight.count})` : ''}
+                        </span>
+                      </li>
+                    )}
+                    {l.sizeBy && (
+                      <li>
+                        <span className="swatch sized" />
+                        <span className="llabel" title={`Point size by ${l.sizeBy.column}`}>
+                          size: {l.sizeBy.column} {fmtValue(l.sizeBy.min)}–{fmtValue(l.sizeBy.max)}
+                        </span>
+                      </li>
+                    )}
+                  </ul>
+                )}
               </li>
             );
           })}

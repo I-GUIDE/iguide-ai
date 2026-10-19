@@ -6019,3 +6019,10 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-18 · M8.120 · The agent sizes, highlights and labels map features, and says what it drew (architecture stage 80)
+
+- **The fault:** in live Ridgecrest demo tests, the answer said "sized by magnitude, mainshock the largest point" over 674 equal circles. Point size was a client constant, and nothing could highlight or label a feature.
+- **Change:** `add_map_layer` takes `size_column` (+ `size_range`, √ scale, default 3–16 px), `point_size`, `highlight` ({column, equals|in|gte|lte|gt|lt}), `label_column` (≤ 50) and `line_width`/`line_color`. All are validated against the data in `agent_runtime/layer_styling.py`. No free-form style specs. The result's `drawn` (second key) says what the map shows. `toDeckLayer.ts` draws a per-feature radius, a `--highlight` sublayer and a `--labels` TextLayer. With no option set, the layer is unchanged.
+- **Surprised by:** GDAL reads every CSV column as text, so `mag` was `"3.98"` and the first size call was refused as non-numeric. Named columns are now converted when every value parses.
+- **Tests:** `test_layer_styling.py` (37), `npm run check:styling`, tsc + build. A replay screenshot of the demo CSV shows the sizes, the gold mainshock and the label. Not deployed. No live LLM check yet.
