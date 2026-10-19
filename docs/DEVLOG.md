@@ -6019,3 +6019,19 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.127 · A value the user states reaches the code, however long the request (architecture stage 87)
+
+**Why** The question parked on 2026-09-17, "the agent ignores stated parameters" (GeoAnalystBench task 44, "2500 m" in the prompt, 1000 m in the code), was a harness bug. `benchmark/geoanalyst/run_agent.py` (claude/benchmark) passes `parameters=` to a `PROMPT` that has no `{parameters}` slot, and `str.format` drops it silently. So no "injected" run ever carried the value. The prompt was never recorded, so the evidence is indirect: no committed version of the runner has the slot; in every archived injected run the supervisor asks for "a defensible distance derived from the task/data"; and the injected runs chose 1,000 m and 1.5 km, never 2500 m.
+**Measured** The runner was fixed in a scratch copy, then prototype f7e53611 was run on lumen:deepseek-v4-flash, 2 trials of tasks 44, 8, 9, 10, 34 and 6. The stated value was used in 12 of 12 runs before the change and 12 of 12 after. Both counts were re-derived by AST and by regex. All 4 task-44 runs give the 3.60 km² gap of the 2500 m answer, against 121.23 at 1000 m on 09-17. `parameter_checks` fired 0 times live. The rule replay over 162 runs gives 0 firings for the old and the new rule.
+**Change** Two real gaps, both small:
+- **The cut brief.** `_turn_brief` carried `query[:1500]` labelled "verbatim". Task 6's stated value sits at char 1,567, so it was gone from the brief, which the stated-parameter rule reads. `_brief_request` now says when the request is cut and quotes each distance or time stated after the cut (`code_watch.stated_passages`).
+- **Hyphenated figures.** `code_watch._STATED` now reads "2-kilometer", "500-metre" and "10-minute".
+
+No "stated values" block was added: no run lost a value between the request and the code.
+**Surprised by** In every run the supervisor's plan restated the value rather than paraphrasing it away. On the 1,500-char cut it was the plan, not the brief, that still held task 6's bandwidth.
+**Tests** `test_stated_values_brief.py` (6) plus 3 hyphenated cases in `test_code_watch.py`. `rag_pipeline/tests`: 4,642 passed and 20 skipped, with the networkx-pin test deselected (it fails on untouched prototype on this Mac).
+**Next** Not deployed.
+- Fix the `{parameters}` slot on claude/benchmark, and re-read every GeoAnalystBench "injected" result as "asked".
+- Unit-less constants (task 6's bandwidth, task 50's radius) are still unchecked by the rule.
+- gpt-5.6-luna was not re-run, since tests are deepseek-only.

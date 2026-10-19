@@ -12080,3 +12080,78 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 87 — A value the user states reaches the code, however long the request {#stage-87}
+
+**The open question.** On 2026-09-17 (GeoAnalystBench task 44, gpt-5.6-luna) the prompt was meant to say "buffer distance/size: 2500 … meters", and the agent buffered by 1000 m. A paired `--mode asked|injected` run gave identical geometry, so the question recorded was: "the agent ignores stated parameters". It was parked until the benchmarking milestone. Stage 78 (S78.1, S78.2) later added a rule that flags a value-applying run that never uses a stated value. That rule catches a wrong value after the fact. It does not show where a value gets lost.
+
+**What actually happened on 2026-09-17: the value never reached the agent.** `benchmark/geoanalyst/run_agent.py` (branch `claude/benchmark`, c077ff14) builds the parameter block and passes it as `PROMPT.format(..., parameters=params)`. But `PROMPT` has no `{parameters}` slot, and `str.format` drops an unused keyword silently. So every `injected` run since then (ab-injected, luna-params, qwen-injected, sweep-injected) got the same prompt as `asked`. The result files do not record the prompt, so the evidence is indirect, but it all points one way:
+- **No version had the slot.** None of the three committed versions of the runner (ab5c9707, 0d7d1c0a, 5c4d8881) has a `{parameters}` slot.
+- **The supervisor asked for a distance it had not been given.** In every archived injected run (ab-injected 44, sweep-injected 44 and 8) its routing reason asks for "a defensible distance derived from the task/data".
+- **The injected runs picked different distances, none of them 2500 m.** Luna used 1,000 m (ab-injected 44), and qwen used 1.5 km (qwen-injected 44).
+- **The memory note's check tested the wrong text.** The earlier note said "inject=True: prompt contains 2500 -> True". That can only have checked `params`, not the formatted prompt, because `str.format` cannot insert a keyword that has no slot.
+
+The fix there is one line (`{knowledge}{parameters}Requirements:`). Each spec's `[from \`…\`]` suffix is a line of the reference implementation, so it is stripped before the value is shown. That branch is not part of this change. The runs below used a scratch copy of the runner with both fixes.
+
+**Measured first, on prototype f7e53611** (lumen:deepseek-v4-flash, `AGENT_VALIDATION=0`, 2 trials). The tasks are every `parameters_only_in_code` task whose value is a distance, plus task 6:
+- **Tasks 44 and 8:** "2500 meters" injected.
+- **Tasks 9 and 10:** "5.5km" stated in the instruction.
+- **Task 34:** "a 2-kilometer buffer" stated in the instruction.
+- **Task 6:** kernel bandwidth 468.805393200003 injected.
+
+A run "used the stated value" when a `.buffer(...)` or `bandwidth=` in its code evaluates to that value. The code comes from the `execute_code` arguments, or from the program file for an `entrypoint` run, because the trace cuts arguments at 3,000 characters.
+
+| Task | Stated value | Used: before | Used: after | `parameter_checks` live (before / after) | Mean s (before / after) |
+|---|---|---|---|---|---|
+| 44 | 2500 meters (injected) | 2/2 | 2/2 | 0 / 0 | 129 / 199 |
+| 8 | 2500 meters (injected) | 2/2 | 2/2 | 0 / 0 | 61 / 112 |
+| 9 | 5.5km (instruction) | 2/2 | 2/2 | 0 / 0 | 447 / 190 |
+| 10 | 5.5km (instruction) | 2/2 | 2/2 | 0 / 0 | 369 / 423 |
+| 34 | a 2-kilometer buffer (instruction) | 2/2 | 2/2 | 0 / 0 | 216 / 280 |
+| 6 | bandwidth 468.805393200003 (injected, at char 1,567) | 2/2 | 2/2 | 0 / 0 | 1000 / 612 |
+| **all** | | **12/12** | **12/12** | **0 / 0** | |
+
+"After" is this branch.
+- **Audit.** The counts were derived twice: once from an AST evaluation of each `.buffer(...)` / `bandwidth=` argument, and once from a regex over the raw trace arguments plus the program files. Both give 12/12 on each side.
+- **Task 44 outcome.** All four task-44 runs give a no-service area of 3.60 km², the 2500 m answer. The 2026-09-17 run gave 121.23 km² at 1000 m. The one other buffer value in these runs (3000 m, task 44 before, trial 1) buffers the study area to find nearby stations; it is not the coverage buffer.
+- **Task 6.** All 4 runs put 468.805393200003 into the code. How they applied it differs, by chance: both *before* runs passed it to scipy's `gaussian_kde(bw_method=...)`, which reads a scalar as a multiple of the data's standard deviation, so the kernel was about 468× too wide. Both *after* runs applied it in metres. This change does not alter anything task 6's code peer acts on, so no credit is claimed.
+- **Plan and brief.** In after-trial 2 of task 6, neither the plan nor the (cut) brief carried the value. The code still used it, from the task message.
+- **Cost.** 24 turns, about 1.3 coins.
+
+**So the parked failure does not reproduce on deepseek-v4-flash once the value is actually in the prompt.** The original run was gpt-5.6-luna. It is not re-run here, because tests use Lumen deepseek only, so whether luna would have ignored a value it was really given stays unmeasured.
+
+**Where a value can still be lost: two gaps, both small.**
+1. **The brief cut the request at 1,500 characters and called the cut "verbatim".** `_turn_brief` renders `query[:1500]` into every peer's system message. The stated-parameter rule reads the same brief (`langchain_exec_tools._task_text`). Task 6 states its bandwidth at character 1,567 of 2,011, so it was gone from the brief. The value was still in the code peer's task message, which carries the whole query, and the supervisor's plan happened to restate it ("Run Kernel Density with bandwidth=468.805393200003"). Task 50 puts its value at character 2,339. Any distance stated that late was invisible to the rule.
+2. **The rule could not read a hyphenated figure.** `_STATED` required a space or nothing between the number and the unit, so it missed "a 2-kilometer buffer", "a 500-metre buffer" and "a 10-minute walk". Task 34 states its buffer that way. The rule saw task 34's value only because the instruction also says "access to roads in 2km" near the word "buffer".
+
+**The supervisor does not paraphrase the value away.** On the default (langchain) peers the code and analyze peers get `state["query"]` whole as their task message. The supervisor writes only the plan's subgoals, and in every run above the subgoals restated the value rather than replacing it.
+
+**Change.**
+- **`supervisor/graph.py` `_brief_request`.**
+  - A request of up to 1,500 characters is carried exactly as before.
+  - A longer one is labelled as cut: "its first 1,500 of N characters, the whole request is your task message".
+  - Every distance or time it states after the cut is quoted below it: "Values the request states after the cut, verbatim: “…buffer each station by 2500 meters…”".
+  - The quote is the window the rule itself reads (60 characters before the figure, 20 after), so the rule finds the figure with its parameter word.
+- **`code_watch.stated_passages`.** Gives that window for each stated figure that ends after a given offset. `_STATED` now also accepts a hyphen between the number and its unit.
+
+**Not changed.**
+- **No separate "stated values" block.** The measured runs give no case of a value lost between the request and the code, so a block the supervisor cannot paraphrase would be fixing nothing.
+- **The correction path.** A `parameter_checks` finding goes back inside the `execute_code` result JSON. Nothing between the tool and the model trims a tool message: the repeat-answer middleware cuts only memoised repeats. `test_a_parameter_check_is_shown_at_once_and_returned_even_on_a_fast_run` covers it. It did not fire live in any run here, because no run applied a wrong value.
+- **Unit-less constants** (task 6's bandwidth, task 50's radius) are still not checked by the rule, and the new brief does not quote them after the cut either. They need a name-and-number reading the rule does not have. The code peer's task message carries them whole.
+
+**Verified.**
+- **Live:** the table above.
+- **Offline replay of the baseline runs through the rule:**
+  - 162 readable `execute_code` runs in 24 turns (3 more are unreadable because arguments are cut at 3,000 characters). The old and new rules both find a stated figure in 20 turns: the 4 task-6 turns state no unit. Both fire on 0 runs.
+  - **What changed for task 34.** The new rule now also reads "2-kilometer" in task 34.
+- **Tests.**
+  - `rag_pipeline/tests/test_stated_values_brief.py` (6) covers:
+    - a short request is carried unchanged;
+    - the old cut lost a late value;
+    - a value stated after the cut is quoted;
+    - the rule then flags `buffer(1000)` and passes `buffer(2500)`;
+    - a value before the cut is not quoted twice;
+    - figures with no parameter word are not carried.
+  - `test_code_watch.py` adds 3 hyphenated cases.
+  - The suite: `python3 -m pytest rag_pipeline/tests/` gives 4,642 passed and 20 skipped, with one test deselected: `test_the_installed_networkx_matches_the_pin`, which fails on untouched prototype on this Mac (networkx 3.4.2 installed, 3.6.1 pinned).
+- **Not deployed.**

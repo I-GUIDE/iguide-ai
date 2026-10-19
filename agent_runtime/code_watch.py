@@ -318,9 +318,11 @@ class _Scan(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-# A number with a distance or time unit, as a person writes it in a request.
+# A number with a distance or time unit, as a person writes it in a request. The hyphenated
+# adjective counts ("a 2-kilometer buffer", "a 10-minute walk"): GeoAnalystBench task 34 states
+# its buffer only that way, and the rule could not see it (Stage 87).
 _STATED = re.compile(
-    r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*"
+    r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?:\s*|-)"
     r"(km|kilomet(?:er|re)s?|m|met(?:er|re)s?|mi|miles?|ft|feet|minutes?|mins?|hours?|hrs?)\b",
     re.IGNORECASE)
 _PARAM_WORDS = re.compile(r"\b(buffer|radius|within|distance|walk|drive|isochrone|catchment|"
@@ -354,6 +356,18 @@ def _numbers_in(code: str) -> List[float]:
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
                 and not isinstance(node.value, bool):
             out.append(float(node.value))
+    return out
+
+
+def stated_passages(text: str, start_at: int = 0) -> List[str]:
+    """The words around each stated parameter (:func:`stated_parameters`) that ends after
+    *start_at*: the span the rule reads to decide it is a parameter, so a passage quoted
+    elsewhere (the peer brief, when the request is cut) is still read as one."""
+    out: List[str] = []
+    for match in _STATED.finditer(text or ""):
+        window = text[max(0, match.start() - 60):match.end() + 20]
+        if match.end() > start_at and _PARAM_WORDS.search(window):
+            out.append(" ".join(window.split()))
     return out
 
 
@@ -993,4 +1007,4 @@ class RunWatch:
 
 __all__ = ["PARAMETER_RULES", "hints_for_result", "split_findings", "Finding", "Interrupt", "RUNTIME_DIRNAME", "RunProbe", "RunWatch", "SITECUSTOMIZE",
            "STACK_FILENAME", "accept_verdict", "enclosing_lines", "parse_stack", "parse_verdict",
-           "precheck", "applies_values", "review_mode", "review_prompt", "stack_report", "stated_parameters"]
+           "precheck", "applies_values", "review_mode", "review_prompt", "stack_report", "stated_passages", "stated_parameters"]

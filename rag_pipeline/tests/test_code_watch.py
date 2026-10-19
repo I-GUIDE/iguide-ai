@@ -107,6 +107,16 @@ def test_the_stated_value_in_any_unit_is_not_flagged(code):
     assert "stated_parameter" not in _rules(code, "buffer the sites by 2,500 m")
 
 
+@pytest.mark.parametrize("brief, value, unit", [
+    ("Then, you'll create a 2-kilometer buffer around all-season roads", 2.0, "km"),  # GA task 34
+    ("draw a 500-metre buffer around each school", 500.0, "m"),
+    ("homes within a 10-minute walk of a stop", 10.0, "min"),
+])
+def test_a_hyphenated_figure_is_a_stated_value(brief, value, unit):
+    assert [(v, u) for v, u, _ in code_watch.stated_parameters(brief)] == [(value, unit)]
+    assert "stated_parameter" in _rules("zone = roads.buffer(1000)\n", brief)
+
+
 def test_a_figure_with_no_parameter_word_is_not_a_parameter():
     assert "stated_parameter" not in _rules("x = 1\n", "the river is 300 km long")
 

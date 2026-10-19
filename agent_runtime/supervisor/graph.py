@@ -2319,9 +2319,33 @@ def _plan_after_run(state: SupervisorState, log: Any, run: Optional[str]) -> Dic
     return plan
 
 
+_BRIEF_REQUEST_CHARS = 1500
+
+
+def _brief_request(query: str) -> str:
+    """The request as the brief carries it. Past the first 1,500 characters it is cut, and the
+    cut says so; a distance or time it states after the cut is quoted below it. The brief is
+    what the stated-parameter rule reads (code_watch). GeoAnalystBench task 6 (2026-10-19) states
+    its value at character 1,567: the brief called the cut text verbatim, and the value reached
+    it only because the supervisor's plan restated it (Stage 87). Task 6's value has no unit, so
+    it is not quoted here either; the task message carries the whole request regardless."""
+    if len(query) <= _BRIEF_REQUEST_CHARS:
+        return f"Task (the user's request, verbatim): {query}"
+    from agent_runtime.code_watch import stated_passages
+
+    line = (f"Task (the user's request, verbatim; its first {_BRIEF_REQUEST_CHARS:,} of "
+            f"{len(query):,} characters, the whole request is your task message): "
+            f"{query[:_BRIEF_REQUEST_CHARS]} …")
+    passages = list(dict.fromkeys(stated_passages(query, start_at=_BRIEF_REQUEST_CHARS)))
+    if passages:
+        line += "\nValues the request states after the cut, verbatim: " + " | ".join(
+            f"“{p}”" for p in passages[:8])
+    return line
+
+
 def _turn_brief(state: SupervisorState) -> str:
     """The task and the plan, for the peer's system message (executor_factory)."""
-    lines = [f"Task (the user's request, verbatim): {str(state.get('query') or '')[:1500]}"]
+    lines = [_brief_request(str(state.get("query") or ""))]
     plan = state.get("plan") or {}
     if plan.get("subgoals"):
         lines.append("Plan (kept by the supervisor; `produced` counts new results recorded "
