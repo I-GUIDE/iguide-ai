@@ -121,7 +121,7 @@ CASES = [
                           "sequence? How many events occurred within 7 days after it and within 25 "
                           "km of its epicentre, and how many of those were magnitude 4 or greater?"},
                {"label": "Map them",
-                "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with "
+                "prompt": "Map the aftershocks within 25 km and 7 days, colored by magnitude, with "
                           "the mainshock marked."}]},
     {"id": "measure", "task": "T01",
      "title": "Measuring area and distance correctly",
