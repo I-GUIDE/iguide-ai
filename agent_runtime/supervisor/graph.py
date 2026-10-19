@@ -5800,6 +5800,69 @@ def _execution_note(result: Any) -> str:
     return note
 
 
+# What the answer writer is shown of a peer's result. It used to be `json.dumps(result)[:2000]`
+# for analyze and `answer[:2000]` for code: a blind 2,000-char prefix. The analyze dump spent
+# that budget on JSON quoting and the tool_calls/tool_results that precede nothing, so a long but
+# correct summary was cut mid-sentence and the writer copied the cut into the answer. Live,
+# 2026-10-18, the Chicago SKATER step (6 regions naming all 77 community areas) ended
+# "Region 6 — 2 areas, pop 23,5[truncated]" or "Region 6 ... cut off in the analysis output" in
+# 4 of 6 runs, while the peer's own summary was complete and the auditor (32,000 chars of the
+# same record, evidence_quality._TURN_RECORD_MAX_CHARS) saw all of it.
+#
+# The model was never the limit: deepseek-v4-flash takes 511,994 tokens and gpt-5.6 922,000
+# (executor_factory._MODEL_WINDOWS). These budgets stay far under the 65,536 floor any unlisted
+# model gets, so they are safe on every window the agent knows.
+_WRITER_SUMMARY_MAX_CHARS = int(float(os.getenv("AGENT_WRITER_SUMMARY_CHARS", "16000") or 16000))
+_WRITER_RECORD_MAX_CHARS = int(float(os.getenv("AGENT_WRITER_RECORD_CHARS", "12000") or 12000))
+# Said to the writer wherever its input was shortened, so it never reports the shortening as a
+# property of the analysis. The old cut carried no marker at all, and the writer invented one.
+_WRITER_SHORTENED_NOTE = ("[Shortened for length here. The full result is in this turn's map "
+                          "layers and downloadable files. Do not mention this shortening in the "
+                          "answer: present what is shown, and point the reader to the map layer "
+                          "or the download for the complete list.]")
+
+
+def _cut_at_line(text: str, limit: int) -> str:
+    """*text* within *limit* chars, cut at the last line break before it and saying so."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    newline = head.rfind("\n")
+    if newline > limit // 2:
+        head = head[:newline]
+    return head.rstrip() + "\n" + _WRITER_SHORTENED_NOTE
+
+
+def _peer_result_for_writer(label: str, result: Any, text_key: str) -> str:
+    """One peer's result as the answer writer reads it: its own words in full, then the record.
+
+    The peer's summary (analyze) or answer (code) is what the answer restates, so it comes first
+    and whole, up to a budget measured in thousands of chars rather than two. The execution
+    record after it is compacted the way the auditor's is (bulk coordinate and vector arrays
+    elided, JSON-string tool outputs parsed), so the writer and the auditor read the same facts.
+    """
+    if not isinstance(result, dict):
+        return f"{label}:\n{_cut_at_line(str(result), _WRITER_SUMMARY_MAX_CHARS)}"
+    text = str(result.get(text_key) or "").strip()
+    rest = {k: v for k, v in result.items() if k != text_key}
+    sections = []
+    if text:
+        sections.append(f"Summary (the peer's own words):\n"
+                        f"{_cut_at_line(text, _WRITER_SUMMARY_MAX_CHARS)}")
+    if rest and (not text or label != "Code result"):
+        # The code branch used to send only the answer and never the dict; it keeps that, and
+        # falls back to the record only when there is no answer text to show.
+        from agent_runtime.evidence_quality import _compact_for_audit
+        try:
+            rendered = json.dumps(_compact_for_audit(rest), ensure_ascii=True, default=str)
+        except Exception:  # noqa: BLE001 - rendering must never break synthesis
+            rendered = json.dumps(rest, ensure_ascii=True, default=str)
+        if len(rendered) > _WRITER_RECORD_MAX_CHARS:
+            rendered = rendered[:_WRITER_RECORD_MAX_CHARS] + "\n" + _WRITER_SHORTENED_NOTE
+        sections.append(f"Execution record:\n{rendered}")
+    return f"{label}:\n" + ("\n\n".join(sections) if sections else "(empty)")
+
+
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
     """Compose the final grounded answer in the original AnalysisAgent format."""
 
@@ -5835,18 +5898,14 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
         parts.append(f"Question:\n{query}")
         parts.append(f"Evidence:\n{_format_documents(evidence)}")
         if analysis_results:
-            parts.append(f"Analysis results:\n{json.dumps(analysis_results, ensure_ascii=True, default=str)[:2000]}")
+            parts.append(_peer_result_for_writer("Analysis results", analysis_results, "summary"))
             _note = _execution_note(analysis_results)
             if _note:
                 parts.append(_note)
         if code_result:
-            # Prefer the code peer's human-readable answer; only fall back to a
-            # serialized dump if no answer text is present (keeps the real code /
-            # output from being truncated away by a large nested object).
-            if isinstance(code_result, dict) and str(code_result.get("answer") or "").strip():
-                parts.append(f"Code result:\n{str(code_result['answer'])[:2000]}")
-            else:
-                parts.append(f"Code result:\n{json.dumps(code_result, ensure_ascii=True, default=str)[:2000]}")
+            # Prefer the code peer's human-readable answer; only fall back to the (compacted)
+            # record if no answer text is present. See _peer_result_for_writer.
+            parts.append(_peer_result_for_writer("Code result", code_result, "answer"))
             _note = _execution_note(code_result)
             if _note:
                 parts.append(_note)

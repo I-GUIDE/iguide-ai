@@ -6012,3 +6012,10 @@ rather than from the previous one.
 - **Why it was missed:** the replay that measured zero false alarms was single-turn only, with no follow-ups.
 - **Change:** `facts.build(history=…)` adds the conversation's numbers as "earlier answer". `synthesize` passes the raw chat history.
 - **Tests:** `test_untraceable_figures.py` +3 (follow-up untouched; cut without history; history does not launder a fabrication).
+
+## 2026-10-18 · M8.119 · The answer writer reads a peer's whole summary (architecture stage 79)
+
+- **The fault:** the Chicago SKATER step printed "pop 23,5[truncated]" or "cut off in the analysis output" in 4 of 6 live runs. The writer got `json.dumps(analysis_results)[:2000]`, and the model's window (511,994 tokens) was not the limit.
+- **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
+- **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
+- **Tests:** `test_writer_sees_full_peer_result.py` (5).

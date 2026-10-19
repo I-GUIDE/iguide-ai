@@ -12039,3 +12039,44 @@ The user asked for each step's action and purpose by default, with the raw recor
 
   Results: 68 passed. The neighbouring code-execution suites: 220 passed.
 - **Not deployed.**
+
+## Stage 79 — The answer writer reads a peer's whole summary {#stage-79}
+
+**The fault.** Live on 2026-10-18 (prod, snapshot c006764c), step 3 of the Chicago violent crime demo ("Six crime regions", SKATER over 77 community areas) cut its region list short in 4 of 6 runs. The answer printed either "Region 6 — 2 areas, pop 23,5[truncated]" or "Region 6 … cut off in the analysis output". The analysis peer's summary was complete, and so were the map layer and the CSV.
+
+**Cause.** `default_synthesize_fn` built the writer's prompt from these two expressions:
+- `json.dumps(analysis_results)[:2000]` for the analysis peer;
+- `str(code_result["answer"])[:2000]` for the code peer.
+
+The analysis dump spent its 2,000 characters on JSON quoting and on `tool_calls`/`tool_results`. A SKATER summary that names all 77 areas is about 3,000 characters on its own, so the writer was handed text that stopped mid-number. The cut carried no marker, so the writer added one of its own.
+
+The model was never the limit. deepseek-v4-flash has a 511,994-token window and gpt-5.6 has 922,000 (`executor_factory._MODEL_WINDOWS`). The grounding auditor already reads up to 32,000 characters of the same record (`evidence_quality._TURN_RECORD_MAX_CHARS`). So the writer saw a small prefix of what the auditor judged it against.
+
+**Change** (`agent_runtime/supervisor/graph.py`, `_peer_result_for_writer`).
+- **Summary first, whole.** The peer's own summary (analysis) or answer (code) comes first, in full, up to `AGENT_WRITER_SUMMARY_CHARS` (default 16,000).
+- **Then the execution record.** It is compacted the way the auditor's is (`_compact_for_audit`: bulk coordinate and vector arrays elided, JSON-string tool outputs parsed), up to `AGENT_WRITER_RECORD_CHARS` (default 12,000).
+- **Code peer.** It still sends only its answer when it has one, and falls back to the compacted record otherwise.
+- **When something is cut.** A summary is cut at a line break, and either cut carries a note to the writer: the full result is in the map layers and downloads, so do not mention the shortening, and point the reader there.
+
+Both budgets are far below the 65,536-token floor that an unlisted model gets, so they are safe on every window the agent knows.
+
+**Not changed.** The code peer's own view of the analysis result (`[:1500]` in the code-peer prompt) is left as it was. It feeds a model that re-reads the files, not the answer the user sees.
+
+**Verified.**
+- **On the real model** (Lumen deepseek-v4-flash, `default_synthesize_fn`), using a 77-area SKATER summary and a record that includes coordinate-heavy tool output:
+
+  | Writer input | Regions in the answer | Region 6 population | Mentions the cut |
+  |---|---|---|---|
+  | Old | 1–4 | no | yes |
+  | New, run 1 | 1–6 | yes | no |
+  | New, run 2 | 1–6 | yes | no |
+
+- **Tests.** `rag_pipeline/tests/test_writer_sees_full_peer_result.py` covers:
+  - the long summary reaches the writer whole, ahead of the record;
+  - an over-budget summary is cut at a line break and carries the note;
+  - the record is compacted and bounded;
+  - the code answer is sent whole and alone;
+  - a code result with no answer falls back to the record.
+
+  The existing writer tests pass unchanged.
+- **Not deployed.**
