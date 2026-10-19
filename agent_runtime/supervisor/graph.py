@@ -3479,6 +3479,106 @@ def _as_retrieval_request(query: str) -> str:
     )
 
 
+# --- what a search turn was actually ABOUT (Stage 86) -------------------------
+# The sweep and the rerank used to run on the LITERAL latest message. On a method-only follow-up
+# that is not a subject at all. Measured on a real trace (2026-10-06, deepseek-v4-flash): turn 2
+# was "Use I-GUIDE keyword search only"; the peer correctly called keyword_search('Chicago crime
+# data') and got the eight Chicago documents, then the sweep searched the sentence itself, the
+# rerank scored everything against it, and the eight it kept were the search-tutorial pages. The
+# answer said there were "no direct crime datasets", and the grounding audit passed, because it
+# checked the answer against the same wrong evidence.
+#
+# Words that say HOW to search or WHICH KIND of result, never WHAT about. A message made of only
+# these (plus _QUERY_FILLER) is a meta-instruction, and its subject is the conversation's.
+_SEARCH_META_TERMS = frozenset({
+    "i-guide", "iguide", "guide", "keyword", "keywords", "semantic", "spatial", "graph", "neo4j",
+    "vector", "bm25", "search", "searches", "searched", "searching", "only", "just", "instead",
+    "again", "retry", "try", "rerun", "re-run", "run", "method", "methods", "tool", "tools",
+    "platform", "knowledge", "base", "catalog", "catalogue", "result", "results", "query",
+    "exact", "match", "matching", "literal", "web", "open", "internet", "external", "internal",
+    "source", "sources", "same", "more", "other", "others", "else", "different", "ones", "those",
+    "these", "them", "notebook", "notebooks", "publication", "publications", "documents", "docs",
+    "elements", "element", "oer", "oers", "not", "don't", "dont", "without", "now", "too", "also",
+})
+# Retrieval tools whose `query` argument is a statement of the subject searched for. web_fetch is
+# a URL, not a subject; the short-circuits record their own rows.
+_SUBJECT_TOOLS = frozenset({
+    "keyword_search", "semantic_search", "neo4j_search", "spatial_search", "opengeodata_search",
+    "agent_kb_search", "kb_method_search", "web_search",
+})
+# How many distinct subjects the deterministic sweep runs. Each is several OpenSearch calls, and
+# everything the sweep returns goes through one rerank prompt.
+_SWEEP_SUBJECTS = 2
+
+
+def _content_terms(text: str) -> List[str]:
+    """Subject terms with the search-method and result-type vocabulary removed too."""
+    return [t for t in _focus_terms(text) if t not in _SEARCH_META_TERMS]
+
+
+def _is_method_only(query: str) -> bool:
+    """True when *query* says how to search but not what for ("use keyword search only")."""
+    return bool(str(query or "").strip()) and not _content_terms(query)
+
+
+def _resolve_search_subject(query: str, chat_history: Optional[List[Any]],
+                            *, max_items: int = 8) -> Optional[str]:
+    """A standalone subject for *query*: itself when it names one, else the newest earlier USER
+    message that does. None when neither exists.
+
+    Deterministic on purpose. It runs on every search turn, and the case it exists for — a
+    follow-up that only changes the method — is recognisable without a model call.
+    """
+    if not _is_method_only(query):
+        return str(query or "").strip() or None
+    current = str(query or "").strip().lower()
+    for item in reversed(list(chat_history or [])[-max_items:]):
+        text = _chat_item_user_text(item).strip()
+        if text and text.lower() != current and _content_terms(text):
+            return text
+    return None
+
+
+def _peer_search_queries(artifacts: Optional[Dict[str, Any]]) -> List[str]:
+    """The distinct subjects the search peer actually queried, in call order."""
+    out: List[str] = []
+    seen: set = set()
+    for call in (artifacts or {}).get("tool_calls") or []:
+        if not isinstance(call, dict) or str(call.get("name") or "") not in _SUBJECT_TOOLS:
+            continue
+        args = call.get("args")
+        text = str((args or {}).get("query") or "").strip() if isinstance(args, dict) else ""
+        # A peer can be just as literal as the old sweep: a call on the meta sentence itself is
+        # not a subject.
+        if not text or _is_method_only(text) or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        out.append(text)
+    return out
+
+
+def _search_subjects(query: str, chat_history: Optional[List[Any]],
+                     peer_queries: List[str]) -> Tuple[List[str], str]:
+    """``(sweep_queries, relevance_query)`` for one search turn.
+
+    The sweep runs on what the peer searched for, plus the standalone request; the rerank judges
+    against the standalone request, with the peer's queries alongside so a request phrased one way
+    still matches the subject the peer resolved it to. The raw message is the last resort, used
+    only when nothing better exists — exactly the old behaviour.
+    """
+    standalone = _resolve_search_subject(query, chat_history)
+    sweep: List[str] = []
+    for text in [*peer_queries, *([standalone] if standalone else [])]:
+        if text.lower() not in {s.lower() for s in sweep}:
+            sweep.append(text)
+    sweep = sweep[:_SWEEP_SUBJECTS] or [query]
+    if standalone and peer_queries:
+        relevance = f"{standalone}\n(searched for: {'; '.join(peer_queries[:4])})"
+    else:
+        relevance = standalone or "; ".join(peer_queries[:4]) or query
+    return sweep, relevance
+
+
 # --- related-knowledge-element lookup (deterministic two-bucket) --------------
 # A "related elements of <UUID>" request is NOT a generic retrieval — it has a precise,
 # deterministic answer. We split it into two clearly-separated buckets so the agent never
@@ -4353,11 +4453,19 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         # stop `source`/`count` reading as imagery provenance.
         rows = _ledger_rows(_run.artifacts)
         # Completeness sweep: union in direct keyword+semantic hits so one search turn always
-        # carries multi-method coverage, even when the LLM peer called a single tool.
-        sweep = _direct_search_sweep(query, enabled_search_methods)
+        # carries multi-method coverage, even when the LLM peer called a single tool. It runs on
+        # what was SEARCHED FOR (Stage 86), not on the message: "use keyword search only" is an
+        # instruction, and sweeping it found the search tutorials.
+        sweep_queries, relevance_query = _search_subjects(
+            query, chat_history, _peer_search_queries(_run.artifacts))
+        sweep: List[Dict[str, Any]] = []
+        for sq in sweep_queries:
+            sweep = _merge_dedup(sweep, _direct_search_sweep(sq, enabled_search_methods))
         if sweep:
-            rows.append(_search_row("baseline_sweep", query, "keyword+semantic", len(sweep)))
-        return {"documents": _merge_dedup(harvested, sweep), "action_rows": rows}
+            rows.append(_search_row("baseline_sweep", "; ".join(sweep_queries),
+                                    "keyword+semantic", len(sweep)))
+        return {"documents": _merge_dedup(harvested, sweep), "action_rows": rows,
+                "relevance_query": relevance_query}
 
     return fn
 
@@ -6102,10 +6210,16 @@ def build_supervisor_graph(
         # or a dict carrying documents + the ledger rows for what it actually did. Both stay
         # supported; only the dict form contributes rows.
         new_rows: List[Dict[str, Any]] = []
+        # What relevance is judged against (Stage 86). The search_fn may say what the turn was
+        # actually about — the peer's own queries, or a method-only follow-up resolved against
+        # the conversation. Reranking on the literal "use keyword search only" kept the search
+        # tutorials and threw away the eight documents the peer had found.
+        rq = q
         if isinstance(raw, dict):
             docs = raw.get("documents") or []
             _, needs = _extract_needs(raw)
             new_rows.extend(raw.get("action_rows") or [])
+            rq = str(raw.get("relevance_query") or "").strip() or q
         else:
             docs, needs = raw, []
 
@@ -6117,9 +6231,9 @@ def build_supervisor_graph(
             tried.append(q)
         if _refine_enabled():
             for _ in range(_max_refinements()):
-                if not _results_are_poor(docs, q):
+                if not _results_are_poor(docs, rq):
                     break
-                refined = _refine_query(llm, q, docs, tried)
+                refined = _refine_query(llm, rq, docs, tried)
                 if not refined:
                     break
                 tried.append(refined)
@@ -6146,13 +6260,16 @@ def build_supervisor_graph(
         # web rather than reporting no results while a public answer exists. Placed AFTER the
         # refinement loop on purpose — a bad phrasing should be retried against our own index
         # before going to a third party — and it cannot fire when the KB returned anything at all.
-        if _platform_evidence_is_unhelpful(_merge_dedup(state.get("evidence") or [], docs), q):
-            web_docs = _web_fallback_evidence(q, enabled_search_methods)
+        if _platform_evidence_is_unhelpful(_merge_dedup(state.get("evidence") or [], docs), rq):
+            # Searched on the subject, but the platform-holdings veto still reads the MESSAGE:
+            # "use I-GUIDE keyword search only" names the platform even when its subject does not.
+            web_docs = ([] if _asks_about_platform_holdings(q)
+                        else _web_fallback_evidence(rq, enabled_search_methods))
             if web_docs:
                 # Direct backend calls, so no artifact to extract — but leaving the open web out
                 # of the ledger is how a follow-up gets told the information is unavailable
                 # right after the agent went and found it.
-                new_rows.append(_search_row("web_fallback", q, "open web", len(web_docs)))
+                new_rows.append(_search_row("web_fallback", rq, "open web", len(web_docs)))
                 emit_trace_event(
                     "node_started",
                     {"stage": "search",
@@ -6165,7 +6282,7 @@ def build_supervisor_graph(
         # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
         has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in docs)
         if do_rerank and len(docs) > 1 and not has_provenance:
-            docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
+            docs = rerank_documents(rq, docs, top_k=top_k, llm=llm)  # operator bundled into search
         before = len(state.get("evidence") or [])
         merged = _merge_dedup(state.get("evidence") or [], docs)
         added = len(merged) - before
@@ -6176,7 +6293,7 @@ def build_supervisor_graph(
         prev_streak = state.get("search_empty_streak", 0)
         update: Dict[str, Any] = {
             "evidence": merged,
-            "evidence_summary": _summarize_evidence(llm, q, merged) or state.get("evidence_summary"),
+            "evidence_summary": _summarize_evidence(llm, rq, merged) or state.get("evidence_summary"),
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
             "searched_queries": tried,

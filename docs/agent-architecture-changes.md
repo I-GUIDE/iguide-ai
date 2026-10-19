@@ -12080,3 +12080,36 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 86 — A follow-up that changes only the method keeps its subject {#stage-86}
+
+**The fault.** Trace of 2026-10-06 (`sess-dc304b00…:f6bf92de6551`, deepseek-v4-flash). Turn 1 asked for Chicago crime data. Turn 2 said "Use I-GUIDE keyword search only". The search peer did the right thing: it called `keyword_search('Chicago crime data')` and got the eight Chicago documents. Then two steps undid it:
+- `default_search_fn` ran `_direct_search_sweep(query)` on the literal message, which found the search-tutorial pages;
+- `search_node` reranked everything against `state["query"]`, the same sentence, and kept the top 8 — the tutorials.
+
+The answer said there were "no direct crime datasets". The grounding audit passed, because it checked the answer against that same wrong evidence.
+
+A second gap made it worse. The keyword DSL was `{"match": {"contents": query}}`. "Chicago Crime data 2026" never says Chicago, crime or data in its contents, so keyword search could not find it, though the platform's own UI finds it by title.
+
+**Change** (`agent_runtime/supervisor/graph.py`, search path only; `rag_pipeline/search/keyword.py`).
+- **What the turn is about.** `_search_subjects` returns the sweep queries and the relevance query:
+  - The peer's own search calls (`_peer_search_queries`: the `query` argument of each retrieval tool, distinct, in call order).
+  - A standalone request (`_resolve_search_subject`). The message itself when it names a subject. When it does not, it is a method-only follow-up, and the newest earlier user message that names one is used instead.
+  - A message is method-only when nothing is left after the filler words and a list of method and result-type words (`_SEARCH_META_TERMS`: keyword, semantic, only, instead, datasets, notebooks, I-GUIDE, …). A peer call on such a sentence is not counted as a subject either.
+- **The sweep** runs on up to two of those subjects (`_SWEEP_SUBJECTS`), peer queries first. The ledger row records the queries it actually ran.
+- **The rerank** judges against the standalone request, with the peer's queries alongside ("…(searched for: Chicago crime data)"). The search_fn hands this over as `relevance_query`. `search_node` uses it for the rerank, the poor-results check, the refinement, the evidence summary and the web fallback's query. The web fallback's platform-holdings veto still reads the message, so "use I-GUIDE … only" can never send the turn to the open web.
+- **Fallback.** With no peer query and no subject in the history, both are the raw message, exactly as before. A search_fn that returns a plain list (every test double) is unchanged.
+- **Keyword DSL.** `keyword_query_dsl` is a `multi_match` over `title^3` and `contents` (best_fields). This is the same boost `spatial.py` already uses on the same index.
+
+**Deterministic, not an LLM rewrite.** The resolver runs on every search turn. The case it exists for — a follow-up that only changes the method — can be recognised from the words alone, and the peer's queries already carry the model's own reading of the subject.
+
+**Not changed.** The sweep still unions every method the request allows, even after "keyword search only". It follows `enabled_search_methods`, not the wording of the message.
+
+**Verified.**
+- **Tests.** `rag_pipeline/tests/test_search_followup_subject.py` runs a two-turn conversation through `run_supervisor` with the real `default_search_fn`. The peer, the keyword index and the reranker are stubbed; the reranker scores by word overlap with the query it is given.
+  - Turn 2 keeps all eight Chicago documents, and no search runs on the instruction.
+  - When the peer itself searched the sentence, the subject comes from the history.
+  - On prototype's `graph.py` both tests fail with the tutorials kept, as in the trace.
+  - There are unit tests for the resolver, the peer-query extraction and the subject choice.
+- **DSL tests.** `rag_pipeline/tests/test_keyword_dsl.py`: the multi_match fields and boost, the body actually sent, a hit found by title alone, and a blank query sending nothing. Both test files are offline (stub client, no OpenSearch).
+- **Not deployed.**
