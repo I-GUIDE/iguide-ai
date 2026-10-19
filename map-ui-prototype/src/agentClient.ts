@@ -4,8 +4,8 @@
 // authoritative terminal `result`. This module IS the swap point that replaces the
 // local deterministic agentBrain.
 import type { AuthReason } from './auth';
-import { AuthError, authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
-  withTokenRetry } from './auth';
+import { AuthError, authErrorFrom, fetchWithRefresh, isAuthStatus, refreshAccessToken, setRefreshUrl,
+  setSigninUrl, withTokenRetry } from './auth';
 export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
@@ -249,7 +249,8 @@ export async function fetchModels(cfg: AgentConfig): Promise<ModelCatalogue | nu
     // apiBase is only the ORIGIN, so name the path explicitly — the same way download
     // URLs are resolved. new URL('models', origin) would hit /models.
     const url = absoluteUrl('/agent/models', cfg);
-    const r = await fetch(url, { headers: authHeaders(cfg, false), credentials: CREDENTIALS });
+    const r = await fetchWithRefresh(
+      () => fetch(url, { headers: authHeaders(cfg, false), credentials: CREDENTIALS }));
     if (!r.ok) return null;
     return (await r.json()) as ModelCatalogue;
   } catch {
@@ -307,10 +308,12 @@ export async function cancelTurn(cfg: AgentConfig, turnId: string): Promise<bool
     ? cfg.endpoint.replace(/\/stream\/?$/, '/cancel')
     : absoluteUrl('/agent/chat/cancel', cfg);
   try {
-    const r = await fetch(url, {
+    // Refreshed like a download: a Stop pressed an hour into a session would otherwise be
+    // refused, and the sandbox it was meant to kill would run on.
+    const r = await fetchWithRefresh(() => fetch(url, {
       method: 'POST', headers: authHeaders(cfg, true), credentials: CREDENTIALS,
       body: JSON.stringify({ turnId }),
-    });
+    }));
     return r.ok;
   } catch {
     return false;
@@ -400,12 +403,18 @@ export function authHeaders(cfg: AgentConfig, json: boolean): Record<string, str
  *  the bare fetch also left the cookie behind, so a signed-in developer lost them the same way.
  *
  *  A layer's url can point anywhere, and the key must not travel with it: a credential sent to
- *  someone else's host is a leaked credential. */
+ *  someone else's host is a leaked credential.
+ *
+ *  An agent file also refreshes the sign-in once on a 401 and is fetched once more
+ *  (fetchWithRefresh). The access cookie lives one hour, and a turn that outlived it lost every
+ *  layer it drew: "could not be loaded (HTTP 401, token_expired)" over an empty map, while the
+ *  refresh cookie that would have fixed it sat unused (agent.i-guide.io, 2026-10-18). */
 export function fetchAgentFile(url: string, cfg: AgentConfig, init: RequestInit = {}): Promise<Response> {
   let own = false;
   try { own = new URL(url).origin === new URL(apiBase(cfg)).origin; } catch { /* not a url */ }
   if (!own) return fetch(url, init);
-  return fetch(url, { ...init, headers: authHeaders(cfg, false), credentials: CREDENTIALS });
+  return fetchWithRefresh(
+    () => fetch(url, { ...init, headers: authHeaders(cfg, false), credentials: CREDENTIALS }));
 }
 
 export function newThreadId(): string {

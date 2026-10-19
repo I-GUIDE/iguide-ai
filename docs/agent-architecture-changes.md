@@ -12080,3 +12080,42 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 84 — Map files survive the access cookie aging out {#stage-84}
+
+**The fault.** Live on 2026-10-18 (prod, suitability example), the map stayed empty. The timeline:
+- the chat stream answered 200 at 2 s;
+- its two layer downloads (`/agent/files/<id>/download`) were refused 401 `token_expired` at 60 s and 75 s;
+- `backend.i-guide.io/api/refresh-token` answered 200 at 109 s, called for whoami.
+
+The layers read "could not be loaded (HTTP 401, token_expired)". The next "map it" turn said they were already on the map. The platform's access cookie lives one hour (iguide-ue-backend `jwtUtils`, `expiresIn: '1h'`), so this recurs in any tab open longer than that. It emptied the map in 1 of 14 live rounds of the demo examples.
+
+**Cause.** Stage S9.4 gave the request paths refresh-and-retry (`withTokenRetry`). That retry reacts to a thrown `AuthError`. `fetchAgentFile`, which every layer, restored layer and artifact download goes through, returns a `Response` and never throws one, so it never retried. Rasters were not covered either: deck.gl's `BitmapLayer` fetched its `image` url with its own loader, outside every retry. Three more authenticated calls went out bare as well:
+- `cancelTurn` — a Stop pressed after the hour was refused, and the sandbox ran on;
+- `fetchModels`;
+- the files of a shared user example (`loadUserExampleFiles`).
+
+**Change** (map-ui-prototype).
+- **`fetchWithRefresh(send)`** (`auth.ts`) is the bounded retry for callers that want the response back. On a 401 it refreshes once and sends once more. Any other status, or a failed refresh, returns the response unchanged, so callers report it as before. It shares `refreshAccessToken`'s in-flight promise, so the incident's two downloads make one refresh, not two.
+- **`fetchAgentFile`** uses it for the agent's own origin only. Another host's 401 is returned untouched, and no credentials are sent there.
+- **`cancelTurn` and `fetchModels`** use it too. `loadUserExampleFiles` now goes through `fetchAgentFile`.
+- **Rasters.** `toDeckLayer` takes a loader and gives `BitmapLayer` a `fetch` prop. The image comes through `fetchAgentFile` (App passes it to `AgentMap`) and is decoded with `createImageBitmap`. A refused image is now an error deck reports, not a silent miss. The repaint that a restored raster needs now runs after that loader resolves. The separate preload `<img>` is gone: it was a second download, and after an expiry it was a second refusal.
+
+**Not done: a proactive refresh.** The page cannot know when the access cookie expires. The cookie is httpOnly, and whoami does not report `exp`. A blind timer would keep every idle tab signed in forever, which is a policy change for the platform to make, not this page. The reactive retry covers the failure.
+
+**Verified.**
+- **New check:** `npm run check:refresh` (`src/tokenRefresh.check.ts`) runs 21 checks against a fake network whose cookie is stale until the refresh endpoint renews it:
+  - an expired layer download refreshes once, retries once and draws;
+  - a live cookie never refreshes;
+  - a failed refresh does not retry, and the layer says `HTTP 401, token_expired`;
+  - a 403 and another host's 401 are not refreshed;
+  - two expired downloads share one refresh;
+  - an aborted download stays aborted;
+  - an expired raster image refreshes and loads, and a refused one throws;
+  - Stop, the model list and shared-example files all refresh;
+  - a source scan finds no authenticated agent call in `agentClient.ts` or `userExamples.ts` outside the two retries, except ui-config (public) and whoami (refreshes itself).
+- **Mutation check.** With `fetchAgentFile` put back to a bare `fetch`, the incident case fails: `HTTP 401, token_expired`, 0 refreshes.
+- **Existing checks.** All 17 pass. `tsc -b` and `npm run build` are clean.
+- **Replay in the browser.** T07L (stack-live-cases) drew its three rasters through the new loader: each `BitmapLayer` holds a loaded 483-px texture. The map matched the archived replay screenshot.
+- **Not covered.** The 401 path was not run live: a replay serves files without auth.
+- **Not deployed.** The frontend deploy is a static copy the user approves.

@@ -6019,3 +6019,9 @@ rather than from the previous one.
 - **Change:** `_peer_result_for_writer` sends the peer's summary first and whole (16,000-char budget), then the record compacted like the auditor's (12,000). Any cut is at a line break and carries a "don't mention it, point to the map/download" note.
 - **Verified:** on Lumen deepseek-v4-flash, the old input gave Regions 1–4 and mentioned the cut. The new input gave 1–6 with no cut mention, 2 of 2.
 - **Tests:** `test_writer_sees_full_peer_result.py` (5).
+
+## 2026-10-19 · M8.124 · Map files survive the access cookie aging out (architecture stage 84)
+
+- **The fault:** prod 2026-10-18, suitability example. Both layer downloads were refused 401 `token_expired` at 60 s and 75 s, the platform refresh answered 200 at 109 s, and the map stayed empty. The access cookie lives 1 h. `fetchAgentFile` returned a Response and never went through `withTokenRetry`. deck.gl loaded raster images on its own, and `cancelTurn`, `fetchModels` and shared-example files were bare too.
+- **Change:** new `fetchWithRefresh` in `auth.ts`: on a 401 it refreshes once and sends once more; any other result comes back unchanged. It is used by `fetchAgentFile` (own origin only), `cancelTurn`, `fetchModels` and `loadUserExampleFiles`. `BitmapLayer` gets a `fetch` prop, so raster images load through `fetchAgentFile`, and the restore repaint runs after that load. There is no proactive refresh: the expiry cannot be read from an httpOnly cookie.
+- **Tests:** `npm run check:refresh` (21). The incident case fails with the old bare fetch. All other checks, tsc and build are green. The T07L replay drew its 3 rasters through the new loader. Not deployed.

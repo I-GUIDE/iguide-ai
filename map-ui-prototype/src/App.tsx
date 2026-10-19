@@ -200,6 +200,10 @@ export default function App() {
     ? { ...cfg, apiKey: '', uploadEndpoint: '/agent/files/upload',
         endpoint: `/agent/chat/stream?replay=${encodeURIComponent(REPLAY_KEY)}` }
     : { ...cfg }), [cfg]);
+  // A raster's image, fetched like every other agent file: credentials, and one refresh of an
+  // expired sign-in (fetchAgentFile).
+  const fetchMapFile = useCallback((url: string, init?: RequestInit) =>
+    fetchAgentFile(url, asAgentConfig(), init), [asAgentConfig]);
   // Stop ends the turn on the server as well as here: the sandbox run is killed and the agent
   // stops at its next step. Aborting the fetch alone left both running for minutes. The abort
   // does not wait for the cancel call, so Stop is instant whatever the server answers.
@@ -1206,6 +1210,7 @@ export default function App() {
                 onResize={refitAfterResize}
                 onRegionPreview={onRegionPreview}
                 onRegionDrawn={onRegionDrawn}
+                fetchFile={fetchMapFile}
               />
             )}
           </div>
