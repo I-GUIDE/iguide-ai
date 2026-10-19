@@ -12085,9 +12085,11 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
 **The open question.** On 2026-09-17 (GeoAnalystBench task 44, gpt-5.6-luna) the prompt was meant to say "buffer distance/size: 2500 … meters", and the agent buffered by 1000 m. A paired `--mode asked|injected` run gave identical geometry, so the question recorded was: "the agent ignores stated parameters". It was parked until the benchmarking milestone. Stage 78 (S78.1, S78.2) later added a rule that flags a value-applying run that never uses a stated value. That rule catches a wrong value after the fact. It does not show where a value gets lost.
 
-**What actually happened on 2026-09-17: the value never reached the agent.** `benchmark/geoanalyst/run_agent.py` (branch `claude/benchmark`, c077ff14) builds the parameter block and passes it as `PROMPT.format(..., parameters=params)`. But `PROMPT` has no `{parameters}` slot, and `str.format` drops an unused keyword silently. So every `injected` run since then (ab-injected, luna-params, qwen-injected, sweep-injected) got the same prompt as `asked`. The evidence:
-- "2500" appears 0 times in `results/ab-injected/44/trace.jsonl`.
-- The supervisor's routing reason in that trace reads "using a defensible distance derived from the task/data". That is a model that was never told a distance.
+**What actually happened on 2026-09-17: the value never reached the agent.** `benchmark/geoanalyst/run_agent.py` (branch `claude/benchmark`, c077ff14) builds the parameter block and passes it as `PROMPT.format(..., parameters=params)`. But `PROMPT` has no `{parameters}` slot, and `str.format` drops an unused keyword silently. So every `injected` run since then (ab-injected, luna-params, qwen-injected, sweep-injected) got the same prompt as `asked`. The result files do not record the prompt, so the evidence is indirect, but it all points one way:
+- **No version had the slot.** None of the three committed versions of the runner (ab5c9707, 0d7d1c0a, 5c4d8881) has a `{parameters}` slot.
+- **The supervisor asked for a distance it had not been given.** In every archived injected run (ab-injected 44, sweep-injected 44 and 8) its routing reason asks for "a defensible distance derived from the task/data".
+- **The injected runs picked different distances, none of them 2500 m.** Luna used 1,000 m (ab-injected 44), and qwen used 1.5 km (qwen-injected 44).
+- **The memory note's check tested the wrong text.** The earlier note said "inject=True: prompt contains 2500 -> True". That can only have checked `params`, not the formatted prompt, because `str.format` cannot insert a keyword that has no slot.
 
 The fix there is one line (`{knowledge}{parameters}Requirements:`). Each spec's `[from \`…\`]` suffix is a line of the reference implementation, so it is stripped before the value is shown. That branch is not part of this change. The runs below used a scratch copy of the runner with both fixes.
 
