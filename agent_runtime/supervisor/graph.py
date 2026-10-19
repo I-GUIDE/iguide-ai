@@ -1907,7 +1907,19 @@ def _peer_error_budget() -> int:
 
 
 def _is_fatal_peer_error(exc: BaseException) -> bool:
-    """Whether retrying any peer is pointless because the model itself is unreachable."""
+    """Whether retrying any peer is pointless because the model itself is unreachable.
+
+    A model call that timed out counts (Stage 85): it already waited the full timeout and its
+    retries, and every other peer calls the same model. Seen 2026-10-09 before the timeout
+    existed: the analyze peer failed after an 18-minute stall and the supervisor routed straight
+    back to analyze to stall again.
+    """
+    try:
+        from agent_runtime.llm_timeout import LLMCallTimeout
+        if isinstance(exc, LLMCallTimeout):
+            return True
+    except Exception:
+        pass
     try:
         from rag_pipeline.llm_claude_cli import ClaudeCliUnavailable
     except Exception:
