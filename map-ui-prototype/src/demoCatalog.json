@@ -178,7 +178,7 @@
    },
    {
     "label": "Map them",
-    "prompt": "Map the aftershocks within 25 km and 7 days, sized by magnitude, with the mainshock marked."
+    "prompt": "Map the aftershocks within 25 km and 7 days, colored by magnitude, with the mainshock marked."
    }
   ]
  },
