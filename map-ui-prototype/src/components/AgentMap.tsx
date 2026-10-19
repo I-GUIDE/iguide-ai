@@ -8,7 +8,7 @@ import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import { MapLibreOverlay } from '@deck.gl/maplibre';
 import type { Feature, Polygon } from 'geojson';
 import type { LayerArtifact } from '../contracts';
-import { toDeckLayer } from '../toDeckLayer';
+import { type FetchFile, type LoadImage, loadRasterImage, toDeckLayer } from '../toDeckLayer';
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre 6 ships only ES modules and starts its worker from a URL that a bundler cannot
 // work out for itself, so the map is handed one (MapLibre's own Vite recipe). `?worker&url`
@@ -66,6 +66,9 @@ interface Props {
   onRegionPreview?: (poly: Polygon | null) => void;
   /** Final selection: a right-DRAG box, or a right-CLICK expanded to `clickBoxKm`. */
   onRegionDrawn?: (poly: Polygon, viaClick: boolean) => void;
+  /** Fetches a raster's image: App passes fetchAgentFile, which carries the page's credentials
+   *  and refreshes an expired sign-in once. Without it the image is a plain fetch. */
+  fetchFile?: FetchFile;
 }
 
 /** Axis-aligned box from two lng/lat corners. */
@@ -80,7 +83,7 @@ function boxFrom(a: [number, number], b: [number, number]): Polygon {
 const CLICK_PX = 8;
 const CLICK_BOX_KM = 2;
 
-export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover, onFeatureClick, onReady, onResize, onRegionPreview, onRegionDrawn }: Props) {
+export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover, onFeatureClick, onReady, onResize, onRegionPreview, onRegionDrawn, fetchFile }: Props) {
   // Right-drag selects a region (matching the rs-embed demo). Wired straight onto the
   // MapLibre instance rather than through React handlers because it needs `mousedown`/
   // `mouseup` with the BUTTON number, and because dragRotate has to be turned off first:
@@ -185,13 +188,23 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
   // the map mounts with layers already in props. deck layers are immutable descriptors, so new
   // instances are what make the overlay draw them again.
   const [mapReady, setMapReady] = useState(false);
+  // Held in a ref so the deck layers stay memoised on `layers` alone: App builds a new fetcher
+  // on every render, and a new one each time would rebuild, and re-fetch, every raster.
+  const fetchRef = useRef(fetchFile);
+  fetchRef.current = fetchFile;
+  const loadImage = useCallback<LoadImage>(async (url, signal) => {
+    const img = await loadRasterImage(url, (u, init) => (fetchRef.current ?? fetch)(u, init), signal);
+    // After deck has taken the image (it does so as this promise resolves), not before.
+    setTimeout(() => mapRef.current?.getMap?.()?.triggerRepaint(), 0);
+    return img;
+  }, []);
   // A road network goes beneath everything and a route on top, whatever order they arrived in:
   // the route is what the user asked for, and a network drawn over it hides it. The sort is
   // stable, so every other layer keeps its place.
   const deckLayers = useMemo(
     () => [...layers]
       .sort((x, y) => drawRank(x) - drawRank(y))
-      .flatMap((a) => toDeckLayer(a)),
+      .flatMap((a) => toDeckLayer(a, loadImage)),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mapReady is a redraw trigger
     [layers, mapReady],
   );
@@ -205,24 +218,13 @@ export function AgentMap({ layers, drawnRegion, drawPreview, onMapClick, onHover
   // the DEM missing. Any stray resize made it appear, which is what gave the cause away:
   // `map.triggerRepaint()` on its own was enough to paint it.
   //
-  // So repaint at the one moment that matters rather than polling for it: preload each raster
-  // image and repaint when it loads. The browser serves deck the cached copy, so the two
-  // resolve together. One repaint per image, nothing on a timer.
+  // So repaint at the one moment that matters rather than polling for it: when each raster
+  // image has loaded. The image comes through loadImage (toDeckLayer's `fetch`), so that is
+  // where the repaint goes — a separate preload <img> would be a second download, and since the
+  // token fix a second refusal once the access cookie has aged out. One repaint per image,
+  // nothing on a timer; the frame lands after deck has taken the resolved image.
   useEffect(() => {
-    const map = mapRef.current?.getMap?.();
-    if (!map) return;
-    map.triggerRepaint();
-    const urls = layers
-      .filter((l) => l.kind === 'raster' && (l as any).url)
-      .map((l) => (l as any).url as string);
-    if (!urls.length) return;
-    let live = true;
-    for (const url of urls) {
-      const img = new Image();
-      img.onload = () => { if (live) map.triggerRepaint(); };
-      img.src = url;
-    }
-    return () => { live = false; };
+    mapRef.current?.getMap?.()?.triggerRepaint();
   }, [deckLayers, layers]);
 
   const regionFeature: Feature | null = useMemo(() => {

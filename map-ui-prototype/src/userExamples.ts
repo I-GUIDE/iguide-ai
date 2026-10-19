@@ -5,7 +5,7 @@
 // signed-in users open, and an admin can publish one to everyone. Running one is the same as
 // running a built-in example: its files are fetched and uploaded into a NEW conversation through
 // the ordinary upload route, so they land in the runner's own file store.
-import { type AgentConfig, CREDENTIALS, absoluteUrl, authHeaders } from './agentClient';
+import { type AgentConfig, CREDENTIALS, absoluteUrl, authHeaders, fetchAgentFile } from './agentClient';
 import { authErrorFrom, isAuthStatus, withTokenRetry } from './auth';
 import type { DemoCase, DemoStep } from './demos';
 
@@ -215,7 +215,7 @@ export function setPublished(cfg: AgentConfig, id: string, on: boolean): Promise
  *  they go through the same upload path as a built-in example's or a hand-picked file. */
 export async function loadUserExampleFiles(c: UserExample, cfg: AgentConfig): Promise<File[]> {
   return Promise.all(c.files.map(async (f) => {
-    const r = await fetch(absoluteUrl(f.url, cfg), { headers: authHeaders(cfg, false), credentials: CREDENTIALS });
+    const r = await fetchAgentFile(absoluteUrl(f.url, cfg), cfg);
     if (!r.ok) throw new Error(`${f.name}: HTTP ${r.status}`);
     const blob = await r.blob();
     return new File([blob], f.name, { type: blob.type || 'application/octet-stream' });

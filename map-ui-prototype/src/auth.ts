@@ -179,6 +179,26 @@ export function refreshAccessToken(): Promise<boolean> {
 }
 
 /**
+ * The same bounded retry for a caller that wants the RESPONSE back rather than an exception: a
+ * 401 refreshes once and sends once more; every other status, and a refresh that failed, comes
+ * back as the response it was, so the caller reports it the way it already does.
+ *
+ * Agent FILE fetches need this shape. They returned a Response and nothing on that path ever
+ * threw an AuthError, so withTokenRetry had nothing to react to and a layer download simply
+ * failed once the one-hour access cookie aged out. Measured on agent.i-guide.io 2026-10-18: chat
+ * 200 at 2 s, both layer downloads 401 `token_expired` at 60 s and 75 s, the platform refresh
+ * 200 at 109 s (for whoami) — the map stayed empty although the cookie could have been renewed.
+ *
+ * `send` is a thunk for the same reason as withTokenRetry's: a retry has to issue a new request.
+ */
+export async function fetchWithRefresh(send: () => Promise<Response>): Promise<Response> {
+  const res = await send();
+  if (res.status !== 401) return res;
+  if (!(await refreshAccessToken())) return res;
+  return send();
+}
+
+/**
  * Run a request; on an expired token, refresh once and run it exactly once more.
  *
  * `run` must be a thunk rather than a Promise: a retry has to ISSUE a new request, and an

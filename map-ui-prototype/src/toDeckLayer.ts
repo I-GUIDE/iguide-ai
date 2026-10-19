@@ -116,7 +116,24 @@ export function hasFill(a: LayerArtifact): boolean {
     && !['route', 'network', 'heatmap'].includes(a.render ?? '');
 }
 
-export function toDeckLayer(a: LayerArtifact) {
+/** How a raster's image is fetched: the agent's own files go through fetchAgentFile, which
+ *  carries the page's credentials and refreshes an expired sign-in once. */
+export type FetchFile = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** A raster's image, fetched through `fetchFile` rather than by deck.gl's loader. deck loads a
+ *  string `image` itself, outside every retry this page has, so an image requested after the
+ *  one-hour access cookie aged out was refused and the raster never drew. */
+export async function loadRasterImage(url: string, fetchFile: FetchFile,
+                                      signal?: AbortSignal): Promise<ImageBitmap> {
+  const res = await fetchFile(url, signal ? { signal } : {});
+  if (!res.ok) throw new Error(`raster image ${url}: HTTP ${res.status}`);
+  return createImageBitmap(await res.blob());
+}
+
+/** Loads a raster's image by url; see loadRasterImage. */
+export type LoadImage = (url: string, signal?: AbortSignal) => Promise<ImageBitmap>;
+
+export function toDeckLayer(a: LayerArtifact, loadImage?: LoadImage) {
   // A raster is an image with a footprint, not geometry: deck.gl wants the bounds in
   // [left, bottom, right, top] order, which is the same order the agent sends.
   if (a.kind === 'raster') {
@@ -127,6 +144,10 @@ export function toDeckLayer(a: LayerArtifact) {
       opacity: a.opacity ?? 0.85,
       visible: a.visible !== false,
       pickable: false,
+      // deck calls `fetch` for a string `image` in place of its own loader.
+      ...(loadImage ? {
+        fetch: (url: string, ctx: { signal?: AbortSignal }) => loadImage(url, ctx?.signal),
+      } : {}),
     });
   }
 
