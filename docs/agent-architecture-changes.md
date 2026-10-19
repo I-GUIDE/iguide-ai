@@ -12080,3 +12080,40 @@ Both budgets are far below the 65,536-token floor that an unlisted model gets, s
 
   The existing writer tests pass unchanged.
 - **Not deployed.**
+
+## Stage 80 — The agent decides what the map shows of a layer, and says what it drew {#stage-80}
+
+**The fault.** In live demo tests of the Ridgecrest aftershocks example (step 2: "map the aftershocks … sized by magnitude, with the mainshock highlighted"), the answer said the points were sized by magnitude and the mainshock was the largest point. The map showed 674 equal circles. Point size was a constant in the client (`toDeckLayer.ts`: `Math.min(pointRadius ?? 6, densityRadius(n))`), and nothing could single out or label a feature. The model asked for what the user wanted, but the tool had no way to do it. So the answer described the request, not the map.
+
+**Why named options, not a style spec.** `add_map_layer` already let the agent choose the render mode, value column, colours, outline, fill opacity and `beneath` (Stage 76, S76.2). This stage adds a few more choices of the same kind. Each is checked against the data before anything is written, and the client draws only what the descriptor names. Free-form deck.gl or MapLibre style specs are not accepted. The client would have to trust them, and the tool could not say what they draw.
+
+**Change.**
+- **New options on `add_map_layer`** (`agent_runtime/layer_styling.py`, called from `langchain_geo_tools.add_map_layer`).
+  - `size_column` (numeric), with optional `size_range` `[min_px, max_px]` (default `[3, 16]`). Radius = `lo + (hi − lo)·√t`, where `t` is the value's position between the column's min and max in the layer as written. A feature with no value is drawn at `lo`.
+  - `point_size` (px): one fixed size.
+  - `highlight`: `{column, equals|in|gte|lte|gt|lt: value[, color, label]}`. Matching features are drawn again on top: larger (`max(1.5r, r+4, 8)` px), gold `[255,193,7]` with a dark edge (or the given `color`), and with a legend entry. A numeric column compares as numbers, anything else as text. The server and the client apply the same rule (`highlight_mask` / `highlightTest`).
+  - `label_column`: at most 50 labels. With 50 or fewer features, every feature is labelled. With more, only the highlighted features are labelled, if there are 50 or fewer of them; otherwise the call is refused, with a hint to add a highlight. The server places each label (the point itself, or `representative_point()` for lines and polygons).
+  - `line_width` (px) and `line_color`. They also set a route's width (its casing is 5 px wider) and a network's line.
+- **Every bad value gets an answerable `{ok: False, error, hint}`.** This covers: a missing or non-numeric column; a constant size column; `size_column` together with `point_size`; `size_range` with no `size_column`, or one that does not grow; a size on a heatmap or on non-point geometry; a highlight that matches no feature or every feature; a numeric comparison on a text column; a bad colour; and too many labels.
+- **CSV columns.** GDAL reads every CSV column as text, so the demo's `mag` arrived as `"3.98"`. A column named by `size_column` or `highlight` is converted to numbers only when every non-empty value parses. An id like `"06"` among names stays text.
+- **`render="auto"` with a size** draws points, not a heatmap. A heatmap has no point size.
+- **Sampling keeps the highlighted features.** Above the feature ceiling, the sample is drawn from the rest.
+- **The result says what will be drawn.** `drawn` comes right after `ok`, so it survives a tool output cut for length. Example: *"674 features drawn as points: points sized by mag (3 to 7.1 drawn 3–16 px, square-root scale); 1 feature highlighted (mag >= 7), drawn larger, on top and in the highlight colour, with a legend entry 'mainshock M7.1'; 1 feature (highlighted only) labelled with mag."* With no options it says *"all points one size (no size_column was set); no feature highlighted; no labels."* `drawn_note` tells the model to describe sizes, highlights and labels only as `drawn` states them. The sizes, the highlight count and the labels come from the frame as written (after sampling), not from the request.
+- **The descriptor** (`map_layers._styling_fields`). `size_by {column, min, max, range}`, `point_size`, `highlight {column, op, value, numeric, label, color, count}`, `labels {column, scope, items[{position, text}]}`, `line_width` and `line_color` are each copied across `build_map_layer` (a fixed shape) only when well formed. A malformed field is dropped, which leaves the layer drawn as before.
+- **The client** (`map-ui-prototype`).
+  - `contracts.ts` gains `SizeBy`, `Highlight`, `Labels` and the matching layer fields.
+  - `layerStyling.ts` holds the pure parts: wire parsing, the predicate and the size scale.
+  - `agentClient.ts` and `App.tsx` carry the fields onto the layer, so they persist with a saved session.
+  - `toDeckLayer.ts` draws per-feature `getPointRadius` (with `updateTriggers`), a `--highlight` GeoJsonLayer and a `--labels` TextLayer. Labels sit on a light backing, and a point's label starts past its drawn circle. With no option set, `toDeckLayer` returns the same single layer as before.
+  - `LeftPanel.tsx` shows the highlight's legend entry with its count, and a "size: mag 3–7.1" row.
+  - A click on a highlighted feature is attributed to its layer.
+
+**Verified.**
+- **Backend.** `rag_pipeline/tests/test_layer_styling.py` (37) covers each option's validation, the `drawn` sentence, the descriptor across `build_map_layers`, the demo CSV itself (text `mag`), sampling that keeps the highlight, polygon label placement, and choropleth column slicing. The neighbouring map-layer suites (217) pass unchanged.
+- **Frontend.** `tsc -b` and `vite build` are clean. `npm run check:styling` is new. `palette`, `route`, `layers`, `restore`, `replay`, `demos`, `sources` and `markdown` pass.
+- **Rendered.** A synthetic turn was replayed through the real page (`npm run replay:shots`). The turn has a `map_layer` event built by the real `add_map_layer` → `build_map_layers` from the demo CSV (674 aftershocks within 25 km and 7 days), with `size_column="mag"`, `highlight={"column": "mag", "gte": 7}` and `label_column="mag"`. The aftershocks are drawn 3–16 px by magnitude, and the M7.1 mainshock is a larger gold circle on top, labelled "7.1", with "mainshock M7.1 (1)" and "size: mag 3–7.1" in the layer panel. The same file with no options draws 674 equal circles, as before. No model was called.
+
+**Not done.**
+- No live turn on Lumen deepseek yet checks that the answer repeats `drawn`.
+- `render="choropleth"` on a CSV column of numbers-as-text is still refused, because that check predates this stage and does not use the new conversion.
+- **Not deployed.**

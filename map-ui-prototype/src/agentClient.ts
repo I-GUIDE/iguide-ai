@@ -4,6 +4,7 @@
 // authoritative terminal `result`. This module IS the swap point that replaces the
 // local deterministic agentBrain.
 import type { AuthReason } from './auth';
+import { stylingFromWire, type LayerStyling } from './layerStyling';
 import { AuthError, authErrorFrom, isAuthStatus, refreshAccessToken, setRefreshUrl, setSigninUrl,
   withTokenRetry } from './auth';
 export interface AgentConfig {
@@ -317,7 +318,7 @@ export async function cancelTurn(cfg: AgentConfig, turnId: string): Promise<bool
   }
 }
 
-export interface MapLayerEvent {
+export interface MapLayerEvent extends LayerStyling {
   id: string;
   source: string;
   label: string;
@@ -651,6 +652,8 @@ export async function streamChat(
             legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             fillOpacity: _share(layer.fill_opacity), beneath: layer.beneath === true,
             sampled: !!layer.sampled, total: layer.total,
+            // Point size, highlight, labels, line width/colour (Stage 80), each only when set.
+            ...stylingFromWire(layer),
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
               ? (layer.bounds.map(Number) as [number, number, number, number]) : undefined,
@@ -671,6 +674,7 @@ export async function streamChat(
             legend: _legend(layer), color: _rgba(layer.color), outline: layer.outline === true,
             fillOpacity: _share(layer.fill_opacity), beneath: layer.beneath === true,
             sampled: !!layer.sampled, total: layer.total,
+            ...stylingFromWire(layer),
           });
         }
         break;

@@ -975,7 +975,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                       name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
                       max_points: Optional[int] = None, color: Optional[str] = None,
                       class_colors: Optional[Dict[str, str]] = None, outline: bool = False,
-                      fill_opacity: Optional[float] = None, beneath: bool = False) -> str:
+                      fill_opacity: Optional[float] = None, beneath: bool = False,
+                      size_column: Optional[str] = None, size_range: Optional[List[float]] = None,
+                      point_size: Optional[float] = None,
+                      highlight: Optional[Dict[str, Any]] = None,
+                      label_column: Optional[str] = None, line_width: Optional[float] = None,
+                      line_color: Optional[str] = None) -> str:
         """Put a dataset on the user's interactive map as a styled layer.
 
         `render`: "heatmap" (point density), "choropleth" (polygons shaded by a NUMERIC
@@ -995,6 +1000,14 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         or boundary with results inside it, should not hide them or the streets beneath:
         pass `outline=True` (boundary only) or a light `fill_opacity` (0 to 1; about 0.15),
         and `beneath=True` to draw it under the other layers. Later layers draw on top.
+
+        What the map shows of the features is also yours to choose, from named options only
+        (agent_runtime.layer_styling): `size_column` (numeric; points sized by it on a
+        square-root scale, between `size_range` [min_px, max_px], default 3-16) or
+        `point_size` (px) for one size; `highlight` ({column, equals|in|gte|lte|gt|lt: value})
+        draws matching features larger, on top, in a stand-out colour with a legend entry;
+        `label_column` labels features (at most 50: with more, only the highlighted ones);
+        `line_width` (px) and `line_color`. The result's `drawn` says what the map shows.
         """
         tmp = None
         try:
@@ -1042,6 +1055,19 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             full = gdf
             if mode == "auto":
                 mode = _auto_render(gdf, column, bool(is_point))
+                if mode == "heatmap" and (size_column is not None or point_size is not None):
+                    mode = "points"         # a size was asked for; a heatmap has none
+            # Size, highlight, labels and lines, checked against the data before anything is
+            # written: live, the Ridgecrest answer said "sized by magnitude" over equal circles
+            # because the tool had no size to set (Stage 80).
+            from agent_runtime import layer_styling
+            styling, refusal = layer_styling.validate(
+                gdf, mode=mode, geom_types=geom_types, size_column=size_column,
+                size_range=size_range, point_size=point_size, highlight=highlight,
+                label_column=label_column, line_width=line_width, line_color=line_color)
+            if refusal:
+                return json.dumps(refusal, default=str)
+            styled_cols = [c for c in layer_styling.columns_needed(styling) if c != column]
             if layer_colour and mode == "categories":
                 return json.dumps({"ok": False,
                                    "error": "a categories layer is coloured per class",
@@ -1111,12 +1137,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                        "error": f"choropleth needs a numeric `column` present in the data; "
                                                 f"got {column!r}",
                                        "numeric_columns": numeric[:40]})
-                gdf = gdf[[column, "geometry"]]
+                gdf = gdf[[column, *styled_cols, "geometry"]]
             elif mode == "heatmap":
                 # Keep a few attributes so clicking a point says something — but past
                 # _HEATMAP_LEAN_ABOVE drop them: a density render needs only position, and
                 # shedding them is what makes the FULL population servable instead of a sample.
-                keep = [c for c in gdf.columns if c == "geometry" or c == column]
+                keep = [c for c in gdf.columns
+                        if c == "geometry" or c == column or c in styled_cols]
                 budget = 0 if len(gdf) > _HEATMAP_LEAN_ABOVE else _HEATMAP_KEEP_COLUMNS
                 extra = [c for c in gdf.columns if c not in keep][:budget]
                 gdf = gdf[[*keep, *extra]] if extra else gdf[keep]
@@ -1130,7 +1157,21 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             if sampled:
                 note = (f"showing a random {ceiling} of {total} features "
                         f"({ceiling * 100 // total}%) — the layer on the map is a SAMPLE")
-                gdf = gdf.sample(ceiling, random_state=0)
+                hl = styling.get("highlight")
+                if hl:
+                    # A sample must not drop what the layer was asked to single out.
+                    import pandas as _pd_s
+                    picked = layer_styling.highlight_mask(gdf, hl).values
+                    rest = gdf[~picked]
+                    take = min(max(ceiling - int(picked.sum()), 0), len(rest))
+                    gdf = _pd_s.concat([rest.sample(take, random_state=0), gdf[picked]])
+                else:
+                    gdf = gdf.sample(ceiling, random_state=0)
+            # What the map will draw, from the frame as written: sizes span the values sent,
+            # the highlight count and the labels are those features.
+            drawn_fields, refusal = layer_styling.finish(gdf, styling)
+            if refusal:
+                return json.dumps(refusal, default=str)
             fname = artifact_name(name, "geojson", source=str(read_path), default=f"{mode}_layer")
             out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
             gdf.to_file(out, driver="GeoJSON")
@@ -1211,10 +1252,20 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                  **({"fill_opacity": fill_opacity}
                                     if fill_opacity is not None else {}),
                                  **({"beneath": True} if beneath else {}),
+                                 # Point size, highlight, labels, line width/colour (Stage 80);
+                                 # each present only when set.
+                                 **drawn_fields,
                                  # Carried to the UI so a partial layer says so on screen.
                                  "sampled": bool(sampled), "total": total}}
             if note:
                 res["note"] = note
+            # What the map will actually draw of the features, said so the answer describes the
+            # map and not the request (Stage 80). First after `ok`: a tool output cut for length
+            # loses its tail, and the descriptor (up to 50 labels) sits before this.
+            res = {"ok": True,
+                   "drawn": layer_styling.describe(drawn_fields, mode=mode,
+                                                   is_point=bool(is_point), count=int(len(gdf))),
+                   "drawn_note": layer_styling.DRAWN_NOTE, **res}
             if nulled:
                 res["nonfinite_as_null"] = (f"{nulled} NaN/Infinity value(s) in the attributes were "
                                             "written as null so the browser can read the file")
@@ -1276,7 +1327,17 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "layer that FRAMES other results (a buffer, service area, study area or "
                          "boundary with the results inside it) must not hide them or the streets: "
                          "pass outline=True (boundary only) or a light fill_opacity (0-1, about "
-                         "0.15), and beneath=True to draw it under the other layers. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
+                         "0.15), and beneath=True to draw it under the other layers. WHAT IT "
+                         "SHOWS of the features, from named options only: size_column (numeric, "
+                         "points sized by it on a square-root scale; size_range [min_px, "
+                         "max_px], default [3, 16]) or point_size (px, one size); highlight "
+                         "({column, equals|in|gte|lte|gt|lt: value}, e.g. {'column': 'mag', "
+                         "'gte': 7}: matches drawn larger, on top, in a stand-out colour with a "
+                         "legend entry); label_column (at most 50 labels; with more features, "
+                         "only the highlighted ones are labelled); line_width (px), line_color. "
+                         "Without size_column every point is one size. The result's `drawn` "
+                         "states what the map shows: describe sizes, highlights and labels only "
+                         "as it says. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
                          "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download. The map keeps one layer per source file: drawing a file that "

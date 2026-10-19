@@ -1,10 +1,11 @@
 // The thin renderer: LayerArtifact -> deck.gl layer. One switch, easy to test.
-import { BitmapLayer, GeoJsonLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { BitmapLayer, GeoJsonLayer, ScatterplotLayer, TextLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
 import type { LayerArtifact, RGBA } from './contracts';
 import type { Feature, Point } from 'geojson';
 import { routeEnds } from './routeGeometry';
 import { fillAndLine, resolveLegend } from './palette';
+import { highlightTest, sizeScale } from './layerStyling';
 
 const DEFAULT_FILL: [number, number, number, number] = [51, 136, 255, 120];
 const DEFAULT_LINE: [number, number, number, number] = [20, 90, 200, 255];
@@ -62,13 +63,15 @@ function routeLayers(a: VectorLayer) {
   const visible = a.visible !== false;
   const line = { lineWidthUnits: 'pixels' as const, lineCapRounded: true, lineJointRounded: true,
                  filled: false, stroked: true };
-  const main: [number, number, number, number] = a.color ? [a.color[0], a.color[1], a.color[2], 255] : ROUTE_LINE;
+  const main: [number, number, number, number] = a.lineColor ?? (a.color ? [a.color[0], a.color[1], a.color[2], 255] : ROUTE_LINE);
+  const width = a.lineWidth ?? 6;
   const layers: any[] = [
     new GeoJsonLayer({ id: `${a.id}--casing`, data: a.data, visible, pickable: false, ...line,
-                       getLineColor: ROUTE_CASING, getLineWidth: 11 }),
+                       getLineColor: ROUTE_CASING, getLineWidth: width + 5,
+                       updateTriggers: { getLineWidth: [a.lineWidth] } }),
     new GeoJsonLayer({ id: a.id, data: a.data, visible, pickable: true, ...line,
-                       getLineColor: main, getLineWidth: 6,
-                       updateTriggers: { getLineColor: [a.color] } }),
+                       getLineColor: main, getLineWidth: width,
+                       updateTriggers: { getLineColor: [a.color, a.lineColor], getLineWidth: [a.lineWidth] } }),
   ];
   const ends = routeEnds(a.data);
   if (ends) {
@@ -87,8 +90,9 @@ function networkLayer(a: VectorLayer) {
   return new GeoJsonLayer({
     id: a.id, data: a.data, visible: a.visible !== false, pickable: true,
     filled: false, stroked: true, lineWidthUnits: 'pixels', lineCapRounded: true,
-    lineJointRounded: true, getLineColor: a.color ?? NETWORK_LINE, getLineWidth: 1.5,
-    updateTriggers: { getLineColor: [a.color] },
+    lineJointRounded: true, getLineColor: a.lineColor ?? a.color ?? NETWORK_LINE,
+    getLineWidth: a.lineWidth ?? 1.5,
+    updateTriggers: { getLineColor: [a.color, a.lineColor], getLineWidth: [a.lineWidth] },
     pointType: 'circle', getPointRadius: 2, pointRadiusUnits: 'pixels',
   });
 }
@@ -98,6 +102,85 @@ function networkLayer(a: VectorLayer) {
 // cluster. A style that asks for smaller dots keeps them.
 export function densityRadius(n: number): number {
   return n > 5000 ? 2 : n > 1500 ? 3 : n > 400 ? 4.5 : 6;
+}
+
+/** A vector layer's point radius in pixels: by the agent's size column, its one fixed size, or
+ *  (as always before Stage 80) the style's radius capped by how dense the layer is. */
+export function pointRadiusOf(a: VectorLayer): number | ((f: any) => number) {
+  if (a.sizeBy) {
+    const at = sizeScale(a.sizeBy);
+    return (f: any) => at(f?.properties);
+  }
+  if (typeof a.pointSize === 'number') return a.pointSize;
+  return Math.min(a.style?.pointRadius ?? 6, densityRadius(a.data.features.length));
+}
+
+const isLine = (f: any) => /LineString/.test(f?.geometry?.type ?? '');
+const HIGHLIGHT_EDGE: RGBA = [33, 33, 33, 255];
+
+const highlightRadius = (r: number) => Math.max(r * 1.5, r + 4, 8);
+
+/** The features the agent singled out, drawn again on top of their layer: larger, in the
+ *  highlight colour, with a dark edge so they read on any basemap and over any ramp. */
+function highlightLayer(a: VectorLayer, baseRadius: number | ((f: any) => number), baseLine: number) {
+  const h = a.highlight!;
+  const test = highlightTest(h);
+  const picked = a.data.features.filter((f) => test(f.properties));
+  if (!picked.length) return null;
+  const radius = (f: any) => highlightRadius(typeof baseRadius === 'function' ? baseRadius(f) : baseRadius);
+  return new GeoJsonLayer({
+    id: `${a.id}--highlight`,
+    data: { type: 'FeatureCollection', features: picked } as any,
+    visible: a.visible !== false,
+    pickable: true,
+    stroked: true,
+    filled: true,
+    pointType: 'circle',
+    getFillColor: [h.color[0], h.color[1], h.color[2], 230],
+    // A highlighted line IS its colour; a point or polygon keeps a dark edge around it.
+    getLineColor: (f: any) => (isLine(f) ? h.color : HIGHLIGHT_EDGE),
+    getLineWidth: (f: any) => (isLine(f) ? baseLine * 2 + 2 : 2),
+    lineWidthUnits: 'pixels',
+    lineCapRounded: true,
+    lineJointRounded: true,
+    getPointRadius: radius,
+    pointRadiusUnits: 'pixels',
+    updateTriggers: { getPointRadius: [a.sizeBy, a.pointSize], getFillColor: [h.color],
+                      getLineColor: [h.color], getLineWidth: [baseLine] },
+  });
+}
+
+/** The agent's labels, placed by the server (at most 50), on a light backing so they read
+ *  over points, polygons and either basemap. A point's label starts just past the circle as
+ *  drawn (a highlighted one is larger); any other label is centred on its place. */
+function labelLayer(a: VectorLayer, radius: number | ((f: any) => number)) {
+  const key = (c: any) => `${Number(c[0]).toFixed(6)},${Number(c[1]).toFixed(6)}`;
+  const test = a.highlight ? highlightTest(a.highlight) : null;
+  const pointR = new Map<string, number>();
+  for (const f of a.data.features) {
+    if (f.geometry?.type !== 'Point') continue;
+    const r = typeof radius === 'function' ? radius(f) : radius;
+    pointR.set(key((f.geometry as Point).coordinates), test?.(f.properties) ? highlightRadius(r) : r);
+  }
+  const at = (d: any) => pointR.get(key(d.position));
+  return new TextLayer({
+    id: `${a.id}--labels`,
+    data: a.labels!.items,
+    visible: a.visible !== false,
+    pickable: false,
+    getPosition: (d: any) => d.position,
+    getText: (d: any) => d.text,
+    getSize: 12,
+    getColor: [20, 20, 20, 255],
+    getTextAnchor: (d: any) => (at(d) === undefined ? 'middle' : 'start'),
+    getAlignmentBaseline: 'center',
+    getPixelOffset: (d: any) => [at(d) === undefined ? 0 : at(d)! + 5, 0],
+    characterSet: 'auto',
+    fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+    background: true,
+    getBackgroundColor: [255, 255, 255, 225],
+    backgroundPadding: [4, 2],
+  });
 }
 
 /** How opaque a vector layer's fill is drawn now (0..1): the agent's or the user's choice, or
@@ -116,7 +199,7 @@ export function hasFill(a: LayerArtifact): boolean {
     && !['route', 'network', 'heatmap'].includes(a.render ?? '');
 }
 
-export function toDeckLayer(a: LayerArtifact) {
+function baseLayers(a: LayerArtifact) {
   // A raster is an image with a footprint, not geometry: deck.gl wants the bounds in
   // [left, bottom, right, top] order, which is the same order the agent sends.
   if (a.kind === 'raster') {
@@ -190,15 +273,37 @@ export function toDeckLayer(a: LayerArtifact) {
     // On a choropleth the FILL carries the number, so the outline must stay out of its way:
     // a 708-cell hex grid drawn with the standard 2px purple border read as an empty mesh —
     // the borders covered more pixels than the shaded interiors. Hairline grey instead.
-    getLineColor: a.outline ? (s.line ?? [90, 60, 160, 255]) : (ramp ? [90, 90, 105, 90] : line),
-    getLineWidth: a.outline ? (s.lineWidth ?? 2.5)
-                            : (ramp ? (s.lineWidth ?? 0.5) : (s.lineWidth ?? 2)),
+    getLineColor: a.lineColor
+      ?? (a.outline ? (s.line ?? [90, 60, 160, 255]) : (ramp ? [90, 90, 105, 90] : line)),
+    getLineWidth: lineWidthOf(a, !!ramp),
     lineWidthUnits: 'pixels',
-    getPointRadius: Math.min(s.pointRadius ?? 6, densityRadius(a.data.features.length)),
-    pointRadiusUnits: s.radiusUnits ?? 'pixels',
+    getPointRadius: pointRadiusOf(a),
+    // A size the agent set is in pixels whatever the source's style says.
+    pointRadiusUnits: a.sizeBy || typeof a.pointSize === 'number' ? 'pixels' : (s.radiusUnits ?? 'pixels'),
     opacity: s.opacity ?? 1,
     // expose source + props for the tooltip
     updateTriggers: { getFillColor: [a.styleBy, a.data, a.render, a.legend, a.color, a.fillOpacity],
-                      getLineColor: [a.color] },
+                      getLineColor: [a.color, a.lineColor], getLineWidth: [a.lineWidth],
+                      getPointRadius: [a.sizeBy, a.pointSize, a.data] },
   });
+}
+
+function lineWidthOf(a: VectorLayer, ramp: boolean): number {
+  if (typeof a.lineWidth === 'number') return a.lineWidth;
+  const s = a.style ?? {};
+  return a.outline ? (s.lineWidth ?? 2.5) : (ramp ? (s.lineWidth ?? 0.5) : (s.lineWidth ?? 2));
+}
+
+export function toDeckLayer(a: LayerArtifact) {
+  const base = baseLayers(a);
+  if (a.kind !== 'geojson' || (!a.highlight && !a.labels?.items.length)) return base;
+  // Highlighted features and labels draw over their own layer, in that order.
+  const extra: any[] = [];
+  if (a.highlight) {
+    const line = a.render === 'route' ? (a.lineWidth ?? 6) : lineWidthOf(a, !!a.styleBy);
+    const hl = highlightLayer(a, a.render === 'heatmap' ? 5 : pointRadiusOf(a), line);
+    if (hl) extra.push(hl);
+  }
+  if (a.labels?.items.length) extra.push(labelLayer(a, a.render === 'heatmap' ? 5 : pointRadiusOf(a)));
+  return [...(Array.isArray(base) ? base : [base]), ...extra];
 }
