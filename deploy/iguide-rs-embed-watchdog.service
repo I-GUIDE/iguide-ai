@@ -1,0 +1,23 @@
+[Unit]
+Description=I-GUIDE rs-embed watchdog — probe an embedding and restart the service when it hangs
+Documentation=file:///opt/iguide-agent/rs-embed-watchdog.sh
+After=rs-embed.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/iguide-rs-embed-watchdog
+ExecStart=/opt/iguide-agent/rs-embed-watchdog.sh
+
+# The probe is capped at PROBE_TIMEOUT (120 s) and the restart at 180 s + 120 s of waiting
+# for the service to answer; this bounds the run as a whole.
+TimeoutStartSec=600
+
+# One at a time, so a run still restarting when the next timer fires cannot restart again.
+ExecCondition=/usr/bin/flock -n /run/iguide-rs-embed-watchdog.lock /bin/true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iguide-rs-embed-watchdog
+
+[Install]
+WantedBy=multi-user.target
