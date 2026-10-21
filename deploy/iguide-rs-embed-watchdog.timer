@@ -1,0 +1,15 @@
+[Unit]
+Description=Probe the rs-embed service every five minutes
+Documentation=file:///opt/iguide-agent/rs-embed-watchdog.sh
+
+[Timer]
+# Every probe is a real embedding (about 14 s of the service's time), so five minutes rather
+# than the agent watchdog's one. With FAILURES_BEFORE_RESTART=2 and a 120 s probe cap, a hung
+# service is restarted within about twelve minutes of hanging, not nine hours.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=iguide-rs-embed-watchdog.service
+
+[Install]
+WantedBy=timers.target

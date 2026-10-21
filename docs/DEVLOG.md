@@ -6029,3 +6029,10 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-10-21 · M8.130 · rs-embed gets an Earth Engine deadline and a watchdog that embeds (architecture stage 90)
+
+- **The fault:** rs-embed hung for nine hours (2026-10-19 15:53 → 10-20 01:16 UTC) while `/api/models` kept answering in 2 ms; every embed waited the agent's 600 s. Cause: Earth Engine calls with no deadline parking the worker pool (53 threads, ten open Google connections).
+- **Change:** the service's startup sets `ee.data.setDeadline` (`EE_DEADLINE_S`, 120) and `setMaxRetries` (`EE_MAX_RETRIES`, 1): a minutes-long call ended in 6.5 s under a 3 s deadline. `deploy/rs-embed-watchdog.sh` probes a REAL embedding every five minutes and restarts the unit after two failures, bundle first; a 4xx or a 200 without an embedding is a bad probe, never a restart.
+- **Deployed:** service restarted 15:34 UTC with the deadline logged; watchdog installed 15:33 UTC, first probe ok. The service-side file is gitignored by rs-embed (VM + `~/webapp-backups/` only).
+- **Tests:** none runnable offline; dry runs on the VM are in the stage entry.
