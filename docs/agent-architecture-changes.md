@@ -92,6 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 91 | [A preview says it is one, and coordinates are checked against degrees](#stage-91) | 2026-10-30 | the CSV preview counts the whole file and flags truncation and swapped lat/lon; a GeoJSON or vector whose bounds cannot be degrees gets a CRS warning with candidate CRSs and their units; code that types a data table and reads no file is a pre-run finding; trap tasks X01-X08 in the harness |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12123,3 +12124,46 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 91 — A preview says it is one, and coordinates are checked against degrees {#stage-91}
+
+**Why.** Trap tests on agent.i-guide.io (2026-10-23, deepseek-v4-flash, 8 small uploads with one
+hidden problem each, failures rerun twice). 6 of 8 passed: -999 sentinels, 25 duplicate rows,
+mixed m/ft depths, a "001" vs 1 join key, a wrong R² stated by the user, and a control. Two
+failed the same way on every run.
+- **T1, 40 stores, lat/lon swapped.** Answer "2 within 2 km" for 4; the second run said "the 19
+  stores in the uploaded stores.csv". `inspect_file_for_analysis` returns the first
+  `DEFAULT_MAX_ROWS` = 20 lines (header plus 19 rows) with no count and no sign of more, and the
+  code that ran began `import math` with the rows typed in. The swap was noticed in run 1 only.
+- **T2, 10 parcels in EPSG:3435 (US ft), GeoJSON with no `crs`.** Answer 271.94 acres for 25.26
+  (10.76x, ft² read as m²), "cross-checked two ways" and "meters is the correct interpretation".
+  GDAL reads a GeoJSON with no CRS as EPSG:4326, so `inspect_vector` reported EPSG:4326 beside
+  bounds of 1,176,000; the area came from raw coordinates, so `sandbox_verify`'s unit checks,
+  which need a CRS on the frame, never ran.
+
+**Change.**
+- **The preview counts the file** (`langchain_file_tools._csv_preview`): `total_data_rows`,
+  `data_rows_shown`, `truncated`, and a note that it is a preview to be read by path, never copied.
+- **Swapped lat/lon** (`coord_sanity.latlon_swap_hint`, read over every row): certain when the
+  "lat" column passes ±90; likely when every "lat" is south of 60°S and every "lon" is a valid
+  latitude north of it. McMurdo, labelled correctly, is not flagged.
+- **Coordinates that cannot be degrees** (`coord_sanity.crs_check`): when the declared CRS is
+  missing or geographic and the bounds fail `degree_like` (the same test as
+  `terrain_tools._degree_like`), `inspect_vector` and the new `.geojson` branch of
+  `inspect_file_for_analysis` add a warning not to assume metres and to ask or state the
+  assumption, plus the projected EPSG CRSs that place the centre inside their own area of use,
+  feet first, with each one's unit, up to 8 zones per unit. Only the common families are searched
+  (US State Plane on NAD83 and NAD83(2011), UTM, a few national grids: 1,184 of 5,291 projected
+  EPSG CRSs), because building a transformer costs ~8 ms and all of them took ~40 s. T2's bounds
+  fit 7 feet zones, Arkansas South to Illinois East (EPSG:3435, centre in downtown Chicago):
+  State Plane zones share false origins, so the list says the numbers alone cannot pick one.
+  4 s cold, cached after.
+- **Typed-in data** (`code_watch`, rule `typed_in_data`, in `PARAMETER_RULES` so it goes back
+  with every result): a literal of 8+ records of 2+ numbers, or 20+ numbers flat, in code that
+  calls no reader. T1's code is flagged; the same code after `pd.read_csv` and a 3-point list are not.
+- **Harness** (`gis_harness/trap_datasets.py`, tasks X01-X08, tag `trap`; `acre` added to the
+  scorer's units). Expected values are computed independently of the agent.
+
+**Verified.** `rag_pipeline/tests/test_trap_fixes.py`, offline. Not yet run: the harness tasks
+against a live model (needs the deployment's model keys), so whether the agent now acts on the
+notes is unmeasured.
