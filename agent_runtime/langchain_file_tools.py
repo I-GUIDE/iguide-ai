@@ -134,14 +134,70 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 def _csv_preview(text: str, max_rows: int) -> Dict[str, Any]:
-    reader = csv.reader(io.StringIO(text))
-    rows: List[List[str]] = []
-    for idx, row in enumerate(reader):
-        if idx >= max(1, int(max_rows or DEFAULT_MAX_ROWS)):
-            break
-        rows.append([str(item) for item in row])
+    # The preview used to be the first max_rows lines and nothing else: header plus 19 data rows
+    # of a 40-row file, with no sign there was more. On 2026-10-23 (trap test T1, twice) the
+    # model answered "19 stores" from it, having typed those rows into its code. The whole file
+    # is counted now, the preview says it is one, and the lat/lon check reads every row.
+    cap = max(1, int(max_rows or DEFAULT_MAX_ROWS))
+    all_rows = [[str(item) for item in row] for row in csv.reader(io.StringIO(text))]
+    rows = all_rows[:cap]
     header = rows[0] if rows else []
-    return {"format": "csv", "header": header, "rows": rows}
+    data_total = max(0, len(all_rows) - 1)
+    data_shown = max(0, len(rows) - 1)
+    out: Dict[str, Any] = {"format": "csv", "header": header, "rows": rows,
+                           "total_data_rows": data_total, "data_rows_shown": data_shown,
+                           "truncated": data_shown < data_total}
+    if out["truncated"]:
+        out["note"] = (f"PREVIEW ONLY: {data_shown} of {data_total} data rows are shown. Read the "
+                       "whole file by its path in code (e.g. pandas.read_csv) and never copy "
+                       "rows from this preview into code; an answer from these rows alone "
+                       "leaves out the rest of the file.")
+    try:
+        from agent_runtime.coord_sanity import latlon_swap_hint
+
+        hint = latlon_swap_hint(header, all_rows[1:])
+        if hint:
+            out.update(hint)
+    except Exception:  # noqa: BLE001 - a hint must never cost the preview
+        pass
+    return out
+
+
+def _geojson_preview(text: str, max_chars: int) -> Dict[str, Any]:
+    """The text (truncated as before), plus the feature count, the coordinate bounds and a CRS
+    warning when those bounds cannot be degrees (see coord_sanity.crs_check)."""
+    out: Dict[str, Any] = {"format": "geojson", "content": _truncate(text, max_chars)}
+    parsed = json.loads(text)
+    feats = parsed.get("features") if isinstance(parsed, dict) else None
+    if isinstance(feats, list):
+        out["feature_count"] = len(feats)
+    xs: List[float] = []
+    ys: List[float] = []
+
+    def walk(c: Any) -> None:
+        if isinstance(c, (list, tuple)):
+            if len(c) >= 2 and all(isinstance(v, (int, float)) for v in c[:2]):
+                xs.append(float(c[0]))
+                ys.append(float(c[1]))
+            else:
+                for item in c:
+                    walk(item)
+
+    for f in feats or []:
+        walk(((f or {}).get("geometry") or {}).get("coordinates"))
+    if xs:
+        bounds = [min(xs), min(ys), max(xs), max(ys)]
+        out["bounds"] = bounds
+        declared = None
+        crs_member = parsed.get("crs") if isinstance(parsed, dict) else None
+        if isinstance(crs_member, dict):
+            declared = ((crs_member.get("properties") or {}).get("name"))
+        from agent_runtime.coord_sanity import crs_check
+
+        warn = crs_check(bounds, declared)
+        if warn:
+            out.update(warn)
+    return out
 
 
 def _json_preview(text: str) -> Dict[str, Any]:
@@ -247,6 +303,8 @@ def inspect_file_for_analysis_tool(
     try:
         if suffix == ".csv":
             payload["analysis_ready_content"] = _csv_preview(text, max_rows=max_rows)
+        elif suffix == ".geojson":
+            payload["analysis_ready_content"] = _geojson_preview(text, max_chars)
         elif suffix == ".json":
             payload["analysis_ready_content"] = _json_preview(text)
         else:
