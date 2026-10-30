@@ -104,7 +104,7 @@ def hints_in_result_after_s() -> float:
 
 
 # Rules about correctness rather than speed: shown whatever the run's timing.
-PARAMETER_RULES = frozenset({"stated_parameter"})
+PARAMETER_RULES = frozenset({"stated_parameter", "typed_in_data"})
 
 
 def split_findings(findings: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
@@ -237,12 +237,54 @@ def _small_literal_loop(node: ast.AST) -> bool:
     return False
 
 
+def _number_node(node: ast.AST) -> bool:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+        and not isinstance(node.value, bool)
+
+
+def _record_numbers(node: ast.AST) -> int:
+    """How many numbers a tuple/list/dict literal holds directly (one row of a typed table)."""
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return sum(_number_node(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return sum(_number_node(v) for v in node.values if v is not None)
+    return 0
+
+
+# A literal this size is a data table, not a parameter list: 8 rows of 2+ numbers (a list of
+# coordinate pairs), or a flat run of 20 numbers.
+TYPED_TABLE_ROWS = 8
+TYPED_FLAT_NUMBERS = 20
+
+
 class _Scan(ast.NodeVisitor):
     def __init__(self) -> None:
         self.loops: List[ast.AST] = []
         self.found: List[Finding] = []
         self.prepared = False
         self.kdtree = False
+        self.reads_file = False
+        self.typed_tables: List[Tuple[ast.AST, int]] = []
+
+    def _note_literal(self, node: ast.AST) -> None:
+        elts = getattr(node, "elts", None)
+        if elts is None:
+            return
+        rows = sum(1 for e in elts if _record_numbers(e) >= 2)
+        if rows >= TYPED_TABLE_ROWS:
+            self.typed_tables.append((node, rows))
+        elif sum(_number_node(e) for e in elts) >= TYPED_FLAT_NUMBERS:
+            self.typed_tables.append((node, len(elts)))
+
+    def visit_List(self, node: ast.List) -> None:
+        self._note_literal(node)
+        self.generic_visit(node)
+
+    def visit_Tuple(self, node: ast.Tuple) -> None:
+        self._note_literal(node)
+        self.generic_visit(node)
 
     def _add(self, rule: str, node: ast.AST, message: str, fix: str) -> None:
         line = getattr(node, "lineno", 0) or 0
@@ -271,6 +313,8 @@ class _Scan(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _call_name(node)
+        if name in _READERS or (name or "").startswith("read_") or name in {"loadtxt", "genfromtxt", "load"}:
+            self.reads_file = True
         if name in {"prepare", "prep"}:
             self.prepared = True
         if name in {"cKDTree", "KDTree", "BallTree", "STRtree", "sjoin", "sjoin_nearest"}:
@@ -491,6 +535,17 @@ def precheck(code: str, *, brief: str = "",
             found = [f for f in found if f.rule != "unprepared_predicate"]
         if scan.kdtree:
             found = [f for f in found if f.rule not in {"distance_in_loop"}]
+        # Data typed into the code by a program that reads no file. Trap test T1 (2026-10-23,
+        # both runs): the code began `import math` and listed the 19 stores of a 20-line preview
+        # by hand; the upload had 40, and the answer said "2 of 19" for 4 of 40.
+        if scan.typed_tables and not scan.reads_file:
+            node, rows = max(scan.typed_tables, key=lambda t: t[1])
+            found.append(Finding(
+                "typed_in_data", getattr(node, "lineno", 0) or 0,
+                f"the code holds a table of {rows} records typed in by hand and reads no file; "
+                "copied from a preview, it is only the rows the preview showed",
+                "read the uploaded file by its path (pandas.read_csv / geopandas.read_file) and "
+                "compute from all of it; if the values really are the user's own, say so"))
         found += _parameter_findings(code or "", brief, earlier)
         return [f.as_dict() for f in sorted(found, key=lambda f: (f.line or 10 ** 9, f.rule))]
     except Exception:  # noqa: BLE001 - a rule check must never cost a run
