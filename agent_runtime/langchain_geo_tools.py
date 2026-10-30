@@ -628,6 +628,17 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 except Exception as derive_exc:
                     payload["geometry_note"] = (
                         f"no geometry in the file and none could be derived: {derive_exc}")
+            # GDAL reads a GeoJSON with no `crs` member as EPSG:4326, so "crs" above can name a
+            # geographic CRS beside bounds of a million: trap test T2 (2026-10-23) was a State
+            # Plane file in US feet, reported as EPSG:4326, measured as metres, 10.76x too large.
+            try:
+                from agent_runtime.coord_sanity import crs_check
+
+                warn = crs_check(payload.get("bounds"), payload.get("crs"))
+                if warn:
+                    payload.update(warn)
+            except Exception:  # noqa: BLE001 - a warning must never cost the inspection
+                pass
             return json.dumps(payload, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
