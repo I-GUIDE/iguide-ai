@@ -5875,6 +5875,67 @@ def _peer_result_for_writer(label: str, result: Any, text_key: str) -> str:
     return f"{label}:\n" + ("\n\n".join(sections) if sections else "(empty)")
 
 
+def _stream_answer_enabled() -> bool:
+    return (os.getenv("AGENT_STREAM_ANSWER", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+# How often the growing draft goes to the client. Every token would be hundreds of events a turn;
+# a quarter second still reads as continuous typing.
+_DRAFT_EVERY_S = 0.25
+
+
+def _stream_writer(active: Any, prompt: str) -> Optional[str]:
+    """Write the answer as a stream and send the draft to the client as it grows (Stage 93).
+
+    The turn still returns the whole text, and every check after the writer runs on it exactly
+    as before; the client shows the draft until the final answer replaces it. `stream_usage`
+    makes an OpenAI-compatible provider report token counts at the end of a stream, which the
+    usage handler (and with it Lumen's coin budget) needs. Returns None when the stream fails
+    before any text, so the caller makes the ordinary call; a stream that fails part-way raises,
+    as the ordinary call would have."""
+    import time as _time
+
+    from agent_runtime.streaming_trace import emit_answer_draft
+
+    pieces: List[str] = []
+    last = 0.0
+    try:
+        for chunk in active.stream(prompt, stream_usage=True):
+            text = _chunk_text(chunk)
+            if not text:
+                continue
+            pieces.append(text)
+            now = _time.monotonic()
+            if now - last >= _DRAFT_EVERY_S:
+                emit_answer_draft("".join(pieces))
+                last = now
+    except (TurnCancelled, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        if not pieces:
+            logging.getLogger(__name__).info("answer stream failed before any text; invoking",
+                                             exc_info=True)
+            return None
+        raise
+    full = "".join(pieces).strip()
+    if not full:
+        return None
+    emit_answer_draft(full)
+    return full
+
+
+def _chunk_text(chunk: Any) -> str:
+    """A stream chunk's text, spacing kept: `_content_to_text` strips, which is right for a
+    whole reply and glues a stream's words together ("The" + " area" -> "Thearea")."""
+    content = getattr(chunk, "content", chunk)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(p.get("text") or "") if isinstance(p, dict) else str(getattr(p, "text", "") or "")
+                       for p in content)
+    return ""
+
+
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
     """Compose the final grounded answer in the original AnalysisAgent format."""
 
@@ -5922,6 +5983,10 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
             if _note:
                 parts.append(_note)
         prompt = "\n\n".join(parts)
+        if _stream_answer_enabled() and hasattr(active, "stream") and hasattr(active, "stream_usage"):
+            streamed = _stream_writer(active, prompt)
+            if streamed is not None:
+                return streamed
         if hasattr(active, "invoke"):
             return _content_to_text(active.invoke(prompt))
         if callable(active):
