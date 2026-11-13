@@ -1670,7 +1670,7 @@ def agent_examples():
       400:
         description: The definition is invalid; `error` names the field.
       403:
-        description: Not signed in (`reason: examples_need_sign_in` when the deployment identifies nobody).
+        description: "Not signed in (`reason: examples_need_sign_in` when the deployment identifies nobody)."
       413:
         description: A limit was reached (examples per account, files, total size).
     """
