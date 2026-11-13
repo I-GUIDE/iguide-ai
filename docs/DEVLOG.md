@@ -6029,3 +6029,21 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-11-13 · housekeeping · README rewritten; unused files removed
+
+**Change** README.md rewritten to the code as it is: the request path (api/server.py →
+agent_chat_service → graph_runtime → orchestrator_graph → supervisor/graph.py), a folder map, run
+and test commands taken from AGENTS.md, and the current endpoints. Removed, each with no reference
+in code, tests, Dockerfiles, compose files or CI: `archive/` (smolagents adapter and notebook,
+retired 2026-06), `smart-search/` (one empty file), `outputs/crime_summary.txt` (outputs/ is
+gitignored), `cache/4683c7…json`, `data/Crimes_-_2026_20260406.csv` (14 MB; only a Swagger example
+named it, now `./data/your_file.csv`), `geopathfinder_top10_tasks.csv`. `ROUTER_LLM_README.md`
+moved to `docs/router-llm.md` (router_llm is still used by `rag_pipeline/search/core.py`).
+**Why** The old README described an OrchestratorAgent/sub-agents-as-tools design, listed files
+that no longer exist (`graph_nodes.py`) and a CLI option that was removed (`--tool-strategy
+full_pipeline`). New readers were sent to the wrong code.
+**Kept on purpose** `opengeodata_prototype/` (`rag_pipeline/search/opengeodata.py` and
+`opengeodata_new.py` read its `.env`), `gis_harness/baselines/` (records kept by design,
+gis_harness/README.md).
+**Measured** tracked files 1,057 → 1,047; 14.2 MB less in the working tree (history keeps it).
