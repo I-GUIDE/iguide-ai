@@ -6029,3 +6029,15 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-11-13 · speed · The answer writer streams a draft (architecture stage 93)
+
+**Change** `supervisor/graph.py` streams the answer writer (`_stream_writer`, `_chunk_text`);
+`streaming_trace.emit_answer_draft`; `api/server.py` forwards `answer_draft`; map UI shows the
+draft (`agentClient.ts`, `App.tsx`, `ChatPanel.tsx`, `styles.css`); tests `test_fast_replies.py`
+(5), `answerDraft.check.ts`. The capability-answer cache from PR #184 is left out (Stage 93 says why).
+**Why** every turn showed nothing until it ended (18–45 s on the questions timed), though the
+writer's text took 2–5 s.
+**Measured** Before, live, 2026-11-13: above. After: not yet measured live (needs a deployment).
+**Model** Lumen deepseek-v4-flash.
+

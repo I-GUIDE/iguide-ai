@@ -12123,3 +12123,57 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 93 — Replies that start sooner: the answer writer streams a draft {#stage-93}
+
+**Why.** Timed live on agent.i-guide.io on 2026-11-13 (Lumen deepseek-v4-flash, every SSE event
+timestamped in the browser): nothing showed until the whole turn ended. The writer was a
+non-streamed `llm.invoke`, and the UI received the answer in one `answer` event at the end: 18–45 s
+of "thinking…" on the three questions measured, though the writer's own text took 2–5 s to produce.
+
+**Change.**
+- **The writer streams** (`supervisor/graph.py`, `_stream_writer` in `default_synthesize_fn`).
+  - Only for a model that exposes `stream` and `stream_usage`: an OpenAI-compatible client,
+    which reports token counts at the end of a stream only when asked. Without them the usage
+    handler, and Lumen's coin budget with it, would not see the writer's call.
+  - The growing text goes to the client every 0.25 s (`streaming_trace.emit_answer_draft`,
+    event `answer_draft`). It goes to the sink only, not the recorder: a stored trace keeps what
+    the turn did, and a draft is the same answer forty times over.
+  - The turn still returns the whole text, stripped as before, and every check after the writer
+    (facts, untraceable figures, sources, verdict) runs on it unchanged. A stream that fails
+    before any text falls back to the ordinary call; one that fails part-way raises, as the
+    ordinary call would. `AGENT_STREAM_ANSWER=0` turns the stream off.
+  - Chunks are read by `_chunk_text`, not `_content_to_text`, which strips and would glue the
+    words of a stream together.
+- **The event is additive.** `api/server.py` forwards `answer_draft` as its own SSE event. A
+  chat-only client that ignores unknown events (the platform's server-to-server path) still gets
+  one `answer` event at the end, as before.
+- **The client** (`agentClient.ts` `onAnswerDraft`, `App.tsx`, `ChatPanel.tsx`) renders the draft
+  in the answer card under "Writing… the answer is checked before it is final." The final
+  `answer` replaces it. The checks can change the text: figures no result holds are taken out
+  (Stage 77) and the sources line and verdict are added, so the draft is labelled as one.
+
+**Left out: the capability-answer cache.** The `fast-replies` branch (PR #184, Shanmukh
+Upadhyayula) paired this with a 6-hour per-process cache of capability answers
+(`describe_capabilities`), because "What can you do?" took 6.7 s and 7.3 s live. It is not in this
+stage, on the maintainer's call of 2026-11-13: the answer is meant to be read live, and the cache
+keyed on a clock rather than on what it reads. A model-written answer that reported rs-embed
+unreachable would have been served for six hours after the service recovered, and a cached answer
+naming models could disagree with the live-probed picker beside it. If it comes back, key it on a
+fingerprint of the listings it calls (rs-embed's model list, the model roster) and never cache an
+answer that reports a tool error.
+
+**History.** The same two streaming commits were merged to `prototype` in #184 and removed again
+when the branch was reset to 26f5b671 on 2026-11-13 (together with #178 and its revert #185).
+
+**Verified.** `rag_pipeline/tests/test_fast_replies.py` (5): the stream keeps its spacing, asks for
+usage and sends drafts; a stream failing before text falls back, one failing part-way raises; off,
+or without `stream_usage`, the writer is called once; a draft is sent and not recorded.
+`map-ui-prototype`: `npm run check:draft` (new), `check:replay`, `check:hooks` and `npm run build`.
+**Not yet measured live**: the time to the first visible words needs a deployment. One open
+question for that deployment: Stage 85's 240 s request timeout bounds a single call; a stream is
+bounded per read by the HTTP client, so a stall between chunks still times out, but a slow and
+continuous stream can run past 240 s in total.
+
+**Not deployed.**
+
