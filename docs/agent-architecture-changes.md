@@ -92,6 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 93 | [Replies that start sooner: a kept capability answer and a streamed draft](#stage-93) | 2026-11-13 | capability answers kept per question, configuration and model for 6 h (`AGENT_CAPABILITY_CACHE_S`); the answer writer streams and the client shows the draft (`answer_draft`, not recorded) until the checked answer replaces it (`AGENT_STREAM_ANSWER=0` turns it off) |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12182,3 +12183,48 @@ At the incident's slow-hour 27 tok/s, 76 output tokens is about 3 s against abou
 - Full offline suite: `rag_pipeline/tests/`: 4,685 passed, 19 skipped, 1 failed. The failure is `test_the_installed_networkx_matches_the_pin`, an environment check: the Mac has networkx 3.4.2 against the pinned 3.6.1, and this change does not touch it. `tests/`: 170 passed, 3 skipped.
 
 **Not deployed.**
+
+## Stage 93 — Replies that start sooner: a kept capability answer and a streamed draft {#stage-93}
+
+**Why.** Timed live on agent.i-guide.io on 2026-11-13 (Lumen deepseek-v4-flash, every SSE event
+timestamped in the browser):
+- **"What can you do?" took 6.7 s and 7.3 s.** Three model calls in a row: pick the listing
+  tools, then two to write. The answer depends only on the question, the request's tool
+  configuration and the model.
+- **Nothing showed until the whole turn ended.** The writer was a non-streamed `llm.invoke`, and
+  the UI received the answer in one `answer` event at the end: 18–45 s of "thinking…" on the
+  three questions measured, though the writer's own text took 2–5 s to produce.
+
+**Change.**
+- **Capability answers are kept** (`capabilities.describe_capabilities`, a cache around the old
+  body, now `_describe_capabilities`). The key is the normalised question, the model name, the
+  chat-only mode and the request's tool configuration. Lifetime 6 h (`AGENT_CAPABILITY_CACHE_S`,
+  `0` off), because the listings it calls (rs-embed models, heads) can change while the server
+  runs. Only a model-written answer is kept: the mechanical fallback written during an outage
+  is not. A model with no name (a test double) is never cached. The first ask in each worker
+  process still pays the full time.
+- **The writer streams** (`supervisor/graph.py`, `_stream_writer` in `default_synthesize_fn`).
+  - Only for a model that exposes `stream` and `stream_usage`: an OpenAI-compatible client,
+    which reports token counts at the end of a stream only when asked. Without them the usage
+    handler, and Lumen's coin budget with it, would not see the writer's call.
+  - The growing text goes to the client every 0.25 s (`streaming_trace.emit_answer_draft`,
+    event `answer_draft`). It goes to the sink only, not the recorder: a stored trace keeps what
+    the turn did, and a draft is the same answer forty times over.
+  - The turn still returns the whole text, stripped as before, and every check after the writer
+    (facts, untraceable figures, sources, verdict) runs on it unchanged. A stream that fails
+    before any text falls back to the ordinary call; one that fails part-way raises, as the
+    ordinary call would.
+  - Chunks are read by `_chunk_text`, not `_content_to_text`, which strips and would glue the
+    words of a stream together.
+- **The client** (`agentClient.ts` `onAnswerDraft`, `App.tsx`, `ChatPanel.tsx`) renders the draft
+  in the answer card under "Writing… the answer is checked before it is final." The final
+  `answer` replaces it. The checks can change the text: figures no result holds are taken out
+  (Stage 77) and the sources line and verdict are added, so the draft is labelled as one.
+
+**Verified.** `rag_pipeline/tests/test_fast_replies.py` (9): a repeated capability question
+makes one model call; another configuration or question asks again; the fallback is not kept;
+the cache switches off; the stream keeps its spacing, asks for usage and sends drafts; a stream
+failing before text falls back, one failing part-way raises; off, or without `stream_usage`,
+the writer is called once; a draft is sent and not recorded. `map-ui-prototype`:
+`npm run check:draft` (new), `check:replay`, `check:hooks` and `npm run build` pass. **Not yet
+measured live**: the time to the first visible words needs a deployment.
