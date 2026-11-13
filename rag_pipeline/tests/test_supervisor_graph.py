@@ -2205,3 +2205,63 @@ def test_unsupported_claims_excludes_a_gate_unknown_and_explains_a_gate_fail():
     assert g._unsupported_claims(audit) == [
         "computed value from `bad` — invariant gate (projected_crs): degrees",
         "six counties border Champaign"]
+
+
+# --- a second search step reranks only what is new (stage 89) -------------------------------
+# On 2026-10-19 both slow turns searched twice and reranked the whole merged list both times,
+# though the completeness sweep repeats the same query and returns the same documents.
+
+_FLOOD = [{"doc_id": f"f{i}", "source": "keyword", "score": 9 - i, "title": f"Flood map {i}",
+           "contents": "flood inundation map"} for i in range(6)]
+
+
+def _counting_rerank_llm(calls):
+    def llm(prompt):
+        low = prompt.lower()
+        if "relevance judge" in low:
+            import re
+
+            calls.append(re.findall(r"^\[\d+\] (.+)$", prompt, flags=re.M))
+            # best first = the reverse of what was shown
+            return json.dumps({"ranking": list(range(len(calls[-1]), 0, -1))})
+        return _fake_llm(prompt)
+    return llm
+
+
+def _two_searches(first, second, calls, top_k=2):
+    box = {"i": 0}
+
+    def search_fn(q, s):
+        box["i"] += 1
+        return list(first if box["i"] == 1 else second)
+
+    return run_supervisor(
+        "flood maps", llm=_counting_rerank_llm(calls),
+        decide_fn=_scripted(["search", "search", "done"]),
+        search_fn=search_fn, synthesize_fn=lambda *a: "ok", do_audit=False, top_k=top_k,
+    )
+
+
+def test_second_search_with_nothing_new_does_not_rerank():
+    calls = []
+    state = _two_searches(_FLOOD, list(reversed(_FLOOD)), calls)
+    assert len(calls) == 1                                    # one rerank, not two
+    assert [d["doc_id"] for d in state["evidence"]] == ["f5", "f4"]
+    assert state["search_attempts"] == 2
+
+
+def test_second_search_reranks_only_new_documents():
+    calls = []
+    new = [{"doc_id": f"n{i}", "source": "keyword", "score": 5 - i, "title": f"New flood map {i}",
+            "contents": "flood inundation map"} for i in range(3)]
+    state = _two_searches(_FLOOD, _FLOOD + new, calls)
+    assert len(calls) == 2
+    assert calls[1] == ["New flood map 0", "New flood map 1", "New flood map 2"]
+    # The best two of the NEW documents join the two the first step kept.
+    assert [d["doc_id"] for d in state["evidence"]] == ["f5", "f4", "n2", "n1"]
+
+
+def test_rerank_memory_is_not_shipped_with_the_answer():
+    calls = []
+    state = _two_searches(_FLOOD, _FLOOD, calls)
+    assert state.get("rerank_seen") == {}
