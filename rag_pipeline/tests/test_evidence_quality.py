@@ -203,6 +203,176 @@ def test_rrf_tolerates_junk_entries():
     assert len(rrf_order(docs)) == 3          # never raises, never drops
 
 
+# --- a short rerank (stage 89) ------------------------------------------------------
+# On 2026-10-19 one search step handed the rerank about 190 documents and asked for
+# {doc_id, score, reason} on each: about 25k input tokens and 6,500-10,000 output tokens, about
+# 6 minutes at Lumen's slow-hour speed, run twice in one turn. The model now judges at most
+# 3 x top_k candidates, chosen by RRF, and answers with their numbers only.
+
+def _big_list(n=190):
+    """The shape the search step merges: several sources, each with its own score scale, and
+    KB-length excerpts with 36-character doc_ids."""
+    sources = [("keyword", 9.0), ("semantic", 0.9), ("opengeodata", 1.0), ("web", 0.98)]
+    out = []
+    for i in range(n):
+        source, top = sources[i % len(sources)]
+        out.append({
+            "doc_id": f"{i:08d}-0000-4000-8000-{i:012d}",
+            "source": source,
+            "score": top - (i // len(sources)) * top / n,
+            "title": f"Geospatial emergency management study {i}: flood, wildfire and hurricane response",
+            "contents": ("Remote sensing, GIS and data-intensive methods for disaster response. " * 12)[:800],
+        })
+    return out
+
+
+def _candidates(prompt):
+    """The candidate numbers a rerank prompt shows, in order."""
+    import re
+
+    return [int(m) for m in re.findall(r"^\[(\d+)\] ", prompt, flags=re.M)]
+
+
+def test_rerank_reads_candidate_numbers():
+    out = rerank_documents("texas floods", DOCS, llm=lambda p: json.dumps({"ranking": [2, 3, 1]}))
+    assert [d["doc_id"] for d in out] == ["b", "c", "a"]
+
+
+def test_rerank_reads_a_bare_array_and_number_strings():
+    assert [d["doc_id"] for d in rerank_documents(
+        "q", DOCS, llm=lambda p: "Here you go: [3, 1]")] == ["c", "a", "b"]
+    assert [d["doc_id"] for d in rerank_documents(
+        "q", DOCS, llm=lambda p: '{"ranking": ["[2]", "#3", "1"]}')] == ["b", "c", "a"]
+
+
+def test_rerank_drops_out_of_range_and_repeated_numbers():
+    out = rerank_documents("q", DOCS, llm=lambda p: json.dumps({"ranking": [9, 2, 2, 0, -1, 1.5, 3]}))
+    assert [d["doc_id"] for d in out] == ["b", "c", "a"]      # 2 then 3; 'a' follows unranked
+
+
+def test_rerank_still_reads_the_old_doc_id_format():
+    reply = json.dumps({"ranking": [{"doc_id": "c", "score": 0.9, "reason": "x"}, {"doc_id": "a"}]})
+    assert [d["doc_id"] for d in rerank_documents("q", DOCS, llm=lambda p: reply)] == ["c", "a", "b"]
+
+
+def test_rerank_prompt_asks_for_numbers_only():
+    seen = {}
+
+    def llm(prompt):
+        seen["p"] = prompt
+        return json.dumps({"ranking": [1]})
+
+    rerank_documents("texas floods", DOCS, llm=llm)
+    assert _candidates(seen["p"]) == [1, 2, 3]
+    assert "reason" not in seen["p"].split("User query:")[0].replace("No scores, no reasons", "")
+    assert "doc_id" not in seen["p"]                 # ids are never copied back
+
+
+def test_garbled_reply_falls_back_to_rrf(caplog):
+    import logging
+
+    for reply in ("I think the third one is best.", '{"ranking": "3, 1"}', '{"ranking": [42, "x"]}',
+                  '{"ranking": [', ""):
+        with caplog.at_level(logging.WARNING, logger="agent_runtime.evidence_quality"):
+            out = [d["doc_id"] for d in rerank_documents("dams", MIXED, top_k=4, llm=lambda p: reply)]
+        assert out == ["nid", "lock", "fm1", "major"], reply     # the RRF order, truncated
+    assert "no usable ranking" in caplog.text
+
+
+def test_timeout_falls_back_to_rrf(caplog):
+    import logging
+
+    from agent_runtime.llm_timeout import LLMCallTimeout
+
+    def slow(_prompt):
+        raise LLMCallTimeout("Model call timed out after 240 s with no answer from deepseek-v4-flash")
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.evidence_quality"):
+        out = [d["doc_id"] for d in rerank_documents("dams", MIXED, top_k=4, llm=slow)]
+    assert out == ["nid", "lock", "fm1", "major"]
+    assert "LLMCallTimeout" in caplog.text and "240 s" in caplog.text
+
+
+def test_rerank_judges_at_most_three_times_top_k(monkeypatch):
+    monkeypatch.delenv("AGENT_RERANK_MAX_CANDIDATES", raising=False)
+    shown = {}
+
+    def llm(prompt):
+        shown["n"] = _candidates(prompt)
+        return json.dumps({"ranking": [1]})
+
+    docs = _big_list(190)
+    out = rerank_documents("emergency management", docs, top_k=8, llm=llm)
+    assert shown["n"] == list(range(1, 25))          # 24 of 190
+    assert len(out) == 8
+    rerank_documents("emergency management", docs, llm=llm)
+    assert len(shown["n"]) == eq.DEFAULT_RERANK_CANDIDATES       # no top_k: 24 as well
+
+
+def test_candidate_cap_is_configurable(monkeypatch):
+    shown = {}
+
+    def llm(prompt):
+        shown["n"] = len(_candidates(prompt))
+        return json.dumps({"ranking": [1]})
+
+    docs = _big_list(60)
+    monkeypatch.setenv("AGENT_RERANK_MAX_CANDIDATES", "10")
+    rerank_documents("q", docs, top_k=8, llm=llm)
+    assert shown["n"] == 10
+    monkeypatch.setenv("AGENT_RERANK_MAX_CANDIDATES", "0")       # 0 = judge them all, as before
+    rerank_documents("q", docs, top_k=8, llm=llm)
+    assert shown["n"] == 60
+    monkeypatch.setenv("AGENT_RERANK_MAX_CANDIDATES", "junk")    # unreadable = the default
+    rerank_documents("q", docs, top_k=8, llm=llm)
+    assert shown["n"] == 24
+    monkeypatch.delenv("AGENT_RERANK_MAX_CANDIDATES")
+    rerank_documents("q", docs, top_k=8, max_candidates=5, llm=llm)
+    assert shown["n"] == 5
+
+
+def test_documents_beyond_the_cap_follow_in_rrf_order(monkeypatch):
+    """Recall is unchanged: every document is still returned, the unjudged ones after the
+    judged ones, in RRF order."""
+    monkeypatch.delenv("AGENT_RERANK_MAX_CANDIDATES", raising=False)
+    docs = _big_list(190)
+    fused = [d["doc_id"] for d in eq.rrf_order(docs)]
+    out = [d["doc_id"] for d in rerank_documents(
+        "q", docs, llm=lambda p: json.dumps({"ranking": [24, 1]}), max_candidates=24)]
+    assert len(out) == 190 and set(out) == set(fused)
+    assert out[:2] == [fused[23], fused[0]]          # the model's picks
+    assert out[2:24] == fused[1:23]                  # judged but unranked: RRF order
+    assert out[24:] == fused[24:]                    # never judged: RRF order, after all of them
+
+
+def test_the_model_sees_the_rrf_head_not_the_merge_order():
+    """The cut is made in RRF order, so a source whose hits sit at the end of the merged list
+    (the catalog, every time, before RRF) still reaches the model."""
+    shown = {}
+
+    def llm(prompt):
+        shown["p"] = prompt
+        return json.dumps({"ranking": [1]})
+
+    rerank_documents("dams", MIXED, llm=llm, max_candidates=4)
+    titles = [line.split("] ", 1)[1] for line in shown["p"].splitlines() if line[:1] == "["]
+    assert titles == ["National Inventory of Dams", "Lock and dam conditions",
+                      "Flood Risk Map: Madison", "Major Dams in the US"]
+
+
+def test_prompt_for_190_documents_is_bounded():
+    """The measured case: 190 candidates, top_k 8. The old prompt carried every one of them."""
+    seen = {}
+
+    def llm(prompt):
+        seen["p"] = prompt
+        return json.dumps({"ranking": list(range(1, 25))})
+
+    rerank_documents("What's the state of the art of geospatial data-intensive emergency "
+                     "management research?", _big_list(190), top_k=8, llm=llm)
+    assert len(seen["p"]) < 13_000                   # 104,250 characters before stage 89
+
+
 # --- the audit must DISCRIMINATE -------------------------------------------------
 # Reported: a correct, fully-grounded answer was flagged "multiple high-severity hallucinations".
 # Measuring it found something worse than a false positive — the same answer with a fabricated
