@@ -6036,3 +6036,14 @@ rather than from the previous one.
 - **Change:** RRF pre-order, then the model judges only the first 3 × top_k (`AGENT_RERANK_MAX_CANDIDATES`; 24 by default). The rest follow in RRF order. The reply is candidate numbers only, and the RRF fallback covers garbled replies and `LLMCallTimeout`. A second search step in a turn reranks only documents no earlier step gave the rerank, and makes no model call when there are none.
 - **Measured:** on 190 docs the prompt goes from 21,400 to 2,219 tokens and the expected output from 8,554 to 75. Live on Lumen deepseek-v4-flash (172 real docs): 1,951 prompt / 76 output tokens, 1.6–1.8 s, 3 of 3 parsed. The old prompt at the same hour: 17,991 / 7,489 tokens, 97.0 s.
 - **Tests:** 14 in `test_evidence_quality.py`, 3 in `test_supervisor_graph.py`.
+
+## 2026-11-13 · speed · Replies that start sooner (architecture stage 93)
+
+**Change** `capabilities.py` caches capability answers (6 h); `supervisor/graph.py` streams the
+answer writer (`_stream_writer`, `_chunk_text`); `streaming_trace.emit_answer_draft`;
+`api/server.py` forwards `answer_draft`; map UI shows the draft (`agentClient.ts`, `App.tsx`,
+`ChatPanel.tsx`, `styles.css`); tests `test_fast_replies.py` (9), `answerDraft.check.ts`.
+**Why** "What can you do?" took 6.7–7.3 s for a fixed answer; every turn showed nothing until it
+ended (18–45 s on the questions timed), though the writer's text took 2–5 s.
+**Measured** Before, live, 2026-11-13: above. After: not yet measured live (needs a deployment).
+**Model** Lumen deepseek-v4-flash.
