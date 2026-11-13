@@ -350,6 +350,21 @@ def emit_trace_event(
     _emit_with_state(_TRACE_STATE.get(), event, data, agent_role=agent_role, node=node)
 
 
+def emit_answer_draft(text: str) -> None:
+    """The answer as written so far, to the client only (Stage 93).
+
+    Not recorded: the trace store keeps what the turn did, and a draft is the same answer
+    forty times over, before the checks that may change it. Sent whatever the detail tier,
+    because it is the answer the user is waiting for, not developer detail."""
+    state = _TRACE_STATE.get()
+    if state is None or not text:
+        return
+    try:
+        state.sink({"event": "answer_draft", "data": {"text": text}})
+    except Exception:
+        logger.debug("Failed to emit answer draft", exc_info=True)
+
+
 class StreamingTraceCallbackHandler(BaseCallbackHandler):
     """LangChain callback handler that forwards live LLM/tool events to SSE."""
 

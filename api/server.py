@@ -3639,6 +3639,12 @@ def agent_chat_stream():
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
 
+                    if event_name == "answer_draft":
+                        # The answer as the writer produces it (streaming_trace.emit_answer_draft).
+                        # The final `answer` event replaces it once the checks have run.
+                        yield _sse_event("answer_draft", payload)
+                        continue
+
                     if event_name in {"turn", "code_progress", "code_review", "cancelled"}:
                         # turn: the id Stop cancels (POST /agent/chat/cancel). code_progress: a
                         # running sandbox's heartbeat. code_review: the concurrent reviewer's

@@ -278,6 +278,8 @@ export interface StreamHandlers {
   onFile?: (files: FileRecord[]) => void;              // artifacts as they appear (deduped)
   onMapLayer?: (layer: MapLayerEvent) => void;         // untruncated geometry to plot live
   onAnswerChunk?: (text: string) => void;              // answer text when it arrives
+  /** The answer as the writer produces it, before the checks; the final answer replaces it. */
+  onAnswerDraft?: (text: string) => void;
   onIds?: (ids: { threadId?: string; memoryId?: string }) => void;
   /** The id Stop cancels on the server (cancelTurn). First event of every stream. */
   onTurn?: (turnId: string) => void;
@@ -636,6 +638,12 @@ export async function streamChat(
       // the stream keep it.
       case 'llm_message':
         break;
+      // The answer as it is being written (Stage 93). A draft: the server's checks run after
+      // it, and the `answer` event below carries what they leave.
+      case 'answer_draft': {
+        if (typeof p.text === 'string' && p.text) h.onAnswerDraft?.(p.text);
+        break;
+      }
       case 'answer': {
         const t = p.final_answer || p.answer || p.detail?.final_answer || p.detail?.answer;
         if (t) { state.answer = t; h.onAnswerChunk?.(t); }
