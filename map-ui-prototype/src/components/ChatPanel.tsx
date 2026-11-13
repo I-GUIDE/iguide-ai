@@ -19,6 +19,8 @@ export interface ChatMessage {
   layers?: { id: string; label: string; source: string }[];
   response?: any;
   streaming?: boolean;
+  /** The answer shown is a draft still being written and checked (Stage 93). */
+  draft?: boolean;
   /** Layers the agent sent this turn that did not draw, one sentence each (layerLoad.ts). On
    *  the card because the answer may say they are on the map, and the trace is folded. */
   mapWarnings?: string[];
@@ -450,6 +452,7 @@ function AgentTurn({ m, resolveUrl, onStop }: { m: ChatMessage; resolveUrl: (u: 
         <div className="answer-card">
           {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
           {m.streaming && !m.html && <span className="cursor">▋</span>}
+          {m.streaming && m.draft && <p className="draft-note" role="status">Writing… the answer is checked before it is final.</p>}
           {m.mapWarnings?.length ? (
             <div className="map-warn" role="status">
               {m.mapWarnings.map((w, i) => <p key={i}>⚠ {w.replace(/^map: /, '')}</p>)}
