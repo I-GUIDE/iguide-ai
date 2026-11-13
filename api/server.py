@@ -2541,14 +2541,14 @@ def agent_chat():
                 type: string
               nullable: true
               description: Local filesystem paths to expose to the agent through file tools. Prefer `fileIds` for files uploaded through `/agent/files/upload`.
-              example: ["./data/Crimes_-_2026_20260406.csv"]
+              example: ["./data/your_file.csv"]
             file_paths:
               type: array
               items:
                 type: string
               nullable: true
               description: Snake_case alias for `filePaths`.
-              example: ["./data/Crimes_-_2026_20260406.csv"]
+              example: ["./data/your_file.csv"]
             fileIds:
               type: array
               items:
@@ -3280,14 +3280,14 @@ def agent_chat_stream():
                 type: string
               nullable: true
               description: Local filesystem paths to expose to the agent through file tools. Prefer `fileIds` for files uploaded through `/agent/files/upload`.
-              example: ["./data/Crimes_-_2026_20260406.csv"]
+              example: ["./data/your_file.csv"]
             file_paths:
               type: array
               items:
                 type: string
               nullable: true
               description: Snake_case alias for `filePaths`.
-              example: ["./data/Crimes_-_2026_20260406.csv"]
+              example: ["./data/your_file.csv"]
             fileIds:
               type: array
               items:
