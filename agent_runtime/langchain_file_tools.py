@@ -137,12 +137,28 @@ def _csv_preview(text: str, max_rows: int) -> Dict[str, Any]:
     # The preview used to be the first max_rows lines and nothing else: header plus 19 data rows
     # of a 40-row file, with no sign there was more. On 2026-10-23 (trap test T1, twice) the
     # model answered "19 stores" from it, having typed those rows into its code. The whole file
-    # is counted now, the preview says it is one, and the lat/lon check reads every row.
+    # is counted now, the preview says it is one, and the lat/lon check reads every row. One
+    # pass, holding only the preview rows: the rest are counted and summarised as they stream
+    # by (Codex review of PR #181: keeping every parsed row multiplied an upload's memory).
+    from agent_runtime.coord_sanity import LatLonScan
+
     cap = max(1, int(max_rows or DEFAULT_MAX_ROWS))
-    all_rows = [[str(item) for item in row] for row in csv.reader(io.StringIO(text))]
-    rows = all_rows[:cap]
+    rows: List[List[str]] = []
+    total = 0
+    scan = None
+    for row in csv.reader(io.StringIO(text)):
+        total += 1
+        if len(rows) < cap:
+            rows.append([str(item) for item in row])
+        if scan is None:
+            scan = LatLonScan(row)
+        else:
+            try:
+                scan.feed(row)
+            except Exception:  # noqa: BLE001 - a hint must never cost the preview
+                pass
     header = rows[0] if rows else []
-    data_total = max(0, len(all_rows) - 1)
+    data_total = max(0, total - 1)
     data_shown = max(0, len(rows) - 1)
     out: Dict[str, Any] = {"format": "csv", "header": header, "rows": rows,
                            "total_data_rows": data_total, "data_rows_shown": data_shown,
@@ -153,12 +169,10 @@ def _csv_preview(text: str, max_rows: int) -> Dict[str, Any]:
                        "rows from this preview into code; an answer from these rows alone "
                        "leaves out the rest of the file.")
     try:
-        from agent_runtime.coord_sanity import latlon_swap_hint
-
-        hint = latlon_swap_hint(header, all_rows[1:])
+        hint = scan.hint() if scan is not None else None
         if hint:
             out.update(hint)
-    except Exception:  # noqa: BLE001 - a hint must never cost the preview
+    except Exception:  # noqa: BLE001
         pass
     return out
 

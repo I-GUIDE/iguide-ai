@@ -12144,9 +12144,13 @@ failed the same way on every run.
 **Change.**
 - **The preview counts the file** (`langchain_file_tools._csv_preview`): `total_data_rows`,
   `data_rows_shown`, `truncated`, and a note that it is a preview to be read by path, never copied.
-- **Swapped lat/lon** (`coord_sanity.latlon_swap_hint`, read over every row): certain when the
-  "lat" column passes ±90; likely when every "lat" is south of 60°S and every "lon" is a valid
-  latitude north of it. McMurdo, labelled correctly, is not flagged.
+- **Swapped lat/lon** (`coord_sanity.LatLonScan`, fed every row as the CSV streams, holding only
+  the preview rows): certain when at least 90% of "lat" values pass ±90 and every "lon" is a
+  valid latitude; likely when every "lat" is south of 60°S and every "lon" is a valid latitude
+  north of it. A few "lat" values past ±90 in an otherwise correct file are reported as invalid
+  rows, not a swap. McMurdo, labelled correctly, is not flagged. (The first version kept every
+  parsed row and called one bad latitude a certain swap; both were raised by the Codex review
+  of PR #181.)
 - **Coordinates that cannot be degrees** (`coord_sanity.crs_check`): when the declared CRS is
   missing or geographic and the bounds fail `degree_like` (the same test as
   `terrain_tools._degree_like`), `inspect_vector` and the new `.geojson` branch of

@@ -56,6 +56,28 @@ def test_swap_beyond_90_is_certain():
     assert hint["latlon_swapped"] == "certain"
 
 
+def test_one_bad_latitude_is_a_bad_row_not_a_swap():
+    # Codex review of PR #181: one latitude beyond ±90 in a correct file must not flip every row.
+    rows = [["a", "40.11", "-88.22"], ["b", "40.12", "-88.21"], ["c", "140.5", "-88.20"]]
+    hint = latlon_swap_hint(["id", "lat", "lon"], rows)
+    assert "latlon_swapped" not in hint
+    assert hint["latlon_invalid_rows"] == 1 and "not swapped columns" in hint["latlon_warning"]
+
+
+def test_most_rows_beyond_90_is_still_a_swap():
+    rows = [["r%d" % i, "-120.%d" % i, "35.%d" % i] for i in range(19)] + [["x", "35.0", "35.0"]]
+    hint = latlon_swap_hint(["id", "lat", "lon"], rows)
+    assert hint["latlon_swapped"] == "certain"
+
+
+def test_a_large_csv_is_counted_in_one_pass_and_keeps_only_the_preview():
+    rows = ["store,lat,lon"] + [f"S{i},{-88.25 + (i % 40) * 0.001:.5f},{40.10:.5f}"
+                                for i in range(50_000)]
+    out = _csv_preview("\n".join(rows) + "\n", max_rows=20)
+    assert out["total_data_rows"] == 50_000 and len(out["rows"]) == 20
+    assert out["latlon_swapped"] == "likely"
+
+
 @pytest.mark.parametrize("rows", [
     [["a", "40.11", "-88.22"], ["b", "40.12", "-88.21"]],    # Champaign, as labelled
     [["a", "-77.85", "166.67"], ["b", "-77.84", "166.68"]],  # McMurdo really is in Antarctica

@@ -190,50 +190,100 @@ _LAT_NAMES = re.compile(r"^(lat|latitude|y|lat_dd|latitude_dd|point_y)$", re.I)
 _LON_NAMES = re.compile(r"^(lon|lng|long|longitude|x|lon_dd|longitude_dd|point_x)$", re.I)
 
 
-def _floats(values: Iterable[Any]) -> List[float]:
-    out = []
-    for v in values:
-        try:
-            f = float(str(v).strip())
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(f):
-            out.append(f)
-    return out
-
-
-def latlon_swap_hint(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> Optional[Dict[str, Any]]:
-    """A note when columns named lat/lon hold values that only make sense the other way round.
-
-    *rows* excludes the header. Two cases:
-      * the "lat" column has values beyond ±90 that fit as longitudes: certainly swapped;
-      * every "lat" value is south of -60 (Antarctica) while every "lon" value is a valid
-        latitude north of it: almost certainly swapped, and the note says so as a likelihood."""
-    lat_i = next((i for i, h in enumerate(header) if _LAT_NAMES.match(str(h).strip())), None)
-    lon_i = next((i for i, h in enumerate(header) if _LON_NAMES.match(str(h).strip())), None)
-    if lat_i is None or lon_i is None:
+def _float(v: Any) -> Optional[float]:
+    try:
+        f = float(str(v).strip())
+    except (TypeError, ValueError):
         return None
-    lats = _floats(r[lat_i] for r in rows if len(r) > lat_i)
-    lons = _floats(r[lon_i] for r in rows if len(r) > lon_i)
-    if not lats or not lons:
+    return f if math.isfinite(f) else None
+
+
+# Share of "lat" values that must lie beyond ±90 before the columns count as swapped. One bad
+# latitude in a correctly labelled file is a bad row, not a swap; calling it a swap would move
+# every other point (Codex review of PR #181).
+SWAP_SHARE = 0.9
+
+
+class LatLonScan:
+    """Running summary of a lat/lon column pair, fed one row at a time, so a large CSV is
+    checked without holding its rows (Codex review of PR #181: the first version kept every
+    parsed row of the upload only to count them)."""
+
+    def __init__(self, header: Sequence[str]) -> None:
+        self.lat_i = next((i for i, h in enumerate(header) if _LAT_NAMES.match(str(h).strip())), None)
+        self.lon_i = next((i for i, h in enumerate(header) if _LON_NAMES.match(str(h).strip())), None)
+        self.lat_name = header[self.lat_i] if self.lat_i is not None else None
+        self.lon_name = header[self.lon_i] if self.lon_i is not None else None
+        self.n_lat = self.n_lon = 0
+        self.lat_beyond_90 = 0      # 90 < |lat| <= 180: could be a longitude
+        self.lat_beyond_180 = 0     # cannot be a coordinate either way
+        self.lon_beyond_90 = 0
+        self.lat_min = self.lon_min = math.inf
+        self.lat_max = self.lon_max = -math.inf
+
+    def feed(self, row: Sequence[Any]) -> None:
+        if self.lat_i is None or self.lon_i is None:
+            return
+        lat = _float(row[self.lat_i]) if len(row) > self.lat_i else None
+        lon = _float(row[self.lon_i]) if len(row) > self.lon_i else None
+        if lat is not None:
+            self.n_lat += 1
+            self.lat_min, self.lat_max = min(self.lat_min, lat), max(self.lat_max, lat)
+            if abs(lat) > 180:
+                self.lat_beyond_180 += 1
+            elif abs(lat) > 90:
+                self.lat_beyond_90 += 1
+        if lon is not None:
+            self.n_lon += 1
+            self.lon_min, self.lon_max = min(self.lon_min, lon), max(self.lon_max, lon)
+            if abs(lon) > 90:
+                self.lon_beyond_90 += 1
+
+    def hint(self) -> Optional[Dict[str, Any]]:
+        """Three outcomes, besides nothing:
+          * at least SWAP_SHARE of "lat" values beyond ±90 (and none beyond ±180), every "lon"
+            a valid latitude: certainly swapped;
+          * some "lat" values beyond ±90 but not most: those rows are invalid, not a swap;
+          * every "lat" south of -60 (Antarctica) and every "lon" a valid latitude north of it:
+            probably swapped, said as a likelihood."""
+        if not self.n_lat or not self.n_lon:
+            return None
+        lat_name, lon_name = self.lat_name, self.lon_name
+        bad = self.lat_beyond_90 + self.lat_beyond_180
+        if (self.lat_beyond_180 == 0 and self.lon_beyond_90 == 0
+                and self.lat_beyond_90 >= SWAP_SHARE * self.n_lat):
+            return {"latlon_warning": (
+                f"Column '{lat_name}' has values beyond ±90 in {self.lat_beyond_90} of "
+                f"{self.n_lat} rows, which cannot be latitudes, and '{lon_name}' holds values "
+                f"that fit as latitudes. The columns are swapped: read '{lon_name}' as latitude "
+                f"and '{lat_name}' as longitude, and say so in the answer."),
+                "latlon_swapped": "certain"}
+        if bad:
+            return {"latlon_warning": (
+                f"{bad} of {self.n_lat} rows have a '{lat_name}' value beyond ±90, which is not "
+                "a valid latitude. The other rows read correctly as labelled, so this is bad "
+                "data in those rows, not swapped columns: leave the columns as they are, and "
+                "exclude or report the invalid rows."),
+                "latlon_invalid_rows": bad}
+        if self.lat_max < -60 and self.lon_min >= -60 and self.lon_beyond_90 == 0:
+            return {"latlon_warning": (
+                f"As labelled, every point is south of 60°S (Antarctica): '{lat_name}' ranges "
+                f"{self.lat_min:.4f} to {self.lat_max:.4f}. Read the other way round "
+                f"('{lon_name}' as latitude) the points are at {self.lon_min:.4f} to "
+                f"{self.lon_max:.4f}°N/S. The columns are probably swapped. Use the reading that "
+                "places the data where the question does, and state which one you used."),
+                "latlon_swapped": "likely"}
         return None
-    lat_name, lon_name = header[lat_i], header[lon_i]
-    if max(abs(v) for v in lats) > 90 and max(abs(v) for v in lats) <= 180 \
-            and max(abs(v) for v in lons) <= 90:
-        return {"latlon_warning": (
-            f"Column '{lat_name}' has values beyond ±90, which cannot be latitudes, and "
-            f"'{lon_name}' holds values that fit as latitudes. The columns are swapped: read "
-            f"'{lon_name}' as latitude and '{lat_name}' as longitude, and say so in the answer."),
-            "latlon_swapped": "certain"}
-    if max(lats) < -60 and min(lons) >= -60 and max(abs(v) for v in lons) <= 90:
-        return {"latlon_warning": (
-            f"As labelled, every point is south of 60°S (Antarctica): '{lat_name}' ranges "
-            f"{min(lats):.4f} to {max(lats):.4f}. Read the other way round ('{lon_name}' as "
-            f"latitude) the points are at {min(lons):.4f} to {max(lons):.4f}°N/S. The columns "
-            "are probably swapped. Use the reading that places the data where the question "
-            "does, and state which one you used."),
-            "latlon_swapped": "likely"}
-    return None
 
 
-__all__ = ["candidate_crs", "crs_check", "degree_like", "latlon_swap_hint"]
+def latlon_swap_hint(header: Sequence[str], rows: Iterable[Sequence[Any]]) -> Optional[Dict[str, Any]]:
+    """:class:`LatLonScan` over *rows* (header excluded), in one pass."""
+    scan = LatLonScan(header)
+    if scan.lat_i is None or scan.lon_i is None:
+        return None
+    for row in rows:
+        scan.feed(row)
+    return scan.hint()
+
+
+__all__ = ["LatLonScan", "candidate_crs", "crs_check", "degree_like", "latlon_swap_hint"]
