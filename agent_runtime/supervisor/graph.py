@@ -45,6 +45,7 @@ from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enab
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
+from agent_runtime.supervisor import speculation as _speculation
 from agent_runtime.turn_control import TurnCancelled
 from agent_runtime import lineage
 from agent_runtime import source_catalog
@@ -6056,6 +6057,15 @@ def build_supervisor_graph(
             # exactly the case it exists for. Falling back to a deterministic route keeps the
             # turn moving: search if nothing has been retrieved yet, otherwise answer with what
             # there is.
+            # A peer just ran: start writing the answer while the decider decides (Stage 92).
+            # Synthesize uses the draft only if the decider says done and its inputs match.
+            if actions and actions[-1] != "done":
+                try:
+                    _speculate_answer(state, {"next_action": "done", "actions": [*actions, "done"],
+                                              "step": step + 1, "needs": needs})
+                except Exception:  # noqa: BLE001 - a draft is an optimisation, never a failure
+                    logging.getLogger(__name__).debug("speculative synthesis not started",
+                                                      exc_info=True)
             _decision_payload = _distill(state, for_decision=True)
             decided, decide_failure = _run_peer(
                 "decide", lambda: decide(state, _decision_payload), state)
@@ -6120,6 +6130,8 @@ def build_supervisor_graph(
                  "message": _reason},
                 node="supervisor",
             )
+        if nxt != "done":
+            _speculation.drop(state.get("turn_log_id"))
         update: Dict[str, Any] = {
             "next_action": nxt,
             "actions": [*(state.get("actions") or []), nxt],
@@ -6439,6 +6451,79 @@ def build_supervisor_graph(
                                  "status": turn_verdict.status(findings)}
         return update
 
+    def _answer_inputs(state: SupervisorState, q: str, evidence: List[Dict[str, Any]], ar: Any,
+                       cr: Any, artifacts: List[Any], _rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Everything the answer writer is given (`args`, in do_synthesize's order), and what the
+        checks after it need. No trace events and no writes, so the supervisor can build it
+        early for a speculative composition (_speculation) without the turn seeing it twice."""
+        _history = list(state.get("chat_history") or [])
+        # THE single rendering, and the auditor gets the visible-state summary too: "the
+        # layer is on your map" is precisely the claim it used to flag as unsupported,
+        # because nothing in its evidence said a layer from an earlier turn still exists.
+        _ledger_text = "\n".join([*_ledger_lines(_rows), *_visible_state_lines(_rows)])
+        # What the CLIENT does, stated only when a layer really is on it — see
+        # _map_environment_lines. It travels as its own exec_ctx key rather than inside
+        # prior_actions, whose heading says "from EARLIER TURNS": an environment fact filed
+        # under that heading would read as a stale artifact of some previous turn. The
+        # answerer's note deliberately does NOT get this line — SYNTHESIS_PROMPT already
+        # covers the map, and the gap being closed here is the auditor's alone.
+        _map_env = _map_environment_lines(_map_layer_was_delivered(
+            {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
+        _note = _prior_actions_note(_rows)
+        # THE FACTS (stage 44): every number the turn recorded, typed ones listed for the
+        # writer with their units and where they were measured. The answer is then held to
+        # them, number by number, by a deterministic scan.
+        _log = turn_log.get_log(state.get("turn_log_id"))
+        _results = [*((ar or {}).get("tool_results") or [] if isinstance(ar, dict) else []),
+                    *((cr or {}).get("tool_results") or [] if isinstance(cr, dict) else [])]
+        fact_set = turn_facts.build(log=_log, results=_results, query=q, evidence=evidence,
+                                    prior_rows=_rows,
+                                    history=_raw_history_text(state.get("chat_history")))
+        _facts_text = fact_set.render()
+        if _facts_text:
+            _note = (f"{_note}\n\n" if _note else "") + (
+                "Measured values this turn recorded (the record the answer is checked "
+                "against; each number stated is matched to one of these or to a tool "
+                "result):\n" + _facts_text)
+        # CROSS-RUN AGREEMENT (plan step 4a): two runs that computed the same figure and
+        # disagree. The writer is told before writing, so it settles the disagreement
+        # instead of reporting the last value silently (T10: 309.531 then 295.06 ppm).
+        # Answer validation off (client_profile.validation_enabled): no check below runs,
+        # including these two recomputations, and the verdict says the answer is unchecked.
+        _checks = validation_enabled()
+        _disagreements = turn_agreement.for_log(_log) if _checks else []
+        # REFERENCE RECOMPUTATION (plan step 4b): a standard method the turn ran, recomputed
+        # with a reference library from the same inputs (kriging with pykrige, Gi* and
+        # Moran's I with esda, Horn slope, zonal mean).
+        _references = turn_reference.for_log(_log) if _checks else []
+        _reconcile = "\n\n".join(n for n in (
+            turn_agreement.reconcile_note(_disagreements),
+            turn_reference.reconcile_note(_references)) if n)
+        if _reconcile:
+            _note = (f"{_note}\n\n" if _note else "") + _reconcile
+        return {"args": (q, evidence, ar, cr, _history, _note), "ledger_text": _ledger_text,
+                "map_env": _map_env, "results": _results, "fact_set": fact_set,
+                "checks": _checks, "disagreements": _disagreements, "references": _references}
+
+    def _speculate_answer(state: SupervisorState, done_update: Dict[str, Any]) -> None:
+        """Start composing the answer while the decider decides (Stage 92).
+
+        Only on the path `_synthesize_core` would take to do_synthesize, and only with answer
+        validation off: with it on, building the inputs recomputes reference results, which is
+        work the turn would then do twice. The state is the one synthesize will see if the
+        decider says `done`; synthesize uses the draft only when its own inputs are identical."""
+        if not _speculation.enabled() or validation_enabled():
+            return
+        hypo = {**state, **done_update}
+        evidence = hypo.get("evidence") or []
+        ar, cr = hypo.get("analysis_results"), hypo.get("code_result")
+        artifacts = _drop_previously_shown(_collect_image_artifacts(ar, cr), hypo.get("chat_history"))
+        if not (_has_grounding(evidence, ar, cr, artifacts) or hypo.get("chat_history")):
+            return  # the general-knowledge or insufficiency path: a different composer
+        inputs = _answer_inputs(hypo, hypo.get("query", ""), evidence, ar, cr, artifacts,
+                                _prior_actions(hypo))
+        _speculation.start(hypo.get("turn_log_id"), inputs["args"], do_synthesize)
+
     def _synthesize_core(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         verdict_findings: List[Any] = []
@@ -6508,52 +6593,13 @@ def build_supervisor_graph(
             # rather than guessing if it lacks the facts for a substantive question.
             # The answering model needs the ledger too, not just the router: the router only
             # decides whether to search, while THIS is what decides whether the answer is right.
-            _history = list(state.get("chat_history") or [])
-            # THE single rendering, and the auditor gets the visible-state summary too: "the
-            # layer is on your map" is precisely the claim it used to flag as unsupported,
-            # because nothing in its evidence said a layer from an earlier turn still exists.
-            _ledger_text = "\n".join([*_ledger_lines(_rows), *_visible_state_lines(_rows)])
-            # What the CLIENT does, stated only when a layer really is on it — see
-            # _map_environment_lines. It travels as its own exec_ctx key rather than inside
-            # prior_actions, whose heading says "from EARLIER TURNS": an environment fact filed
-            # under that heading would read as a stale artifact of some previous turn. The
-            # answerer's note deliberately does NOT get this line — SYNTHESIS_PROMPT already
-            # covers the map, and the gap being closed here is the auditor's alone.
-            _map_env = _map_environment_lines(_map_layer_was_delivered(
-                {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
-            _note = _prior_actions_note(_rows)
-            # THE FACTS (stage 44): every number the turn recorded, typed ones listed for the
-            # writer with their units and where they were measured. The answer is then held to
-            # them, number by number, by a deterministic scan.
-            _log = turn_log.get_log(state.get("turn_log_id"))
-            _results = [*((ar or {}).get("tool_results") or [] if isinstance(ar, dict) else []),
-                        *((cr or {}).get("tool_results") or [] if isinstance(cr, dict) else [])]
-            fact_set = turn_facts.build(log=_log, results=_results, query=q, evidence=evidence,
-                                        prior_rows=_rows,
-                                        history=_raw_history_text(state.get("chat_history")))
-            _facts_text = fact_set.render()
-            if _facts_text:
-                _note = (f"{_note}\n\n" if _note else "") + (
-                    "Measured values this turn recorded (the record the answer is checked "
-                    "against; each number stated is matched to one of these or to a tool "
-                    "result):\n" + _facts_text)
-            # CROSS-RUN AGREEMENT (plan step 4a): two runs that computed the same figure and
-            # disagree. The writer is told before writing, so it settles the disagreement
-            # instead of reporting the last value silently (T10: 309.531 then 295.06 ppm).
-            # Answer validation off (client_profile.validation_enabled): no check below runs,
-            # including these two recomputations, and the verdict says the answer is unchecked.
-            _checks = validation_enabled()
-            _disagreements = turn_agreement.for_log(_log) if _checks else []
-            # REFERENCE RECOMPUTATION (plan step 4b): a standard method the turn ran, recomputed
-            # with a reference library from the same inputs (kriging with pykrige, Gi* and
-            # Moran's I with esda, Horn slope, zonal mean).
-            _references = turn_reference.for_log(_log) if _checks else []
-            _reconcile = "\n\n".join(n for n in (
-                turn_agreement.reconcile_note(_disagreements),
-                turn_reference.reconcile_note(_references)) if n)
-            if _reconcile:
-                _note = (f"{_note}\n\n" if _note else "") + _reconcile
-            answer = do_synthesize(q, evidence, ar, cr, _history, _note)
+            _in = _answer_inputs(state, q, evidence, ar, cr, artifacts, _rows)
+            _ledger_text, _map_env, _results = _in["ledger_text"], _in["map_env"], _in["results"]
+            fact_set, _checks = _in["fact_set"], _in["checks"]
+            _disagreements, _references = _in["disagreements"], _in["references"]
+            answer = _speculation.take(state.get("turn_log_id"), _in["args"])
+            if answer is None:
+                answer = do_synthesize(*_in["args"])
             # The auditor must be given the SAME earlier-turn tool records the answerer was
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
             # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
