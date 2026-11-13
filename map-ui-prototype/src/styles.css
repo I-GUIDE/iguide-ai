@@ -274,6 +274,8 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .answer-card .map-warn p { margin: 0; }
 .answer-card .map-warn p + p { margin-top: 4px; }
 .cursor { color: var(--brand); animation: blink 1s steps(2) infinite; }
+/* Stage 93: under a draft answer while it is still being written and checked. */
+.draft-note { margin: 6px 0 0; font-size: 12px; color: var(--muted, #6b7280); }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* markdown */

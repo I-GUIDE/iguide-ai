@@ -722,6 +722,7 @@ export default function App() {
         enabledSearchMethods: spatial ? null : CHAT_ONLY_METHODS,
       }, asAgentConfig(), {
         onTrace: (l) => addTrace(l),
+        onAnswerDraft: (draft) => patch({ html: renderMarkdown(draft, resolveUrl), draft: true }),
         onToolCall: (name, args) => {
           // What the call does, in words (toolPhrases); the raw call stays on the row for
           // debug mode.
@@ -823,7 +824,7 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, markdown: res.error ? undefined : res.answer || undefined,
-              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false, progress: undefined });
+              text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false, draft: false, progress: undefined });
       // Only when the agent did NOT place a layer itself. Its downloads join the map_layer ones
       // rather than being awaited here. The await put the fallback's layers before `finally` ended
       // the turn, which `finally` now does for both, but it waited with no bound, and Stop could
@@ -847,8 +848,8 @@ export default function App() {
       // and that must not reach dangerouslySetInnerHTML — whereas the refusal text is ours,
       // from authMessage(), with the URL coming from the deployment's own /agent/ui-config.
       patch(isAuth
-        ? { html: renderMarkdown(text, resolveUrl), streaming: false, progress: undefined }
-        : { text, streaming: false, progress: undefined });
+        ? { html: renderMarkdown(text, resolveUrl), streaming: false, draft: false, progress: undefined }
+        : { html: undefined, text, streaming: false, draft: false, progress: undefined });
     } finally {
       // The turn ends when its layers are drawn, so the snapshot this counter triggers includes
       // them, and `busy` keeps the composer from starting the next turn until then. A second save
