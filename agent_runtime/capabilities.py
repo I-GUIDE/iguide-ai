@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -392,8 +395,68 @@ def _inventory_for_prompt(inventory: Any, *, max_chars: int = _INVENTORY_PROMPT_
         dropped += 1
 
 
+# Answers to capability questions, kept per process (Stage 93). "What can you do?" took 6.7 s
+# and 7.3 s live on 2026-11-13: three model calls in a row (pick the listing tools, then two to
+# write), for an answer that depends only on the question, the request's tool configuration and
+# the model, all of which are in the key. The listings it calls (rs-embed models, heads) can
+# change while the server runs, hence a lifetime rather than forever.
+_ANSWER_CACHE: Dict[tuple, tuple] = {}
+_ANSWER_CACHE_LOCK = threading.Lock()
+
+
+def _cache_ttl_s() -> float:
+    try:
+        return max(0.0, float(os.getenv("AGENT_CAPABILITY_CACHE_S", "21600") or 21600))
+    except ValueError:
+        return 21600.0
+
+
+def _cache_key(llm: Any, query: Optional[str], config: Dict[str, Any]) -> Optional[tuple]:
+    normal = re.sub(r"\s+", " ", (query or "What can you do?").strip().lower()).rstrip("?!. ")
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+    if not model:
+        return None  # an unnamed model (a test double, a callable) is never cached
+    try:
+        from agent_runtime.client_profile import chat_only
+
+        mode = bool(chat_only())
+    except Exception:  # noqa: BLE001
+        mode = False
+    try:
+        cfg = json.dumps(config, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return (normal, str(model), mode, cfg)
+
+
 def describe_capabilities(*, llm: Optional[Any] = None, query: Optional[str] = None,
                           **config: Any) -> str:
+    """Cached :func:`_describe_capabilities` (see _ANSWER_CACHE). Only a model-written answer is
+    kept; the mechanical fallback is not, so a model outage is not remembered."""
+    active = llm
+    if active is None:
+        try:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        except Exception:  # noqa: BLE001 - the inner call builds it again and falls back
+            active = None
+    key = _cache_key(active, query, config) if active is not None else None
+    ttl = _cache_ttl_s()
+    if key is not None and ttl > 0:
+        with _ANSWER_CACHE_LOCK:
+            hit = _ANSWER_CACHE.get(key)
+        if hit and time.monotonic() - hit[0] < ttl:
+            return hit[1]
+    answer, written = _describe_capabilities(llm=active, query=query, **config)
+    if key is not None and ttl > 0 and written:
+        with _ANSWER_CACHE_LOCK:
+            _ANSWER_CACHE[key] = (time.monotonic(), answer)
+    return answer
+
+
+def _describe_capabilities(*, llm: Optional[Any] = None, query: Optional[str] = None,
+                           **config: Any) -> tuple:
     """Answer a capability question by REASONING over live self-introspection.
 
     A ReAct loop rather than a one-shot composer, because a fixed prompt can only answer the
@@ -443,11 +506,11 @@ def describe_capabilities(*, llm: Optional[Any] = None, query: Optional[str] = N
             executor, query=(query or "What can you do?").strip(), chat_history=None)
         answer = extract_final_answer(resp) or ""
         if answer.strip():
-            return answer.strip()
+            return answer.strip(), True
     except Exception:
         logger.warning("capability agent unavailable; falling back to a mechanical listing",
                        exc_info=True)
-    return _mechanical_summary(collect_capability_inventory(**config))
+    return _mechanical_summary(collect_capability_inventory(**config)), False
 
 
 __all__ = ["is_capability_query", "collect_capability_inventory",
