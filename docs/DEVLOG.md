@@ -6029,3 +6029,10 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-10-19 · M8.129 · The evidence rerank judges a short list and answers with numbers (architecture stage 89)
+
+- **The fault:** a 20 min 25 s platform turn (f5dba41c) spent about 18 min in Lumen writing the evidence rerank. About 190 uncapped candidates (about 25k input tokens) each got `{doc_id, score, reason}` (6,513–9,983 output tokens at 27 tok/s), only 8 were kept, and the turn reranked twice.
+- **Change:** RRF pre-order, then the model judges only the first 3 × top_k (`AGENT_RERANK_MAX_CANDIDATES`; 24 by default). The rest follow in RRF order. The reply is candidate numbers only, and the RRF fallback covers garbled replies and `LLMCallTimeout`. A second search step in a turn reranks only documents no earlier step gave the rerank, and makes no model call when there are none.
+- **Measured:** on 190 docs the prompt goes from 21,400 to 2,219 tokens and the expected output from 8,554 to 75. Live on Lumen deepseek-v4-flash (172 real docs): 1,951 prompt / 76 output tokens, 1.6–1.8 s, 3 of 3 parsed. The old prompt at the same hour: 17,991 / 7,489 tokens, 97.0 s.
+- **Tests:** 14 in `test_evidence_quality.py`, 3 in `test_supervisor_graph.py`.

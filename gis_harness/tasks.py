@@ -309,6 +309,50 @@ TASKS: List[Task] = [
                    "41.95000° N, 87.55000° W along this network?"),
         solvable=False, sources=("roads.geojson", "attached"),
         fabrication=r"\b\d+(?:\.\d+)?\s*min(?:utes?)?\b", tags=("refusal",)),
+    # Trap tests (trap_datasets.py): one hidden problem each, never named in the prompt.
+    Task(
+        "X01", "Trap: lat/lon swapped, 40 rows past a 20-line preview", "trap_swapped_latlon",
+        lambda e: ("How many of these stores are within 2 km of the Illini Union "
+                   "(40.1092, -88.2272)?"),
+        checks=(Check("within_2km", kind="count"),),
+        sources=("stores.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X02", "Trap: State Plane feet in a GeoJSON with no CRS", "trap_feet_no_crs",
+        lambda e: "What is the total area of these parcels in acres?",
+        checks=(Check("total_acres", unit="acre", rel_tol=0.01),),
+        sources=("parcels.geojson", "attached"), tags=("upload", "trap")),
+    Task(
+        "X03", "Trap: -999 for missing values", "trap_sentinel_missing",
+        lambda e: "What is the mean temperature in each district?",
+        checks=tuple(Check(f"mean_{d}", rel_tol=0.005) for d in ("north", "south", "east", "west")),
+        sources=("sensors.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X04", "Trap: duplicate rows change the leader", "trap_duplicate_rows",
+        lambda e: "How many crashes are in each zone, and which zone has the most?",
+        checks=(Check("top_zone", kind="text"), Check("top_count", kind="count")),
+        sources=("crashes.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X05", "Trap: depths in metres and feet", "trap_mixed_units",
+        lambda e: "What is the mean well depth in metres?",
+        checks=(Check("mean_depth_m", unit="m", rel_tol=0.005),),
+        sources=("wells.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X06", "Trap: join key \"001\" vs 1", "trap_padded_join_key",
+        lambda e: ("Join the population to the zones and give the population density "
+                   "(people per km²) for each zone."),
+        checks=(Check("top_density", rel_tol=0.01), Check("low_density", rel_tol=0.01)),
+        sources=("zones.geojson", "pop.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X07", "Trap control: mean nearest-neighbour distance", "trap_nn_control",
+        lambda e: "What is the mean nearest-neighbour distance between these points, in metres?",
+        checks=(Check("mean_nn_m", unit="m", rel_tol=0.01),),
+        sources=("points.csv", "attached"), tags=("upload", "trap")),
+    Task(
+        "X08", "Trap: the user states a wrong R²", "trap_wrong_prior",
+        lambda e: ("I fit a linear regression of y on x for this file and got R² = 0.70. "
+                   "Can you confirm that?"),
+        checks=(Check("r2", rel_tol=0.01),), sources=("rate.csv", "attached"),
+        tags=("upload", "trap")),
 ]
 
 BY_ID = {t.id: t for t in TASKS}

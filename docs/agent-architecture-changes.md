@@ -92,6 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 91 | [A preview says it is one, and coordinates are checked against degrees](#stage-91) | 2026-10-30 | the CSV preview counts the whole file and flags truncation and swapped lat/lon; a GeoJSON or vector whose bounds cannot be degrees gets a CRS warning with candidate CRSs and their units; code that types a data table and reads no file is a pre-run finding; trap tasks X01-X08 in the harness |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12123,3 +12124,109 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 89 — The evidence rerank judges a short list and answers with numbers {#stage-89}
+
+**The fault.** On 2026-10-19 a platform question ("What's the state of the art of geospatial data-intensive emergency management research?", conversation f5dba41c) took 20 min 25 s on the VM (18:03:15→18:23:40 UTC). The VM journal, a py-spy dump and the turn's usage record put about 18 of those minutes in one place: Lumen generating the evidence rerank (`rerank_documents`, called from `search_node`).
+- **Uncapped input.** `search_node` merges every hit the search peer gathered, about 190 documents, with no cap. `_rerank_prompt` showed all of them at 400-character excerpts, about 25k input tokens.
+- **Long output.** It asked for `{doc_id, score, reason}` for every document. The output was 9,983 and 8,740 tokens in that turn, and 6,513 twice in another.
+- **Most of it was thrown away.** `top_k` (`AGENT_SUPERVISOR_TOP_K`, 8) was applied only after the model had ranked everything.
+- **Slow at the wrong hour.** deepseek-v4-flash generated about 27 tok/s at 18:10–18:23, against about 90 tok/s at 18:56, so one rerank took about 6 minutes. One attempt returned HTTP 500 after 6 min 13 s and was retried.
+- **Twice per turn.** Both slow turns searched twice, and each search step reranked the whole merged list again.
+- **Stage 85 raised the stakes.** Every model call now has a 240 s request timeout and 1 retry, and the rerank is a non-streamed `llm.invoke`. So a rerank needing more than 240 s would time out twice, about 8 minutes, before falling back to RRF.
+
+**Change** (`agent_runtime/evidence_quality.py`, `agent_runtime/supervisor/graph.py`).
+- **Bounded input.** `rerank_documents` puts the candidates in reciprocal-rank-fusion order (`rrf_order`, the rerank's fallback order since 5ef3878a) first. Only the head goes to the model.
+  - **Cap.** `rerank_candidate_cap(top_k)` returns 3 × top_k, so 24 at the default top_k of 8, or 24 when the caller passes no top_k. `AGENT_RERANK_MAX_CANDIDATES` sets it outright; `0`/`off` shows every candidate, the old behaviour. Callers can also pass `max_candidates=`.
+  - **Order.** The model's picks come first. Candidates it left out follow in RRF order, then every document beyond the cap, also in RRF order. Then `top_k` truncates.
+  - **Recall is unchanged.** Retrieval is untouched (`AGENT_SEARCH_TOP_K` still decides how many hits each method returns), and every document is still in the returned list. Only fewer are judged.
+  - **Why RRF for the cut.** In merge order every catalog hit sits at the end, behind the keyword hits (the finding behind 5ef3878a). RRF interleaves the sources by their own ranks, so the model sees each source's best.
+- **Short output.** The candidates are numbered, and the prompt asks for `{"ranking": [3, 1, 2]}`: the numbers, best first, with no scores and no reasons. Each number costs one or two tokens, against about 20 to copy back a 36-character doc_id. The doc_ids are no longer in the prompt at all.
+  - **Parsing** (`_parse_ranking`) also accepts a bare array, number strings (`"3"`, `"[3]"`, `"#3"`), and the old `{doc_id, score, reason}` objects. A string that is a candidate's doc_id is read as that document before it is read as a number. Numbers out of range and repeats are dropped.
+- **Fallback unchanged.** On any failure the result is the RRF order, truncated to `top_k`, with a warning naming the cause. Failures are: an exception, including Stage 85's `LLMCallTimeout`, which subclasses the client's `APITimeoutError`; a reply with no usable ranking; or a reply whose every entry is out of range.
+- **A second search step judges only what is new** (`_rerank_new_documents`). A second search step used to rerank everything it returned. Most of that was the first step's list again, because the completeness sweep (`_direct_search_sweep`) repeats the same keyword+semantic query.
+  - **What is remembered.** `search_node` now keeps `rerank_seen = {query, keys}`: 12-hex digests of `_doc_key` for every document an earlier step this turn gave the rerank.
+  - **Rule.** A document seen before has already been placed against the same query. It is in the evidence, or it lost its place to the documents that are, so judging it again could at best re-add what is already held.
+    - Nothing new: no model call, and nothing is added. `search_empty_streak` advances, as it did when a repeat rerank kept only held documents.
+    - Some new: only they are reranked, and the best `top_k` of them are added.
+  - **Bound.** Evidence still grows by at most `top_k` per search step. That is the same bound as before, when a step whose documents were all new added its top `top_k`.
+  - **Behaviour change.** A step that returns old and new documents together now adds its best new ones without making them out-rank the documents already kept. Before, a re-returned kept document could take one of the `top_k` places and push a new one out.
+  - **Scope.** The memory is keyed by the query: a clarified query (the clarify gate rewrites `query`) starts afresh. It is cleared in `synthesize`, like `action_rows`, so it never reaches the client payload; a re-grounding search after synthesis judges everything again.
+  - **Not done.** Reusing the first step's judgements to merge the two rankings. The model's numbers are positions inside one list, not scores comparable across two calls.
+
+**Measured.** The candidate list is the 190-document synthetic list the new tests use: four sources with their own score scales and 800-character KB-length excerpts. A second list is 172 real documents de-duplicated from the harness archive's traces (keyword 75, web 42, opengeodata 38, overpass 16, semantic 1). Tokens are counted with tiktoken o200k_base. The "expected output" for the old format is every document's `{doc_id, score, reason}` with a one-line reason; it lands in the range observed on the VM (6,513–9,983).
+
+| | candidates judged | prompt | expected output |
+|---|---|---|---|
+| before, 190 synthetic | 190 | 104,250 chars, 21,400 tok | 8,554 tok |
+| after, 190 synthetic | 24 | 12,193 chars, 2,219 tok | 75 tok |
+| before, 172 real | 172 | 72,005 chars, 17,781 tok | 7,781 tok |
+| after, 172 real | 24 | 8,249 chars, 1,915 tok | 75 tok |
+
+**Live, Lumen deepseek-v4-flash, 2026-10-19 19:57 UTC**, on the 172 real documents and the f5dba41c question, through a `ChatOpenAI` built with `client_limits("lumen")`, outside the agent:
+- **After, 3 calls.** 1,951 prompt tokens and 76 output tokens each; 1.6 s, 1.6 s and 1.8 s; 24/24 numbers parsed every time. The first six picks were identical in all three, and the junk web hits ("GREAT | English meaning", "Great-circle distance") ranked last.
+- **Before, 1 call, same hour.** The old prompt over all 172 documents: 17,991 prompt tokens and 7,489 output tokens in 97.0 s, about 77 tok/s, which is a fast hour. The reply held 173 entries for 172 documents, one of them repeated.
+- **Ratio.** 99× fewer output tokens and 57× less wall time at the same hour. The output token count is what the incident's minutes scale with.
+
+At the incident's slow-hour 27 tok/s, 76 output tokens is about 3 s against about 6 minutes, and nowhere near the 240 s timeout.
+
+**Tests** (offline).
+- `rag_pipeline/tests/test_evidence_quality.py`, 14 new:
+  - parsing: numbers, a bare array, number strings, out-of-range and repeated numbers, the old doc_id format;
+  - the prompt has numbers and no doc_ids;
+  - the RRF fallback on 5 garbled replies and on an `LLMCallTimeout`;
+  - the 3 × top_k cap and its setting;
+  - the order beyond the cap: judged picks, then judged-but-unranked in RRF order, then the unjudged in RRF order, all 190 returned;
+  - the model sees the RRF head, not the merge order;
+  - the 190-document prompt stays under 13,000 characters.
+- `rag_pipeline/tests/test_supervisor_graph.py`, 3 new: a second search with nothing new makes no rerank call; one with new documents reranks only them and adds their best `top_k`; `rerank_seen` is cleared before the state is returned.
+- Full offline suite: `rag_pipeline/tests/`: 4,685 passed, 19 skipped, 1 failed. The failure is `test_the_installed_networkx_matches_the_pin`, an environment check: the Mac has networkx 3.4.2 against the pinned 3.6.1, and this change does not touch it. `tests/`: 170 passed, 3 skipped.
+
+**Not deployed.**
+
+## Stage 91 — A preview says it is one, and coordinates are checked against degrees {#stage-91}
+
+**Why.** Trap tests on agent.i-guide.io (2026-10-23, deepseek-v4-flash, 8 small uploads with one
+hidden problem each, failures rerun twice). 6 of 8 passed: -999 sentinels, 25 duplicate rows,
+mixed m/ft depths, a "001" vs 1 join key, a wrong R² stated by the user, and a control. Two
+failed the same way on every run.
+- **T1, 40 stores, lat/lon swapped.** Answer "2 within 2 km" for 4; the second run said "the 19
+  stores in the uploaded stores.csv". `inspect_file_for_analysis` returns the first
+  `DEFAULT_MAX_ROWS` = 20 lines (header plus 19 rows) with no count and no sign of more, and the
+  code that ran began `import math` with the rows typed in. The swap was noticed in run 1 only.
+- **T2, 10 parcels in EPSG:3435 (US ft), GeoJSON with no `crs`.** Answer 271.94 acres for 25.26
+  (10.76x, ft² read as m²), "cross-checked two ways" and "meters is the correct interpretation".
+  GDAL reads a GeoJSON with no CRS as EPSG:4326, so `inspect_vector` reported EPSG:4326 beside
+  bounds of 1,176,000; the area came from raw coordinates, so `sandbox_verify`'s unit checks,
+  which need a CRS on the frame, never ran.
+
+**Change.**
+- **The preview counts the file** (`langchain_file_tools._csv_preview`): `total_data_rows`,
+  `data_rows_shown`, `truncated`, and a note that it is a preview to be read by path, never copied.
+- **Swapped lat/lon** (`coord_sanity.LatLonScan`, fed every row as the CSV streams, holding only
+  the preview rows): certain when at least 90% of "lat" values pass ±90 and every "lon" is a
+  valid latitude; likely when every "lat" is south of 60°S and every "lon" is a valid latitude
+  north of it. A few "lat" values past ±90 in an otherwise correct file are reported as invalid
+  rows, not a swap. McMurdo, labelled correctly, is not flagged. (The first version kept every
+  parsed row and called one bad latitude a certain swap; both were raised by the Codex review
+  of PR #181.)
+- **Coordinates that cannot be degrees** (`coord_sanity.crs_check`): when the declared CRS is
+  missing or geographic and the bounds fail `degree_like` (the same test as
+  `terrain_tools._degree_like`), `inspect_vector` and the new `.geojson` branch of
+  `inspect_file_for_analysis` add a warning not to assume metres and to ask or state the
+  assumption, plus the projected EPSG CRSs that place the centre inside their own area of use,
+  feet first, with each one's unit, up to 8 zones per unit. Only the common families are searched
+  (US State Plane on NAD83 and NAD83(2011), UTM, a few national grids: 1,184 of 5,291 projected
+  EPSG CRSs), because building a transformer costs ~8 ms and all of them took ~40 s. T2's bounds
+  fit 7 feet zones, Arkansas South to Illinois East (EPSG:3435, centre in downtown Chicago):
+  State Plane zones share false origins, so the list says the numbers alone cannot pick one.
+  4 s cold, cached after.
+- **Typed-in data** (`code_watch`, rule `typed_in_data`, in `PARAMETER_RULES` so it goes back
+  with every result): a literal of 8+ records of 2+ numbers, or 20+ numbers flat, in code that
+  calls no reader. T1's code is flagged; the same code after `pd.read_csv` and a 3-point list are not.
+- **Harness** (`gis_harness/trap_datasets.py`, tasks X01-X08, tag `trap`; `acre` added to the
+  scorer's units). Expected values are computed independently of the agent.
+
+**Verified.** `rag_pipeline/tests/test_trap_fixes.py`, offline. Not yet run: the harness tasks
+against a live model (needs the deployment's model keys), so whether the agent now acts on the
+notes is unmeasured.

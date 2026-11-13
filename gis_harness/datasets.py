@@ -1133,6 +1133,10 @@ BUILDERS = {
     "waikiki_tsunami": waikiki_tsunami,
 }
 
+from .trap_datasets import BUILDERS as _TRAP_BUILDERS  # noqa: E402
+
+BUILDERS.update(_TRAP_BUILDERS)
+
 
 def build(name: str, out: Path, cache: Path) -> Tuple[Dict[str, Path], Dict[str, Any]]:
     out.mkdir(parents=True, exist_ok=True)

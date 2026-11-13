@@ -38,6 +38,7 @@ from .tasks import Check, Task
 UNITS: Dict[str, Tuple[str, float]] = {
     "km": ("length", 1000.0), "m": ("length", 1.0), "mi": ("length", 1609.344),
     "km2": ("area", 1e6), "m2": ("area", 1.0), "ha": ("area", 1e4), "mi2": ("area", 2589988.110336),
+    "acre": ("area", 4046.8564224),
     "min": ("time", 1.0), "h": ("time", 60.0), "s": ("time", 1 / 60),
     "deg": ("angle", 1.0),
     "ppm": ("conc", 1.0),
@@ -52,6 +53,7 @@ _UNIT_WORDS: List[Tuple[str, str]] = [
     (r"square met(?:re|er)s?|sq\.? ?m\b|m²|m\^2|m2\b", "m2"),
     (r"square miles?|sq\.? ?mi(?:les?)?|mi²|mi2", "mi2"),
     (r"hectares?|\bha\b", "ha"),
+    (r"acres?\b|\bac\b", "acre"),
     (r"kilomet(?:re|er)s?|\bkm\b", "km"),
     (r"miles?\b|\bmi\b", "mi"),
     (r"met(?:re|er)s?\b|\bm\b", "m"),
