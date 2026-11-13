@@ -91,7 +91,8 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 76 | [Map layers say what they are](#stage-76) | 2026-10-17 | `add_map_layer` render="auto" lets a given column decide (class names → categories, numbers → choropleth); `reverse_geocode` names the place at a coordinate and no prompt may name one from memory; `route` and `network` renders draw a path and its road network the way a navigation app does; the client owns the category palette and the agent sends a colour only when the user asked (`color`, `class_colors`) or it means something (Gi*, LISA) |
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
-| 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2)
+| 90 | [rs-embed gets an Earth Engine deadline and a watchdog that embeds](#stage-90) | 2026-10-21 | the service sets `ee.data.setDeadline` (`EE_DEADLINE_S`, 120 s) and `setMaxRetries` (`EE_MAX_RETRIES`, 1); `deploy/rs-embed-watchdog.sh` probes with a real embedding every five minutes and restarts the unit after two failures, bundle first. A nine-hour hang (2026-10-19 15:53 → 10-20 01:16 UTC) went unnoticed because `/api/models` kept answering in 2 ms | on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12123,3 +12124,68 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 90 — rs-embed gets an Earth Engine deadline and a watchdog that embeds {#stage-90}
+
+**The fault.** The satellite-embedding service (rs-embed, a systemd unit on the VM host, uvicorn on
+`172.17.0.1:8077`) hung from 2026-10-19 15:53 to 2026-10-20 01:16 UTC, nine hours, and nobody noticed
+until a user reported "several rsembed requests failed". Its last completed embedding was at 15:53.
+In those nine hours its journal shows 37 `GET /api/models` (all 200 in about 2 ms), 5 `/api/heads`,
+and not one answered `POST /api/embed`; the agent's turns around 00:09–00:56 UTC each waited the
+agent's full `RS_EMBED_TIMEOUT_S` of 600 s and reported that the service did not answer. The same
+state was diagnosed on 2026-08-20 (`rs-embed-service-wedges`): a status endpoint that keeps answering
+while every embedding request queues forever.
+
+**The cause.** An outbound Earth Engine call that Google never answers. The service's `getInfo()`
+calls (`rs_embed/providers/gee.py`, `gee_utils.py`) had no deadline, so a stalled call holds its
+worker thread for ever; FastAPI runs these sync endpoints in a bounded pool, and once enough workers
+are parked every later request waits behind them. Evidence from the stuck process: up 12 days, 53
+threads, 1 h 51 min of CPU, ten ESTABLISHED connections to Google addresses and none elsewhere (in
+August the stuck peer was HuggingFace); `systemctl restart` needed the 90 s stop timeout and a
+SIGKILL, and the same probe then answered 200 in 13.7 s. No thread stacks: the host has no `py-spy`.
+
+**Change 1: a deadline on every Earth Engine call** (`examples/webapp/server.py`, `_ensure_ee`, after
+`ee.Initialize`). `ee.data.setDeadline(EE_DEADLINE_S × 1000)` (120 s; 0 disables) and
+`ee.data.setMaxRetries(EE_MAX_RETRIES)` (1; the library's default of 5 would make a stalled call a
+ten-minute stall). `setDeadline` is the `requests` timeout on the Cloud API resource, and a later
+`ee.Initialize` (the provider's own `ensure_ready`) keeps it, so one call at startup covers both init
+paths. The service logs `Earth Engine ready: request deadline 120.0 s, max retries 1`.
+- **Measured, from the service's venv:** a year of Sentinel-2 over a 4°×4° box reduced at 10 m, a
+  call that runs for minutes server-side, ended in `TimeoutError` after 6.5 s with a 3 s deadline
+  (one retry); `ee.Number(1).getInfo()` under the 120 s deadline took 0.19 s.
+- **A trap, so nobody re-diagnoses it:** `setDeadline` rebuilds the API resource, and that fetches
+  Earth Engine's API description with the SAME timeout. A 1 ms test deadline therefore failed inside
+  `setDeadline` itself, and urllib3 reported the last address it tried, an IPv6 one the VM cannot
+  route, as "Network is unreachable". IPv4 was fine throughout (the description fetched in 0.1 s);
+  the message named the wrong fault. Keep the deadline in seconds, not milliseconds.
+- **Where it lives.** rs-embed gitignores `examples/**`, so this half is on the deployment and in
+  `~/webapp-backups/server.py.<ts>.pre-ee-deadline` only, like the `ZonesReq` change before it.
+
+**Change 2: a watchdog whose probe is an embedding** (`deploy/rs-embed-watchdog.sh`,
+`deploy/install-rs-embed-watchdog.sh`, unit and timer). Modelled on `agent-watchdog.sh`, with one
+deliberate difference: its probe is a real `POST /api/embed` (one precomputed gse tile over Urbana),
+because `/api/models` is exactly what kept answering.
+- A probe is a failure only when the service did not answer (timeout at `PROBE_TIMEOUT`, 120 s) or
+  answered 5xx. A 4xx, or a 200 without an embedding in it, is a wrong PROBE and is logged loudly and
+  never restarted for: a restart cannot fix the request. A unit that is not active is left alone
+  (systemd's `Restart=on-failure` covers a crash; `systemctl stop` is somebody's decision).
+- Two consecutive failures restart the unit, after a bundle in
+  `/var/log/iguide-agent/incidents/rs-embed-<ts>/` (status, process, its established connections,
+  `py-spy` stacks when the tool exists, the journal tail). Flap guard: three restarts an hour, then
+  it stops and says so. The restart is bounded at 180 s, which covers the 90 s stop timeout seen.
+- The timer runs every five minutes, so a hung service is restarted within about twelve minutes.
+- **Measured in dry runs on the VM:** the probe answered in 11 s; a probe aimed at a port nobody
+  answers failed twice, wrote a bundle (process line, 4 connections, journal) and reported it would
+  restart. Two bugs those runs caught, both silent: the JSON probe body as a `${VAR:-default}`
+  default lost its first `}` to the expansion, and the service answered 200 with no results; and a
+  log line written to stdout inside `$(probe)` became part of the verdict, so no case matched and the
+  script exited in 0.07 s having decided nothing.
+
+**Deployed, 2026-10-21.** The service was restarted onto the patched file at 15:34 UTC (no embed in
+flight; the log line above confirms the deadline; a probe answered 200 in 15.2 s). The watchdog was
+installed at 15:33:35 UTC from this branch's files, its first run passed, and the timer is live. The
+VM's checkout stays on `snapshot`; this PR only versions the watchdog and records the change.
+
+**Not done.** `py-spy` is not on the host, so the next bundle has no stacks. The agent still waits
+the full 600 s on a request that reaches a wedged service between probes. The service-side change is
+untracked by any repository.

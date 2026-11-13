@@ -968,6 +968,20 @@ state, and `py-spy` stacks for every thread. If you are debugging a hang, look t
 restarting anything, and never recover with `--force-recreate`: it deletes the container and the
 evidence with it. `journalctl -u iguide-agent-watchdog` is every decision it has made.
 
+**rs-embed hangs while looking healthy, and two things now catch it.** The satellite-embedding
+service (a systemd unit on the host, not a container) twice reached a state where `GET
+/api/models` answered in 2 ms and every `POST /api/embed` hung until the agent's own 600 s
+`RS_EMBED_TIMEOUT_S`: 2026-08-20, and 2026-10-19 15:53 to 2026-10-20 01:16 UTC, nine hours in
+which nobody noticed. The cause is an Earth Engine call Google never answers: the worker thread
+is never freed, and once enough are parked every later request queues behind them. So the
+service's startup now sets `ee.data.setDeadline` (`EE_DEADLINE_S`, 120) and `setMaxRetries`
+(`EE_MAX_RETRIES`, 1), measured to end a minutes-long call in 6.5 s, and
+`deploy/rs-embed-watchdog.sh` (timer every five minutes, `deploy/install-rs-embed-watchdog.sh`)
+runs a REAL embedding as its probe, because a status endpoint is exactly what kept answering.
+Two failed probes restart the unit after capturing a bundle beside the agent's. The deadline
+lives in the service's `examples/webapp/server.py`, which rs-embed gitignores, so that half is
+on the deployment and in `~/webapp-backups/` only. Stage 90 has the measurements.
+
 **A recreate is an outage for whoever is mid-turn.** Changing `.env` (model, tier, cookie name)
 needs the container recreated, and that hard-stops every open SSE stream — an agent turn runs for
 tens of seconds to minutes. Switching the default model on 2026-10-02 cut off eight live turns:
