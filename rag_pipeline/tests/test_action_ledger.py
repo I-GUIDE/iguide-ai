@@ -247,7 +247,9 @@ def test_every_peer_and_the_router_see_the_ledger():
     # channel that discards it", which is exactly how the chat_history route shipped broken.
     assert "_ledger_text = " in syn
     assert '"prior_actions": _ledger_text' in syn
-    assert "do_synthesize(q, evidence, ar, cr, _history, _note)" in syn
+    # Stage 92: the writer's inputs are built once (_answer_inputs) and passed as `args`.
+    assert '"args": (q, evidence, ar, cr, _history, _note)' in syn
+    assert 'do_synthesize(*_in["args"])' in syn
 
 
 # --- the ledger must reach the grounding auditor, not just the answering model -------------

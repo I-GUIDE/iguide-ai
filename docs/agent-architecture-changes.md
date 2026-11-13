@@ -92,6 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 92 | [The answer is composed while the supervisor decides](#stage-92) | 2026-11-13 | after a peer runs, the writer's call (`do_synthesize`) starts in the background beside the decider's; synthesize keeps the draft only when its own inputs are identical (canonical JSON); off with validation on, or `AGENT_SPECULATIVE_SYNTHESIS=0` |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12182,3 +12183,49 @@ At the incident's slow-hour 27 tok/s, 76 output tokens is about 3 s against abou
 - Full offline suite: `rag_pipeline/tests/`: 4,685 passed, 19 skipped, 1 failed. The failure is `test_the_installed_networkx_matches_the_pin`, an environment check: the Mac has networkx 3.4.2 against the pinned 3.6.1, and this change does not touch it. `tests/`: 170 passed, 3 skipped.
 
 **Not deployed.**
+
+## Stage 92 — The answer is composed while the supervisor decides {#stage-92}
+
+**Why.** Three questions timed live on agent.i-guide.io (2026-11-13, Lumen deepseek-v4-flash,
+`/agent/chat/stream` read from the browser with an arrival time on every event). Model calls were
+80–90% of each turn; tools and code under 12%.
+
+| question | total | model calls | tools |
+|---|---|---|---|
+| "What can you do?" | 6.7 s | 3, 5.3 s | 0.7 s |
+| area of Champaign County | 20.2 s | 6, 17.0 s | 2.3 s |
+| heat-stress dataset lookup | 45.8 s | 7, ~45 s (22 s of it the rerank Stage 89 fixed) | 0.9 s |
+
+After the peer finished, two calls ran in series: the decider (1.7 s and 1.9 s; ~1.7k tokens in,
+130–170 out) and then the writer (2.7 s and 4.9 s). The writer waits on a decision that is
+nearly always `done`: in the 363 harness turns in `gis_harness/baselines`, the route after the
+first peer was `done` in 331 (91%). The other 32 went on to search (21), code (10) or analyze (1). So
+skipping the decider would end about 1 turn in 11 too early; overlapping the two calls cannot.
+
+**Change.**
+- `_answer_inputs` (`supervisor/graph.py`): the writer's inputs and what the checks after it
+  need, moved out of `_synthesize_core` unchanged. It emits nothing and writes nothing.
+- `supervisor_node`: when a peer has just run and the decider is about to be asked,
+  `_speculate_answer` builds those inputs from the state synthesize will see if the answer is
+  `done`, and starts `do_synthesize` in a thread (`supervisor/speculation.py`, the caller's
+  contextvars copied in: trace stream, request settings, turn control). A decision other than
+  `done` drops the draft.
+- `_synthesize_core` takes the draft (`speculation.take`) only when the inputs it builds itself
+  hash to the same canonical JSON. Anything that does not serialise faithfully never drafts
+  (logged). A draft that failed is ignored and the writer is called as before.
+- **Not with validation on.** Building the inputs then recomputes reference results
+  (`reference_checks.for_log`), work the turn would do twice. The deployment default is off.
+- **Cost.** A dropped draft is a writer call that still runs and is billed: ~9% of turns by the
+  baselines, ~3k input tokens each.
+- **Trace.** The draft's `llm_start`/`llm_usage` events arrive during the supervisor stage, before
+  "Composing answer".
+
+**Expected.** About the decider's time, 1.7–1.9 s, off each turn that ends after a peer (91% by
+the baselines): 20.2 s → ~18.4 s on the Champaign question.
+
+**Verified.** `rag_pipeline/tests/test_speculative_synthesis.py` (7): the draft starts during the
+decision and is the only writer call; a decider that continues gets an answer with the later
+peer's result; off, it writes once in the turn; validation on, no draft; mismatched, dropped,
+failed and non-serialisable drafts are never used. The 21 test files that run the supervisor
+graph pass (663), after `test_action_ledger` was updated from the literal call to the `args`
+tuple. **Not yet measured live**: the expected saving needs a deployment of this branch.

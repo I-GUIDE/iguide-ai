@@ -6036,3 +6036,14 @@ rather than from the previous one.
 - **Change:** RRF pre-order, then the model judges only the first 3 × top_k (`AGENT_RERANK_MAX_CANDIDATES`; 24 by default). The rest follow in RRF order. The reply is candidate numbers only, and the RRF fallback covers garbled replies and `LLMCallTimeout`. A second search step in a turn reranks only documents no earlier step gave the rerank, and makes no model call when there are none.
 - **Measured:** on 190 docs the prompt goes from 21,400 to 2,219 tokens and the expected output from 8,554 to 75. Live on Lumen deepseek-v4-flash (172 real docs): 1,951 prompt / 76 output tokens, 1.6–1.8 s, 3 of 3 parsed. The old prompt at the same hour: 17,991 / 7,489 tokens, 97.0 s.
 - **Tests:** 14 in `test_evidence_quality.py`, 3 in `test_supervisor_graph.py`.
+
+## 2026-11-13 · speed · The answer is composed while the supervisor decides (architecture stage 92)
+
+**Change** `supervisor/speculation.py` (new); `supervisor/graph.py`: `_answer_inputs` split out of
+`_synthesize_core`, `_speculate_answer` called from `supervisor_node` before the decider;
+`test_action_ledger` source assertion updated; `test_speculative_synthesis.py` (7).
+**Why** The decider (1.7–1.9 s) and the writer (2.7–4.9 s) ran in series after every peer, and
+the decider said `done` after the first peer in 331 of 363 baseline turns.
+**Measured** Live timings before the change in architecture stage 92. Saving after: not yet
+measured live (needs a deployment); expected ~1.8 s per turn that ends after a peer.
+**Model** Lumen deepseek-v4-flash (the timings).
