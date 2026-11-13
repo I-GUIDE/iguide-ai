@@ -6047,3 +6047,9 @@ answer writer (`_stream_writer`, `_chunk_text`); `streaming_trace.emit_answer_dr
 ended (18–45 s on the questions timed), though the writer's text took 2–5 s.
 **Measured** Before, live, 2026-11-13: above. After: not yet measured live (needs a deployment).
 **Model** Lumen deepseek-v4-flash.
+
+## 2026-11-13 · M8.129 reverted · Stage 89 (rerank short) taken back out (architecture stage 89.1)
+
+- **Change:** `git revert -m 1 62513752` (PR #178). `evidence_quality.py`, `supervisor/graph.py` and their tests return to their pre-Stage-89 state; Stage 93 is kept. Entry S89.1 in `agent-architecture-changes.md` says what behaviour returns and which limits still hold.
+- **Why:** reverted at the maintainer's request on 2026-11-13; reason not recorded.
+

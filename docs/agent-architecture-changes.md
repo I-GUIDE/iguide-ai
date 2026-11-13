@@ -12184,6 +12184,16 @@ At the incident's slow-hour 27 tok/s, 76 output tokens is about 3 s against abou
 
 **Not deployed.**
 
+### S89.1 — Stage 89 reverted {#stage-89-1}
+
+**Change.** The merge of PR #178 (`62513752`, Stage 89) is reverted (`git revert -m 1`), on the maintainer's instruction of 2026-11-13. `agent_runtime/evidence_quality.py`, `agent_runtime/supervisor/graph.py` and the two test files return to their state before it; Stage 93 (`e2772eb7`, merged after it) is kept, and its changes to `graph.py` merged around the revert without conflict. The Stage 89 entry above stays as the record of what was tried and measured.
+
+**What comes back.** The evidence rerank again shows the model every merged candidate (no cap, no `AGENT_RERANK_MAX_CANDIDATES`), asks for `{doc_id, score, reason}` per document, and every search step in a turn reranks its whole merged list (no `rerank_seen`). The RRF fallback from 5ef3878a is unchanged. Two mitigations that stand independently of this stage limit how far the 2026-10-19 fault can return: Stage 85's 240 s request timeout and single retry bound one rerank call to about 8 minutes before the RRF fallback, and the VM's `AGENT_SEARCH_TOP_K=8` (set 2026-10-19) retrieves far fewer than the 190 candidates of the incident.
+
+**Reason.** Not recorded: the reversal was requested without one, and this entry does not invent one.
+
+**Tests.** The two test files return to their pre-Stage-89 content; `test_evidence_quality.py`, `test_supervisor_graph.py`, `test_fast_replies.py` and `test_supervisor_knows_its_peers.py` run green on the result (counts in the PR).
+
 ## Stage 93 — Replies that start sooner: a kept capability answer and a streamed draft {#stage-93}
 
 **Why.** Timed live on agent.i-guide.io on 2026-11-13 (Lumen deepseek-v4-flash, every SSE event
