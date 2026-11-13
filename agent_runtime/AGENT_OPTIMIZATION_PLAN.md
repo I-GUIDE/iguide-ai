@@ -166,7 +166,7 @@ Expose the pipeline-only capabilities as **native granular tools**. New module:
 - Remove `--tool-strategy` choices / collapse the param in `graph_runtime.main` and
   `langchain_agent_executor`.
 - Update README (Project Structure + the `--tool-strategy full_pipeline` CLI
-  examples I added earlier are now misleading) and `ROUTER_LLM_README.md`.
+  examples I added earlier are now misleading) and `docs/router-llm.md`.
 - Keep `rag_pipeline/search/*`, `reranker*`, `hallucination_check`, `memory_module`
   — those remain the implementations the granular tools wrap.
 
