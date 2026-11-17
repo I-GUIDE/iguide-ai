@@ -164,8 +164,13 @@ class OwnPeerSession:
     returns what THAT invocation produced, ``turn_artifacts`` accumulates the turn."""
 
     def __init__(self, llm: Any, tools: Sequence[Any], system_prompt: str,
-                 thread_key: Optional[str]) -> None:
+                 thread_key: Optional[str], agent_name: Optional[str] = "code_agent") -> None:
         self.llm = llm
+        # create_agent(name=...) puts the agent's name on every reply it stores, and the name is
+        # SENT on each later request ("name": "code_agent" on the assistant message). The loop
+        # does the same, so both loops send the model byte-identical requests (stage 94; held by
+        # a test, and what record-and-replay depends on).
+        self.agent_name = agent_name
         self.tools: List[Any] = list(tools)
         self.system_prompt = system_prompt
         self.thread_key = thread_key
@@ -228,6 +233,8 @@ class OwnPeerSession:
                 finish_instrumentation(record, error=exc)
                 raise
             ai = reply if isinstance(reply, AIMessage) else AIMessage(content=str(reply))
+            if self.agent_name and not ai.name:
+                ai.name = self.agent_name
             finish_instrumentation(record, ai)
             history.append(_with_id(ai))
             calls = list(getattr(ai, "tool_calls", None) or [])
@@ -328,7 +335,8 @@ def open_session(*, llm: Optional[Any], tools: Sequence[Any], system_prompt_over
         logger.info("code loop: own (AGENT_CODE_LOOP=own, code_loop.py)")
     prepared = (prepare or prepare_peer_tools)(list(tools), skill_roots=skill_roots)
     return OwnPeerSession(llm or build_default_llm(), prepared,
-                          peer_system_prompt(system_prompt_override), thread_key)
+                          peer_system_prompt(system_prompt_override), thread_key,
+                          agent_name="code_agent")
 
 
 __all__ = ["DEFAULT_MAX_STEPS", "LOOP_ENV", "MAX_STEPS_ENV", "OwnPeerSession", "THREADS",

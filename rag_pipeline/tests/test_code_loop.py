@@ -434,3 +434,68 @@ def test_a_runaway_code_peer_is_an_answer_under_the_own_loop(monkeypatch):
     assert calls == 12
     assert len(result["tool_calls"]) == 12 and len(result["tool_results"]) == 12
     assert len(log.results("code")) == 12
+
+
+# ------------------------------------------------------------------ the wire: identical requests
+
+def test_both_loops_send_byte_identical_requests_for_the_same_conversation():
+    """The comparison and record-and-replay both assume the model is sent the same bytes under
+    either loop. Found by this test's first version: create_agent names every stored reply
+    "code_agent" and that name is sent; the loop sent none."""
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from agent_runtime.model_client_langchain import OwnChatModel
+
+    script = [
+        {"content": "Looking it up.", "tool_calls": [{"id": "call_1", "type": "function", "function": {
+            "name": "geocode", "arguments": '{"places": ["Urbana"]}'}}]},
+        {"content": None, "tool_calls": [{"id": "call_2", "type": "function", "function": {
+            "name": "geocode", "arguments": '{"places": ["Champaign"]}'}}]},
+        {"content": "Done."},
+    ]
+    bodies: Dict[str, List[Any]] = {"graph": [], "own": []}
+    state = {"arm": "graph", "i": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):  # noqa: ANN002
+            pass
+
+        def do_POST(self):  # noqa: N802
+            bodies[state["arm"]].append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            msg = {**script[state["i"] % len(script)], "role": "assistant"}
+            state["i"] += 1
+            out = json.dumps({"id": "x", "object": "chat.completion", "model": "deepseek-v4-flash",
+                              "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}],
+                              "usage": {"prompt_tokens": 10, "completion_tokens": 2,
+                                        "total_tokens": 12}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+
+    def model():
+        return OwnChatModel(model="deepseek-v4-flash", api_key="k", base_url=base,
+                            temperature=0.0, max_retries=0)
+
+    try:
+        state.update(arm="graph", i=0)
+        agent = create_agent(model=model(), tools=[geocode], system_prompt="PROMPT",
+                             middleware=ef._default_middleware(), checkpointer=InMemorySaver(),
+                             name="code_agent")
+        _in_turn(lambda: ef.open_peer_session(
+            agent, {"configurable": {"thread_id": "g::code"}}).run("where is Urbana"))
+        state.update(arm="own", i=0)
+        _in_turn(lambda: OwnPeerSession(model(), [geocode], "PROMPT", "o::code").run("where is Urbana"))
+    finally:
+        server.shutdown()
+    assert len(bodies["graph"]) == len(bodies["own"]) == 3
+    for g, o in zip(bodies["graph"], bodies["own"]):
+        assert json.dumps(g, sort_keys=True) == json.dumps(o, sort_keys=True)
