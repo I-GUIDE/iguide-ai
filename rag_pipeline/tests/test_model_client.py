@@ -19,7 +19,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from agent_runtime import model_client, turn_control
+from agent_runtime import llm_timeout, model_client, turn_control
 from agent_runtime.model_client import ChatClient, ModelCallError, ModelCallTimeout
 
 PLAN = ("The user wants the county's area. I should call admin_boundary for Champaign "
@@ -162,13 +162,49 @@ def test_a_stalled_call_is_retried_once_then_fails(stub):
 
 
 def test_the_timeout_comes_from_the_shared_env_setting(stub, monkeypatch):
-    monkeypatch.setenv(model_client.TIMEOUT_ENV, "0.7")
-    monkeypatch.setenv(model_client.RETRIES_ENV, "0")
+    """A bare client reads stage 85's setting, the one the ChatOpenAI path reads."""
+    monkeypatch.setenv(llm_timeout.TIMEOUT_ENV, "0.7")
+    monkeypatch.setenv(llm_timeout.RETRIES_ENV, "0")
     stub.script = [{"stall": 30}]
     t0 = time.monotonic()
     with pytest.raises(ModelCallTimeout):
         ChatClient(stub.base_url, "k").complete(_body())
     assert time.monotonic() - t0 < 1.5
+
+
+def test_a_bare_client_defaults_to_stage_85s_limits(monkeypatch):
+    monkeypatch.delenv(llm_timeout.TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(llm_timeout.RETRIES_ENV, raising=False)
+    client = ChatClient("http://127.0.0.1:9/v1", "k")
+    assert (client._timeout(None), client._retries()) == (240.0, 1)
+    assert ChatClient("http://127.0.0.1:9/v1", "k", provider="anvilgpt")._timeout(None) == 280.0
+
+
+def test_off_means_no_deadline_but_stop_still_ends_the_call(stub, monkeypatch):
+    monkeypatch.setenv(llm_timeout.TIMEOUT_ENV, "off")
+    stub.script = [{"stall": 30}]
+    client = ChatClient(stub.base_url, "k", max_retries=0)
+    assert client._timeout(None) is None
+    handle = turn_control.begin(owner=None)
+    outcome: Dict[str, Any] = {}
+
+    def run() -> None:
+        with turn_control.bound(handle):
+            t0 = time.monotonic()
+            try:
+                client.complete(_body())
+            except BaseException as exc:  # noqa: BLE001
+                outcome["exc"] = exc
+            outcome["took"] = time.monotonic() - t0
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    time.sleep(1.0)
+    assert "exc" not in outcome, "with the deadline off, nothing but Stop ends the call"
+    assert turn_control.request_cancel(handle.id, None) == "cancelled"
+    worker.join(5)
+    turn_control.end(handle)
+    assert isinstance(outcome.get("exc"), turn_control.TurnCancelled)
 
 
 def test_stop_ends_a_call_mid_flight(stub):
@@ -422,13 +458,50 @@ def test_the_adapter_streams_with_the_carry_over(stub, monkeypatch):
     assert msg.usage_metadata["output_tokens"] == 4
 
 
-def test_the_adapters_timeout_surfaces_through_invoke(stub, monkeypatch):
+def test_the_adapters_timeout_surfaces_through_invoke_as_stage_85s_error(stub, monkeypatch):
+    """The supervisor treats LLMCallTimeout as fatal (no re-route to the stalled model); the own
+    client's timeout must be that class, with the same message shape."""
+    from agent_runtime.supervisor.graph import _is_fatal_peer_error
+
     stub.script = [{"stall": 30}]
     _, own = _models(stub, monkeypatch, timeout=0.6)
     t0 = time.monotonic()
-    with pytest.raises(ModelCallTimeout):
+    with pytest.raises(llm_timeout.LLMCallTimeout) as err:
         own.invoke("hi")
     assert time.monotonic() - t0 < 1.5
+    assert isinstance(err.value.__cause__, ModelCallTimeout)
+    assert _is_fatal_peer_error(err.value)
+    text = str(err.value)
+    assert text.startswith("Model call timed out after 0.6 s with no answer from deepseek-v4-flash")
+    assert "(127.0.0.1)" in text and "automatic retr" not in text, text
+    assert err.value.seconds == 0.6 and err.value.model == "deepseek-v4-flash"
+
+
+@pytest.mark.parametrize("provider,expected", [("lumen", 240.0), ("anvilgpt", 280.0),
+                                               (None, 240.0)])
+def test_the_own_client_carries_the_same_limits_as_chatopenai(monkeypatch, provider, expected):
+    """Stage 85's construction-site test, under AGENT_MODEL_CLIENT=own: one setting, one default
+    per provider, whichever client is built."""
+    from agent_runtime import executor_factory as ef
+    from agent_runtime.model_client_langchain import OwnChatModel
+
+    monkeypatch.setenv(model_client.CLIENT_ENV, "own")
+    monkeypatch.delenv(llm_timeout.TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(llm_timeout.RETRIES_ENV, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_KEY", "sk-test")
+    monkeypatch.setenv("ANVILGPT_KEY", "sk-test-anvil")
+    monkeypatch.setenv("LUMEN_API_KEY", "sk_test_not_a_real_key")
+    monkeypatch.setenv("AGENT_MODE", "dev")
+    monkeypatch.delenv("AGENT_LLM_PROVIDER", raising=False)
+    if provider:
+        monkeypatch.setenv("AGENT_LLM_PROVIDER", provider)
+    monkeypatch.setattr(ef, "_lumen_fallback", lambda: None)
+    llm = ef.build_default_llm()
+    assert isinstance(llm, OwnChatModel)
+    assert (llm.timeout, llm.max_retries) == (expected, 1)
+    assert (llm.client.timeout, llm.client.max_retries) == (expected, 1)
+    assert llm.client._timeout(None) == expected
 
 
 def test_a_create_agent_turn_runs_the_same_on_both_clients(stub, monkeypatch):

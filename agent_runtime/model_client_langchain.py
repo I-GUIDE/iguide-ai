@@ -21,7 +21,10 @@ What stays exactly as it was, and why it matters:
   reads to price a call and to recognise Lumen's (stage 59).
 
 What changes is underneath: a deadline per attempt, Stop honoured mid-call, bounded retries
-(``model_client``), and a provider error that keeps the provider's own message.
+(``model_client``), and a provider error that keeps the provider's own message. The deadline
+and the retry cap are stage 85's (``llm_timeout``): ``executor_factory`` passes the same
+``timeout`` / ``max_retries`` it passes ``ChatOpenAI``, and a timeout is raised as the same
+``LLMCallTimeout`` the supervisor treats as fatal.
 """
 
 from __future__ import annotations
@@ -48,7 +51,8 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, PrivateAttr, SecretStr
 
-from agent_runtime.model_client import ChatClient
+from agent_runtime import llm_timeout
+from agent_runtime.model_client import ChatClient, ModelCallTimeout
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -309,8 +313,20 @@ class OwnChatModel(BaseChatModel):
 
             return generate_from_stream(self._stream(messages, stop, run_manager, **kwargs))
         timeout = kwargs.pop("timeout", None)
-        response = self.client.complete(self._body(messages, stop, kwargs), timeout=timeout)
+        try:
+            response = self.client.complete(self._body(messages, stop, kwargs), timeout=timeout)
+        except ModelCallTimeout as exc:
+            raise self._restate_timeout(exc) from exc
         return self._chat_result(response)
+
+    def _restate_timeout(self, exc: ModelCallTimeout) -> llm_timeout.LLMCallTimeout:
+        """The transport's timeout as stage 85's ``LLMCallTimeout``: the text names the limit,
+        the model and the host, and the supervisor treats the class as fatal rather than
+        re-routing to the stalled model."""
+        retries = max(0, int(exc.attempts or 1) - 1)
+        return llm_timeout.LLMCallTimeout(
+            llm_timeout.describe(exc.seconds, self.model_name, self.resolved_base_url, retries),
+            seconds=exc.seconds, model=self.model_name)
 
     def _chat_result(self, response: Mapping[str, Any]) -> ChatResult:
         if response.get("error"):
@@ -343,6 +359,14 @@ class OwnChatModel(BaseChatModel):
                 **kwargs: Any) -> Iterator[ChatGenerationChunk]:
         timeout = kwargs.pop("timeout", None)
         body = self._body(messages, stop, kwargs)
+        try:
+            yield from self._stream_chunks(body, timeout, run_manager)
+        except ModelCallTimeout as exc:
+            raise self._restate_timeout(exc) from exc
+
+    def _stream_chunks(self, body: Dict[str, Any], timeout: Optional[float],
+                       run_manager: Optional[CallbackManagerForLLMRun]
+                       ) -> Iterator[ChatGenerationChunk]:
         reasoning: List[str] = []
         saw_text = False
         saw_calls = False

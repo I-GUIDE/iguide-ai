@@ -22,8 +22,9 @@ slices and, between slices, checks two things:
 * ``turn_control.cancel_requested()`` — the person pressed Stop. The call is aborted and
   :class:`~agent_runtime.turn_control.TurnCancelled` is raised at once, mid-call, not at the
   next step;
-* the attempt's deadline (``AGENT_LLM_TIMEOUT_SECONDS``). The call is aborted and, if a retry
-  is left, tried again; otherwise :class:`ModelCallTimeout` is raised.
+* the attempt's deadline (``AGENT_LLM_TIMEOUT_SECONDS``, stage 85's setting, read from
+  ``llm_timeout``). The call is aborted and, if a retry is left, tried again; otherwise
+  :class:`ModelCallTimeout` is raised.
 
 "Aborted" means the socket is shut down, not only abandoned: every attempt holds its own
 connection pool, whose sockets this module records as it opens them (``_TrackingBackend``), so
@@ -52,16 +53,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 CLIENT_ENV = "AGENT_MODEL_CLIENT"           # own | langchain (default)
-TIMEOUT_ENV = "AGENT_LLM_TIMEOUT_SECONDS"   # per attempt; shared with the ChatOpenAI path
-RETRIES_ENV = "AGENT_LLM_MAX_RETRIES"       # retries after the first attempt
 
-# Per attempt. Long enough for the slowest legitimate call measured on the harness (a code-peer
-# step writing a long script on deepseek-v4-flash), short of the ~6 min after which Lumen answers
-# a long-context call with an "Upstream error" 500, and below AnvilGPT's 300 s gateway limit.
-DEFAULT_TIMEOUT_S = 180.0
-# One retry: a transient 5xx or a dropped connection gets a second chance, a stalled provider
-# costs two deadlines (6 min) rather than the SDK's three 10-minute attempts.
-DEFAULT_MAX_RETRIES = 1
+# The deadline and the retry cap are stage 85's settings, read from ``agent_runtime.llm_timeout``
+# (``AGENT_LLM_TIMEOUT_SECONDS``: 240 s, 280 s on AnvilGPT; ``AGENT_LLM_MAX_RETRIES``: 1). One
+# definition for both clients: ``executor_factory`` passes ``client_limits(provider)`` to
+# whichever class it builds, and a bare ``ChatClient`` falls back to the same functions. ``0`` or
+# ``off`` means no deadline, as it does on the ChatOpenAI path; Stop still ends such a call.
 CONNECT_TIMEOUT_S = 15.0
 # How often the waiting thread looks at Stop and the deadline.
 _POLL_S = 0.2
@@ -81,37 +78,6 @@ def client_choice() -> str:
     return "own" if value == "own" else "langchain"
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("%s=%r is not a number; using %s", name, raw, default)
-        return default
-    return value if value > 0 else default
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return max(0, int(float(raw)))
-    except ValueError:
-        logger.warning("%s=%r is not a number; using %s", name, raw, default)
-        return default
-
-
-def default_timeout() -> float:
-    return _float_env(TIMEOUT_ENV, DEFAULT_TIMEOUT_S)
-
-
-def default_max_retries() -> int:
-    return _int_env(RETRIES_ENV, DEFAULT_MAX_RETRIES)
-
-
 class ModelCallError(RuntimeError):
     """A model call failed after its retries. The text keeps the openai SDK's
     ``Error code: <status> - <body>`` shape, which log readers and the server's error
@@ -127,7 +93,24 @@ class ModelCallError(RuntimeError):
 
 
 class ModelCallTimeout(ModelCallError):
-    """No answer within ``AGENT_LLM_TIMEOUT_SECONDS`` on every attempt."""
+    """No answer within ``AGENT_LLM_TIMEOUT_SECONDS`` on every attempt.
+
+    The LangChain face restates it as :class:`agent_runtime.llm_timeout.LLMCallTimeout`, the
+    class the supervisor treats as fatal (stage 85), so a stalled model ends the turn the same
+    way on either client.
+    """
+
+    def __init__(self, message: str, *, seconds: Optional[float] = None, **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.seconds = seconds
+
+
+def _httpx_timeout(deadline_s: Optional[float]) -> httpx.Timeout:
+    """httpx's own limit sits a little past ours, so the thread's deadline is what fires;
+    with no deadline only the connect phase is bounded."""
+    if not deadline_s:
+        return httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
+    return httpx.Timeout(deadline_s + 5.0, connect=min(CONNECT_TIMEOUT_S, deadline_s))
 
 
 def _cancel_requested() -> bool:
@@ -261,23 +244,31 @@ class ChatClient:
 
     def __init__(self, base_url: str, api_key: Optional[str], *,
                  timeout: Optional[float] = None, max_retries: Optional[int] = None,
-                 headers: Optional[Dict[str, str]] = None) -> None:
+                 headers: Optional[Dict[str, str]] = None,
+                 provider: Optional[str] = None) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self._api_key = api_key
+        # None: read stage 85's setting per call (``provider`` picks AnvilGPT's shorter default).
         self.timeout = timeout
         self.max_retries = max_retries
+        self.provider = provider
         self._headers = dict(headers or {})
         self._pool = _Pool()
 
     # -- settings, read per call so an operator's env change applies to the next call ----------
-    def _timeout(self, override: Optional[float]) -> float:
+    def _timeout(self, override: Optional[float]) -> Optional[float]:
+        """The deadline per attempt in seconds, or None for no deadline (``off``)."""
+        from agent_runtime import llm_timeout
+
         for value in (override, self.timeout):
             if value is not None and float(value) > 0:
                 return float(value)
-        return default_timeout()
+        return llm_timeout.timeout_seconds(self.provider)
 
     def _retries(self) -> int:
-        return self.max_retries if self.max_retries is not None else default_max_retries()
+        from agent_runtime import llm_timeout
+
+        return self.max_retries if self.max_retries is not None else llm_timeout.max_retries()
 
     def _request_headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json",
@@ -361,7 +352,8 @@ class ChatClient:
             time.sleep(min(_POLL_S, left))
 
     # -- one attempt ----------------------------------------------------------------------------
-    def _complete_once(self, payload: Dict[str, Any], deadline_s: float) -> Dict[str, Any]:
+    def _complete_once(self, payload: Dict[str, Any],
+                       deadline_s: Optional[float]) -> Dict[str, Any]:
         outcome = self._exchange(payload, deadline_s)
         try:
             data = json.loads(outcome.body)
@@ -374,11 +366,11 @@ class ChatClient:
                                  status=outcome.status)
         return data
 
-    def _exchange(self, payload: Dict[str, Any], deadline_s: float) -> _Outcome:
+    def _exchange(self, payload: Dict[str, Any], deadline_s: Optional[float]) -> _Outcome:
         lease = self._pool.take()
         box: Dict[str, Any] = {}
         done = threading.Event()
-        timeout = httpx.Timeout(deadline_s + 5.0, connect=min(CONNECT_TIMEOUT_S, deadline_s))
+        timeout = _httpx_timeout(deadline_s)
 
         def work() -> None:
             try:
@@ -394,23 +386,24 @@ class ChatClient:
             self._pool.give_back(lease)
             _raise_cancelled()
         threading.Thread(target=work, name="model-call", daemon=True).start()
-        deadline = time.monotonic() + deadline_s
+        deadline = time.monotonic() + deadline_s if deadline_s else None
         while not done.wait(_POLL_S):
             if _cancel_requested():
                 lease.abort()
                 _raise_cancelled()
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 lease.abort()
                 raise _Retry(ModelCallTimeout(
                     f"model call to {payload.get('model')}: no answer within {deadline_s:g} s",
-                    retryable=True))
+                    seconds=deadline_s, retryable=True))
         error = box.get("error")
         if error is not None:
             lease.abort()
             if isinstance(error, httpx.TimeoutException):
                 raise _Retry(ModelCallTimeout(
-                    f"model call to {payload.get('model')}: {type(error).__name__} "
-                    f"after {deadline_s:g} s", retryable=True)) from error
+                    f"model call to {payload.get('model')}: {type(error).__name__}"
+                    + (f" after {deadline_s:g} s" if deadline_s else ""),
+                    seconds=deadline_s, retryable=True)) from error
             if isinstance(error, httpx.TransportError):
                 raise _Retry(ModelCallError(
                     f"connection to {self.base_url} failed: {type(error).__name__}: {error}",
@@ -430,10 +423,11 @@ class ChatClient:
             raise _Retry(error, _retry_after({k.lower(): v for k, v in headers.items()}))
         raise error
 
-    def _stream_once(self, payload: Dict[str, Any], idle_s: float) -> Iterator[Dict[str, Any]]:
+    def _stream_once(self, payload: Dict[str, Any],
+                     idle_s: Optional[float]) -> Iterator[Dict[str, Any]]:
         lease = self._pool.take()
         items: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
-        timeout = httpx.Timeout(idle_s + 5.0, connect=min(CONNECT_TIMEOUT_S, idle_s))
+        timeout = _httpx_timeout(idle_s)
 
         def work() -> None:
             try:
@@ -455,19 +449,20 @@ class ChatClient:
         threading.Thread(target=work, name="model-stream", daemon=True).start()
         clean = False
         try:
-            deadline = time.monotonic() + idle_s
+            deadline = time.monotonic() + idle_s if idle_s else None
             while True:
                 try:
                     kind, value = items.get(timeout=_POLL_S)
                 except queue.Empty:
                     if _cancel_requested():
                         _raise_cancelled()          # the finally below aborts the lease
-                    if time.monotonic() >= deadline:
+                    if deadline is not None and time.monotonic() >= deadline:
                         raise _Retry(ModelCallTimeout(
                             f"stream from {payload.get('model')}: nothing for {idle_s:g} s",
-                            retryable=True))
+                            seconds=idle_s, retryable=True))
                     continue
-                deadline = time.monotonic() + idle_s
+                if idle_s:
+                    deadline = time.monotonic() + idle_s
                 if kind == "end":
                     clean = True
                     return
@@ -479,7 +474,7 @@ class ChatClient:
                     if isinstance(value, httpx.TimeoutException):
                         raise _Retry(ModelCallTimeout(
                             f"stream from {payload.get('model')}: {type(value).__name__}",
-                            retryable=True)) from value
+                            seconds=idle_s, retryable=True)) from value
                     if isinstance(value, httpx.TransportError):
                         raise _Retry(ModelCallError(
                             f"connection to {self.base_url} failed: {type(value).__name__}: "
@@ -509,6 +504,4 @@ class ChatClient:
                 lease.abort()
 
 
-__all__ = ["CLIENT_ENV", "ChatClient", "DEFAULT_MAX_RETRIES", "DEFAULT_TIMEOUT_S",
-           "ModelCallError", "ModelCallTimeout", "RETRIES_ENV", "TIMEOUT_ENV", "client_choice",
-           "default_max_retries", "default_timeout"]
+__all__ = ["CLIENT_ENV", "ChatClient", "ModelCallError", "ModelCallTimeout", "client_choice"]
