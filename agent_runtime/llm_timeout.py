@@ -37,6 +37,8 @@ import os
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
+TIMEOUT_ENV = "AGENT_LLM_TIMEOUT_SECONDS"
+RETRIES_ENV = "AGENT_LLM_MAX_RETRIES"
 DEFAULT_TIMEOUT_S = 240.0
 # AnvilGPT's nginx answers 504 at 300 s whatever the client asks for.
 ANVILGPT_TIMEOUT_S = 280.0
@@ -48,7 +50,7 @@ _OFF = {"0", "off", "none", "false", "no"}
 
 def timeout_seconds(provider: Optional[str] = None) -> Optional[float]:
     """The request timeout for ``provider``, or None when it is switched off."""
-    raw = (os.getenv("AGENT_LLM_TIMEOUT_SECONDS") or "").strip().lower()
+    raw = (os.getenv(TIMEOUT_ENV) or "").strip().lower()
     default = ANVILGPT_TIMEOUT_S if (provider or "").strip().lower() == "anvilgpt" \
         else DEFAULT_TIMEOUT_S
     if not raw:
@@ -63,7 +65,7 @@ def timeout_seconds(provider: Optional[str] = None) -> Optional[float]:
 
 
 def max_retries() -> int:
-    raw = (os.getenv("AGENT_LLM_MAX_RETRIES") or "").strip()
+    raw = (os.getenv(RETRIES_ENV) or "").strip()
     try:
         return max(0, min(MAX_RETRIES_CAP, int(raw))) if raw else DEFAULT_MAX_RETRIES
     except ValueError:
