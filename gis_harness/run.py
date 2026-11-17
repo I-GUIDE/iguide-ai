@@ -113,6 +113,7 @@ def start_server(port: int, log_path: Path,
     log = open(log_path, "a")
     log.write(f"harness: AGENT_EXTRACTION={env['AGENT_EXTRACTION']!r}, "
               f"AGENT_MODEL_CLIENT={env.get('AGENT_MODEL_CLIENT') or 'langchain'!r}, "
+              f"AGENT_CODE_LOOP={env.get('AGENT_CODE_LOOP') or 'langchain'!r}, "
               f"code-peer staging tools {staging['tools']}\n")
     log.flush()
     proc = subprocess.Popen([sys.executable, str(REPO / "api" / "server.py")], env=env,

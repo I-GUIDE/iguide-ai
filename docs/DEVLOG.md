@@ -6046,3 +6046,12 @@ rather than from the previous one.
   - Harness, 17 tasks, one trial each, lumen:deepseek-v4-flash: correct 12/13 vs 12/13, refused 4/4 vs 4/4, strict 10/17 (langchain) vs 9/17 (own). Model calls 200 vs 253, coins 0.73 vs 0.86. 0 model-call errors in either run. The extra steps are mostly one T06 reviewer-stop loop, at the same per-review stop rate.
 - **Not deployed.**
 
+## 2026-11-17 · M8.131 · The code peer runs in its own loop (architecture stage 94)
+
+- **Why:** phase 2 of the own framework (user brief 10-17). The code peer's `create_agent` graph owned the rules the run depends on: the step limit was LangGraph's `recursion_limit`, whose overrun became a peer failure with `answer: ""` and lost every recorded result; the dead-end rules were middleware; Stop came through a swallowed callback. The stage 78 review never needed the graph.
+- **Change:** `agent_runtime/code_loop.py`, `OwnPeerSession` with `PeerSession`'s face, behind `AGENT_CODE_LOOP=own` (default `langchain`), swapped at the two construction lines of `default_code_fn` (where `AGENT_CODE_PEER` already swaps the peer). Owns: `AGENT_CODE_LOOP_MAX_STEPS` (30) ending with a message that keeps results; the progress rule and repeat memo via the turn log; Stop between steps; brief + repair + the same budget trim on what is sent; tool failures worded as the graph's; a bounded per-thread history on the same key. Stays LangChain: the `StructuredTool`s (so `accept_null_defaults` is untouched), `bind_tools().invoke()` with the turn's callbacks (trace events, map layers, stage 59 cost), the messages and extractors, the supervisor graph and checkpointer.
+- **Factored for both loops:** `prepare_peer_tools`, `peer_system_prompt`, `trim_to_budget`, `run_tool_with_memo`, `progress_stop_text` in `executor_factory`; the middleware calls them now.
+- **Verified:** `test_code_loop.py` (16), including parity with the real graph on one script. Harness: HARNESS_RESULTS_PLACEHOLDER
+- **Not deployed.** The default stays `langchain`.
+
+
