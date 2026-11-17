@@ -2104,7 +2104,7 @@ def _answer_sources(state: SupervisorState,
     upstream = set(graph.calls_upstream(used)) if used else set()
     from urllib.parse import urlparse
 
-    sources = source_catalog.sources_of(pairs, (used | upstream) or None)
+    sources = source_catalog.sources_of(pairs, (set(used) | upstream) or None)
     titles = _web_titles(pairs)
     # A dataset staged from a URL is named by the title its search found it under, beside its
     # host's catalogue entry: "Chicago Public Schools - School Locations SY2425: City of Chicago
@@ -2162,17 +2162,24 @@ def _lineage_context(state: Dict[str, Any], resolutions: List[Any]) -> Dict[str,
 
 
 def _used_calls(pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]],
-                numbers: Optional[List[Dict[str, Any]]]) -> set:
+                numbers: Optional[List[Dict[str, Any]]]) -> List[str]:
     """The calls an answer used: those a stated figure resolved to (the number scan's links),
-    and those that put a layer on the map."""
-    used = {n.get("call_id") for n in (numbers or []) if n.get("call_id")}
+    and those that put a layer on the map.
+
+    An ordered list, not a set: the auditor's lineage lines are rendered in this order, and a
+    set of strings iterates in a different order in every process (hash randomisation), so two
+    identical runs sent the auditor two different prompts. Found by record-and-replay
+    (stage 96), where it was the one request per turn that never matched.
+    """
+    used: Dict[str, None] = dict.fromkeys(
+        n.get("call_id") for n in (numbers or []) if n.get("call_id"))
     for call, res in pairs:
         parsed = turn_log.parse_result(res.get("content"))
         payload = _json_or_empty(res.get("content"))
         if parsed["ok"] and (payload.get("map_layer") or payload.get("map_layers")
-                             or payload.get("on_map")):
-            used.add(res.get("tool_call_id"))
-    return used
+                             or payload.get("on_map")) and res.get("tool_call_id"):
+            used.setdefault(res.get("tool_call_id"), None)
+    return list(used)
 
 
 def _with_sources(answer: str, state: SupervisorState,

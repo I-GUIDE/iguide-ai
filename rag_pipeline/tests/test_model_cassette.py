@@ -270,3 +270,14 @@ def test_rekey_brings_an_old_cassette_up_to_the_current_rules(stub, monkeypatch,
     assert model_cassette.rekey(tmp_path) == {"rekeyed": 1, "merged": 0, "unchanged": 0}
     _use(monkeypatch, tmp_path, "replay")
     assert ChatClient(stub.base_url, "k", max_retries=0).complete(_body(duration=9.0))["x_replayed"]
+
+
+def test_the_calls_an_answer_used_keep_their_order():
+    """The auditor's lineage lines follow this order; a set of strings iterates differently in
+    every process, so two identical runs sent the auditor different prompts (found by replay)."""
+    from agent_runtime.supervisor.graph import _used_calls
+
+    numbers = [{"call_id": "call_b"}, {"call_id": "call_a"}, {"call_id": "call_b"}]
+    pairs = [({}, {"tool_call_id": "call_c",
+                   "content": json.dumps({"ok": True, "map_layer": {"id": "layer_1"}})})]
+    assert _used_calls(pairs, numbers) == ["call_b", "call_a", "call_c"]
