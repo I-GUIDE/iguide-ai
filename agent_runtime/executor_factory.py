@@ -1705,7 +1705,7 @@ def _usage_and_calls(response: Any) -> Tuple[Optional[Dict[str, Any]], List[str]
     """
     usage: Optional[Dict[str, Any]] = None
     called: List[str] = []
-    messages = getattr(response, "result", None)
+    messages = getattr(response, "result", response)
     if not isinstance(messages, list):
         messages = [messages] if messages is not None else []
     for msg in messages:
@@ -1719,85 +1719,69 @@ def _usage_and_calls(response: Any) -> Tuple[Optional[Dict[str, Any]], List[str]
     return usage, called
 
 
-def _make_instrumentation_middleware() -> Any:
-    """Record what each model call actually cost and which tools it actually used.
-
-    Placed LAST in the middleware list, which makes it INNERMOST: the first handler is the
-    outermost wrapper, so only the last one sees the request as it finally goes to the provider
-    — after repair and after the budget trim. Measuring any earlier would report a payload that
-    was never sent.
-    """
-    from langchain.agents.middleware import wrap_model_call
+def instrumentation_record(*, thread: str, model: Any, tools: List[Any], messages: List[Any],
+                           system_message: Any, ceiling: Callable[[], int]) -> Dict[str, Any]:
+    """The record of one model call about to be made, and the toolset catalog line once per
+    distinct bound set (``turn_instrumentation_toolset``, which the harness reads to check the
+    code peer's toolset). Shared by the middleware and the code peer's own loop (stage 94).
+    Empty when anything fails: instrumentation must never break a turn."""
     from langchain_core.messages.utils import count_tokens_approximately
 
-    @wrap_model_call
-    def instrument(request: Any, handler: Any) -> Any:
-        if not _instrumentation_enabled():
-            return handler(request)
+    try:
+        names = _tool_names(tools)
+        fingerprint = _toolset_fingerprint(names) if names else "none"
+        schema_tokens, per_tool = _schema_cost(tools)
+        system_tokens = (count_tokens_approximately([system_message])
+                         if system_message is not None else 0)
+        # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
+        # peer name. The prefix is the CONVERSATION id (observed live: "sess-4fa362d4-..."),
+        # NOT a turn id — every turn of a conversation shares it, so this field cannot
+        # group a turn on its own. `seq` below is what orders the calls; a turn boundary
+        # shows up as `messages` dropping back down.
+        session, _, label = thread.partition("::")
+        # The conversation id the client knows, not the caller-scoped key (S9.15).
+        from agent_runtime.thread_scope import unscoped
+        session = unscoped(session) or session
+        key = (session, label)
+        _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
+        record = {
+            "session": session,
+            "seq": _CALL_SEQ[key],
+            "peer": label or "supervisor",
+            "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
+                           if isinstance(getattr(model, a, None), str)), "unknown"),
+            "toolset": fingerprint,
+            "tools_bound": len(tools),
+            "messages": len(messages),
+            "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
+            "schema_tokens": schema_tokens,
+            # Counted separately because the provider's input_tokens includes it: a ratio
+            # against messages+schemas alone silently omits ~1,000 tokens and reports an
+            # overcount that is really a mis-comparison.
+            "system_tokens": system_tokens,
+            "ceiling": ceiling(),
+        }
+        if fingerprint not in _TOOLSET_LOGGED and per_tool:
+            _TOOLSET_LOGGED.add(fingerprint)
+            logger.info("turn_instrumentation_toolset %s", json.dumps(
+                {"toolset": fingerprint, "peer": label or "supervisor",
+                 "tools_bound": len(tools), "schema_tokens": schema_tokens,
+                 "per_tool": per_tool}, default=str))
+        return record
+    except Exception:  # noqa: BLE001 - instrumentation must never break a turn
+        return {}
 
-        record: Dict[str, Any] = {}
-        try:
-            messages = list(getattr(request, "messages", None) or [])
-            tools = list(getattr(request, "tools", None) or [])
-            names = _tool_names(tools)
-            fingerprint = _toolset_fingerprint(names) if names else "none"
-            schema_tokens, per_tool = _schema_cost(tools)
-            system = getattr(request, "system_message", None)
-            system_tokens = count_tokens_approximately([system]) if system is not None else 0
-            thread = _active_thread_id() or ""
-            # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
-            # peer name. The prefix is the CONVERSATION id (observed live: "sess-4fa362d4-..."),
-            # NOT a turn id — every turn of a conversation shares it, so this field cannot
-            # group a turn on its own. `seq` below is what orders the calls; a turn boundary
-            # shows up as `messages` dropping back down.
-            session, _, label = thread.partition("::")
-            # The conversation id the client knows, not the caller-scoped key (S9.15).
-            from agent_runtime.thread_scope import unscoped
-            session = unscoped(session) or session
-            model = getattr(request, "model", None)
-            key = (session, label)
-            _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
-            record = {
-                "session": session,
-                "seq": _CALL_SEQ[key],
-                "peer": label or "supervisor",
-                "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
-                               if isinstance(getattr(model, a, None), str)), "unknown"),
-                "toolset": fingerprint,
-                "tools_bound": len(tools),
-                "messages": len(messages),
-                "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
-                "schema_tokens": schema_tokens,
-                # Counted separately because the provider's input_tokens includes it: a ratio
-                # against messages+schemas alone silently omits ~1,000 tokens and reports an
-                # overcount that is really a mis-comparison.
-                "system_tokens": system_tokens,
-                "ceiling": _derive_budget(request),
-            }
-            if fingerprint not in _TOOLSET_LOGGED and per_tool:
-                _TOOLSET_LOGGED.add(fingerprint)
-                logger.info("turn_instrumentation_toolset %s", json.dumps(
-                    {"toolset": fingerprint, "peer": label or "supervisor",
-                     "tools_bound": len(tools), "schema_tokens": schema_tokens,
-                     "per_tool": per_tool}, default=str))
-        except Exception:  # noqa: BLE001 - instrumentation must never break a turn
-            record = {}
 
-        try:
-            response = handler(request)
-        except Exception as exc:  # noqa: BLE001
-            # The previous version logged only after a SUCCESSFUL call, so a provider rejection
-            # — the 400 the whole context budget exists to prevent — produced no line at all.
-            # That censored the sample precisely at the tail worth measuring.
-            if record:
-                record["error"] = type(exc).__name__
-                record["error_detail"] = str(exc)[:300]
-                try:
-                    logger.info("turn_instrumentation %s", json.dumps(record, default=str))
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-
+def finish_instrumentation(record: Dict[str, Any], response: Any = None,
+                           error: Optional[BaseException] = None) -> None:
+    """Complete and log *record* after the call: the provider's usage and the tools called, or
+    the error. ``response`` is a middleware ``ModelResponse`` or a bare ``AIMessage``."""
+    if not record:
+        return
+    if error is not None:
+        record["error"] = type(error).__name__
+        record["error_detail"] = str(error)[:300]
+    else:
         try:
             usage, called = _usage_and_calls(response)
             record["tools_called"] = called
@@ -1819,12 +1803,43 @@ def _make_instrumentation_middleware() -> Any:
                 record["usage"] = "absent"
         except Exception:  # noqa: BLE001
             pass
+    try:
+        logger.info("turn_instrumentation %s", json.dumps(record, default=str))
+    except Exception:  # noqa: BLE001
+        pass
 
-        if record:
-            try:
-                logger.info("turn_instrumentation %s", json.dumps(record, default=str))
-            except Exception:  # noqa: BLE001
-                pass
+
+def _make_instrumentation_middleware() -> Any:
+    """Record what each model call actually cost and which tools it actually used.
+
+    Placed LAST in the middleware list, which makes it INNERMOST: the first handler is the
+    outermost wrapper, so only the last one sees the request as it finally goes to the provider
+    — after repair and after the budget trim. Measuring any earlier would report a payload that
+    was never sent.
+    """
+    from langchain.agents.middleware import wrap_model_call
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    @wrap_model_call
+    def instrument(request: Any, handler: Any) -> Any:
+        if not _instrumentation_enabled():
+            return handler(request)
+
+        record = instrumentation_record(
+            thread=_active_thread_id() or "", model=getattr(request, "model", None),
+            tools=list(getattr(request, "tools", None) or []),
+            messages=list(getattr(request, "messages", None) or []),
+            system_message=getattr(request, "system_message", None),
+            ceiling=lambda: _derive_budget(request))
+        try:
+            response = handler(request)
+        except Exception as exc:  # noqa: BLE001
+            # The previous version logged only after a SUCCESSFUL call, so a provider rejection
+            # — the 400 the whole context budget exists to prevent — produced no line at all.
+            # That censored the sample precisely at the tail worth measuring.
+            finish_instrumentation(record, error=exc)
+            raise
+        finish_instrumentation(record, response)
         return response
 
     return instrument

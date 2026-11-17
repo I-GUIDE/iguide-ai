@@ -198,7 +198,7 @@ class OwnPeerSession:
 
     # -- the loop -------------------------------------------------------------------------
     def _loop(self, history: List[BaseMessage]) -> None:
-        from agent_runtime.executor_factory import progress_stop_text
+        from agent_runtime.executor_factory import finish_instrumentation, progress_stop_text
         from agent_runtime.streaming_trace import attach_streaming_callbacks
 
         log, run = turn_log.active(), turn_log.active_run()
@@ -221,8 +221,14 @@ class OwnPeerSession:
             self.steps += 1
             logger.info("code loop: step %d/%d, %d message(s), %d tool(s) bound",
                         step, limit, len(messages), len(self.tools))
-            reply = self._bound.invoke([system, *messages], config=config)
+            record = self._instrumentation(system, messages)
+            try:
+                reply = self._bound.invoke([system, *messages], config=config)
+            except Exception as exc:
+                finish_instrumentation(record, error=exc)
+                raise
             ai = reply if isinstance(reply, AIMessage) else AIMessage(content=str(reply))
+            finish_instrumentation(record, ai)
             history.append(_with_id(ai))
             calls = list(getattr(ai, "tool_calls", None) or [])
             invalid = list(getattr(ai, "invalid_tool_calls", None) or [])
@@ -237,6 +243,20 @@ class OwnPeerSession:
                 history.append(_with_id(self._run_call(call, config)))
         logger.warning("code loop run %s ended at its step limit (%d model calls)", run, limit)
         history.append(_with_id(AIMessage(content=step_limit_text(limit))))
+
+    def _instrumentation(self, system: SystemMessage, messages: List[BaseMessage]) -> Dict[str, Any]:
+        """The same ``turn_instrumentation`` record and toolset catalog line the middleware
+        logs, under the thread key the graph would have used, so the harness's toolset check
+        and the per-call instrumentation read both loops alike."""
+        from agent_runtime import executor_factory as ef
+
+        if not ef._instrumentation_enabled():
+            return {}
+        request = SimpleNamespace(model=self.llm, system_message=system, tools=self.tools,
+                                  messages=messages)
+        return ef.instrumentation_record(
+            thread=self.thread_key or "", model=self.llm, tools=self.tools, messages=messages,
+            system_message=system, ceiling=lambda: ef._derive_budget(request))
 
     def _system_message(self) -> SystemMessage:
         from agent_runtime.executor_factory import _BRIEF_HEADER

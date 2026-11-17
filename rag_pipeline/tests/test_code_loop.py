@@ -297,6 +297,28 @@ def test_trace_events_and_cost_are_recorded_through_the_same_callbacks():
     assert len(handler.calls) == 2, "the configure-hook cost handler saw both model calls"
 
 
+def test_the_toolset_catalog_and_per_call_instrumentation_are_logged(monkeypatch, caplog):
+    """The harness reads `turn_instrumentation_toolset` with peer == "code" to check the code
+    peer's toolset; the own loop logs it under the same thread key the graph would."""
+    import logging
+
+    monkeypatch.delenv(ef.INSTRUMENTATION_ENV, raising=False)
+    ef._TOOLSET_LOGGED.clear()
+    replies = [AIMessage(content="", tool_calls=[_call("geocode", {"places": ["A"]}, 1)]),
+               AIMessage(content="done")]
+    with caplog.at_level(logging.INFO, logger="agent_runtime.executor_factory"):
+        _in_turn(lambda: _session(replies, thread="sess-9::code").run("q"))
+    catalog = [json.loads(r.message.split(" ", 1)[1]) for r in caplog.records
+               if r.message.startswith("turn_instrumentation_toolset ")]
+    assert len(catalog) == 1 and catalog[0]["peer"] == "code"
+    assert set(catalog[0]["per_tool"]) == {"geocode", "boom", "boundary"}
+    calls = [json.loads(r.message.split(" ", 1)[1]) for r in caplog.records
+             if r.message.startswith("turn_instrumentation ")]
+    assert [c["peer"] for c in calls] == ["code", "code"]
+    assert calls[0]["session"] == "sess-9" and calls[0]["tools_called"] == ["geocode"]
+    assert calls[1]["tools_called"] == [] and calls[1]["messages"] == 3  # human, ai, tool
+
+
 # ------------------------------------------------------------------ the switch
 
 def test_the_flag_defaults_to_langchain(monkeypatch):
