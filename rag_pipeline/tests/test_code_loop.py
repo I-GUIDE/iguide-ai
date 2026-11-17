@@ -381,3 +381,56 @@ def test_open_session_prepares_the_tools_the_graph_would_bind(monkeypatch):
     assert seen["tools"] == TOOLS and seen["kwargs"] == {"skill_roots": ["/nowhere"]}
     assert [t.name for t in session.tools] == ["geocode"]
     assert session.system_prompt == "P"
+
+
+# ------------------------------------------------------------------ check 3: a runaway code peer
+#
+# Four of the seven step-limit overruns in the harness archive (683 turns, 2026-11-17) were the
+# code peer (T06 once, T08L three times). This drives a code peer that never stops calling tools
+# through the REAL path the code node takes: default_code_fn, whichever loop it builds, and the
+# supervisor's _run_peer, with only the tool list replaced. Every call returns something new, so
+# the progress rule does not end the run first: only the step limit can.
+
+def _runaway(monkeypatch, loop: str):
+    import agent_runtime.supervisor.graph as graph
+
+    counter = {"n": 0}
+
+    @tool
+    def measure(i: int) -> str:
+        """Measure something new."""
+        counter["n"] += 1
+        return json.dumps({"ok": True, "value": i * 7, "n": counter["n"]})
+
+    replies = [AIMessage(content="", tool_calls=[_call("measure", {"i": i}, i)])
+               for i in range(1, 200)]
+    monkeypatch.setenv(code_loop.LOOP_ENV, loop)
+    monkeypatch.setenv("AGENT_RECURSION_LIMIT", "25")       # the graph's floor
+    monkeypatch.setenv(code_loop.MAX_STEPS_ENV, "12")       # the same model calls, roughly
+    monkeypatch.setenv("AGENT_SKILLS_ENABLED", "0")
+    monkeypatch.setattr(ef, "prepare_peer_tools", lambda tools, **kw: [measure])
+    fn = graph.default_code_fn(llm=ToolAwareFake(messages=iter(replies)), code_exec=False,
+                               input_file_ids=None, code_peer="langchain")
+    state = {"thread_id": f"runaway-{loop}", "query": "q"}
+    log = turn_log.new_log()
+    with turn_log.bind(log, "code", "Task: q"):
+        result, failure = graph._run_peer("code", lambda: fn("q", [], state), state)
+    return result, failure, counter["n"], log
+
+
+def test_a_runaway_code_peer_is_a_failure_under_the_graph(monkeypatch):
+    result, failure, calls, log = _runaway(monkeypatch, "langchain")
+    assert result is None
+    assert "recursion limit" in failure["error"].lower()
+    assert calls >= 10
+    # What survives is the turn log's record, not the peer's result (stage 42).
+    assert len(log.results("code")) == calls
+
+
+def test_a_runaway_code_peer_is_an_answer_under_the_own_loop(monkeypatch):
+    result, failure, calls, log = _runaway(monkeypatch, "own")
+    assert failure is None
+    assert result["answer"] == code_loop.step_limit_text(12)
+    assert calls == 12
+    assert len(result["tool_calls"]) == 12 and len(result["tool_results"]) == 12
+    assert len(log.results("code")) == 12
