@@ -241,3 +241,32 @@ def test_a_miss_can_be_diffed_against_the_nearest_recording(stub, monkeypatch, t
     [d] = model_cassette.diff_misses(tmp_path)
     assert "Urbana" in d["recorded"] and "Peoria" in d["live"]
     assert d["recorded"][:40] == d["live"][:40]
+
+
+def test_a_sandbox_run_time_does_not_break_a_match():
+    """The first live replay's misses: execute_code's `ran_seconds` (1.4 recorded, 1.3 live)."""
+    def body(ran: float) -> Dict[str, Any]:
+        result = json.dumps({"ok": True, "ran_seconds": ran, "time_limit_s": 180, "exit_code": 0,
+                             "summary": {"mean_ms": ran * 1000}})
+        return {"model": "m", "messages": [{"role": "tool", "tool_call_id": "c", "content": result}]}
+    a, _ = model_cassette.normalize(body(1.4))
+    b, _ = model_cassette.normalize(body(1.3))
+    assert a == b
+    c, _ = model_cassette.normalize({"model": "m", "messages": [
+        {"role": "tool", "tool_call_id": "c", "content": json.dumps({"exit_code": 1})}]})
+    assert c != a, "values that are not times still count"
+
+
+def test_rekey_brings_an_old_cassette_up_to_the_current_rules(stub, monkeypatch, tmp_path):
+    _use(monkeypatch, tmp_path, "record")
+    ChatClient(stub.base_url, "k", max_retries=0).complete(_body())
+    [path] = list(tmp_path.glob("*.json"))
+    entry = json.loads(path.read_text())
+    # As an older rule set would have stored it: a run time left in, keyed on that.
+    entry["request"] = entry["request"].replace('\\"duration_s\\": 0', '\\"duration_s\\": 1.25')
+    entry["key"] = model_cassette.request_key(entry["request"])
+    path.unlink()
+    (tmp_path / f"{entry['key']}.json").write_text(json.dumps(entry))
+    assert model_cassette.rekey(tmp_path) == {"rekeyed": 1, "merged": 0, "unchanged": 0}
+    _use(monkeypatch, tmp_path, "replay")
+    assert ChatClient(stub.base_url, "k", max_retries=0).complete(_body(duration=9.0))["x_replayed"]

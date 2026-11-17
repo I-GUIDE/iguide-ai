@@ -73,9 +73,13 @@ _TOKEN_RE = re.compile(
 )
 # Blanked to a constant: values that differ every run and are never referred back to.
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+# Any field whose name says it is a time in seconds or milliseconds: a word for time anywhere in
+# the key, or the `_s` / `_ms` suffix. The first live replay missed at every turn's first code
+# result on execute_code's `ran_seconds` (1.4 s recorded, 1.3 s live), which a list of exact
+# names had left out. A setting like `time_limit_s` is blanked too, harmlessly: it is constant.
 _DURATION_RE = re.compile(
-    r'(\\?"(?:duration_s|duration_ms|duration|elapsed_s|elapsed|seconds|took_s|runtime_s|wall_s|'
-    r'wall_time_s|time_s)\\?"\s*:\s*)-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?')
+    r'(\\?"(?:[a-z_]*(?:seconds|secs|duration|elapsed|took|runtime|wall_time|latency)[a-z_]*'
+    r'|[a-z_]+_s|[a-z_]+_ms)\\?"\s*:\s*)-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?')
 _PLACEHOLDER_RE = re.compile(r"\u27e6id:(\d+)\u27e7")
 
 
@@ -303,6 +307,46 @@ def summarize(directory: Path) -> Dict[str, Any]:
             "hit_rate": round(hits / calls, 3) if calls else None}
 
 
+def renormalize(normalized: str) -> str:
+    """A stored compared request under the CURRENT blanking rules. Token numbering is already
+    in place, so only the constant blanks are reapplied (idempotent)."""
+    text = _TIMESTAMP_RE.sub("\u27e6ts\u27e7", normalized)
+    return _DURATION_RE.sub(lambda m: m.group(1) + "0", text)
+
+
+def rekey(directory: Path) -> Dict[str, int]:
+    """Bring a cassette's keys up to the current rules without re-recording: every entry that
+    kept its compared request is re-keyed, and entries that now share a key are merged."""
+    directory = Path(directory)
+    moved = merged = kept = 0
+    for path in sorted(directory.glob("*.json")):
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        if not isinstance(entry.get("request"), str):
+            kept += 1
+            continue
+        text = renormalize(entry["request"])
+        key = request_key(text)
+        if key == entry.get("key"):
+            kept += 1
+            continue
+        target = directory / f"{key}.json"
+        if target.exists():
+            other = json.loads(target.read_text(encoding="utf-8"))
+            other["answers"] = other.get("answers", []) + entry.get("answers", [])
+            other["request"] = text
+            target.write_text(json.dumps(other, ensure_ascii=False), encoding="utf-8")
+            merged += 1
+        else:
+            entry.update(key=key, request=text)
+            target.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+            moved += 1
+        path.unlink()
+    return {"rekeyed": moved, "merged": merged, "unchanged": kept}
+
+
 def first_difference(a: str, b: str, context: int = 160) -> Dict[str, Any]:
     """Where two compared requests part: the offset and the text around it in each."""
     n = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
@@ -346,7 +390,12 @@ def _main(argv: Optional[List[str]] = None) -> int:
     rep.add_argument("directory", type=Path)
     rep.add_argument("--diff", action="store_true",
                      help="for each miss, where it first differs from the nearest recorded request")
+    rk = sub.add_parser("rekey", help="re-key a cassette under the current matching rules")
+    rk.add_argument("directory", type=Path)
     a = ap.parse_args(argv)
+    if a.cmd == "rekey":
+        print(rekey(a.directory))
+        return 0
     if a.diff:
         for d in diff_misses(a.directory):
             print(f"miss {d['miss'][:12]} ({d['messages']} messages, {(d['caller'] or '')[:40]!r}) "
@@ -370,4 +419,4 @@ if __name__ == "__main__":
 
 __all__ = ["Cassette", "CassetteMiss", "DIR_ENV", "LOG_NAME", "MODE_ENV", "MODES", "active",
            "decode_answer", "diff_misses", "encode_answer", "first_difference", "normalize",
-           "request_key", "summarize"]
+           "rekey", "renormalize", "request_key", "summarize"]
