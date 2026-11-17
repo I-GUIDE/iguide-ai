@@ -42,6 +42,7 @@ from __future__ import annotations
 import math
 import shutil
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -89,6 +90,39 @@ _SIB = ("For an uploaded shapefile, pass the .shp's file_id (or any single compo
 # Areal statistics need enough observations for a permutation reference distribution to mean
 # anything. Below this, report the number but say plainly that it is not inferable.
 _MIN_OBS = 8
+
+# Every permutation test in this module draws from one fixed seed, so the same layer, column and
+# weights give the same z-score and pseudo p-value on every call. The local statistics take it as
+# an argument. The global ones (Moran, Geary, G) take no seed and draw from numpy's process-wide
+# generator, so :func:`_seeded_permutations` seeds that generator around each call.
+_PERMUTATION_SEED = 42
+_GLOBAL_RNG_LOCK = threading.Lock()
+
+
+@contextmanager
+def _seeded_permutations() -> Iterator[None]:
+    """Seed numpy's global generator for one esda statistic, then put the caller's state back.
+
+    esda's global Moran, Geary and G call ``np.random.permutation`` with no way to pass a seed, so
+    their z-score and pseudo p-value changed on every call: on a spatially random 64-cell layer,
+    Getis-Ord G read "significant" (p < 0.05) in 7 of 30 identical calls. A recorded turn could not
+    be replayed either, because the next model request carried a different number (Stage 97).
+
+    The lock serialises these sections against each other across gunicorn threads, and the state
+    is restored afterwards, so nothing else in the process sees a reseeded generator. A draw from
+    the global generator on another thread during the call would still shift this sequence. No
+    code in the agent draws from it unseeded (the samplers pass ``random_state``), so that is a
+    library-level residual, not a path the agent takes.
+    """
+    import numpy as np
+
+    with _GLOBAL_RNG_LOCK:
+        state = np.random.get_state()
+        np.random.seed(_PERMUTATION_SEED)
+        try:
+            yield
+        finally:
+            np.random.set_state(state)
 
 
 def _fmt(value: Any, digits: int = 4) -> Any:
@@ -627,12 +661,20 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 _island_note(w, notes)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    moran = esda.Moran(y, w, permutations=perms)
-                    geary = esda.Geary(y, w, permutations=perms)
+                    # Each statistic is seeded on its own, so Geary's result does not depend
+                    # on how many draws Moran made, and moran_scatterplot reports the same
+                    # Moran's I p-value as this tool.
+                    with _seeded_permutations():
+                        moran = esda.Moran(y, w, permutations=perms)
+                    with _seeded_permutations():
+                        geary = esda.Geary(y, w, permutations=perms)
                     try:
                         # Getis-Ord G is only defined for a non-negative variable (it is a ratio
                         # of weighted to total sums), so a z-score column would make it nonsense.
-                        getis = esda.G(y, w, permutations=perms) if (y >= 0).all() else None
+                        getis = None
+                        if (y >= 0).all():
+                            with _seeded_permutations():
+                                getis = esda.G(y, w, permutations=perms)
                     except Exception:
                         getis = None
 
@@ -720,7 +762,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 island_idx = set(int(i) for i in w.islands)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    lisa = esda.Moran_Local(y, w, permutations=perms, seed=42)
+                    lisa = esda.Moran_Local(y, w, permutations=perms, seed=_PERMUTATION_SEED)
 
             # libpysal quadrant codes: 1=HH, 2=LH, 3=LL, 4=HL. Getting this mapping wrong swaps
             # the outliers for the clusters, which is why it is written out literally.
@@ -851,7 +893,7 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                     # The transform goes to G_Local too: it re-applies its own, which is "R"
                     # unless told otherwise, whatever the W arrived with.
                     g = esda.G_Local(y, w, transform=tr.upper(), permutations=perms,
-                                     star=bool(star), seed=42, n_jobs=1)
+                                     star=bool(star), seed=_PERMUTATION_SEED, n_jobs=1)
 
             z = np.asarray(g.Zs, dtype="float64")
             p = np.asarray(g.p_sim, dtype="float64")
@@ -958,7 +1000,8 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                 _island_note(w, notes)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    moran = esda.Moran(y, w, permutations=perms)
+                    with _seeded_permutations():
+                        moran = esda.Moran(y, w, permutations=perms)
                     std = (y - y.mean()) / (y.std() or 1.0)
                     lag = np.asarray(lag_spatial(w, std), dtype="float64")
 

@@ -92,6 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
+| 97 | [Every permutation test uses one seed](#stage-97) | 2026-11-17 | the global Moran, Geary and G permutation tests and the scatterplot's Moran draw from a fixed seed, as the local LISA and Gi* already did; the same call now gives the same z-score and pseudo p-value (G on a random layer was "significant" in 7 of 30 identical calls) |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12123,3 +12124,41 @@ The issue was paused for discussion on 2026-09-18 and picked up for the Hawaii d
   - the supervisor asks a timed-out model once, records a fatal failure with the message, and still answers.
 - **Deployed pins.** The same tests and the neighbouring provider/peer-failure suites (87) pass inside `iguide-lockbuild:agent-api` (openai 3.14.1, langchain-openai 1.6.2, as `constraints.txt` pins).
 - **Not deployed.**
+
+## Stage 97 — Every permutation test uses one seed {#stage-97}
+
+**The fault.** The spatial-statistics tools report a pseudo p-value from random reshufflings of the column (999 by default). The local tools, `local_moran_lisa` and `local_getis_ord`, passed `seed=42` to esda. The global ones did not, because esda's `Moran`, `Geary` and `G` take no seed argument: they call `np.random.permutation`, numpy's process-wide generator. That covered `global_spatial_autocorrelation` (all three statistics) and the Moran's I in `moran_scatterplot`. So the same layer, column and weights gave a different z-score and p-value on every call.
+- **A verdict that flips.** On the test lattice's spatially random `noise` column (64 cells, queen weights, 999 permutations), 30 identical calls gave these pseudo p-values:
+
+  | statistic | p range | calls below 0.05 |
+  |---|---|---|
+  | Moran's I | 0.442–0.500 | 0 of 30 |
+  | Geary's C | 0.411–0.470 | 0 of 30 |
+  | Getis-Ord G | 0.040–0.069 | 7 of 30 |
+
+  The tool turns p < 0.05 into "(significant)". So on unchanged data, G told the user high values cluster significantly in about a quarter of calls and not in the rest.
+- **Two tools, two answers.** `moran_scatterplot` prints Moran's p-value in its title, and `global_spatial_autocorrelation` reports it too. The two ran separate unseeded draws, so a user looking at both saw two different p-values for one statistic.
+- **A recorded turn could not be replayed.** With the Stage 96 model cassette, T09 diverged at call 4 on both code-peer loops: the analyze peer's tool result carried a Moran z-score of 4.714 in the recording and 4.408 on replay, so the next model request differed. T01, T04 and T12, which run no permutation test, replayed whole.
+
+**Change** (`agent_runtime/analysis_spatial_stats_tools.py`).
+- **One seed.** `_PERMUTATION_SEED = 42` is used by all four permutation tests. The two local calls now pass it instead of a literal 42, so they give the same results as before.
+- **The global calls run inside `_seeded_permutations()`.** It takes a module lock, saves numpy's global state, seeds it, runs one esda call, and restores the state. Restoring means code that draws from the global generator after a tool runs sees the sequence it would have seen anyway.
+- **Each statistic is seeded on its own.** Seeding once before all three would make Geary's draws depend on how many Moran made. Seeding each one also gives Moran's I the same draws in the global tool and the scatterplot, so both report one p-value.
+- **The lock** keeps two calls on different gunicorn threads from interleaving inside the seeded section. Measured cost of seeding and restoring: 0.05 ms per call.
+- **Not changed.** The p-values that change are new draws, not a new method; the `permutations` argument and its clamp are as before. On the noise column G is now p = 0.052 on every call. Regionalization is unchanged: pygeoda's AZP and max-p already default to a fixed `random_seed`, and SKATER, REDCAP and SCHC are deterministic. Every other random draw in the agent already passes a seed (`gdf.sample(random_state=0)`, `PCA(random_state=0)`, the zonal worker's `default_rng(seed)`).
+
+**Residual.** A draw from numpy's global generator on another thread, while a seeded section is running, would still shift that call's sequence. The lock only serialises these tools against each other. No agent code draws from the global generator unseeded, so this needs a library that does so on its own.
+
+**Why not reimplement the permutation test with a local generator.** It would remove the residual, but it would mean recomputing esda's `z_sim`, `p_sim` and their two-tailed handling outside esda. That is a second engine for one number, which this module's header rules out. esda 2.9.0, the version `constraints.txt` pins, draws the same way in all three classes (checked in its source), so seeding the global generator works on the deployed image as on the Mac (esda 2.10.0).
+
+**Verified.**
+- **Tests** in `rag_pipeline/tests/test_spatial_stats_tools.py` (5 new, 51 in the file):
+  - the global tool returns identical z-scores and p-values on two calls, with unrelated global draws in between;
+  - a caller's seeded global sequence is the same after both tools run;
+  - the scatterplot and the global tool report the same Moran's p;
+  - four concurrent calls on threads match a call made alone;
+  - the local LISA and Gi* results are identical across calls.
+- **The first three fail on the unchanged module**; the local-statistics test passes there, since those were already seeded.
+- **On the deployed pins.** In a virtual environment installed through `constraints.txt` (esda 2.9.0, libpysal 4.14.1, numpy 2.4.6), the seeded Moran, Geary and G on an 8×8 lattice repeat exactly and leave the caller's generator state untouched. They give the same z-scores and p-values as the Mac's esda 2.10.0 and numpy 2.1.3, to six decimals. A cassette recorded on one stack therefore matches the other.
+- **Not deployed.** Replaying T09 through the cassette needs a new recording, because the recorded tool results carry the old unseeded numbers.
+
