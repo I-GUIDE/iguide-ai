@@ -6029,3 +6029,10 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-11-17 · M8.132 · Stop ends the turn at the supervisor's next step (architecture stage 95)
+
+- **The fault:** on the default `ChatOpenAI` stack, Stop during a stalled code-peer call did not stop the turn. The call ran to its timeout, the openai SDK retried it, the timed-out peer counted as a fatal failure, and synthesis answered from general knowledge: 2 model requests and 91 s after Stop (`fault_checks.py`, scenario `stop`). The cancellation check lived only in the peers' streaming callback handler.
+- **Change:** every supervisor node starts with `raise_if_cancelled()` (`_stoppable`); `_run_peer` re-raises a failure after Stop as `TurnCancelled`; every `ChatOpenAI` sends through a shared httpx client whose request hook refuses a request for a stopped turn, the SDK's retries included (`_stoppable_http_client`).
+- **Measured:** the same live scenario on `lumen:deepseek-v4-flash`: model requests after Stop 2 → 0; turn ended 91.0 s → 42.5 s after Stop, with the stopped message. The rest is the in-flight call reaching its timeout, which is still not interrupted.
+- **Tests:** `test_stop_between_steps.py` (7; 5 fail before the change), also green with `test_llm_request_timeout.py` on openai 3.14.1 / langchain-openai 1.6.2.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -236,6 +237,38 @@ def _reasoning_text(choice: Any) -> str:
     return ""
 
 
+_STOPPABLE_HTTP_CLIENT: Any = None
+_STOPPABLE_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _refuse_after_stop(request: Any) -> None:
+    """httpx request hook: a model request is not sent for a turn its person has stopped."""
+    from agent_runtime import turn_control
+
+    turn_control.raise_if_cancelled()
+
+
+def _stoppable_http_client() -> Any:
+    """The httpx client every ``ChatOpenAI`` here sends through, shared like LangChain's default.
+
+    Its one difference from the openai client's own default is a request hook that raises
+    ``TurnCancelled`` once the turn has been stopped (Stage 95). The hook runs before every HTTP
+    request, including the openai SDK's automatic retries, which happen inside one ``invoke``
+    where no LangChain callback sees them. Measured before it: Stop pressed during a stalled
+    call, the call timed out 42 s later and the SDK sent its retry anyway, a model request made
+    after Stop. ``TurnCancelled`` is a ``BaseException``, so the SDK's retry loop, which catches
+    ``Exception``, does not swallow it.
+    """
+    global _STOPPABLE_HTTP_CLIENT
+    with _STOPPABLE_HTTP_CLIENT_LOCK:
+        if _STOPPABLE_HTTP_CLIENT is None:
+            import openai
+
+            _STOPPABLE_HTTP_CLIENT = openai.DefaultHttpxClient(
+                event_hooks={"request": [_refuse_after_stop]})
+        return _STOPPABLE_HTTP_CLIENT
+
+
 def _reasoning_preserving_chat_openai() -> Any:
     """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message."""
     import httpx
@@ -247,6 +280,12 @@ def _reasoning_preserving_chat_openai() -> Any:
     _timeouts = (openai.APITimeoutError, httpx.TimeoutException)
 
     class ReasoningPreservingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
+        def __init__(self, **kwargs: Any) -> None:
+            # A caller's own client (or proxy) wins; otherwise Stop reaches every request.
+            if kwargs.get("http_client") is None and not kwargs.get("openai_proxy"):
+                kwargs["http_client"] = _stoppable_http_client()
+            super().__init__(**kwargs)
+
         def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
             result = super()._create_chat_result(response, generation_info)
             try:
