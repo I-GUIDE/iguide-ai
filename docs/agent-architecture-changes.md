@@ -12246,7 +12246,22 @@ A full rewrite was rejected. Phase 2 replaces the code peer's LOOP only, behind 
   | errors | 0 | 1 (T06 hit the harness's 1,200 s cap) |
 
   - **Where they diverge.** Four tasks: T02L and T09 were wrong on the current loop and right on the own loop; U01 substituted on the current loop and refused on the own loop; T06 was right on the current loop (478 s) and hit the 1,200 s cap on the own loop, wrong. T06 is the whole cost difference: 0.550 coins and 70 calls on the own loop against 0.343 and 47. Without T06 the own loop spent 0.652 coins in 190 calls against 0.820 in 237. On the own loop's T06 the time went to the supervisor routing analyze → code → analyze → code over pysheds watershed code (24 reviews); the code peer's second run was ended by the progress rule, as the graph's would be. Phase 1's own-client run had the same T06 pattern.
-  - **Against the switch rule** (strict ≥ current AND steps and cost ≤): strict 11 ≥ 7 and model calls 260 ≤ 284 hold; cost 1.202 > 1.163 does not, by 3%, all of it T06. One trial does not separate this from deepseek's run-to-run variation, so **the default stays `langchain`** until the four divergent tasks have three trials per loop.
-  - **The sandbox**: the first attempt measured nothing. Docker Desktop was not running and the `iguide-codeexec` image was no longer on the Mac, so every `execute_code` failed with a connection error. The image was rebuilt (`docker build --platform linux/amd64 -t iguide-codeexec sandbox/`; an arm64 build fails on `gdal-config`) and both runs were restarted from scratch. That image runs under emulation on Apple silicon, so pysheds and numba are slower here than on the deployed Linux VM, equally for both loops.
+  - **Against the switch rule** (strict ≥ current AND steps and cost ≤): strict 11 ≥ 7 and model calls 260 ≤ 284 hold; cost 1.202 > 1.163 does not, by 3%, all of it T06. One trial does not separate this from deepseek's run-to-run variation, so the four divergent tasks were run three times per loop (below).
+  - **Three trials on the four divergent tasks** (T02L, T06, T09, U01; two more trials per loop, same code, side by side):
+
+  | four tasks × 3 trials | current loop | own loop |
+  |---|---|---|
+  | strict | 5/12 | 4/12 |
+  | correct (solvable) | 7/9 | 7/9 |
+  | refused (unsolvable) | 3/3 (2 substituted) | 3/3 (1 substituted) |
+  | unproductive steps | 30 | 47 |
+  | model calls | 220 | 273 |
+  | Lumen coins | 1.200 | 1.694 |
+  | seconds | 3,267 | 4,357 |
+  | errors | 0 | 1 (the capped T06) |
+
+  Per trial the spread is wide on both loops: T06 cost 0.343 / 0.174 / 0.383 coins on the current loop and 0.550 / 0.427 / 0.268 on the own loop, and one own-loop T09 trial took 38 calls where the others took 8 and 9. T06 was the heavier task on the own loop in two of three trials, and it was also the heavy task in stage 88's own-client run; the cause is not established. Both loops carry the code thread's history the same way (message counts per call restart and grow identically); the own loop's larger mean request comes from that one 25-step T06 code run, not from a difference in what is sent.
+- **Estimated over the 17 tasks** (one trial of the 13 tasks that agreed, the three-trial mean of the four that did not): strict 8.7 → 10.3, model calls 269 → 250, coins 1.106 → 1.129 (+2%). Against the switch rule (strict ≥ and steps and cost ≤), strict and steps pass and cost fails by 2%, inside the per-trial spread. **The default stays `langchain`.** Two tasks whose strict result also differed on one trial (T08, U03: clean on the own loop, a banner on the current) were not rerun, because their outcome agreed. In all, this stage's measurement spent about 4.9 Lumen coins.
+- **The sandbox**: the first attempt measured nothing. Docker Desktop was not running and the `iguide-codeexec` image was no longer on the Mac, so every `execute_code` failed with a connection error. The image was rebuilt (`docker build --platform linux/amd64 -t iguide-codeexec sandbox/`; an arm64 build fails on `gdal-config`) and both runs were restarted from scratch. That image runs under emulation on Apple silicon, so pysheds and numba are slower here than on the deployed Linux VM, equally for both loops.
 - **Not deployed.** The default stays `langchain`.
 
