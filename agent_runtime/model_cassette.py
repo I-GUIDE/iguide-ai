@@ -180,6 +180,15 @@ class Cassette:
                 "caller": _caller(body), "messages": len(messages),
                 "last_role": last.get("role"), "stream": bool(body.get("stream"))}
 
+    def _keep_miss(self, key: str, normalized: str, info: Dict[str, Any]) -> None:
+        try:
+            misses = self.dir / "misses"
+            misses.mkdir(exist_ok=True)
+            (misses / f"{key}.json").write_text(
+                json.dumps({**info, "request": normalized}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            logger.debug("miss write failed", exc_info=True)
+
     # -- the two directions -----------------------------------------------------------------
     def replay(self, body: Dict[str, Any], kind: str) -> Optional[Any]:
         """The recorded answer for *body*, or None. Strict replay raises CassetteMiss."""
@@ -202,6 +211,7 @@ class Cassette:
         if stored is None:
             self._log(hit=False, mode=self.mode, served="live" if self.mode == "replay_or_live"
                       else "refused", **info)
+            self._keep_miss(key, normalized, info)
             if self.mode == "replay":
                 raise CassetteMiss(f"cassette miss: no recorded answer for request {key} "
                                    f"({info['caller'][:40]!r}, {info['messages']} messages)")
@@ -220,9 +230,10 @@ class Cassette:
                        else encode_answer(answer, numbering))
         info = self._describe(body, key)
         with self._lock:
+            # The compared text is kept so a later miss can be diffed against it (`report --diff`).
             entry = self._load(key) or {"key": key, "model": body.get("model"),
                                         "caller": info["caller"], "messages": info["messages"],
-                                        "answers": []}
+                                        "request": normalized, "answers": []}
             entry["answers"].append({"kind": kind, "answer": stored,
                                      "recorded_at": round(time.time(), 3)})
             tmp = self._path(key).with_suffix(".tmp")
@@ -292,6 +303,40 @@ def summarize(directory: Path) -> Dict[str, Any]:
             "hit_rate": round(hits / calls, 3) if calls else None}
 
 
+def first_difference(a: str, b: str, context: int = 160) -> Dict[str, Any]:
+    """Where two compared requests part: the offset and the text around it in each."""
+    n = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+    start = max(0, n - context // 2)
+    return {"offset": n, "recorded": a[start:n + context], "live": b[start:n + context]}
+
+
+def diff_misses(directory: Path) -> List[Dict[str, Any]]:
+    """Each miss against the recorded request it shares the longest prefix with."""
+    directory = Path(directory)
+    recorded = []
+    for path in directory.glob("*.json"):
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        if isinstance(entry.get("request"), str):
+            recorded.append(entry)
+    out = []
+    for path in sorted((directory / "misses").glob("*.json")):
+        miss = json.loads(path.read_text(encoding="utf-8"))
+        live = miss.get("request") or ""
+        best = None
+        for entry in recorded:
+            d = first_difference(entry["request"], live)
+            if best is None or d["offset"] > best[1]["offset"]:
+                best = (entry, d)
+        if best:
+            out.append({"miss": miss.get("key"), "caller": miss.get("caller"),
+                        "messages": miss.get("messages"), "nearest": best[0].get("key"),
+                        **best[1]})
+    return out
+
+
 def _main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
@@ -299,7 +344,16 @@ def _main(argv: Optional[List[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     rep = sub.add_parser("report", help="hits and first misses per turn")
     rep.add_argument("directory", type=Path)
+    rep.add_argument("--diff", action="store_true",
+                     help="for each miss, where it first differs from the nearest recorded request")
     a = ap.parse_args(argv)
+    if a.diff:
+        for d in diff_misses(a.directory):
+            print(f"miss {d['miss'][:12]} ({d['messages']} messages, {(d['caller'] or '')[:40]!r}) "
+                  f"vs {d['nearest'][:12]}, differs at char {d['offset']}:")
+            print(f"  recorded: {d['recorded']!r}")
+            print(f"  live:     {d['live']!r}")
+        return 0
     s = summarize(a.directory)
     print(f"{s['hits']}/{s['calls']} calls served from the cassette (hit rate {s['hit_rate']})")
     for turn, t in s["turns"].items():
@@ -315,4 +369,5 @@ if __name__ == "__main__":
 
 
 __all__ = ["Cassette", "CassetteMiss", "DIR_ENV", "LOG_NAME", "MODE_ENV", "MODES", "active",
-           "decode_answer", "encode_answer", "normalize", "request_key", "summarize"]
+           "decode_answer", "diff_misses", "encode_answer", "first_difference", "normalize",
+           "request_key", "summarize"]

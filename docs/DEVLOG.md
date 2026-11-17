@@ -6054,4 +6054,12 @@ rather than from the previous one.
 - **Verified:** `test_code_loop.py` (19): parity with the real graph on one script, and a runaway code peer that is a peer failure under the graph and an answer with all 12 results under the own loop. Fault injection on live servers (`gis_harness/fault_checks.py`): stalls and slow 500s are bounded on both stacks (stage 85); Stop mid-call closed the call in 0.08 s with no further request on the redesign, while the current stack kept the call 42 s, made 2 more requests and composed an answer 91 s after Stop (fixed separately, stage 95 / #187). Harness, 1 trial, 17 tasks: strict 7 → 11, correct 11 → 12 of 13, model calls 284 → 260, coins 1.163 → 1.202 (+3%, all T06, which hit the 1,200 s cap on the own loop). Three trials on the four divergent tasks (T02L, T06, T09, U01): strict 5/12 → 4/12, calls 220 → 273, coins 1.200 → 1.694, with wide per-trial spread (T06 0.17–0.55 coins). Estimated over 17 tasks: strict 8.7 → 10.3, calls 269 → 250, coins 1.106 → 1.129 (+2%). Cost fails the switch rule by 2%, inside the noise; the default stays `langchain`. ~4.9 coins spent measuring. Afterwards a byte-level comparison found the graph sends `"name": "code_agent"` on every earlier assistant message and the own loop sent none; the loop now matches (a test holds the requests identical), so the runs above carried that difference.
 - **Not deployed.** The default stays `langchain`.
 
+## 2026-11-17 · M8.133 · Model calls can be recorded and replayed (architecture stage 96)
+
+- **Why:** stage 94's comparison spent ~4.9 coins and ended on a 2% cost gap inside deepseek's per-trial spread (T06 0.17–0.55 coins). Replay removes the model's variance: both versions answer from one recording, and the first differing request is where they part.
+- **Change:** `agent_runtime/model_cassette.py` in the own client's `complete` / `stream`. `AGENT_MODEL_CASSETTE=<dir>`, `AGENT_MODEL_CASSETTE_MODE=record|replay|replay_or_live`. Requests match after blanking timestamps and durations and numbering per-run ids (file/layer/run/thread ids, uuids, digests, temp paths), and answers are stored with the same numbering, so a replay names the live run's files. Per-call replay log and `python -m agent_runtime.model_cassette report`. Replayed calls marked on `llm_usage`. Refused outside local/dev mode; no header stored.
+- **Verified:** `test_model_cassette.py` (11). Live: REPLAY_RESULTS_PLACEHOLDER
+- **Not deployed.** Off unless the variable is set.
+
+
 

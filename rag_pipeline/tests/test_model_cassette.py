@@ -231,3 +231,13 @@ def test_normalizing_numbers_tokens_in_order_and_blanks_measurements():
     assert model_cassette.request_key(a) == model_cassette.request_key(b)
     c, _ = model_cassette.normalize(_body(text="where is Peoria"))
     assert model_cassette.request_key(c) != model_cassette.request_key(a)
+
+
+def test_a_miss_can_be_diffed_against_the_nearest_recording(stub, monkeypatch, tmp_path):
+    _use(monkeypatch, tmp_path, "record")
+    ChatClient(stub.base_url, "k", max_retries=0).complete(_body())
+    _use(monkeypatch, tmp_path, "replay_or_live")
+    ChatClient(stub.base_url, "k", max_retries=0).complete(_body(text="where is Peoria"))
+    [d] = model_cassette.diff_misses(tmp_path)
+    assert "Urbana" in d["recorded"] and "Peoria" in d["live"]
+    assert d["recorded"][:40] == d["live"][:40]
