@@ -12284,7 +12284,25 @@ A full rewrite was rejected. Phase 2 replaces the code peer's LOOP only, behind 
 **Limits.** A tool whose output changes between runs makes the next request differ: a live web search, Overpass, or the stage 78 reviewer, whose prompt carries a live stack sample. Those are misses, and the log names the caller. Streams are stored chunk by chunk, so a minted id split across two chunks would not be renumbered.
 
 **Verified.**
-- **Tests** (`rag_pipeline/tests/test_model_cassette.py`, 11): a recorded request is answered after the stub server has shut down; a live run's different file id, path, duration and timestamp still match, and the replayed tool call names the live run's file; strict replay refuses a new request; `replay_or_live` sends it live without writing the cassette, and the report puts the first miss at call 2; repeats replay in order; a stream records and replays; `token` and `demo` mode record nothing; the API key reaches the server and never the cassette; a replayed call's `llm_usage` event says `replayed`.
-- **Live**: REPLAY_RESULTS_PLACEHOLDER
+- **Tests** (`rag_pipeline/tests/test_model_cassette.py`, 15): a recorded request is answered after the stub server has shut down; a live run's different file id, path, duration and timestamp still match, and the replayed tool call names the live run's file; strict replay refuses a new request; `replay_or_live` sends it live without writing the cassette, and the report puts the first miss at call 2; repeats replay in order; a stream records and replays; `token` and `demo` mode record nothing; the API key reaches the server and never the cassette; a replayed call's `llm_usage` event says `replayed`; a sandbox run time does not break a match; `rekey` brings an old cassette up to new rules; `report --diff` finds where a miss parts; the calls an answer used keep their order.
+- **Live, on the harness** (`lumen:deepseek-v4-flash`, own client, T01, T04, T09, T12; record once on the own loop, then `replay_or_live` through each loop on its own copy of the cassette). Three rounds, each fixing what the previous one's `report --diff` showed:
+
+  | round | what the diff showed | same-loop replay |
+  |---|---|---|
+  | first | (no request text kept yet) | 11 of 40 calls served; every turn missed at call 3 or 4 |
+  | after `report --diff` | execute_code's `ran_seconds` (1.4 s recorded, 1.3 s live) was not blanked | T04 + T12: 26 of 28 served; one miss per turn, the auditor's prompt |
+  | after both fixes | the auditor's lineage lines came out in set order, different in every process (`_used_calls`) | below |
+
+  | final, same recording | own loop | current loop |
+  |---|---|---|
+  | T01 | 7/7, no miss | 7/7, no miss |
+  | T04 | 9/9, no miss | 9/9, no miss |
+  | T12 | 14/14, no miss | 14/14, no miss |
+  | T09 | first miss at call 4 | first miss at call 4 |
+  | all calls served | 33 of 53 | 33 of 41 |
+
+  - **T01, T04 and T12 replay whole on both loops.** Every model request of those turns, under either loop, matched the recording byte for byte (after the numbering and blanking above), so on those turns the two loops are equivalent with the model's variance removed, and those turns cost nothing to rerun.
+  - **T09 parts in the analyze peer, before the code peer runs, on both loops alike**: its spatial-statistics tool computes Moran's I with random permutations, and the z-score differs every run (4.714 recorded, 4.408 live). That is a tool, not a loop. After it, the stage 78 reviewer's prompts (a live stack sample) differ too, as expected.
+- **Found on the way, fixed here.** The auditor's prompt was not the same on two identical runs: `_used_calls` returned a set, whose string order changes per process. It is now an ordered list (tested). And stage 94's own loop sent no `name` on its stored replies where `create_agent` sends `"code_agent"`; that fix is on #188.
 
 

@@ -6058,7 +6058,8 @@ rather than from the previous one.
 
 - **Why:** stage 94's comparison spent ~4.9 coins and ended on a 2% cost gap inside deepseek's per-trial spread (T06 0.17–0.55 coins). Replay removes the model's variance: both versions answer from one recording, and the first differing request is where they part.
 - **Change:** `agent_runtime/model_cassette.py` in the own client's `complete` / `stream`. `AGENT_MODEL_CASSETTE=<dir>`, `AGENT_MODEL_CASSETTE_MODE=record|replay|replay_or_live`. Requests match after blanking timestamps and durations and numbering per-run ids (file/layer/run/thread ids, uuids, digests, temp paths), and answers are stored with the same numbering, so a replay names the live run's files. Per-call replay log and `python -m agent_runtime.model_cassette report`. Replayed calls marked on `llm_usage`. Refused outside local/dev mode; no header stored.
-- **Verified:** `test_model_cassette.py` (11). Live: REPLAY_RESULTS_PLACEHOLDER
+- **Verified:** `test_model_cassette.py` (15). Live, T01/T04/T09/T12 recorded once on the own loop and replayed through each loop: the first replay served 11 of 40 calls; `report --diff` found execute_code's `ran_seconds` unblanked (fixed: any time-named or `_s`/`_ms` field), then the auditor's lineage lines in per-process set order (`_used_calls`, fixed to an ordered list). Final: T01, T04, T12 replay whole on BOTH loops (7/7, 9/9, 14/14), so the loops are equivalent on those turns; T09 parts at call 4 in the analyze peer on both, because Moran's I's random permutations change its z-score (4.714 vs 4.408).
+- **Also:** `rekey` re-keys a cassette under new rules from the requests it kept; `report --diff` shows where a miss parts from the nearest recording.
 - **Not deployed.** Off unless the variable is set.
 
 
