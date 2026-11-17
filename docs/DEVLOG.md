@@ -6029,3 +6029,10 @@ rather than from the previous one.
   - No `max_tokens`.
 - **Why 240:** the longest gap between Lumen completions inside a prod turn on 2026-10-19 was 44 s (295 calls, p99 33 s).
 - **Tests:** `test_llm_request_timeout.py` (36): a construction-site scan, the limits on every built client, and a local stalled server (plain, stream, async, bound tools) that ends at the timeout with the expected request count. The supervisor stops after one timeout. Also green on the deployed pins (openai 3.14.1).
+
+## 2026-11-17 · M8.134 · Every permutation test uses one seed (architecture stage 97)
+
+- **The fault:** esda's global `Moran`, `Geary` and `G` take no seed and draw from numpy's global generator. `global_spatial_autocorrelation` and `moran_scatterplot` therefore gave a different z-score and p-value on every call. On a spatially random 64-cell layer, Getis-Ord G read "significant" in 7 of 30 identical calls (p 0.040–0.069). The scatterplot and the global tool showed two different p-values for one Moran's I. T09 could not be replayed from a Stage 96 cassette (z 4.714 recorded, 4.408 on replay).
+- **Change:** `_seeded_permutations()` seeds numpy's global generator with `_PERMUTATION_SEED` (42) around each global esda call, under a lock, and restores the caller's state. Each statistic is seeded on its own. The local LISA and Gi* already passed `seed=42` and now use the same constant.
+- **Residual:** an unseeded global draw on another thread during a call would still shift it; no agent code makes one.
+- **Tests:** 5 new in `test_spatial_stats_tools.py` (51 pass): repeat calls match, the caller's generator is untouched, scatterplot and global Moran's p agree, concurrent calls match, local results repeat. Three of them fail on the old module. The seeded values repeat and match exactly on the deployed pins (esda 2.9.0, numpy 2.4.6) and the Mac (esda 2.10.0, numpy 2.1.3).

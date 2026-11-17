@@ -321,6 +321,78 @@ def test_permutation_inference_starts_no_process_pool(lattice, monkeypatch):
         assert r["ok"] is True, (tool, extra, r.get("error"))
 
 
+def _global_inference(r):
+    return {k: (v["z_score"], v["p_value"]) for k, v in r["results"].items()}
+
+
+def test_global_permutation_inference_is_the_same_on_every_call(lattice):
+    """esda's global Moran, Geary and G take no seed and draw from numpy's global generator, so
+    the same call returned a different z-score and p-value each time (Stage 97). The noise
+    column is the case that matters: its G p-value sat either side of 0.06. Draws in between
+    move the global generator, and the result must not care."""
+    tools = _tools()
+    args = {"file_id": lattice, "column": "noise"}
+    first = _global_inference(json.loads(tools["global_spatial_autocorrelation"].invoke(args)))
+    np.random.seed(None)
+    np.random.random(17)
+    second = _global_inference(json.loads(tools["global_spatial_autocorrelation"].invoke(args)))
+    assert set(first) == {"morans_i", "gearys_c", "getis_ord_g"}
+    assert first == second
+
+
+def test_seeding_leaves_the_callers_generator_where_it_was(lattice):
+    """The seed is applied around each esda call and the previous state put back, so code that
+    draws from numpy's global generator after a tool runs sees the sequence it would have seen."""
+    np.random.seed(7)
+    expected = np.random.random(5)
+    np.random.seed(7)
+    for tool in ("global_spatial_autocorrelation", "moran_scatterplot"):
+        r = json.loads(_tools()[tool].invoke({"file_id": lattice, "column": "noise"}))
+        assert r["ok"] is True, (tool, r.get("error"))
+    assert np.array_equal(np.random.random(5), expected)
+
+
+def test_scatterplot_and_global_tool_report_the_same_morans_p(lattice):
+    """Each statistic is seeded on its own, so Moran's I gets the same draws in both tools and a
+    user reading the scatterplot beside the global result sees one p-value, not two."""
+    pytest.importorskip("matplotlib")
+    tools = _tools()
+    args = {"file_id": lattice, "column": "noise"}
+    g = json.loads(tools["global_spatial_autocorrelation"].invoke(args))
+    s = json.loads(tools["moran_scatterplot"].invoke(args))
+    assert s["p_value"] == g["results"]["morans_i"]["p_value"]
+
+
+def test_concurrent_calls_get_the_same_result(lattice):
+    """gunicorn serves turns on several threads of one process, and the generator being seeded is
+    process-wide. The lock keeps one call's seeded section from interleaving with another's."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    tools = _tools()
+    args = {"file_id": lattice, "column": "noise"}
+    alone = _global_inference(json.loads(tools["global_spatial_autocorrelation"].invoke(args)))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(
+            lambda _: _global_inference(json.loads(
+                tools["global_spatial_autocorrelation"].invoke(args))), range(4)))
+    assert all(r == alone for r in results)
+
+
+def test_local_statistics_are_the_same_on_every_call(lattice):
+    """The local statistics were already seeded through esda's own argument. Held here so the
+    four permutation tests in the module stay consistent."""
+    tools = _tools()
+    for tool in ("local_moran_lisa", "local_getis_ord"):
+        runs = []
+        for _ in range(2):
+            np.random.random(3)
+            r = json.loads(tools[tool].invoke({"file_id": lattice, "column": "noise"}))
+            assert r["ok"] is True, (tool, r.get("error"))
+            runs.append({k: v for k, v in r.items() if k not in ("file_id", "download_url",
+                                                                   "map_layer", "csv")})
+        assert runs[0] == runs[1], tool
+
+
 # --- Moran scatterplot ----------------------------------------------------------------
 
 
