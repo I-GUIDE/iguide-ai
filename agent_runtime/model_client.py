@@ -129,6 +129,26 @@ def _raise_cancelled() -> None:
     raise turn_control.TurnCancelled("stopped by the user")
 
 
+def _cassette() -> Any:
+    """The active record-and-replay cassette (stage 96), or None."""
+    try:
+        from agent_runtime import model_cassette
+
+        return model_cassette.active()
+    except Exception:  # noqa: BLE001 - a broken cassette never stops a call
+        logger.warning("model cassette unavailable", exc_info=True)
+        return None
+
+
+def _replayed(tape: Any, payload: Dict[str, Any], kind: str) -> Any:
+    from agent_runtime import model_cassette
+
+    try:
+        return tape.replay(payload, kind)
+    except model_cassette.CassetteMiss as exc:
+        raise ModelCallError(str(exc), retryable=False) from exc
+
+
 class _TrackingBackend(httpcore.SyncBackend):
     """httpcore's own backend, remembering every socket it opens so an abort can shut it.
 
@@ -283,8 +303,25 @@ class ChatClient:
 
     # -- public ---------------------------------------------------------------------------------
     def complete(self, body: Dict[str, Any], *, timeout: Optional[float] = None) -> Dict[str, Any]:
-        """One non-streamed completion. Returns the provider's JSON."""
+        """One non-streamed completion. Returns the provider's JSON.
+
+        With a cassette (``model_cassette``, stage 96) a recorded request is answered from it,
+        marked ``x_replayed``, and a live answer may be recorded.
+        """
         payload = {**body, "stream": False}
+        tape = _cassette()
+        if tape is not None:
+            if _cancel_requested():
+                _raise_cancelled()
+            replayed = _replayed(tape, payload, "complete")
+            if replayed is not None:
+                return {**replayed, "x_replayed": True}
+        data = self._complete_live(payload, timeout)
+        if tape is not None:
+            tape.record(payload, data, "complete")
+        return data
+
+    def _complete_live(self, payload: Dict[str, Any], timeout: Optional[float]) -> Dict[str, Any]:
         deadline_s = self._timeout(timeout)
         retries = self._retries()
         for n in range(retries + 1):
@@ -304,6 +341,25 @@ class ChatClient:
         """
         payload = {**body, "stream": True}
         payload.setdefault("stream_options", {"include_usage": True})
+        tape = _cassette()
+        if tape is not None:
+            if _cancel_requested():
+                _raise_cancelled()
+            replayed = _replayed(tape, payload, "stream")
+            if replayed is not None:
+                for chunk in replayed:
+                    yield {**chunk, "x_replayed": True}
+                return
+            collected: List[Dict[str, Any]] = []
+            for chunk in self._stream_live(payload, timeout):
+                collected.append(chunk)
+                yield chunk
+            tape.record(payload, collected, "stream")
+            return
+        yield from self._stream_live(payload, timeout)
+
+    def _stream_live(self, payload: Dict[str, Any],
+                     timeout: Optional[float]) -> Iterator[Dict[str, Any]]:
         idle_s = self._timeout(timeout)
         retries = self._retries()
         for n in range(retries + 1):

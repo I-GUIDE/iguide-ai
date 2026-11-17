@@ -345,6 +345,8 @@ class OwnChatModel(BaseChatModel):
             info: Dict[str, Any] = {"finish_reason": choice.get("finish_reason")}
             if "logprobs" in choice:
                 info["logprobs"] = choice["logprobs"]
+            if response.get("x_replayed"):
+                info["replayed"] = True         # answered from a cassette (stage 96)
             generations.append(ChatGeneration(message=message, generation_info=info))
         llm_output: Dict[str, Any] = {
             "token_usage": usage, "model_provider": "openai",
@@ -388,6 +390,8 @@ class OwnChatModel(BaseChatModel):
                 saw_calls = saw_calls or bool(calls)
                 info = ({"finish_reason": choice["finish_reason"]}
                         if choice.get("finish_reason") else None)
+                if info is not None and chunk.get("x_replayed"):
+                    info["replayed"] = True     # answered from a cassette (stage 96)
                 if text or calls or info:
                     msg = AIMessageChunk(content=text, tool_call_chunks=calls)
                     gen = ChatGenerationChunk(message=msg, generation_info=info)

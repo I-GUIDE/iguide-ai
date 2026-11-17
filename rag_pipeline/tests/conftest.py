@@ -187,6 +187,10 @@ _CLEARED = (
     # Which loop runs the code peer (stage 94). The suite's peer tests pin the create_agent
     # graph; test_code_loop.py sets it where it means to.
     "AGENT_CODE_LOOP",
+    # Record-and-replay (stage 96): a cassette inherited from a shell would record the suite's
+    # fake calls, or answer them from a recording.
+    "AGENT_MODEL_CASSETTE",
+    "AGENT_MODEL_CASSETTE_MODE",
 )
 
 for _name in ([] if _LIVE else _CLEARED):
