@@ -12214,6 +12214,39 @@ A full rewrite was rejected. Phase 2 replaces the code peer's LOOP only, behind 
 **Not changed.** The analyze and search peers (still `create_agent`). The context budget's derivation, the turn log, the ledger, lineage, the stage 78 reviewer. The instrumentation middleware's per-call log line is not reproduced: it is bound to LangChain's `ModelRequest`, and the loop logs its own compact line; the harness reads trace events, not that log.
 
 **Verified.**
-- **Tests** (`rag_pipeline/tests/test_code_loop.py`, 16): the flat shape; parity with the real `create_agent` graph and middleware on one script (same `tool_calls`, same `tool_results`, same answer, same repeat answered from the log); the step limit ends with a message and keeps its results; the progress rule ends a run that repeats itself after one real call; unknown tool, tool exception and unparseable call worded as the graph's; `null` for an optional argument means the default; Stop raises `TurnCancelled` and keeps what ran; the brief is in every system message; the history persists per thread and is bounded; the budget trims what is sent and not what is stored; trace events and the configure-hook cost handler see every call; the flag defaults to `langchain`, and `default_code_fn` builds the graph by default and the loop when selected (`create_agent` patched to fail proves it is not reached).
-- **Harness**: HARNESS_RESULTS_PLACEHOLDER
+- **Tests** (`rag_pipeline/tests/test_code_loop.py`, 19): the flat shape; parity with the real `create_agent` graph and middleware on one script (same `tool_calls`, same `tool_results`, same answer, same repeat answered from the log); the step limit ends with a message and keeps its results; the progress rule ends a run that repeats itself after one real call; unknown tool, tool exception and unparseable call worded as the graph's; `null` for an optional argument means the default; Stop raises `TurnCancelled` and keeps what ran; the brief is in every system message; the history persists per thread and is bounded; the budget trims what is sent and not what is stored; trace events and the configure-hook cost handler see every call; the flag defaults to `langchain`, and `default_code_fn` builds the graph by default and the loop when selected (`create_agent` patched to fail proves it is not reached).
+- **A runaway code peer** (`test_code_loop.py`, check 3): a scripted model that never stops calling a tool returning something new each time, driven through the real `default_code_fn` and the supervisor's `_run_peer`. Under the graph it is a peer failure ("recursion limit"); under the own loop it is an answer carrying all 12 results.
+- **Fault injection on live local servers** (`gis_harness/fault_checks.py`, 2026-11-17, commit 5223f6f5, `lumen:deepseek-v4-flash`): a proxy forwards every model call to Lumen except the code peer's, which it stalls, answers with a 500 after 8 s, or stalls while Stop is pressed 3 s in. Same query and commit; `current` = default client and graph loop, `redesign` = `AGENT_MODEL_CLIENT=own` + `AGENT_CODE_LOOP=own`; timeout 20 s (45 s for Stop), 1 retry.
+
+  | scenario | config | code-peer attempts | each held | turn | after Stop |
+  |---|---|---|---|---|---|
+  | stall | current | 2 | 20.0, 20.0 s | 63 s | |
+  | stall | redesign | 2 | 20.1, 20.2 s | 65 s | |
+  | 500 after 8 s | current | 2 | 8.1, 8.1 s | 43 s | |
+  | 500 after 8 s | redesign | 2 | 8.0, 8.1 s | 44 s | |
+  | Stop mid-call | current | 2 | 45.0, 45.0 s | 114 s | call closed 42 s later; 2 more model requests; full answer composed 91 s later |
+  | Stop mid-call | redesign | 1 | 3.1 s | 23 s | call closed 0.08 s later; 0 more requests; turn ended 0.08 s later |
+
+  - **Stall and 500 are bounded on both stacks**, by stage 85 rather than this stage: two attempts, each cut at the limit, where the SDK default was three attempts of up to 600 s.
+  - **Stop is where the stacks differ.** On the current stack Stop did not stop the turn at all. The stalled call ran to its timeout, the SDK retried it (a model request made after Stop), the code peer failed with `LLMCallTimeout`, and the supervisor went on to synthesis and composed a general-knowledge answer (a second request after Stop), 91 s after the person pressed Stop. The cancel route answered 200 throughout. On the redesign the stalled call's socket closed 0.08 s after Stop, nothing else was sent, and the turn ended with "[Stopped before an answer was composed: stopped by the user.]". The current-stack half is a defect of the deployed default, fixed on its own in stage 95 (#187): no request after Stop, though the call in flight still runs to its timeout there.
+- **Harness, one trial per loop, `lumen:deepseek-v4-flash`, same code (5223f6f5), two servers side by side**, 17 tasks (T01–T12 with T02L, U01–U04), `AGENT_LLM_PROVIDER=lumen` so the code-run reviewer also ran on Lumen, both on the default model client:
+
+  | | current loop | own loop |
+  |---|---|---|
+  | correct (solvable) | 11/13 | 12/13 |
+  | refused (unsolvable) | 3/4 (1 substituted) | 3/4 |
+  | strict | 7/17 | 11/17 |
+  | zero unproductive | 7/17 | 11/17 |
+  | unproductive steps (dup / failed) | 27 (7 / 20) | 21 (5 / 16) |
+  | banners | 5 | 1 |
+  | model calls | 284 | 260 |
+  | input / output tokens | 6.88 M / 134 K | 7.11 M / 140 K |
+  | Lumen coins | 1.163 | 1.202 |
+  | seconds | 3,382 | 3,449 |
+  | errors | 0 | 1 (T06 hit the harness's 1,200 s cap) |
+
+  - **Where they diverge.** Four tasks: T02L and T09 were wrong on the current loop and right on the own loop; U01 substituted on the current loop and refused on the own loop; T06 was right on the current loop (478 s) and hit the 1,200 s cap on the own loop, wrong. T06 is the whole cost difference: 0.550 coins and 70 calls on the own loop against 0.343 and 47. Without T06 the own loop spent 0.652 coins in 190 calls against 0.820 in 237. On the own loop's T06 the time went to the supervisor routing analyze → code → analyze → code over pysheds watershed code (24 reviews); the code peer's second run was ended by the progress rule, as the graph's would be. Phase 1's own-client run had the same T06 pattern.
+  - **Against the switch rule** (strict ≥ current AND steps and cost ≤): strict 11 ≥ 7 and model calls 260 ≤ 284 hold; cost 1.202 > 1.163 does not, by 3%, all of it T06. One trial does not separate this from deepseek's run-to-run variation, so **the default stays `langchain`** until the four divergent tasks have three trials per loop.
+  - **The sandbox**: the first attempt measured nothing. Docker Desktop was not running and the `iguide-codeexec` image was no longer on the Mac, so every `execute_code` failed with a connection error. The image was rebuilt (`docker build --platform linux/amd64 -t iguide-codeexec sandbox/`; an arm64 build fails on `gdal-config`) and both runs were restarted from scratch. That image runs under emulation on Apple silicon, so pysheds and numba are slower here than on the deployed Linux VM, equally for both loops.
+- **Not deployed.** The default stays `langchain`.
 
