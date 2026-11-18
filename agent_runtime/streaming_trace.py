@@ -630,6 +630,10 @@ class UsageCallbackHandler(BaseCallbackHandler):
             model = self._models.pop(str(kwargs.get("run_id")), None)
             base = self._bases.pop(str(kwargs.get("run_id")), None)
         usage: Dict[str, Any] = {}
+        # Answered from a record-and-replay cassette (stage 96): the usage is the recorded call's,
+        # so this cost is what the path would cost, not money spent now.
+        replayed = any((getattr(g, "generation_info", None) or {}).get("replayed")
+                       for group in getattr(response, "generations", None) or [] for g in group or [])
         for group in getattr(response, "generations", None) or []:
             for generation in group or []:
                 um = getattr(getattr(generation, "message", None), "usage_metadata", None)
@@ -645,6 +649,8 @@ class UsageCallbackHandler(BaseCallbackHandler):
                 usage = {"input_tokens": legacy.get("prompt_tokens"),
                          "output_tokens": legacy.get("completion_tokens")}
         payload: Dict[str, Any] = {"kind": "llm_usage", "label": "LLM usage", "model": model}
+        if replayed:
+            payload["replayed"] = True
         if usage:
             payload["input_tokens"] = usage.get("input_tokens")
             payload["output_tokens"] = usage.get("output_tokens")

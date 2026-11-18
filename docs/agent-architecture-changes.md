@@ -94,6 +94,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
 | 88 | [The agent's own model client](#stage-88) | 2026-10-19 | `AGENT_MODEL_CLIENT=own` (default `langchain`) puts the agent's own OpenAI-compatible client under every model call, behind a `BaseChatModel` adapter that sends `ChatOpenAI`'s exact body: a deadline per attempt (`AGENT_LLM_TIMEOUT_SECONDS`), Stop mid-call with the socket shut, bounded retries (`AGENT_LLM_MAX_RETRIES`), streaming, the reasoning carry-over and stage 59's cost accounting unchanged |
 | 94 | [The code peer runs in its own loop](#stage-94) | 2026-11-17 | `AGENT_CODE_LOOP=own` (default `langchain`) runs the code peer's same tools and prompt in `code_loop.py` instead of a `create_agent` graph: an explicit step limit (`AGENT_CODE_LOOP_MAX_STEPS`, 30) that ends with a message and keeps the run's results, the progress rule, the repeat memo and the brief read from the turn log, Stop between steps, the same budget trim, tool failures worded as the graph's; swapped at the two construction lines of `default_code_fn`; the supervisor graph and checkpointer untouched |
+| 96 | [Model calls can be recorded and replayed](#stage-96) | 2026-11-17 | `AGENT_MODEL_CASSETTE=<dir>` with `AGENT_MODEL_CASSETTE_MODE=record|replay|replay_or_live` stores each own-client request's answer and replays it; per-run ids are numbered so a replayed answer names this run's file, durations and timestamps are blanked; a replay log and `python -m agent_runtime.model_cassette report` give per-turn hits and the first divergence; refused outside local and dev mode |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12280,4 +12281,43 @@ A full rewrite was rejected. Phase 2 replaces the code peer's LOOP only, behind 
 - **Against the switch rule:** strict passes (9 ≥ 8); steps fail (244 > 238, +3%) and cost fails (0.944 > 0.873, +8%). **The default stays `langchain`.** Across both one-trial runs of all 17 tasks (the first carried the name difference), the own loop costs more each time, by 3% and then 8%, while its strict lead went from 4 to 1. The three-trial reruns of the divergent tasks were not repeated: seven tasks diverged, so two more trials per loop would cost about 1.2 more coins, and the cost result has now pointed the same way in every measurement. The rerun spent 1.82 coins, about 6.7 for this stage in all.
 - **The sandbox**: the first attempt measured nothing. Docker Desktop was not running and the `iguide-codeexec` image was no longer on the Mac, so every `execute_code` failed with a connection error. The image was rebuilt (`docker build --platform linux/amd64 -t iguide-codeexec sandbox/`; an arm64 build fails on `gdal-config`) and both runs were restarted from scratch. That image runs under emulation on Apple silicon, so pysheds and numba are slower here than on the deployed Linux VM, equally for both loops.
 - **Not deployed.** The default stays `langchain`.
+
+## Stage 96 — Model calls can be recorded and replayed {#stage-96}
+
+**Why.** Comparing two versions of the agent on the harness measures the change and the model's run-to-run variation together, and on `lumen:deepseek-v4-flash` the variation is the larger: in stage 94's three trials, T06 cost 0.343 / 0.174 / 0.383 coins on one loop and 0.550 / 0.427 / 0.268 on the other, and one T09 trial took 38 model calls where its siblings took 8 and 9. Stage 94 spent about 4.9 coins and still ended on a 2% cost difference inside that spread. More trials narrow the noise slowly and at full price. Replay removes it: record one run's model answers, then run the other version against the recording. Wherever the two send the same request they get the same answer, at no cost, and the first request that differs is where their behaviour parts. Phase 1 (stage 88) made the own client the owner of the wire, so this needs no change above it.
+
+**Change.**
+- **`agent_runtime/model_cassette.py`**, used by `ChatClient.complete` and `ChatClient.stream`. `AGENT_MODEL_CASSETTE=<dir>` turns it on; `AGENT_MODEL_CASSETTE_MODE`:
+  - `record`: every call goes to the provider and every successful answer is stored;
+  - `replay`: a recorded request is answered from the cassette, anything else raises `ModelCallError` ("cassette miss"), with no network;
+  - `replay_or_live` (default): a miss goes to the provider and is NOT written, so the recording stays the reference.
+- **What counts as the same request.** The request is compared as sorted-key JSON after two rewrites. Values that differ every run and are never referred back to are blanked: timestamps and measured durations (`duration_s`, `elapsed`, `seconds` and similar keys). Ids minted per run (file, layer, run, thread and session ids, uuids, hex digests of 16+ characters, temporary paths) are NUMBERED by first appearance, and the answer is stored with the same numbering. So an answer that called a tool on "the file from the first tool result" calls it on the live run's file when replayed, not on the recorded run's (tested). Repeats of one request replay in recorded order.
+- **What a replay says.** Every call appends to `<dir>/replay_log.jsonl`: hit or miss, the turn (`turn_control`), the caller (the start of its system message) and the message count. `python -m agent_runtime.model_cassette report <dir>` gives, per turn, the calls served from the cassette and where the first miss was. A replayed call is marked `x_replayed` by the client and `replayed` on its `llm_usage` event, because its usage is the recorded call's: a replay run's cost is what the path would cost, and the real spend is its misses.
+- **Privacy.** A cassette holds prompts, tool results and user data, so it is refused unless `AGENT_MODE` is `local` or `dev` (a warning once, then nothing is recorded), it never stores a header or key (tested), and it belongs under `gis_harness/runs/`, which git ignores. The harness's `server.log` header records the mode.
+- **Only the own client.** `AGENT_MODEL_CLIENT=own` is required; the `ChatOpenAI` path is unchanged. A loop comparison under replay therefore runs both loops on the own client.
+
+**Limits.** A tool whose output changes between runs makes the next request differ: a live web search, Overpass, or the stage 78 reviewer, whose prompt carries a live stack sample. Those are misses, and the log names the caller. Streams are stored chunk by chunk, so a minted id split across two chunks would not be renumbered.
+
+**Verified.**
+- **Tests** (`rag_pipeline/tests/test_model_cassette.py`, 15): a recorded request is answered after the stub server has shut down; a live run's different file id, path, duration and timestamp still match, and the replayed tool call names the live run's file; strict replay refuses a new request; `replay_or_live` sends it live without writing the cassette, and the report puts the first miss at call 2; repeats replay in order; a stream records and replays; `token` and `demo` mode record nothing; the API key reaches the server and never the cassette; a replayed call's `llm_usage` event says `replayed`; a sandbox run time does not break a match; `rekey` brings an old cassette up to new rules; `report --diff` finds where a miss parts; the calls an answer used keep their order.
+- **Live, on the harness** (`lumen:deepseek-v4-flash`, own client, T01, T04, T09, T12; record once on the own loop, then `replay_or_live` through each loop on its own copy of the cassette). Three rounds, each fixing what the previous one's `report --diff` showed:
+
+  | round | what the diff showed | same-loop replay |
+  |---|---|---|
+  | first | (no request text kept yet) | 11 of 40 calls served; every turn missed at call 3 or 4 |
+  | after `report --diff` | execute_code's `ran_seconds` (1.4 s recorded, 1.3 s live) was not blanked | T04 + T12: 26 of 28 served; one miss per turn, the auditor's prompt |
+  | after both fixes | the auditor's lineage lines came out in set order, different in every process (`_used_calls`) | below |
+
+  | final, same recording | own loop | current loop |
+  |---|---|---|
+  | T01 | 7/7, no miss | 7/7, no miss |
+  | T04 | 9/9, no miss | 9/9, no miss |
+  | T12 | 14/14, no miss | 14/14, no miss |
+  | T09 | first miss at call 4 | first miss at call 4 |
+  | all calls served | 33 of 53 | 33 of 41 |
+
+  - **T01, T04 and T12 replay whole on both loops.** Every model request of those turns, under either loop, matched the recording byte for byte (after the numbering and blanking above), so on those turns the two loops are equivalent with the model's variance removed, and those turns cost nothing to rerun.
+  - **T09 parts in the analyze peer, before the code peer runs, on both loops alike**: its spatial-statistics tool computes Moran's I with random permutations, and the z-score differs every run (4.714 recorded, 4.408 live). That is a tool, not a loop. After it, the stage 78 reviewer's prompts (a live stack sample) differ too, as expected.
+- **Found on the way, fixed here.** The auditor's prompt was not the same on two identical runs: `_used_calls` returned a set, whose string order changes per process. It is now an ordered list (tested). And stage 94's own loop sent no `name` on its stored replies where `create_agent` sends `"code_agent"`; that fix is on #188.
+
 
