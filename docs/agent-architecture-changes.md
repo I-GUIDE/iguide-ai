@@ -92,7 +92,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 77 | [An answer whose figures no result holds is not shipped](#stage-77) | 2026-10-17 | always on, whatever the validation setting: when at least 3 figures are stated and 60% or more resolve to nothing the turn recorded, those statements are taken out and the answer says they could not be computed, naming the failed code runs |
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
-| 95 | [Stop ends the turn at the supervisor's next step](#stage-95) | 2026-11-17 | every supervisor node starts with a Stop check; a peer that fails after Stop ends the turn instead of going to synthesis; an httpx request hook refuses every model request, the SDK's own retries included, once the turn is stopped; Stop during a stalled call: 2 → 0 model requests after Stop |
+| 95 | [Stop ends the turn at the supervisor's next step](#stage-95) | 2026-11-17 | every supervisor node starts with a Stop check; a peer that fails after Stop ends the turn instead of going to synthesis; the httpx transport refuses every model request once the turn is stopped, the SDK's retries included, and (95.1) aborts the one in flight by shutting its socket; Stop during a stalled call: 2 → 0 model requests after Stop, turn ended 91.0 s → 0.02 s after Stop |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12163,7 +12163,7 @@ same scenario 0.08 s after Stop, but the deployed stack runs the `ChatOpenAI` cl
   `TurnCancelled` is a `BaseException`, so the SDK's retry loop, which catches `Exception`, does
   not swallow it. A caller that passes its own `http_client` or an `openai_proxy` keeps it.
 
-**Not covered.**
+**Not covered** (until Stage 95.1, below).
 - A model call already under way is not interrupted, as `/agent/chat/cancel`'s docstring says:
   it ends on its own, at the latest at `AGENT_LLM_TIMEOUT_SECONDS` (240 s by default), and only
   then does the turn stop. The browser stops waiting at once; the worker thread does not.
@@ -12195,3 +12195,70 @@ same scenario 0.08 s after Stop, but the deployed stack runs the `ChatOpenAI` cl
   the request before it was sent. The remaining 42 s is the stalled call running to its 45 s
   timeout (Not covered, above).
 - **Not deployed.**
+
+### Stage 95.1 — Stop aborts the model call in flight {#stage-95-1}
+
+**Why the hook was not enough.** Stage 95's live run ended the turn 42.5 s after Stop, all of
+it the stalled call running to its 45 s timeout. With the default 240 s timeout that is up to
+four minutes of a worker thread, a gunicorn thread (`--threads 4`, one worker) and an open
+provider connection, possibly still generating, for a turn the person has stopped. A request
+hook runs only before a request is sent, so it cannot reach one already sent. Neither the openai
+SDK nor `ChatOpenAI` can abort a synchronous call from outside.
+
+**Change.** The abort moves into the transport (`agent_runtime/stoppable_http.py`), which
+replaces Stage 95's request hook:
+- **A request inside a turn runs on a worker thread.** The calling thread waits on whichever
+  comes first, the worker or the turn's Stop, checked every 50 ms (`POLL_S`). Every read of the
+  response body is done the same way, so a streamed answer stops between chunks.
+- **On Stop the request's socket is shut down**, not just closed. `shutdown(SHUT_RDWR)` wakes
+  a `recv` blocked in the worker and sends the provider a FIN. `close()` from another thread does
+  neither on Linux. Then the caller raises `TurnCancelled`.
+- **Each request in flight has a lane of its own**: an `HTTPTransport` with its own pool, lent
+  to one request and returned when its response is closed. An abort therefore shuts exactly the
+  sockets of the request it stops, and idle lanes keep their keep-alive connections. This is
+  the shape of the phase-2 client's `_Lease`. The socket is reached by replacing the private
+  `_pool._network_backend`; a test fails if a future httpx moves it.
+- **A request for a turn already stopped is refused** before it is sent, the SDK's retries
+  included, as the hook did.
+- **A request outside any turn** (tests, background work) is sent on the calling thread as
+  before.
+
+One finding cost a test run. The deployed openai 3.14.1 sends through `httpx2`/`httpcore2`,
+not `httpx`. An `httpx` transport inside its client fails an `isinstance` assertion on every
+request: 11 failures on the deployed pins, none on the Mac's openai 2.45. So the transport
+classes are built against the library the openai client is built on (`build()`), and a test
+holds that.
+
+**Not covered.**
+- `ChatAnthropic`, the Claude CLI and async calls (`ainvoke`, whose `http_async_client` is
+  untouched). The node checks still end those turns at the next step.
+- A request routed through an environment proxy (`HTTPS_PROXY`) goes through httpx's proxy
+  mount, not this transport.
+
+**Verified.**
+- **Tests.** `test_stop_between_steps.py` now has 14:
+  - a stalled server with a 30 s timeout: Stop at 0.3 s ends `invoke` in under 1.5 s, the
+    server sees the connection closed, and only 1 request arrives;
+  - a streamed answer stalled after its first chunk: Stop ends it in under 1.5 s;
+  - a turn already stopped sends no request;
+  - without Stop, the timeout and the retry still hold (2 requests, `LLMCallTimeout`) on both
+    the worker path and the direct path;
+  - answers arrive and 3 calls share 1 connection on both paths;
+  - the lane can reach its socket;
+  - the transport comes from the library openai sends with.
+
+  The two interrupt tests fail with Stage 95's hook alone. The 14 tests and
+  `test_llm_request_timeout.py` (36) pass on both the Mac's pins and the deployed ones.
+- **Live** (same scenario, `lumen:deepseek-v4-flash`, `AGENT_MODE=local`, run
+  `fault-checks-stop-interrupt`). The proxy holds the code peer's call, and Stop is pressed 3 s
+  into it:
+
+  | | model requests after Stop | stalled call closed after Stop | turn ended after Stop | answer |
+  |---|---|---|---|---|
+  | before Stage 95 (`fault-checks-5223f6f5`) | 2 | +45 s (its timeout), then a retry | 91.0 s | a composed answer |
+  | Stage 95 (`fault-checks-stop-after`) | 0 | +42.0 s (its timeout) | 42.5 s | the stopped message |
+  | Stage 95.1 | 0 | +0.02 s | 0.02 s | the stopped message |
+
+  The 0.02 s turn end is the phase-2 client's figure (0.08 s) on the deployed client.
+- **Not deployed.**
+

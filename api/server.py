@@ -2956,9 +2956,10 @@ def agent_chat_cancel():
       - Agent Chat
     description: >
       The stream's first event is `turn` with a `turn_id`. Posting that id here stops the turn:
-      a running sandbox container is killed within about a second, and the agent stops at its
-      next model call or tool call (a model call already under way finishes first). The stream
-      then sends `cancelled` and ends. Only the person who started the turn can stop it.
+      a running sandbox container is killed within about a second, a model call already under
+      way is abandoned and its connection closed (OpenAI-compatible models; a Claude model's
+      call finishes first), and no further model call or tool call is made. The stream then
+      sends `cancelled` and ends. Only the person who started the turn can stop it.
       Turns live in the process that streams them, so this assumes one gunicorn worker
       (WEB_CONCURRENCY=1, as deployed).
     parameters:

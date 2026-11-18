@@ -6036,3 +6036,11 @@ rather than from the previous one.
 - **Change:** every supervisor node starts with `raise_if_cancelled()` (`_stoppable`); `_run_peer` re-raises a failure after Stop as `TurnCancelled`; every `ChatOpenAI` sends through a shared httpx client whose request hook refuses a request for a stopped turn, the SDK's retries included (`_stoppable_http_client`).
 - **Measured:** the same live scenario on `lumen:deepseek-v4-flash`: model requests after Stop 2 → 0; turn ended 91.0 s → 42.5 s after Stop, with the stopped message. The rest is the in-flight call reaching its timeout, which is still not interrupted.
 - **Tests:** `test_stop_between_steps.py` (7; 5 fail before the change), also green with `test_llm_request_timeout.py` on openai 3.14.1 / langchain-openai 1.6.2.
+
+## 2026-11-18 · M8.135 · Stop aborts the model call in flight (architecture stage 95.1)
+
+- **The gap:** Stage 95 stopped every model request after Stop but not the one already sent. Live, the stalled call ran 42 s past Stop to its timeout (up to 240 s at the default), holding a worker thread, a gunicorn thread and the provider's connection.
+- **Change:** `agent_runtime/stoppable_http.py` replaces the request hook with a transport. Inside a turn, each request and each body read runs on a worker thread while the caller waits on the turn's Stop (50 ms poll). On Stop the request's socket is `shutdown`, which wakes the blocked `recv` and closes the connection to the provider, and `TurnCancelled` is raised. Each in-flight request has its own lane (an `HTTPTransport` with its own pool, reused when idle). The classes are built against the HTTP library openai uses: openai 3.14.1, as deployed, sends through `httpx2`, and an `httpx` transport failed every request there (11 test failures on the deployed pins, none on the Mac).
+- **Measured:** `fault_checks.py --configs current --scenarios stop`, `lumen:deepseek-v4-flash`: the stalled call closed +0.02 s after Stop (was +42.0 s), and the turn ended 0.02 s after Stop (91.0 s before Stage 95, 42.5 s with it). 0 model requests after Stop.
+- **Tests:** `test_stop_between_steps.py`, 14 tests (the two interrupt tests fail with the hook alone). They pass with `test_llm_request_timeout.py` on both pin sets.
+
