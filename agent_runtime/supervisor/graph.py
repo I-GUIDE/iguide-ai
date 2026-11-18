@@ -5619,13 +5619,27 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_public_data_tools())
         except Exception:  # noqa: BLE001 - one optional toolset must not break the peer
             pass
-        executor = build_agent_executor(
-            # The prompt says the sandbox has no network; while a measurement flag gives it one,
-            # or the tool bridge is on, the note after it says what the code can reach.
-            llm=llm, preloaded_tools=tools,
-            system_prompt_override=CODE_PEER_PROMPT + _sandbox_note(),
-            agent_name="code_agent", skill_roots=skill_roots,
-        )
+        # The prompt says the sandbox has no network; while a measurement flag gives it one,
+        # or the tool bridge is on, the note after it says what the code can reach.
+        _code_prompt = CODE_PEER_PROMPT + _sandbox_note()
+        # AGENT_CODE_LOOP=own runs these same tools in the peer's own loop (stage 94,
+        # agent_runtime/code_loop.py) instead of a create_agent graph. The same swap point as
+        # AGENT_CODE_PEER above: the tools, the prompt, the thread key and the session's face
+        # (run / turn_artifacts) are the same, so everything after this line is unchanged.
+        from agent_runtime import code_loop
+
+        if code_loop.selected():
+            _session = code_loop.open_session(
+                llm=llm, tools=tools, system_prompt_override=_code_prompt,
+                thread_key=child_thread_id(state.get("thread_id"), "code"),
+                skill_roots=skill_roots)
+        else:
+            executor = build_agent_executor(
+                llm=llm, preloaded_tools=tools, system_prompt_override=_code_prompt,
+                agent_name="code_agent", skill_roots=skill_roots,
+            )
+            _session = open_peer_session(
+                executor, agent_config(child_thread_id(state.get("thread_id"), "code")))
         parts = [query]
         if evidence:
             parts.append(f"Evidence:\n{_format_documents(evidence, consumer='code_peer')}")
@@ -5662,8 +5676,6 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             parts.append(_code_reground)
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
-        _session = open_peer_session(
-            executor, agent_config(child_thread_id(state.get("thread_id"), "code")))
         _run = _session.run("\n\n".join(parts))
         resp = _run.resp
         # Flat result: the human-readable answer + a compact artifacts extract.

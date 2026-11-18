@@ -11,7 +11,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from collections import Counter, OrderedDict
 from uuid import uuid4
 
@@ -1533,6 +1533,78 @@ def _derive_budget(request: Any) -> int:
     return ceiling
 
 
+def payload_cost(messages: Any) -> int:
+    """The token estimate for *messages*, marked up for how badly it undercounts real payloads
+    (``AGENT_CONTEXT_PAYLOAD_SAFETY``)."""
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    safety = float(os.getenv(_PAYLOAD_SAFETY_ENV) or _DEFAULT_PAYLOAD_SAFETY) or 1.0
+    return int(count_tokens_approximately(messages) * safety)
+
+
+def trim_to_budget(messages: List[Any], budget: int,
+                   cost: Optional[Callable[[Any], int]] = None) -> Optional[List[Any]]:
+    """The messages to send under *budget*, or None when they already fit (or cannot be counted).
+
+    The budget middleware's trim, as a function, so the code peer's own loop (stage 94,
+    ``code_loop``) trims exactly as the LangChain loop does. Pins the last HUMAN message, the
+    question, whose loss makes the call pointless, then keeps as much of the recent tail as fits,
+    in the original order, since in a ReAct loop the last human message is NOT last: tool-call
+    pairs follow it, and reordering splits them. The result is repaired (a tool result whose call
+    was dropped is a 400 on most providers) and never empty.
+    """
+    from langchain_core.messages import HumanMessage
+
+    cost = cost or payload_cost
+    if budget <= 0 or not messages:
+        return None
+    try:
+        total = cost(messages)
+    except Exception:  # noqa: BLE001 - counting must never break a call
+        return None
+    if total <= budget:
+        return None
+    anchor = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    if anchor is None:
+        anchor = messages[-1]
+    pinned_ids = {id(anchor)}
+    body = [m for m in messages if id(m) not in pinned_ids]
+    try:
+        used = cost([anchor])
+    except Exception:  # noqa: BLE001
+        return None
+    kept_ids = set(pinned_ids)
+    for msg in reversed(body):
+        try:
+            size = cost([msg])
+        except Exception:  # noqa: BLE001
+            break
+        if used + size > budget:
+            break
+        kept_ids.add(id(msg))
+        used += size
+    trimmed = [m for m in messages if id(m) in kept_ids]
+    try:
+        from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+        trimmed, _ = repair_tool_call_sequence(trimmed)
+    except Exception:  # noqa: BLE001
+        pass
+    if not trimmed:
+        # Repair is purely subtractive, so it can cascade the anchor away as an orphan and
+        # leave NOTHING — previously shipped as a question-less call while the log claimed a
+        # number well over budget.
+        trimmed = [anchor]
+        logger.warning("context budget: repair emptied the payload; sending the question only")
+    try:
+        after = cost(trimmed)                  # the truth is the POST-repair count
+    except Exception:  # noqa: BLE001
+        after = used
+    logger.info("context budget: trimmed %d message(s), ~%d -> ~%d tokens (ceiling %d)",
+                len(messages) - len(trimmed), total, after, budget)
+    return trimmed
+
+
 def _make_context_budget_middleware() -> Any:
     """Keep the outgoing message list under a token budget.
 
@@ -1565,70 +1637,9 @@ def _make_context_budget_middleware() -> Any:
         # that fits in gpt-4o's 128k while leaving gpt-oss:120b's 65,536 to be overrun by the
         # schemas nothing was counting.
         budget = _derive_budget(request)
-        if budget <= 0:
+        trimmed = trim_to_budget(list(getattr(request, "messages", None) or []), budget, _cost)
+        if trimmed is None:
             return handler(request)
-        messages = list(getattr(request, "messages", None) or [])
-        if not messages:
-            return handler(request)
-        try:
-            total = _cost(messages)
-        except Exception:  # noqa: BLE001 - counting must never break a call
-            return handler(request)
-        if total <= budget:
-            return handler(request)
-
-        # request.messages EXCLUDES the system message (langchain prepends it downstream), so
-        # this filter found nothing and the "pin every system message" docstring described a
-        # no-op. Pin the last HUMAN message — the question, whose loss makes the call pointless —
-        # and keep the original order when reassembling, since in a ReAct loop the last human
-        # message is NOT last: tool-call pairs follow it, and reordering splits them.
-        anchor = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
-        if anchor is None:
-            anchor = messages[-1]
-        pinned_ids = {id(anchor)}
-        body = [m for m in messages if id(m) not in pinned_ids]
-
-        try:
-            used = _cost([anchor])
-        except Exception:  # noqa: BLE001
-            return handler(request)
-        kept_ids = set(pinned_ids)
-        for msg in reversed(body):
-            try:
-                size = _cost([msg])
-            except Exception:  # noqa: BLE001
-                break
-            if used + size > budget:
-                break
-            kept_ids.add(id(msg))
-            used += size
-
-        trimmed = [m for m in messages if id(m) in kept_ids]
-        # A tool result whose call was dropped is a 400 on most providers; the repair
-        # middleware beside this one exists for exactly that, so hand it a coherent list.
-        try:
-            from agent_runtime.runtime_utils import repair_tool_call_sequence
-
-            trimmed, _ = repair_tool_call_sequence(trimmed)
-        except Exception:  # noqa: BLE001
-            pass
-        if not trimmed:
-            # Repair is purely subtractive, so it can cascade the anchor away as an orphan and
-            # leave NOTHING — previously shipped as a question-less call while the log claimed a
-            # number well over budget.
-            trimmed = [anchor]
-            logger.warning("context budget: repair emptied the payload; sending the question only")
-        try:
-            after = _cost(trimmed)                  # the truth is the POST-repair count
-        except Exception:  # noqa: BLE001
-            after = used
-        logger.info(
-            "context budget: trimmed %d message(s), ~%d -> ~%d tokens (ceiling %d = window %d "
-            "- output reserve - %d overhead; x%.1f payload safety)",
-            len(messages) - len(trimmed), total, after, budget,
-            _model_context_window(getattr(request, "model", None)),
-            _overhead_tokens(request), safety,
-        )
         return handler(request.override(messages=trimmed))
 
     return budget_context
@@ -1694,7 +1705,7 @@ def _usage_and_calls(response: Any) -> Tuple[Optional[Dict[str, Any]], List[str]
     """
     usage: Optional[Dict[str, Any]] = None
     called: List[str] = []
-    messages = getattr(response, "result", None)
+    messages = getattr(response, "result", response)
     if not isinstance(messages, list):
         messages = [messages] if messages is not None else []
     for msg in messages:
@@ -1708,85 +1719,69 @@ def _usage_and_calls(response: Any) -> Tuple[Optional[Dict[str, Any]], List[str]
     return usage, called
 
 
-def _make_instrumentation_middleware() -> Any:
-    """Record what each model call actually cost and which tools it actually used.
-
-    Placed LAST in the middleware list, which makes it INNERMOST: the first handler is the
-    outermost wrapper, so only the last one sees the request as it finally goes to the provider
-    — after repair and after the budget trim. Measuring any earlier would report a payload that
-    was never sent.
-    """
-    from langchain.agents.middleware import wrap_model_call
+def instrumentation_record(*, thread: str, model: Any, tools: List[Any], messages: List[Any],
+                           system_message: Any, ceiling: Callable[[], int]) -> Dict[str, Any]:
+    """The record of one model call about to be made, and the toolset catalog line once per
+    distinct bound set (``turn_instrumentation_toolset``, which the harness reads to check the
+    code peer's toolset). Shared by the middleware and the code peer's own loop (stage 94).
+    Empty when anything fails: instrumentation must never break a turn."""
     from langchain_core.messages.utils import count_tokens_approximately
 
-    @wrap_model_call
-    def instrument(request: Any, handler: Any) -> Any:
-        if not _instrumentation_enabled():
-            return handler(request)
+    try:
+        names = _tool_names(tools)
+        fingerprint = _toolset_fingerprint(names) if names else "none"
+        schema_tokens, per_tool = _schema_cost(tools)
+        system_tokens = (count_tokens_approximately([system_message])
+                         if system_message is not None else 0)
+        # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
+        # peer name. The prefix is the CONVERSATION id (observed live: "sess-4fa362d4-..."),
+        # NOT a turn id — every turn of a conversation shares it, so this field cannot
+        # group a turn on its own. `seq` below is what orders the calls; a turn boundary
+        # shows up as `messages` dropping back down.
+        session, _, label = thread.partition("::")
+        # The conversation id the client knows, not the caller-scoped key (S9.15).
+        from agent_runtime.thread_scope import unscoped
+        session = unscoped(session) or session
+        key = (session, label)
+        _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
+        record = {
+            "session": session,
+            "seq": _CALL_SEQ[key],
+            "peer": label or "supervisor",
+            "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
+                           if isinstance(getattr(model, a, None), str)), "unknown"),
+            "toolset": fingerprint,
+            "tools_bound": len(tools),
+            "messages": len(messages),
+            "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
+            "schema_tokens": schema_tokens,
+            # Counted separately because the provider's input_tokens includes it: a ratio
+            # against messages+schemas alone silently omits ~1,000 tokens and reports an
+            # overcount that is really a mis-comparison.
+            "system_tokens": system_tokens,
+            "ceiling": ceiling(),
+        }
+        if fingerprint not in _TOOLSET_LOGGED and per_tool:
+            _TOOLSET_LOGGED.add(fingerprint)
+            logger.info("turn_instrumentation_toolset %s", json.dumps(
+                {"toolset": fingerprint, "peer": label or "supervisor",
+                 "tools_bound": len(tools), "schema_tokens": schema_tokens,
+                 "per_tool": per_tool}, default=str))
+        return record
+    except Exception:  # noqa: BLE001 - instrumentation must never break a turn
+        return {}
 
-        record: Dict[str, Any] = {}
-        try:
-            messages = list(getattr(request, "messages", None) or [])
-            tools = list(getattr(request, "tools", None) or [])
-            names = _tool_names(tools)
-            fingerprint = _toolset_fingerprint(names) if names else "none"
-            schema_tokens, per_tool = _schema_cost(tools)
-            system = getattr(request, "system_message", None)
-            system_tokens = count_tokens_approximately([system]) if system is not None else 0
-            thread = _active_thread_id() or ""
-            # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
-            # peer name. The prefix is the CONVERSATION id (observed live: "sess-4fa362d4-..."),
-            # NOT a turn id — every turn of a conversation shares it, so this field cannot
-            # group a turn on its own. `seq` below is what orders the calls; a turn boundary
-            # shows up as `messages` dropping back down.
-            session, _, label = thread.partition("::")
-            # The conversation id the client knows, not the caller-scoped key (S9.15).
-            from agent_runtime.thread_scope import unscoped
-            session = unscoped(session) or session
-            model = getattr(request, "model", None)
-            key = (session, label)
-            _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
-            record = {
-                "session": session,
-                "seq": _CALL_SEQ[key],
-                "peer": label or "supervisor",
-                "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
-                               if isinstance(getattr(model, a, None), str)), "unknown"),
-                "toolset": fingerprint,
-                "tools_bound": len(tools),
-                "messages": len(messages),
-                "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
-                "schema_tokens": schema_tokens,
-                # Counted separately because the provider's input_tokens includes it: a ratio
-                # against messages+schemas alone silently omits ~1,000 tokens and reports an
-                # overcount that is really a mis-comparison.
-                "system_tokens": system_tokens,
-                "ceiling": _derive_budget(request),
-            }
-            if fingerprint not in _TOOLSET_LOGGED and per_tool:
-                _TOOLSET_LOGGED.add(fingerprint)
-                logger.info("turn_instrumentation_toolset %s", json.dumps(
-                    {"toolset": fingerprint, "peer": label or "supervisor",
-                     "tools_bound": len(tools), "schema_tokens": schema_tokens,
-                     "per_tool": per_tool}, default=str))
-        except Exception:  # noqa: BLE001 - instrumentation must never break a turn
-            record = {}
 
-        try:
-            response = handler(request)
-        except Exception as exc:  # noqa: BLE001
-            # The previous version logged only after a SUCCESSFUL call, so a provider rejection
-            # — the 400 the whole context budget exists to prevent — produced no line at all.
-            # That censored the sample precisely at the tail worth measuring.
-            if record:
-                record["error"] = type(exc).__name__
-                record["error_detail"] = str(exc)[:300]
-                try:
-                    logger.info("turn_instrumentation %s", json.dumps(record, default=str))
-                except Exception:  # noqa: BLE001
-                    pass
-            raise
-
+def finish_instrumentation(record: Dict[str, Any], response: Any = None,
+                           error: Optional[BaseException] = None) -> None:
+    """Complete and log *record* after the call: the provider's usage and the tools called, or
+    the error. ``response`` is a middleware ``ModelResponse`` or a bare ``AIMessage``."""
+    if not record:
+        return
+    if error is not None:
+        record["error"] = type(error).__name__
+        record["error_detail"] = str(error)[:300]
+    else:
         try:
             usage, called = _usage_and_calls(response)
             record["tools_called"] = called
@@ -1808,12 +1803,43 @@ def _make_instrumentation_middleware() -> Any:
                 record["usage"] = "absent"
         except Exception:  # noqa: BLE001
             pass
+    try:
+        logger.info("turn_instrumentation %s", json.dumps(record, default=str))
+    except Exception:  # noqa: BLE001
+        pass
 
-        if record:
-            try:
-                logger.info("turn_instrumentation %s", json.dumps(record, default=str))
-            except Exception:  # noqa: BLE001
-                pass
+
+def _make_instrumentation_middleware() -> Any:
+    """Record what each model call actually cost and which tools it actually used.
+
+    Placed LAST in the middleware list, which makes it INNERMOST: the first handler is the
+    outermost wrapper, so only the last one sees the request as it finally goes to the provider
+    — after repair and after the budget trim. Measuring any earlier would report a payload that
+    was never sent.
+    """
+    from langchain.agents.middleware import wrap_model_call
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    @wrap_model_call
+    def instrument(request: Any, handler: Any) -> Any:
+        if not _instrumentation_enabled():
+            return handler(request)
+
+        record = instrumentation_record(
+            thread=_active_thread_id() or "", model=getattr(request, "model", None),
+            tools=list(getattr(request, "tools", None) or []),
+            messages=list(getattr(request, "messages", None) or []),
+            system_message=getattr(request, "system_message", None),
+            ceiling=lambda: _derive_budget(request))
+        try:
+            response = handler(request)
+        except Exception as exc:  # noqa: BLE001
+            # The previous version logged only after a SUCCESSFUL call, so a provider rejection
+            # — the 400 the whole context budget exists to prevent — produced no line at all.
+            # That censored the sample precisely at the tail worth measuring.
+            finish_instrumentation(record, error=exc)
+            raise
+        finish_instrumentation(record, response)
         return response
 
     return instrument
@@ -1852,6 +1878,57 @@ def _make_instrumentation_middleware() -> Any:
 _REPEAT_RESULT_CHARS = 2_000
 
 
+def run_tool_with_memo(name: Any, args: Any, call_id: Optional[str],
+                       run: Callable[[], Any]) -> Any:
+    """Run a tool call through the turn log: answered from the log when it repeats an earlier
+    call of the turn, recorded either way. Shared by the LangChain middleware and the code
+    peer's own loop (stage 94). Outside a supervisor turn (no active log) the call just runs."""
+    from langchain_core.messages import ToolMessage
+
+    from agent_runtime import turn_log
+
+    log = turn_log.active()
+    if log is None:
+        return run()
+    peer, run_id = turn_log.active_peer() or "peer", turn_log.active_run()
+    try:
+        key = turn_log.call_key(name, args)
+        earlier = log.earlier_answer(key)
+        log.record_call(peer=peer, run=run_id, name=str(name), args=args, call_id=call_id)
+    except Exception:  # noqa: BLE001 - a broken log must never cost the tool call
+        return run()
+    if earlier is not None:
+        content = str(earlier.get("content") or "")
+        if len(content) > _REPEAT_RESULT_CHARS:
+            content = (content[:_REPEAT_RESULT_CHARS]
+                       + f" … [cut here; the full result is the tool message for "
+                         f"{earlier.get('call_id')}]")
+        what = "failed" if not earlier.get("ok") else "returned"
+        note = (f"[Same call, same arguments as {earlier.get('call_id')}, which already "
+                f"{what} this turn. It was not run again: nothing it depends on has changed "
+                "since, so it would return exactly this. Its earlier result follows.]\n")
+        log.record_result(peer=peer, run=run_id, name=str(name), args=args, call_id=call_id,
+                          content=note + content, memo_of=earlier.get("seq"))
+        logger.info("repeat tool call answered from the turn log: %s (= %s)",
+                    name, earlier.get("call_id"))
+        return ToolMessage(content=note + content, tool_call_id=call_id, name=name,
+                           additional_kwargs={"repeat_of": earlier.get("call_id")})
+    try:
+        result = run()
+    except Exception as exc:
+        log.record_result(peer=peer, run=run_id, name=str(name), args=args, call_id=call_id,
+                          content=f"Error: {type(exc).__name__}: {exc}", status="error")
+        raise
+    try:
+        content = getattr(result, "content", result)
+        log.record_result(peer=peer, run=run_id, name=str(name), args=args, call_id=call_id,
+                          content=content if isinstance(content, str) else str(content),
+                          status=getattr(result, "status", None))
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
 def _make_repeat_call_middleware() -> Any:
     """Answer a call identical to one already answered this turn from the turn's event log.
 
@@ -1886,48 +1963,9 @@ def _make_repeat_call_middleware() -> Any:
             return _answer_repeats(request, handler)
 
     def _answer_repeats(request: Any, handler: Any) -> Any:
-        log = turn_log.active()
-        if log is None:
-            return handler(request)
         call = request.tool_call or {}
-        name, args, call_id = call.get("name"), call.get("args"), call.get("id")
-        peer, run = turn_log.active_peer() or "peer", turn_log.active_run()
-        try:
-            key = turn_log.call_key(name, args)
-            earlier = log.earlier_answer(key)
-            log.record_call(peer=peer, run=run, name=str(name), args=args, call_id=call_id)
-        except Exception:  # noqa: BLE001 - a broken log must never cost the tool call
-            return handler(request)
-        if earlier is not None:
-            content = str(earlier.get("content") or "")
-            if len(content) > _REPEAT_RESULT_CHARS:
-                content = (content[:_REPEAT_RESULT_CHARS]
-                           + f" … [cut here; the full result is the tool message for "
-                             f"{earlier.get('call_id')}]")
-            what = "failed" if not earlier.get("ok") else "returned"
-            note = (f"[Same call, same arguments as {earlier.get('call_id')}, which already "
-                    f"{what} this turn. It was not run again: nothing it depends on has changed "
-                    "since, so it would return exactly this. Its earlier result follows.]\n")
-            log.record_result(peer=peer, run=run, name=str(name), args=args, call_id=call_id,
-                              content=note + content, memo_of=earlier.get("seq"))
-            logger.info("repeat tool call answered from the turn log: %s (= %s)",
-                        name, earlier.get("call_id"))
-            return ToolMessage(content=note + content, tool_call_id=call_id, name=name,
-                               additional_kwargs={"repeat_of": earlier.get("call_id")})
-        try:
-            result = handler(request)
-        except Exception as exc:
-            log.record_result(peer=peer, run=run, name=str(name), args=args, call_id=call_id,
-                              content=f"Error: {type(exc).__name__}: {exc}", status="error")
-            raise
-        try:
-            content = getattr(result, "content", result)
-            log.record_result(peer=peer, run=run, name=str(name), args=args, call_id=call_id,
-                              content=content if isinstance(content, str) else str(content),
-                              status=getattr(result, "status", None))
-        except Exception:  # noqa: BLE001
-            pass
-        return result
+        return run_tool_with_memo(call.get("name"), call.get("args"), call.get("id"),
+                                  lambda: handler(request))
 
     return answer_repeats
 
@@ -1937,6 +1975,15 @@ def _make_repeat_call_middleware() -> Any:
 # recent tail fits, so on a retry, where the latest human message is a bare observation, the
 # original task could be trimmed away. The system message is never trimmed.
 _BRIEF_HEADER = "\n\n## This turn (kept by the supervisor; it survives every retry and trim)\n"
+
+
+def progress_stop_text() -> str:
+    """What a run ended by the progress rule returns as its answer (both loops)."""
+    from agent_runtime import turn_log
+
+    return (f"[Stopped: the last {turn_log.PROGRESS_LIMIT} steps added nothing new to "
+            "this turn's record (each call repeated an earlier one or failed the same "
+            "way). The results recorded above are what this run produced.]")
 
 
 def _make_progress_middleware() -> Any:
@@ -1967,10 +2014,7 @@ def _make_progress_middleware() -> Any:
             if log.exhausted(run):
                 logger.warning("peer run %s ended: %d consecutive steps added nothing",
                                run, turn_log.PROGRESS_LIMIT)
-                return AIMessage(content=(
-                    f"[Stopped: the last {turn_log.PROGRESS_LIMIT} steps added nothing new to "
-                    "this turn's record (each call repeated an earlier one or failed the same "
-                    "way). The results recorded above are what this run produced.]"))
+                return AIMessage(content=progress_stop_text())
             brief = turn_log.active_brief()
             if brief:
                 system = getattr(request, "system_message", None)
@@ -2005,24 +2049,15 @@ def _default_middleware() -> List[Any]:
             _make_repeat_call_middleware()]
 
 
-def build_agent_executor(
-    *,
-    llm: Optional[Any] = None,
-    verbose: bool = False,
-    return_intermediate_steps: bool = True,
-    tool_strategy: str = "granular",
-    include_mcp_tools: bool = False,
-    mcp_modules: Optional[List[str]] = None,
-    enabled_search_methods: Optional[List[str]] = None,
-    allowed_tool_names: Optional[List[str]] = None,
-    preloaded_tools: Optional[List[Any]] = None,
-    system_prompt_override: Optional[str] = None,
-    agent_name: str = "rag_agent",
-    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
-    session_id: Optional[str] = None,
-    skill_roots: Optional[List[str]] = None,
-) -> Any:
-    """Create a LangGraph agent (``create_agent``) wired with the given tools."""
+def prepare_peer_tools(preloaded_tools: Optional[List[Any]], *,
+                       tool_strategy: str = "granular", include_mcp_tools: bool = False,
+                       mcp_modules: Optional[List[str]] = None,
+                       enabled_search_methods: Optional[List[str]] = None,
+                       session_id: Optional[str] = None,
+                       skill_roots: Optional[List[str]] = None,
+                       allowed_tool_names: Optional[List[str]] = None) -> List[Any]:
+    """The tool list a peer binds, with every filter applied: the one place a peer's tools are
+    decided, whichever loop runs them (``create_agent`` or stage 94's ``code_loop``)."""
     if preloaded_tools is not None:
         # `skill_roots` was accepted and then forwarded ONLY into _collect_tools, which this
         # branch skips — so a caller that passed both (the analyze peer does) silently got no
@@ -2065,7 +2100,12 @@ def build_agent_executor(
 
     if not validation_enabled():
         tools = [tool for tool in tools if getattr(tool, "name", "") not in VALIDATION_TOOLS]
-    active_llm = llm or build_default_llm()
+    return tools
+
+
+def peer_system_prompt(system_prompt_override: Optional[str] = None) -> str:
+    """A peer's system prompt, with the chat-only substitution applied."""
+    from agent_runtime.client_profile import chat_only
 
     system_prompt = system_prompt_override or DEFAULT_AGENT_PROMPT
     if chat_only():
@@ -2074,6 +2114,33 @@ def build_agent_executor(
         from agent_runtime.supervisor.prompts import CHAT_ONLY_DISPLAY_RULE, VISUALIZATION_ROUTES_RULE
 
         system_prompt = system_prompt.replace(VISUALIZATION_ROUTES_RULE, CHAT_ONLY_DISPLAY_RULE)
+    return system_prompt
+
+
+def build_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
+    allowed_tool_names: Optional[List[str]] = None,
+    preloaded_tools: Optional[List[Any]] = None,
+    system_prompt_override: Optional[str] = None,
+    agent_name: str = "rag_agent",
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    session_id: Optional[str] = None,
+    skill_roots: Optional[List[str]] = None,
+) -> Any:
+    """Create a LangGraph agent (``create_agent``) wired with the given tools."""
+    tools = prepare_peer_tools(
+        preloaded_tools, tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules, enabled_search_methods=enabled_search_methods,
+        session_id=session_id, skill_roots=skill_roots, allowed_tool_names=allowed_tool_names)
+    active_llm = llm or build_default_llm()
+    system_prompt = peer_system_prompt(system_prompt_override)
 
     # LangGraph agent (langchain>=1.0). ``create_agent`` returns a compiled
     # StateGraph whose invocation accepts ``{"messages": [...]}`` and returns the

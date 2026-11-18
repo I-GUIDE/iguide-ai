@@ -184,6 +184,9 @@ _CLEARED = (
     # a shell, those calls left the machine with the tests' fake keys. test_model_client.py sets
     # it where it means to.
     "AGENT_MODEL_CLIENT",
+    # Which loop runs the code peer (stage 94). The suite's peer tests pin the create_agent
+    # graph; test_code_loop.py sets it where it means to.
+    "AGENT_CODE_LOOP",
 )
 
 for _name in ([] if _LIVE else _CLEARED):

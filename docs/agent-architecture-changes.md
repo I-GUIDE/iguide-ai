@@ -93,6 +93,7 @@ never written down, it is gone, and reading the diff does not bring it back.
 | 78 | [A code run can be watched, stopped and reviewed while it runs](#stage-78) | 2026-10-17 | 180 s limit (cap 600); a heartbeat and a run bar in the UI; Stop cancels the turn on the server and kills the container; rule checks before the run; a model reviews the running code with a live stack sample and stops it on a critical verdict it can back with the code (performance stops wait for 30 s and a re-check); a timed-out run names the line it was on; inspect_vector reports vertices |
 | 85 | [Every model call has a timeout](#stage-85) | 2026-10-19 | `AGENT_LLM_TIMEOUT_SECONDS` (240 s; 280 s on AnvilGPT, under its 300 s gateway) and `AGENT_LLM_MAX_RETRIES` (1, was the client's 2) on every chat model; a timeout reads "Model call timed out after N s …" and the supervisor stops re-routing to the stalled model; still no `max_tokens` |
 | 88 | [The agent's own model client](#stage-88) | 2026-10-19 | `AGENT_MODEL_CLIENT=own` (default `langchain`) puts the agent's own OpenAI-compatible client under every model call, behind a `BaseChatModel` adapter that sends `ChatOpenAI`'s exact body: a deadline per attempt (`AGENT_LLM_TIMEOUT_SECONDS`), Stop mid-call with the socket shut, bounded retries (`AGENT_LLM_MAX_RETRIES`), streaming, the reasoning carry-over and stage 59's cost accounting unchanged |
+| 94 | [The code peer runs in its own loop](#stage-94) | 2026-11-17 | `AGENT_CODE_LOOP=own` (default `langchain`) runs the code peer's same tools and prompt in `code_loop.py` instead of a `create_agent` graph: an explicit step limit (`AGENT_CODE_LOOP_MAX_STEPS`, 30) that ends with a message and keeps the run's results, the progress rule, the repeat memo and the brief read from the turn log, Stop between steps, the same budget trim, tool failures worded as the graph's; swapped at the two construction lines of `default_code_fn`; the supervisor graph and checkpointer untouched |
 
 Stages 8, 9 and 10 began as independent branches and **merged into `prototype`** at `e0e1f92`
 (identity) and `b511460` (the decider and tool-surface work), with `c180490` closing the upload
@@ -12187,3 +12188,96 @@ A full rewrite was rejected. Phase 1 replaces the client only. The supervisor gr
 - **Not deployed.** The default stays `langchain`.
 
 **Coordination.** `AGENT_LLM_TIMEOUT_SECONDS` and `AGENT_LLM_MAX_RETRIES` are stage 85's names (merged as #172 and live on the deployment). On 2026-11-17 this branch was rebased onto it: `llm_timeout` is the one definition of both settings and their defaults, `model_client` no longer carries its own (`DEFAULT_TIMEOUT_S`, `default_timeout()`, `default_max_retries()` are gone), and `test_model_client.py` repeats stage 85's construction-site check under `AGENT_MODEL_CLIENT=own` (240 / 280 / 240 s and 1 retry for Lumen, AnvilGPT and OpenAI). The harness table above predates the rebase; the request bytes and the carry-over are unchanged by it.
+
+## Stage 94 — The code peer runs in its own loop {#stage-94}
+
+**Why.** Phase 2 of the agent's own framework (user brief, 2026-10-17; phase 1 is stage 88). The code peer was a `create_agent` graph: a LangGraph state machine whose model step, tool step and five middleware wrappers decided, between them, when the run ends, what the model is sent and what a tool failure looks like. Four rules the run depends on lived where the loop could not own them:
+- **The step limit was LangGraph's `recursion_limit`** (60 graph steps, `AGENT_RECURSION_LIMIT`). Reaching it raised `GraphRecursionError`, which `invoke_agent_with_payload_fallback` turned into `AgentInvocationError` and the code node into a peer FAILURE with `answer: ""`. The tool records survive (since stage 42 they are the turn log's view, not the run's return value), but the peer's own account of what it found is lost, and the run counts against the peer error budget. Measured in the harness archive (683 turns, 2026-11-17): 7 turns hit the limit, in the code or analyze peer, on T06, T08L, T11L and the flood example.
+- **The dead-end rules** (stage 42's repeat memo and progress rule) were middleware that could act only from inside the model step, by returning a message in the model's place.
+- **Stop** reached the loop through a callback, and LangChain's callback manager swallows a callback's exception unless it is a `BaseException` (why stage 78 made `TurnCancelled` one).
+- **Interrupt-and-correct** (the stage 78 review) lives inside `execute_code`, which was the one part that never needed the graph.
+
+A full rewrite was rejected. Phase 2 replaces the code peer's LOOP only, behind a flag, beside the graph, and the two are measured on the same tasks before either becomes the default.
+
+**Change.**
+- **`agent_runtime/code_loop.py`: the loop.** `OwnPeerSession.run(query)` calls the model, runs its tool calls, and stops for a reason it can name. It has `PeerSession`'s face (`run()` returns a `PeerRun` with this invocation's `artifacts` and `answer`; `turn_artifacts` accumulates the turn), so `_apply_execution_honesty`, the dead-end re-run and the trace pipeline read it unchanged, and the code node's result keeps its flat `answer` / `tool_calls` / `tool_results` shape.
+  - **An explicit step limit**, `AGENT_CODE_LOOP_MAX_STEPS` model calls per run (default 30: the graph's 60 steps halved, a model step and a tool step being two). At the limit the run ENDS WITH A MESSAGE ("[Stopped: this run reached its limit of 30 model calls …]"), and the run is an answer, not a failure.
+  - **The progress rule and the repeat memo** are applied by the loop itself: `log.close_step` / `log.exhausted` before each model call, `run_tool_with_memo` around each tool call. Both read the same turn log through the same functions the middleware uses, so a run is judged the same way under either loop.
+  - **Stop** is checked between steps here (`turn_control.raise_if_cancelled`), mid-call by the own client (stage 88), and inside a code run by the sandbox. `TurnCancelled` is a `BaseException` nothing in the module catches. What ran before the Stop stays on the thread.
+  - **What the model is sent**: the system prompt plus the turn's brief (`_BRIEF_HEADER`, as the progress middleware renders it), then the thread's history repaired (`repair_tool_call_sequence`) and trimmed to the same budget the middleware derives (`_derive_budget`, `trim_to_budget`). The stored history is never rewritten.
+  - **Tool failures** are worded as LangGraph's tool node words them ("Error: X is not a valid tool, try one of […]", "Error: RuntimeError(…)\n Please fix your mistakes.", `status="error"`), so the model sees what it sees today. An unparseable tool call (`invalid_tool_calls`) is answered with its parse error instead of being sent back as a call with no result.
+  - **The thread's history** is a process-local bounded store (`ThreadStore`) keyed by the same `child_thread_id(thread_id, "code")` the graph used, with the same cap (`AGENT_CHECKPOINT_MAX_THREADS`), so a conversation's code thread still accumulates across turns.
+- **What stays LangChain, on purpose**, so the comparison measures the loop and nothing else: the tools are the same `StructuredTool`s from the same factories (`accept_null_defaults` rewrites a signature before `StructuredTool.from_function` infers the schema, and the loop infers nothing; a call is run with `tool.invoke(tool_call, config)`, which validates against that schema, fires the `tool_call` / `tool_result` / `map_layer` trace events and returns a `ToolMessage`); the model is whatever `build_llm` built, called through `bind_tools(...).invoke(...)` with the turn's callbacks, so the stage 59 cost handler prices each call unchanged; the messages are LangChain messages, read by `extract_search_artifacts` / `extract_final_answer` as the graph's were.
+- **The swap: `AGENT_CODE_LOOP=own|langchain`, default `langchain`.** The two executor-construction lines of `supervisor.graph.default_code_fn`, the same place `AGENT_CODE_PEER` swaps the whole peer for a CLI. Not a new `AGENT_CODE_PEER` backend: the tools are the LangChain peer's, so `capability_registry` and the decider's description stay "langchain". The supervisor graph, its nodes and edges, the checkpointer and `create_agent` for the search and analyze peers are untouched. The server logs `code loop: own` once, and the harness's `server.log` header records `AGENT_CODE_LOOP` beside `AGENT_MODEL_CLIENT`.
+- **Factored out of `executor_factory` for both loops to share**: `prepare_peer_tools` (the skill dedup and the chat-only / validation filters `build_agent_executor` applied inline), `peer_system_prompt`, `trim_to_budget` (the budget middleware's trim), `run_tool_with_memo` (the repeat middleware's body) and `progress_stop_text`. The middleware calls these now; its behaviour is unchanged (589 existing tests around it).
+
+**Not changed.** The analyze and search peers (still `create_agent`). The context budget's derivation, the turn log, the ledger, lineage, the stage 78 reviewer. The instrumentation middleware's per-call log line is not reproduced: it is bound to LangChain's `ModelRequest`, and the loop logs its own compact line; the harness reads trace events, not that log.
+
+**Verified.**
+- **Tests** (`rag_pipeline/tests/test_code_loop.py`, 19): the flat shape; parity with the real `create_agent` graph and middleware on one script (same `tool_calls`, same `tool_results`, same answer, same repeat answered from the log); the step limit ends with a message and keeps its results; the progress rule ends a run that repeats itself after one real call; unknown tool, tool exception and unparseable call worded as the graph's; `null` for an optional argument means the default; Stop raises `TurnCancelled` and keeps what ran; the brief is in every system message; the history persists per thread and is bounded; the budget trims what is sent and not what is stored; trace events and the configure-hook cost handler see every call; the flag defaults to `langchain`, and `default_code_fn` builds the graph by default and the loop when selected (`create_agent` patched to fail proves it is not reached).
+- **A runaway code peer** (`test_code_loop.py`, check 3): a scripted model that never stops calling a tool returning something new each time, driven through the real `default_code_fn` and the supervisor's `_run_peer`. Under the graph it is a peer failure ("recursion limit"); under the own loop it is an answer carrying all 12 results.
+- **Fault injection on live local servers** (`gis_harness/fault_checks.py`, 2026-11-17, commit 5223f6f5, `lumen:deepseek-v4-flash`): a proxy forwards every model call to Lumen except the code peer's, which it stalls, answers with a 500 after 8 s, or stalls while Stop is pressed 3 s in. Same query and commit; `current` = default client and graph loop, `redesign` = `AGENT_MODEL_CLIENT=own` + `AGENT_CODE_LOOP=own`; timeout 20 s (45 s for Stop), 1 retry.
+
+  | scenario | config | code-peer attempts | each held | turn | after Stop |
+  |---|---|---|---|---|---|
+  | stall | current | 2 | 20.0, 20.0 s | 63 s | |
+  | stall | redesign | 2 | 20.1, 20.2 s | 65 s | |
+  | 500 after 8 s | current | 2 | 8.1, 8.1 s | 43 s | |
+  | 500 after 8 s | redesign | 2 | 8.0, 8.1 s | 44 s | |
+  | Stop mid-call | current | 2 | 45.0, 45.0 s | 114 s | call closed 42 s later; 2 more model requests; full answer composed 91 s later |
+  | Stop mid-call | redesign | 1 | 3.1 s | 23 s | call closed 0.08 s later; 0 more requests; turn ended 0.08 s later |
+
+  - **Stall and 500 are bounded on both stacks**, by stage 85 rather than this stage: two attempts, each cut at the limit, where the SDK default was three attempts of up to 600 s.
+  - **Stop is where the stacks differ.** On the current stack Stop did not stop the turn at all. The stalled call ran to its timeout, the SDK retried it (a model request made after Stop), the code peer failed with `LLMCallTimeout`, and the supervisor went on to synthesis and composed a general-knowledge answer (a second request after Stop), 91 s after the person pressed Stop. The cancel route answered 200 throughout. On the redesign the stalled call's socket closed 0.08 s after Stop, nothing else was sent, and the turn ended with "[Stopped before an answer was composed: stopped by the user.]". The current-stack half is a defect of the deployed default, fixed on its own in stage 95 (#187): no request after Stop, though the call in flight still runs to its timeout there.
+- **Harness, one trial per loop, `lumen:deepseek-v4-flash`, same code (5223f6f5), two servers side by side**, 17 tasks (T01–T12 with T02L, U01–U04), `AGENT_LLM_PROVIDER=lumen` so the code-run reviewer also ran on Lumen, both on the default model client:
+
+  | | current loop | own loop |
+  |---|---|---|
+  | correct (solvable) | 11/13 | 12/13 |
+  | refused (unsolvable) | 3/4 (1 substituted) | 3/4 |
+  | strict | 7/17 | 11/17 |
+  | zero unproductive | 7/17 | 11/17 |
+  | unproductive steps (dup / failed) | 27 (7 / 20) | 21 (5 / 16) |
+  | banners | 5 | 1 |
+  | model calls | 284 | 260 |
+  | input / output tokens | 6.88 M / 134 K | 7.11 M / 140 K |
+  | Lumen coins | 1.163 | 1.202 |
+  | seconds | 3,382 | 3,449 |
+  | errors | 0 | 1 (T06 hit the harness's 1,200 s cap) |
+
+  - **Where they diverge.** Four tasks: T02L and T09 were wrong on the current loop and right on the own loop; U01 substituted on the current loop and refused on the own loop; T06 was right on the current loop (478 s) and hit the 1,200 s cap on the own loop, wrong. T06 is the whole cost difference: 0.550 coins and 70 calls on the own loop against 0.343 and 47. Without T06 the own loop spent 0.652 coins in 190 calls against 0.820 in 237. On the own loop's T06 the time went to the supervisor routing analyze → code → analyze → code over pysheds watershed code (24 reviews); the code peer's second run was ended by the progress rule, as the graph's would be. Phase 1's own-client run had the same T06 pattern.
+  - **Against the switch rule** (strict ≥ current AND steps and cost ≤): strict 11 ≥ 7 and model calls 260 ≤ 284 hold; cost 1.202 > 1.163 does not, by 3%, all of it T06. One trial does not separate this from deepseek's run-to-run variation, so the four divergent tasks were run three times per loop (below).
+  - **Three trials on the four divergent tasks** (T02L, T06, T09, U01; two more trials per loop, same code, side by side):
+
+  | four tasks × 3 trials | current loop | own loop |
+  |---|---|---|
+  | strict | 5/12 | 4/12 |
+  | correct (solvable) | 7/9 | 7/9 |
+  | refused (unsolvable) | 3/3 (2 substituted) | 3/3 (1 substituted) |
+  | unproductive steps | 30 | 47 |
+  | model calls | 220 | 273 |
+  | Lumen coins | 1.200 | 1.694 |
+  | seconds | 3,267 | 4,357 |
+  | errors | 0 | 1 (the capped T06) |
+
+  Per trial the spread is wide on both loops: T06 cost 0.343 / 0.174 / 0.383 coins on the current loop and 0.550 / 0.427 / 0.268 on the own loop, and one own-loop T09 trial took 38 calls where the others took 8 and 9. T06 was the heavier task on the own loop in two of three trials, and it was also the heavy task in stage 88's own-client run; the cause is not established. Both loops carry the code thread's history the same way (message counts per call restart and grow identically); the own loop's larger mean request comes from that one 25-step T06 code run, not from a difference in what is sent.
+- **Estimated over the 17 tasks** (one trial of the 13 tasks that agreed, the three-trial mean of the four that did not): strict 8.7 → 10.3, model calls 269 → 250, coins 1.106 → 1.129 (+2%). Against the switch rule (strict ≥ and steps and cost ≤), strict and steps pass and cost fails by 2%, inside the per-trial spread. **The default stays `langchain`.** Two tasks whose strict result also differed on one trial (T08, U03: clean on the own loop, a banner on the current) were not rerun, because their outcome agreed. In all, this stage's measurement spent about 4.9 Lumen coins.
+- **One wire difference the harness runs carried.** A byte-level comparison of the two loops' requests (found while building record-and-replay, 2026-11-17) showed that `create_agent(name="code_agent")` puts that name on every reply it stores and sends it on later requests (`"name": "code_agent"` on each assistant message), and the own loop sent none. Every harness number above was measured with that difference. The loop now names its replies the same way, and `test_both_loops_send_byte_identical_requests_for_the_same_conversation` holds the two request streams identical.
+- **Rerun with the name fix** (2026-11-18, commit e8451cdb, both loops side by side, one trial of the same 17 tasks on `lumen:deepseek-v4-flash`; labels `loop-langchain-e8451cdb` and `loop-own-e8451cdb`):
+
+  | 17 tasks, 1 trial | current loop | own loop |
+  |---|---|---|
+  | strict | 8 | 9 |
+  | correct | 13/13 | 13/13 |
+  | refused gracefully | 3/4 | 4/4 (one a substitution) |
+  | banners on correct answers | 4 | 1 |
+  | model calls | 238 | 244 |
+  | input tokens | 5.16 M | 5.59 M |
+  | Lumen coins | 0.873 | 0.944 |
+  | errors | 0 | 0 |
+
+  Strict differed on 7 tasks: the own loop alone passed T02L, T07, T08 and U04, and the current loop alone passed T09, U01 and U03. Most of the own loop's extra cost is one task. On T10 it ran `execute_code` 14 times where the current loop ran it 3 times, detoured through the search peer, and spent 39 calls and 0.174 coins against 14 and 0.039, for the same answer. Without T10 the own loop is cheaper (205 calls and 0.770 coins against 224 and 0.834). Since the two loops now send byte-identical requests for the same conversation (replayed whole on T01, T04 and T12, stage 96), a per-task swing like this is most likely deepseek's run-to-run variation picking a different path. That identity is tested on one conversation and replayed on three tasks; the step-limit and trimming paths were not compared byte for byte.
+- **Against the switch rule:** strict passes (9 ≥ 8); steps fail (244 > 238, +3%) and cost fails (0.944 > 0.873, +8%). **The default stays `langchain`.** Across both one-trial runs of all 17 tasks (the first carried the name difference), the own loop costs more each time, by 3% and then 8%, while its strict lead went from 4 to 1. The three-trial reruns of the divergent tasks were not repeated: seven tasks diverged, so two more trials per loop would cost about 1.2 more coins, and the cost result has now pointed the same way in every measurement. The rerun spent 1.82 coins, about 6.7 for this stage in all.
+- **The sandbox**: the first attempt measured nothing. Docker Desktop was not running and the `iguide-codeexec` image was no longer on the Mac, so every `execute_code` failed with a connection error. The image was rebuilt (`docker build --platform linux/amd64 -t iguide-codeexec sandbox/`; an arm64 build fails on `gdal-config`) and both runs were restarted from scratch. That image runs under emulation on Apple silicon, so pysheds and numba are slower here than on the deployed Linux VM, equally for both loops.
+- **Not deployed.** The default stays `langchain`.
+
