@@ -236,6 +236,17 @@ def _reasoning_text(choice: Any) -> str:
     return ""
 
 
+def _stoppable_http_client() -> Any:
+    """The httpx client every ``ChatOpenAI`` here sends through (``agent_runtime.stoppable_http``).
+
+    Stop refuses every model request after it, the openai SDK's retries included (Stage 95),
+    and aborts the one already in flight (Stage 95.1).
+    """
+    from agent_runtime.stoppable_http import stoppable_http_client
+
+    return stoppable_http_client()
+
+
 def _reasoning_preserving_chat_openai() -> Any:
     """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message."""
     import httpx
@@ -247,6 +258,12 @@ def _reasoning_preserving_chat_openai() -> Any:
     _timeouts = (openai.APITimeoutError, httpx.TimeoutException)
 
     class ReasoningPreservingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
+        def __init__(self, **kwargs: Any) -> None:
+            # A caller's own client (or proxy) wins; otherwise Stop reaches every request.
+            if kwargs.get("http_client") is None and not kwargs.get("openai_proxy"):
+                kwargs["http_client"] = _stoppable_http_client()
+            super().__init__(**kwargs)
+
         def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
             result = super()._create_chat_result(response, generation_info)
             try:

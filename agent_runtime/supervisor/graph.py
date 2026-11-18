@@ -45,6 +45,7 @@ from agent_runtime.client_profile import VALIDATION_OFF_FINDING, validation_enab
 from agent_runtime import facts as turn_facts
 from agent_runtime import reference_checks as turn_reference
 from agent_runtime import turn_log
+from agent_runtime import turn_control
 from agent_runtime.turn_control import TurnCancelled
 from agent_runtime import lineage
 from agent_runtime import source_catalog
@@ -1927,6 +1928,30 @@ def _is_fatal_peer_error(exc: BaseException) -> bool:
     return isinstance(exc, ClaudeCliUnavailable)
 
 
+def _stop_reason() -> str:
+    handle = turn_control.current()
+    return (handle.reason if handle is not None and handle.reason else "stopped by the user")
+
+
+def _stoppable(name: str, node: Callable[[SupervisorState], Dict[str, Any]]):
+    """``node`` with a Stop check in front of it: every step of the graph starts with one.
+
+    Stop used to take effect only inside a peer, where the streaming callback handler checks it
+    at each model call and tool start. The supervisor's own steps carry no such handler (the
+    decision, the synthesis and the general-knowledge answer call the model directly), so a turn
+    stopped during a peer went on to decide and to answer, each a model call made after the
+    person had stopped it (Stage 95). The check sits at the boundary of every node, so a turn
+    stopped anywhere ends before its next step does any work.
+    """
+    def run(state: SupervisorState) -> Dict[str, Any]:
+        turn_control.raise_if_cancelled()
+        return node(state)
+
+    run.__name__ = getattr(node, "__name__", name)
+    run.__doc__ = node.__doc__
+    return run
+
+
 def _run_peer(name: str, call, state: SupervisorState):
     """Run a peer, returning ``(result, failure)``. Never raises.
 
@@ -1945,6 +1970,13 @@ def _run_peer(name: str, call, state: SupervisorState):
     except BaseException as exc:                      # noqa: BLE001 - deliberately total
         if isinstance(exc, (KeyboardInterrupt, SystemExit, TurnCancelled)):
             raise
+        # Stopped while the peer was failing: the failure is not the turn's outcome, the Stop
+        # is. A model call already under way when Stop is pressed is not interrupted, so it ends
+        # in its own way, usually a timeout. Recorded as a peer failure, that timeout is FATAL,
+        # and the supervisor routes to synthesis, which answers from general knowledge with
+        # another model call (Stage 95, measured 91 s after Stop).
+        if turn_control.cancel_requested():
+            raise TurnCancelled(_stop_reason()) from exc
         # `at` is where in the turn it failed: the length of `actions` when the peer ran, which
         # includes the peer's own entry. _unresolved_peer_failures reads it to tell a failure a
         # later peer made good from one that left the answer short.
@@ -6751,16 +6783,16 @@ def build_supervisor_graph(
                 "distilled": {**_distill(merged), "answer": q}}
 
     builder = StateGraph(SupervisorState)
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("search", search_node)
-    builder.add_node("analyze", analysis_node)
-    builder.add_node("code", code_node)
-    builder.add_node("synthesize", synthesize_node)
+    builder.add_node("supervisor", _stoppable("supervisor", supervisor_node))
+    builder.add_node("search", _stoppable("search", search_node))
+    builder.add_node("analyze", _stoppable("analyze", analysis_node))
+    builder.add_node("code", _stoppable("code", code_node))
+    builder.add_node("synthesize", _stoppable("synthesize", synthesize_node))
 
     from agent_runtime.clarify_policy import policy as _clarify_policy
 
     if _clarify_policy() == "ask":
-        builder.add_node("clarify", clarify_node)
+        builder.add_node("clarify", _stoppable("clarify", clarify_node))
         builder.add_edge(START, "clarify")
         builder.add_conditional_edges(
             "clarify",
