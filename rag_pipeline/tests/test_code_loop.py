@@ -499,3 +499,196 @@ def test_both_loops_send_byte_identical_requests_for_the_same_conversation():
     assert len(bodies["graph"]) == len(bodies["own"]) == 3
     for g, o in zip(bodies["graph"], bodies["own"]):
         assert json.dumps(g, sort_keys=True) == json.dumps(o, sort_keys=True)
+
+
+# ------------------------------------------------------------------ the checks, where the model ends
+# Stage 98. The supervisor's deterministic checks (supervisor.graph) run when a reply carries no
+# tool call; a failure appends the supervisor's own observation and the SAME run continues, once
+# per check, instead of the whole peer being re-run from outside.
+
+from agent_runtime.supervisor import graph as sg  # noqa: E402
+
+EXEC_RUNS = {"n": 0}
+LAYER_DESCRIPTOR = {"url": "/agent/files/file_a1/download", "label": "Schools",
+                    "render": "points", "count": 3}
+
+
+def _execute_code(code: str) -> str:
+    """Run Python in the sandbox."""
+    EXEC_RUNS["n"] += 1
+    return json.dumps({"ok": True, "exit_code": 0, "stdout": "42\n"})
+
+
+def _add_map_layer(file_id: str) -> str:
+    """Put a geodata file on the map."""
+    return json.dumps({"ok": True, "map_layer": LAYER_DESCRIPTOR})
+
+
+def _embed_region(model: str = "gse") -> str:
+    """Embed a region."""
+    return json.dumps({"ok": True, "model": model, "file_id": "file_e1"})
+
+
+execute_code = StructuredTool.from_function(func=_execute_code, name="execute_code",
+                                            description="Run Python.")
+add_map_layer = StructuredTool.from_function(func=_add_map_layer, name="add_map_layer",
+                                             description="Add a layer.")
+embed_region = StructuredTool.from_function(func=accept_null_defaults(_embed_region),
+                                            name="embed_region", description="Embed.")
+CHECK_TOOLS = [execute_code, add_map_layer, embed_region, geocode]
+
+UNRUN = "Here is the code:\n```python\nprint(6 * 7)\n```\nIt prints 42."
+
+
+@pytest.fixture
+def events(monkeypatch):
+    seen: List[Any] = []
+    monkeypatch.setattr(st, "emit_trace_event",
+                        lambda name, data=None, **kw: seen.append((name, data or {})))
+    EXEC_RUNS["n"] = 0
+    return seen
+
+
+def _humans(run) -> List[str]:
+    return [m.content for m in run.resp["messages"] if isinstance(m, HumanMessage)]
+
+
+def test_an_unrun_code_answer_continues_the_run_once_then_finishes(events):
+    replies = [AIMessage(content=UNRUN),
+               AIMessage(content="", tool_calls=[_call("execute_code", {"code": "print(6*7)"}, 1)]),
+               AIMessage(content="It ran and printed 42.")]
+    session = _session(replies, tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("compute 6*7"))
+    assert run.answer == "It ran and printed 42."
+    assert EXEC_RUNS["n"] == 1 and session.steps == 3
+    # The supervisor's own observation, as the next message of the same run.
+    assert _humans(run) == ["compute 6*7", sg._CODE_NOT_RUN_OBSERVATION]
+    assert [n for n, _ in events] == ["code_not_executed"]
+    assert events[0][1]["in_loop"] is True
+    assert session.checks_handled == {code_loop.CHECK_CODE_NOT_RUN}
+
+
+def test_the_code_check_continues_a_run_only_once(events):
+    """A model that ships unrun code again after the observation is not challenged a second
+    time in the loop: the run ends, and what it is is left to the answer and the audit."""
+    replies = [AIMessage(content=UNRUN), AIMessage(content=UNRUN), AIMessage(content="never")]
+    session = _session(replies, tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("compute 6*7"))
+    assert run.answer == UNRUN and session.steps == 2
+    assert [n for n, _ in events] == ["code_not_executed"]
+
+
+def test_a_false_map_claim_continues_the_run_once_then_finishes(events):
+    replies = [AIMessage(content="The schools are now on the map as a points layer."),
+               AIMessage(content="", tool_calls=[_call("add_map_layer", {"file_id": "file_a1"}, 1)]),
+               AIMessage(content="The 3 schools are on the map.")]
+    session = _session(replies, tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("find the schools"))
+    assert run.answer == "The 3 schools are on the map."
+    assert session.steps == 3
+    assert _humans(run) == ["find the schools", sg._MAP_NOT_DELIVERED_OBSERVATION]
+    assert [n for n, _ in events] == ["map_layer_not_delivered"]
+    assert session.checks_handled == {code_loop.CHECK_MAP_CLAIM}
+
+
+def test_a_map_claim_is_left_alone_when_a_layer_was_delivered_or_is_already_on_screen(events):
+    delivered = [AIMessage(content="", tool_calls=[_call("add_map_layer", {"file_id": "file_a1"}, 1)]),
+                 AIMessage(content="The schools are on the map.")]
+    run, _, _ = _in_turn(lambda: _session(delivered, tools=CHECK_TOOLS).run("q"))
+    assert run.answer == "The schools are on the map."
+    earlier = OwnPeerSession(ToolAwareFake(messages=iter([AIMessage(content="It is on the map.")])),
+                             CHECK_TOOLS, "test", "t2", map_on_screen=True)
+    run, _, _ = _in_turn(lambda: earlier.run("make it red"))
+    assert run.answer == "It is on the map."
+    assert events == []
+
+
+def test_a_map_claim_is_left_alone_for_a_chat_only_client_or_without_a_layer_tool(events, monkeypatch):
+    claim = "The schools are on the map."
+    run, _, _ = _in_turn(lambda: _session([AIMessage(content=claim)], tools=[execute_code]).run("q"))
+    assert run.answer == claim
+    from agent_runtime import client_profile
+
+    monkeypatch.setattr(client_profile, "chat_only", lambda: True)
+    run, _, _ = _in_turn(lambda: _session([AIMessage(content=claim)], tools=CHECK_TOOLS,
+                                          thread="t3").run("q"))
+    assert run.answer == claim
+    assert events == []
+
+
+def test_a_named_model_that_did_not_run_continues_the_run_once(events, monkeypatch):
+    monkeypatch.setattr(sg, "_EMBED_MODELS_CACHE", frozenset({"gse", "clay", "prithvi"}))
+    replies = [AIMessage(content="", tool_calls=[_call("embed_region", {}, 1)]),
+               AIMessage(content="Here is the embedding."),
+               AIMessage(content="", tool_calls=[_call("embed_region", {"model": "clay"}, 2)]),
+               AIMessage(content="Here is the clay embedding.")]
+    session = OwnPeerSession(ToolAwareFake(messages=iter(replies)), CHECK_TOOLS, "test", "t4",
+                             task="the clay embedding of Urbana")
+    run, _, _ = _in_turn(lambda: session.run("the clay embedding of Urbana\n\nEvidence: ..."))
+    assert run.answer == "Here is the clay embedding."
+    assert _humans(run)[1] == sg._MODEL_MISMATCH_OBSERVATION.format(wanted="clay", used="gse")
+    assert [n for n, _ in events] == ["embedding_model_mismatch"]
+
+
+def test_a_check_needs_a_step_left_and_can_be_turned_off(events, monkeypatch):
+    monkeypatch.setenv(code_loop.MAX_STEPS_ENV, "1")
+    session = _session([AIMessage(content=UNRUN)], tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("q"))
+    assert run.answer == UNRUN and session.checks_handled == set()
+    monkeypatch.delenv(code_loop.MAX_STEPS_ENV)
+    monkeypatch.setenv(code_loop.CHECKS_ENV, "0")
+    session = _session([AIMessage(content=UNRUN)], tools=CHECK_TOOLS, thread="t5")
+    run, _, _ = _in_turn(lambda: session.run("q"))
+    assert run.answer == UNRUN and events == []
+
+
+def test_the_outside_code_check_does_not_challenge_what_the_loop_handled(events):
+    """The supervisor's check still guards a run the loop could not fix (here the model ships
+    unrun code twice), but it does not re-run the peer for the same failure a second time."""
+    replies = [AIMessage(content=UNRUN), AIMessage(content=UNRUN)]
+    session = _session(replies, tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("compute 6*7"))
+    result = {"answer": run.answer, "tool_calls": run.artifacts["tool_calls"],
+              "tool_results": run.artifacts["tool_results"]}
+    reran = sg._apply_execution_honesty(session, result, prose_key="answer", exec_available=True,
+                                        caps=[], node="code")
+    assert reran is False and session.steps == 2
+    assert result["executed"] is False, "the result still says the code did not run"
+
+
+def test_the_outside_code_check_still_fires_when_the_loop_did_not(events, monkeypatch):
+    """No step left in the loop: the outside check re-runs the peer exactly as before."""
+    monkeypatch.setenv(code_loop.MAX_STEPS_ENV, "1")
+    replies = [AIMessage(content=UNRUN),
+               AIMessage(content="", tool_calls=[_call("execute_code", {"code": "x"}, 1)])]
+    session = _session(replies, tools=CHECK_TOOLS)
+    run, _, _ = _in_turn(lambda: session.run("compute 6*7"))
+    result = {"answer": run.answer, "tool_calls": run.artifacts["tool_calls"],
+              "tool_results": run.artifacts["tool_results"]}
+    assert sg._apply_execution_honesty(session, result, prose_key="answer", exec_available=True,
+                                       caps=[], node="code") is True
+    assert EXEC_RUNS["n"] == 1
+
+
+def _regionalize(method: str) -> str:
+    """Regionalize polygons."""
+    return json.dumps({"ok": False, "error": "'DataFrame' object has no attribute 'to_list'"})
+
+
+regionalize = StructuredTool.from_function(func=_regionalize, name="regionalize",
+                                           description="Regionalize.")
+
+
+def test_a_tool_at_a_dead_end_continues_the_run_once_and_the_outside_rule_stands_down(events):
+    replies = [AIMessage(content="", tool_calls=[_call("regionalize", {"method": "maxp"}, 1)]),
+               AIMessage(content="", tool_calls=[_call("regionalize", {"method": "skater"}, 2)]),
+               AIMessage(content="regionalize is broken. Shall I implement it by hand?"),
+               AIMessage(content="", tool_calls=[_call("execute_code", {"code": "regions()"}, 3)]),
+               AIMessage(content="Done by hand in execute_code: 4 regions.")]
+    session = _session(replies, tools=[*CHECK_TOOLS, regionalize])
+    run, _, _ = _in_turn(lambda: session.run("regionalize the tracts"))
+    assert run.answer == "Done by hand in execute_code: 4 regions."
+    assert _humans(run)[1] == sg._tool_stuck_observation(
+        sg._repeatedly_failed_tools(run.artifacts))
+    assert [n for n, _ in events] == ["tool_dead_end"]
+    assert session.checks_handled == {code_loop.CHECK_DEAD_END}

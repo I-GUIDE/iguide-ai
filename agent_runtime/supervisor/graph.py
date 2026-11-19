@@ -5274,7 +5274,14 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
     turn = {"tool_calls": result.get("tool_calls") or [],
             "tool_results": result.get("tool_results") or []}
     reran = False
+    # A session that runs this check itself, where the model ends (the code peer's own loop,
+    # stage 98), says so in ``checks_handled`` once it has challenged the peer there; the same
+    # observation is not handed over a second time.
+    from agent_runtime.code_loop import CHECK_CODE_NOT_RUN
+
+    handled = CHECK_CODE_NOT_RUN in (getattr(session, "checks_handled", None) or ())
     if (exec_available
+            and not handled
             and not _has_execution_record(turn)
             and _ships_unrun_code(result.get(prose_key) or "", any_fence=any_fence)):
         blocked = bool(caps)
@@ -5629,10 +5636,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         from agent_runtime import code_loop
 
         if code_loop.selected():
+            # The loop runs the checks below at the moment the model ends (stage 98), so it is
+            # told what they need: the user's task (the model check reads the model named
+            # there) and whether an earlier turn left a layer on the map (then "on the map"
+            # can be true with nothing added this turn).
             _session = code_loop.open_session(
                 llm=llm, tools=tools, system_prompt_override=_code_prompt,
                 thread_key=child_thread_id(state.get("thread_id"), "code"),
-                skill_roots=skill_roots)
+                skill_roots=skill_roots, task=query,
+                map_on_screen=_map_delivered_earlier(_prior_actions(state)))
         else:
             executor = build_agent_executor(
                 llm=llm, preloaded_tools=tools, system_prompt_override=_code_prompt,
@@ -5707,7 +5719,11 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # very `ok` key the detector reads — so two identical sandbox failures produced no
         # intervention at all. At most ONE extra run per turn, so a peer that already got the
         # did-you-run-it observation is left alone rather than paying for both.
-        if not extra_run and not caps and not ran:
+        # The own loop (stage 98) runs this rule where the model ends; once it has handed the
+        # peer this observation there, it is not handed over again from here.
+        dead_end_handled = code_loop.CHECK_DEAD_END in (getattr(_session, "checks_handled", None)
+                                                        or ())
+        if not extra_run and not caps and not ran and not dead_end_handled:
             stuck = _repeatedly_failed_tools(turn)
             if stuck:
                 emit_trace_event(

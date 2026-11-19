@@ -58,7 +58,22 @@ What the loop owns:
   call with no result;
 * **the thread's history**: a process-local, bounded store keyed by the same
   ``child_thread_id(thread_id, "code")`` the graph used, so a conversation's code thread
-  still accumulates across turns and is evicted at the same cap.
+  still accumulates across turns and is evicted at the same cap;
+* **the deterministic checks at the moment the model ends** (stage 98). The supervisor checks a
+  finished peer result from outside, once per turn: code handed back with no ``execute_code``
+  record, a tool at a dead end, and, on the analyze peer only, a map claimed with no layer
+  delivered and an embedding model named and another one run. Here the same check functions
+  (imported from ``supervisor.graph``, not copied) run on the turn so far whenever a reply
+  carries no tool call; a failure appends the same observation and the run CONTINUES in the same
+  thread, once per check per run, inside the step limit. The session records what it handled
+  (``checks_handled``) so the outside check does not challenge the same thing again.
+  On this peer an outside re-run was never more expensive than a continuation: it appends the
+  same observation to the same thread under the same turn-log run, so the model is sent the same
+  request. What moving the checks buys is coverage: the map and model checks now guard the code
+  peer, every ending is checked (including the ending of a run the outside started), and an
+  unrun-code challenge no longer uses up the turn's one dead-end re-run.
+  The LLM grounding audit stays outside: its value is that it does not share the answerer's
+  premise. ``AGENT_CODE_LOOP_CHECKS=0`` turns the inner checks off (for before/after runs).
 """
 
 from __future__ import annotations
@@ -79,7 +94,14 @@ logger = logging.getLogger(__name__)
 
 LOOP_ENV = "AGENT_CODE_LOOP"                 # own | langchain (default)
 MAX_STEPS_ENV = "AGENT_CODE_LOOP_MAX_STEPS"  # model calls per run
+CHECKS_ENV = "AGENT_CODE_LOOP_CHECKS"        # 0 turns the in-loop checks off (default on)
 DEFAULT_MAX_STEPS = 30
+
+# The checks run where the model ends, and what each one is called in ``checks_handled``.
+CHECK_CODE_NOT_RUN = "code_not_run"
+CHECK_DEAD_END = "tool_dead_end"
+CHECK_MAP_CLAIM = "map_not_delivered"
+CHECK_MODEL_MISMATCH = "model_mismatch"
 
 # LangGraph's tool node's own words (langgraph.prebuilt.tool_node), so a failure reads the same
 # to the model under either loop.
@@ -106,6 +128,10 @@ def max_steps() -> int:
     except ValueError:
         logger.warning("%s=%r is not a number; using %d", MAX_STEPS_ENV, raw, DEFAULT_MAX_STEPS)
         return DEFAULT_MAX_STEPS
+
+
+def checks_enabled() -> bool:
+    return (os.getenv(CHECKS_ENV) or "").strip().lower() not in ("0", "false", "no", "off")
 
 
 def step_limit_text(limit: int) -> str:
@@ -164,7 +190,8 @@ class OwnPeerSession:
     returns what THAT invocation produced, ``turn_artifacts`` accumulates the turn."""
 
     def __init__(self, llm: Any, tools: Sequence[Any], system_prompt: str,
-                 thread_key: Optional[str], agent_name: Optional[str] = "code_agent") -> None:
+                 thread_key: Optional[str], agent_name: Optional[str] = "code_agent", *,
+                 task: Optional[str] = None, map_on_screen: bool = False) -> None:
         self.llm = llm
         # create_agent(name=...) puts the agent's name on every reply it stores, and the name is
         # SENT on each later request ("name": "code_agent" on the assistant message). The loop
@@ -178,6 +205,15 @@ class OwnPeerSession:
         self._bound = llm.bind_tools(self.tools) if self.tools else llm
         self.turn_artifacts: Dict[str, List[Dict[str, Any]]] = {"tool_calls": [], "tool_results": []}
         self.steps = 0          # model calls made by this session's runs
+        # For the in-loop checks. ``task`` is what the user asked (the model check reads the
+        # model named THERE, not in the evidence appended to the peer's query); without it the
+        # run's own query is read. ``map_on_screen``: a layer from an earlier turn is still on
+        # the user's map, so "on the map" can be true with no layer added this turn.
+        self.task = task
+        self.map_on_screen = bool(map_on_screen)
+        # Which checks failed in the loop and were answered there, this turn. The supervisor's
+        # outside checks read it so the same failure is not challenged twice.
+        self.checks_handled: set = set()
 
     # -- the public face ------------------------------------------------------------------
     def run(self, query: str, *, chat_history: Optional[List[Any]] = None) -> Any:
@@ -188,7 +224,7 @@ class OwnPeerSession:
         start = len(history)
         history.append(_with_id(HumanMessage(content=query)))
         try:
-            self._loop(history)
+            self._loop(history, start)
         finally:
             # What ran is kept even when the run ends by Stop or a model failure: the next turn
             # of this thread continues from a repaired history, as the graph's did.
@@ -202,12 +238,13 @@ class OwnPeerSession:
                        answer=extract_final_answer(scoped) or "")
 
     # -- the loop -------------------------------------------------------------------------
-    def _loop(self, history: List[BaseMessage]) -> None:
+    def _loop(self, history: List[BaseMessage], start: int = 0) -> None:
         from agent_runtime.executor_factory import finish_instrumentation, progress_stop_text
         from agent_runtime.streaming_trace import attach_streaming_callbacks
 
         log, run = turn_log.active(), turn_log.active_run()
         limit = max_steps()
+        fired: set = set()      # checks that already continued THIS run: each gets one
         for step in range(1, limit + 1):
             turn_control.raise_if_cancelled()
             if log is not None:
@@ -240,7 +277,17 @@ class OwnPeerSession:
             calls = list(getattr(ai, "tool_calls", None) or [])
             invalid = list(getattr(ai, "invalid_tool_calls", None) or [])
             if not calls and not invalid:
-                return
+                # The model is ending. Run the supervisor's checks on the turn so far; a failure
+                # becomes one more step of this run. Only with a step left to spend, so the limit
+                # stays the limit: with none, the run ends here and the outside check applies as
+                # it always did.
+                failed = self._final_check(history, start, fired) if step < limit else None
+                if failed is None:
+                    return
+                fired.add(failed[0])
+                self.checks_handled.add(failed[0])
+                history.append(_with_id(HumanMessage(content=failed[1])))
+                continue
             for bad in invalid:
                 history.append(_with_id(ToolMessage(
                     content=TOOL_ERROR_TEXT.format(error=bad.get("error") or "invalid tool call"),
@@ -250,6 +297,86 @@ class OwnPeerSession:
                 history.append(_with_id(self._run_call(call, config)))
         logger.warning("code loop run %s ended at its step limit (%d model calls)", run, limit)
         history.append(_with_id(AIMessage(content=step_limit_text(limit))))
+
+    def _final_check(self, history: List[BaseMessage], start: int,
+                     fired: set) -> Optional[tuple]:
+        """``(check, observation)`` for the first supervisor check the ending reply fails, or None.
+
+        In the outside order: code handed back unrun, a tool at a dead end, a map claimed and not
+        delivered, a named embedding model that did not run.
+
+        The predicates and the observation texts are ``supervisor.graph``'s own, imported, so the
+        inner check and the outside one cannot drift apart. Each reads the TURN so far (earlier
+        runs of this session plus this one), the same record the outside check reads after a
+        retry. The gates are the outside checks' gates: the code check needs ``execute_code``
+        bound; the map and model checks are skipped for a peer that asked for another capability
+        (it is stopping legitimately), and the map check for a chat-only client (no map) and for
+        a peer that cannot deliver a layer (nothing to tell it to call).
+        """
+        if not checks_enabled():
+            return None
+        from agent_runtime.client_profile import chat_only
+        from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
+        from agent_runtime.streaming_trace import emit_trace_event
+        from agent_runtime.supervisor import graph as g
+
+        scoped = {"messages": history[start:]}
+        answer = extract_final_answer(scoped) or ""
+        now = extract_search_artifacts(scoped)
+        turn = {key: list(self.turn_artifacts[key]) + list(now.get(key) or [])
+                for key in ("tool_calls", "tool_results")}
+        blocked = g._called_tool(turn, "request_capability")
+        names = set(self._by_name)
+
+        def failed(check: str, event: str, observation: str, **payload: Any) -> tuple:
+            emit_trace_event(event, {"stage": "code", "in_loop": True, **payload}, node="code")
+            logger.info("code loop run %s: %s check failed; continuing the run",
+                        turn_log.active_run(), check)
+            return check, observation
+
+        try:
+            if (CHECK_CODE_NOT_RUN not in fired and "execute_code" in names
+                    and not g._has_execution_record(turn)
+                    and g._ships_unrun_code(answer, any_fence=True)):
+                return failed(
+                    CHECK_CODE_NOT_RUN, "code_not_executed",
+                    g._CODE_NOT_RUN_BLOCKED_OBSERVATION if blocked else g._CODE_NOT_RUN_OBSERVATION,
+                    blocked_on_capability=blocked,
+                    message="code returned without an execute_code record; continuing the run")
+            # A tool failing the same way twice, with no successful run beside it: the code
+            # peer's outside rule and its conditions. Not in the stage's first brief, but the
+            # only one of these checks the harness archive shows firing on the code peer (T04,
+            # T09).
+            if CHECK_DEAD_END not in fired and not blocked and not g._execution_outcome(turn)[0]:
+                stuck = g._repeatedly_failed_tools(turn)
+                if stuck:
+                    return failed(
+                        CHECK_DEAD_END, "tool_dead_end", g._tool_stuck_observation(stuck),
+                        tools=sorted(stuck),
+                        message=f"{', '.join(sorted(stuck))} failed repeatedly; handing the "
+                                "peer the observation and an alternative route; continuing the run")
+            if (CHECK_MAP_CLAIM not in fired and not blocked and not self.map_on_screen
+                    and names & set(g._MAP_DELIVERY_TOOLS) and not chat_only()
+                    and g._CLAIMS_MAP_RE.search(answer)
+                    and not g._map_delivered_this_turn(turn)):
+                return failed(
+                    CHECK_MAP_CLAIM, "map_layer_not_delivered", g._MAP_NOT_DELIVERED_OBSERVATION,
+                    message="answer claims a map layer but none was delivered; continuing the run")
+            if CHECK_MODEL_MISMATCH not in fired and not blocked:
+                task = self.task if self.task is not None else (
+                    history[start].content if len(history) > start else "")
+                used = g._models_used(turn)
+                wanted = g._models_named_in(str(task or "")) - used
+                if len(wanted) == 1 and used:
+                    asked, ran = next(iter(wanted)), ", ".join(sorted(used))
+                    return failed(
+                        CHECK_MODEL_MISMATCH, "embedding_model_mismatch",
+                        g._MODEL_MISMATCH_OBSERVATION.format(wanted=asked, used=ran),
+                        requested=asked, used=ran,
+                        message=f"asked for {asked}, ran {ran}; continuing the run")
+        except Exception:  # noqa: BLE001 - a check must never cost the answer it is checking
+            logger.debug("code loop: final-answer check skipped", exc_info=True)
+        return None
 
     def _instrumentation(self, system: SystemMessage, messages: List[BaseMessage]) -> Dict[str, Any]:
         """The same ``turn_instrumentation`` record and toolset catalog line the middleware
@@ -324,7 +451,8 @@ class OwnPeerSession:
 
 def open_session(*, llm: Optional[Any], tools: Sequence[Any], system_prompt_override: str,
                  thread_key: Optional[str], skill_roots: Optional[List[str]] = None,
-                 prepare: Optional[Callable[..., List[Any]]] = None) -> OwnPeerSession:
+                 prepare: Optional[Callable[..., List[Any]]] = None,
+                 task: Optional[str] = None, map_on_screen: bool = False) -> OwnPeerSession:
     """A session over the same prepared tools and prompt ``build_agent_executor`` would bind."""
     from agent_runtime.executor_factory import (
         build_default_llm, peer_system_prompt, prepare_peer_tools,
@@ -336,9 +464,10 @@ def open_session(*, llm: Optional[Any], tools: Sequence[Any], system_prompt_over
     prepared = (prepare or prepare_peer_tools)(list(tools), skill_roots=skill_roots)
     return OwnPeerSession(llm or build_default_llm(), prepared,
                           peer_system_prompt(system_prompt_override), thread_key,
-                          agent_name="code_agent")
+                          agent_name="code_agent", task=task, map_on_screen=map_on_screen)
 
 
-__all__ = ["DEFAULT_MAX_STEPS", "LOOP_ENV", "MAX_STEPS_ENV", "OwnPeerSession", "THREADS",
-           "ThreadStore", "loop_choice", "max_steps", "open_session", "selected",
-           "step_limit_text"]
+__all__ = ["CHECKS_ENV", "CHECK_CODE_NOT_RUN", "CHECK_DEAD_END", "CHECK_MAP_CLAIM",
+           "CHECK_MODEL_MISMATCH", "DEFAULT_MAX_STEPS", "LOOP_ENV", "MAX_STEPS_ENV",
+           "OwnPeerSession", "THREADS", "ThreadStore", "checks_enabled", "loop_choice",
+           "max_steps", "open_session", "selected", "step_limit_text"]
